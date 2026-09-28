@@ -53,8 +53,8 @@ yyeditor/
 │  │  └─ tables/              # 生成済みマッピングテーブル（build 時に埋め込み）
 │  ├─ yy-io/                  # mmap、ファイルオープン、変換ローダー、保存、ロック、一時ファイル
 │  │  └─ src/{lib.rs, source.rs, loader.rs, saver.rs, tempdir.rs, lock.rs}
-│  ├─ yy-core/                # Document（バッファ＋メタ情報）、カーソル・選択、編集コマンド、Undo/Redo
-│  │  └─ src/{lib.rs, document.rs, selection.rs, edit.rs, history.rs, commands/...}
+│  ├─ yy-core/                # Document（バッファ＋メタ情報）、マルチカーソル・矩形選択、一括編集、Undo/Redo
+│  │  └─ src/{lib.rs, document.rs, selection.rs, rect.rs, edit.rs, history.rs, commands/...}
 │  ├─ yy-search/              # 正規表現検索・置換（チャンク検索、全置換ストリーミング）
 │  ├─ yy-delimited/           # 区切り文字/CSV 解析、レコードインデックス、列幅計算、列操作
 │  ├─ yy-backup/              # 自動バックアップ（ジャーナル）、クラッシュ復元
@@ -160,7 +160,7 @@ pub struct JobContext {
 pub struct Document {
     snapshot: Snapshot,            // 現在の内容（永続ピースツリーのルート）
     history: History,              // Undo/Redo（スナップショットのスタック）
-    selections: Vec<Selection>,    // 複数カーソル対応
+    selections: SelectionSet,      // マルチカーソル / 矩形選択（09 章）
     source: SourceInfo,            // パス、元の文字コード、BOM、改行コード、ファイル識別子
     mode: EditMode,                // Text | Delimited(DelimitedConfig)
     generation: u64,               // 編集ごとに増加。ジョブ結果の有効性判定に使う

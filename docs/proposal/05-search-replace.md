@@ -59,7 +59,7 @@
 |-----------|------|
 | 大文字小文字を区別しない | `(?i)` |
 | 単語単位 | `\b...\b`（日本語では文字種境界を単語境界とする独自判定をオプションで提供） |
-| 選択範囲内 | 検索区間を選択範囲に限定 |
+| 選択範囲内 | 検索区間を選択範囲に限定。マルチ選択・矩形選択の場合は複数区間（矩形は行ごとの範囲） |
 | 列限定（区切り文字モード） | マッチ位置を (レコード, フィールド) に変換し、対象列のみ採用。`^` `$` をフィールドの先頭・末尾として扱うオプション |
 | 複数ファイル検索（Grep） | 指定フォルダ配下を `ignore` クレートで列挙し、ファイルごとに文字コード判別して検索。結果一覧ウィンドウ |
 
@@ -102,7 +102,7 @@ pub struct SearchQuery {
     pub kind: PatternKind,          // Literal | Regex
     pub case_sensitive: bool,
     pub whole_word: bool,
-    pub scope: SearchScope,         // Document | Selection(Range) | Columns(Vec<usize>)
+    pub scope: SearchScope,         // Document | Selections(Vec<Range>) | Rect(RectSelection) | Columns(Vec<usize>)
     pub max_match_len: usize,
 }
 

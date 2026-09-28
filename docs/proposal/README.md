@@ -15,6 +15,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | R7 | Undo / Redo | [06-undo-backup-save](06-undo-backup-save.md) |
 | R8 | 自動バックアップ（クラッシュ時の復元） | [06-undo-backup-save](06-undo-backup-save.md) |
 | R9 | 保存時の拡張子変更と文字コード変換 | [06-undo-backup-save](06-undo-backup-save.md) |
+| R10 | 矩形選択、マルチカーソルによる複数行同時編集 | [09-multi-cursor-rectangle](09-multi-cursor-rectangle.md) |
 
 > 依頼文の「encdic」は、IBM メインフレーム系の **EBCDIC**（日本では EBCDIK / IBM CCSID 930・939・1390・1399、富士通 JEF、日立 KEIS などの EBCDIC 系漢字コード）を指すものと解釈しています。
 
@@ -41,6 +42,9 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 
 8. **保存は常に「一時ファイルへ書き出し → 原子的差し替え」。** 文字コード変換時は事前に変換不能文字を検査して一覧表示し、中止／代替文字／数値文字参照などを選択できます。拡張子変更で CSV→TSV のような区切り文字変換も行えます。
 
+9. **矩形選択とマルチカーソルは同じ「一括編集」経路で処理する。**
+   矩形は表示桁（全角=2、タブ展開後）で定義して行ごとの範囲を遅延展開するため、100 万行の矩形でも選択・スクロールは表示範囲分のコストのみです。全カーソル分の編集は 1 つのスナップショット（= 1 回の Undo）として適用し、巨大な矩形の編集は全置換と同じストリーミング方式に切り替えます。CSV モードではセル範囲の矩形選択になります。
+
 ## 3. 文書構成
 
 | ファイル | 内容 |
@@ -53,6 +57,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | [06-undo-backup-save.md](06-undo-backup-save.md) | Undo/Redo、自動バックアップと復元、保存パイプライン（拡張子・文字コード変換） |
 | [07-ui-rendering.md](07-ui-rendering.md) | Win32 UI、DirectWrite 描画、IME、長大行対策 |
 | [08-roadmap-testing.md](08-roadmap-testing.md) | 開発ロードマップ、テスト・性能目標、リスクと対策 |
+| [09-multi-cursor-rectangle.md](09-multi-cursor-rectangle.md) | 矩形選択、マルチカーソル・複数行同時編集、CSV のセル範囲選択 |
 
 ## 4. 性能・品質目標（抜粋）
 
