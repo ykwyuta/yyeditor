@@ -58,8 +58,10 @@ yyeditor/
 │  ├─ yy-search/              # 正規表現検索・置換（チャンク検索、全置換ストリーミング）
 │  ├─ yy-delimited/           # 区切り文字/CSV 解析、レコードインデックス、列幅計算、列操作
 │  ├─ yy-backup/              # 自動バックアップ（ジャーナル）、クラッシュ復元
+│  ├─ yy-syntax/              # シンタックスハイライト（定義ファイル、状態機械、状態チェックポイント）
+│  │  └─ syntax/              # 組み込みのハイライト定義（TOML、exe に埋め込み）
 │  ├─ yy-layout/              # 表示用レイアウト計算（折り返し、表示列、仮想行）。描画 API 非依存
-│  ├─ yy-config/              # 設定、キーマップ、ファイルタイプ（拡張子→モード/区切り文字）
+│  ├─ yy-config/              # 設定、キーマップ、ファイルタイプ（拡張子→モード/区切り文字/ハイライト定義）、カラーテーマ
 │  ├─ yy-jobs/                # バックグラウンドジョブ基盤（進捗、キャンセルトークン）
 │  └─ yy-win/                 # Win32 アプリ層：ウィンドウ、描画、IME、メニュー、ダイアログ
 │     └─ src/{app.rs, frame.rs, editor_view.rs, render/, ime.rs, dialogs/, statusbar.rs}
@@ -86,9 +88,9 @@ yyeditor/
                        │
                     yy-win ─────────────┐
                        │                │
-      ┌────────┬───────┼────────┬───────┴─┐
-  yy-layout yy-search yy-delimited yy-backup yy-config
-      └────────┴───────┼────────┴─────────┘
+      ┌────────┬───────┼────────┬───────┴─┬──────────┐
+  yy-layout yy-search yy-delimited yy-backup yy-config yy-syntax
+      └────────┴───────┼────────┴─────────┴──────────┘
                     yy-core
                   ┌────┴─────┐
                yy-io      yy-jobs
@@ -190,6 +192,10 @@ delimiter = ","
 quote = '"'
 rfc4180 = true
 header = "auto"
+
+[filetype.rust]
+extensions = ["rs"]
+syntax = "rust"          # ハイライト定義（10 章）
 
 [filetype.tsv]
 extensions = ["tsv", "tab"]

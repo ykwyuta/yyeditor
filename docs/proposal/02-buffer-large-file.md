@@ -109,7 +109,7 @@ open() ──► mmap ──► 1 MiB ピースに分割（lf_count = Unknown）
 2. 先頭 64 KB（＋必要なら末尾）を読み、BOM / 文字コード判別（03 章）
 3a. UTF-8 / ASCII → Original ソースとして mmap。即座に表示。
 3b. それ以外 → Transcoder ジョブを起動（下記）。変換済みの先頭から表示。
-4. Indexer ジョブ起動。区切り文字モードなら CSV Scanner ジョブも起動（04 章）。
+4. Indexer ジョブ起動。区切り文字モードなら CSV Scanner ジョブ、ハイライト定義があれば Syntax Scanner ジョブも起動（04 章・10 章）。
 ```
 
 ### 4.1 非 UTF-8 ファイルの変換ロード（Transcoder）

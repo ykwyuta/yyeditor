@@ -16,6 +16,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | R8 | 自動バックアップ（クラッシュ時の復元） | [06-undo-backup-save](06-undo-backup-save.md) |
 | R9 | 保存時の拡張子変更と文字コード変換 | [06-undo-backup-save](06-undo-backup-save.md) |
 | R10 | 矩形選択、マルチカーソルによる複数行同時編集 | [09-multi-cursor-rectangle](09-multi-cursor-rectangle.md) |
+| R11 | ファイル種類別のシンタックスハイライト | [10-syntax-highlight](10-syntax-highlight.md) |
 
 > 依頼文の「encdic」は、IBM メインフレーム系の **EBCDIC**（日本では EBCDIK / IBM CCSID 930・939・1390・1399、富士通 JEF、日立 KEIS などの EBCDIC 系漢字コード）を指すものと解釈しています。
 
@@ -45,6 +46,9 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 9. **矩形選択とマルチカーソルは同じ「一括編集」経路で処理する。**
    矩形は表示桁（全角=2、タブ展開後）で定義して行ごとの範囲を遅延展開するため、100 万行の矩形でも選択・スクロールは表示範囲分のコストのみです。全カーソル分の編集は 1 つのスナップショット（= 1 回の Undo）として適用し、巨大な矩形の編集は全置換と同じストリーミング方式に切り替えます。CSV モードではセル範囲の矩形選択になります。
 
+10. **シンタックスハイライトは独自の軽量エンジン（宣言的な TOML 定義＋状態機械）で行う。**
+   拡張子・ファイル名・先頭行などでファイル種類を判定します。行をまたぐ状態（ブロックコメント等）は CSV と同じ「状態チェックポイント＋収束判定」で管理するため、数 GB のファイルでも表示範囲だけを処理して即座に色付けでき、入力時の再処理も数行で済みます。COBOL・JCL のような固定桁形式にも対応します。
+
 ## 3. 文書構成
 
 | ファイル | 内容 |
@@ -58,6 +62,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | [07-ui-rendering.md](07-ui-rendering.md) | Win32 UI、DirectWrite 描画、IME、長大行対策 |
 | [08-roadmap-testing.md](08-roadmap-testing.md) | 開発ロードマップ、テスト・性能目標、リスクと対策 |
 | [09-multi-cursor-rectangle.md](09-multi-cursor-rectangle.md) | 矩形選択、マルチカーソル・複数行同時編集、CSV のセル範囲選択 |
+| [10-syntax-highlight.md](10-syntax-highlight.md) | ファイル種類の判定、ハイライト定義の形式、巨大ファイル対応のハイライトエンジン、カラーテーマ |
 
 ## 4. 性能・品質目標（抜粋）
 
