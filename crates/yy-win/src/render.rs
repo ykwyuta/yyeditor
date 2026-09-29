@@ -206,6 +206,8 @@ struct CachedRow {
 pub(crate) struct Renderer {
     d2d: ID2D1Factory,
     dwrite: IDWriteFactory,
+    /// システムのフォントと同梱フォント。作れなければ `None`（システムのフォントだけ）
+    fonts: Option<IDWriteFontCollection>,
     target: Option<Target>,
     text_format: IDWriteTextFormat,
     number_format: IDWriteTextFormat,
@@ -250,11 +252,18 @@ impl Renderer {
                 .context("D2D1CreateFactory")?;
             let dwrite: IDWriteFactory =
                 DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).context("DWriteCreateFactory")?;
-            let (text_format, number_format, metrics) =
-                create_formats(&dwrite, font_family, font_size_pt, tab_width)?;
+            let fonts = crate::font::collection(&dwrite).ok();
+            let (text_format, number_format, metrics) = create_formats(
+                &dwrite,
+                fonts.as_ref(),
+                font_family,
+                font_size_pt,
+                tab_width,
+            )?;
             Ok(Renderer {
                 d2d,
                 dwrite,
+                fonts,
                 target: None,
                 text_format,
                 number_format,
@@ -287,8 +296,15 @@ impl Renderer {
     /// フォントサイズを変更する（Ctrl+ホイール等）。
     pub fn set_font_size(&mut self, pt: f32) -> Result<()> {
         let pt = pt.clamp(4.0, 72.0);
-        let (t, n, m) =
-            unsafe { create_formats(&self.dwrite, &self.font_family, pt, self.tab_width)? };
+        let (t, n, m) = unsafe {
+            create_formats(
+                &self.dwrite,
+                self.fonts.as_ref(),
+                &self.font_family,
+                pt,
+                self.tab_width,
+            )?
+        };
         self.text_format = t;
         self.number_format = n;
         self.metrics = m;
@@ -983,8 +999,13 @@ fn utf8_index(text: &str, u16_idx: usize) -> usize {
 }
 
 /// 指定のフォントがインストールされていなければ、等幅の代替フォントを選ぶ。
-fn resolve_family(dwrite: &IDWriteFactory, requested: &str) -> String {
-    const FALLBACKS: [&str; 5] = [
+fn resolve_family(
+    dwrite: &IDWriteFactory,
+    fonts: Option<&IDWriteFontCollection>,
+    requested: &str,
+) -> String {
+    const FALLBACKS: [&str; 6] = [
+        crate::font::BUNDLED_FAMILY,
         "Consolas",
         "BIZ UDゴシック",
         "MS Gothic",
@@ -992,10 +1013,11 @@ fn resolve_family(dwrite: &IDWriteFactory, requested: &str) -> String {
         "Segoe UI",
     ];
     unsafe {
-        let mut collection = None;
-        if dwrite
-            .GetSystemFontCollection(&mut collection, false)
-            .is_err()
+        let mut collection = fonts.cloned();
+        if collection.is_none()
+            && dwrite
+                .GetSystemFontCollection(&mut collection, false)
+                .is_err()
         {
             return requested.to_owned();
         }
@@ -1034,16 +1056,17 @@ fn resolve_family(dwrite: &IDWriteFactory, requested: &str) -> String {
 /// 本文用・行番号用のテキスト形式とフォントの寸法を作る。
 unsafe fn create_formats(
     dwrite: &IDWriteFactory,
+    fonts: Option<&IDWriteFontCollection>,
     family: &str,
     size_pt: f32,
     tab_width: u32,
 ) -> Result<(IDWriteTextFormat, IDWriteTextFormat, FontMetrics)> {
     let size_dip = size_pt * 96.0 / 72.0;
-    let family = HSTRING::from(resolve_family(dwrite, family));
+    let family = HSTRING::from(resolve_family(dwrite, fonts, family));
     let make = || unsafe {
         dwrite.CreateTextFormat(
             &family,
-            None,
+            fonts,
             DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,

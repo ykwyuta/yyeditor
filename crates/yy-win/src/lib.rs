@@ -18,6 +18,7 @@ mod clipboard;
 mod diffstream;
 mod diffview;
 mod findbar;
+mod font;
 mod goto;
 mod grepdlg;
 mod ime;

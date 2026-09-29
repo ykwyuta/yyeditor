@@ -48,7 +48,8 @@ impl Default for Config {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EditorConfig {
-    /// フォント名。日本語グリフは DirectWrite のフォールバックで補われる
+    /// フォント名。既定は実行ファイルに同梱の UDEV Gothic。
+    /// ほかのフォントの日本語グリフは DirectWrite のフォールバックで補われる
     pub font_family: String,
     /// フォントサイズ（ポイント）
     pub font_size: f32,
@@ -60,7 +61,7 @@ pub struct EditorConfig {
 impl Default for EditorConfig {
     fn default() -> Self {
         EditorConfig {
-            font_family: "Consolas".into(),
+            font_family: "UDEV Gothic".into(),
             font_size: 11.0,
             tab_width: 4,
             ambiguous_wide: true,

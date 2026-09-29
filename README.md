@@ -155,7 +155,7 @@ yyeditor.exe --render-bmp input.txt out.bmp
 
 ```toml
 [editor]
-font_family = "BIZ UDゴシック"   # 見つからない場合は Consolas → BIZ UDゴシック → MS Gothic の順に代替
+font_family = "UDEV Gothic"      # 既定は同梱の UDEV Gothic。見つからない場合は UDEV Gothic → Consolas → BIZ UDゴシック → MS Gothic の順に代替
 font_size = 11.0                 # ポイント
 tab_width = 4
 ambiguous_wide = true            # ①・○ などの曖昧幅文字を全角（2 桁）として数える（矩形選択の桁）
@@ -169,6 +169,10 @@ wheel_lines = 3
 background = "#FFFFFF"
 foreground = "#1E1E1E"
 ```
+
+### 同梱フォント
+
+既定のフォントとして [UDEV Gothic](https://github.com/yuru7/udev-gothic)（v2.2.0、Regular）を実行ファイルに埋め込んでいます。インストールは不要で、yyeditor のプロセス内でだけ使えるよう登録します（比較画面も同じフォントで表示します）。全角文字が半角のちょうど 2 倍の幅なので、矩形選択の桁がずれません。UDEV Gothic は SIL Open Font License 1.1 で配布されています（[crates/yy-win/fonts/LICENSE-UDEVGothic.txt](crates/yy-win/fonts/LICENSE-UDEVGothic.txt)）。
 
 ## 保存の仕組み
 
@@ -194,7 +198,7 @@ foreground = "#1E1E1E"
 
 ## 既知の制限（M5 時点）
 
-- 矩形選択の桁は、半角 1・全角 2 の等幅を前提に数えます。全角文字が半角のちょうど 2 倍の幅でないフォント（Consolas と日本語フォントの組み合わせなど）では、矩形が見た目上わずかにずれます。MS ゴシックや BIZ UDゴシックなど、全角・半角の幅がそろったフォントの利用をおすすめします。
+- 矩形選択の桁は、半角 1・全角 2 の等幅を前提に数えます。全角文字が半角のちょうど 2 倍の幅でないフォント（Consolas と日本語フォントの組み合わせなど）では、矩形が見た目上わずかにずれます。既定の UDEV Gothic（同梱）や MS ゴシック・BIZ UDゴシックなど、全角・半角の幅がそろったフォントの利用をおすすめします。
 - 矩形選択で一度に編集できるのは 100 万行までです（超える場合はメッセージを表示します）。
 - 矩形内の連番挿入・大文字小文字変換・並べ替え・検索、Ctrl+K Ctrl+D（出現箇所のスキップ）は未実装です。
 
