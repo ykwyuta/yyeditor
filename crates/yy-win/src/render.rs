@@ -12,7 +12,7 @@ use windows::Win32::Graphics::DirectWrite::*;
 use windows::core::{HSTRING, Interface, Result, w};
 use windows_numerics::Vector2;
 use yy_config::{Color, Colors};
-use yy_layout::{Row, SpanKind};
+use yy_layout::{ColumnConfig, Row, SpanKind};
 
 use crate::util::Context;
 
@@ -118,11 +118,84 @@ impl Target {
 }
 
 /// 1 行分のレイアウトと、その元の UTF-16 テキスト。
+///
+/// 長い行（[`LONG_ROW_BYTES`] を超える行）は表示中の横範囲だけをレイアウトし、
+/// 位置の計算は等幅の桁（[`LongInfo`]）で行う。
 #[derive(Clone)]
 struct RowLayout {
     layout: IDWriteTextLayout,
+    /// 行全体の幅
     width: f32,
     wide: std::rc::Rc<[u16]>,
+    /// レイアウトの左端の x 座標（長い行で先頭以外からレイアウトした場合）
+    x0: f32,
+    long: Option<std::rc::Rc<LongInfo>>,
+}
+
+/// この長さ（表示テキストのバイト数）を超える行は、表示中の範囲だけをレイアウトする
+const LONG_ROW_BYTES: usize = 2048;
+/// 長い行の桁の記録間隔（バイト）
+const LONG_CK_STEP: usize = 1024;
+/// 長い行をレイアウトする範囲の単位（桁）。この単位でキャッシュする
+const LONG_WINDOW_COLS: u32 = 256;
+
+/// 長い行の桁の索引（等幅フォントを前提に、x 座標 = 桁 × 半角の幅 とする）。
+struct LongInfo {
+    /// （バイト位置, 桁）を一定間隔で記録したもの
+    ck: Vec<(usize, u32)>,
+    total_cols: u32,
+}
+
+impl LongInfo {
+    fn build(text: &str, cc: &ColumnConfig) -> LongInfo {
+        let mut ck = vec![(0, 0)];
+        let mut col = 0u32;
+        let mut next = LONG_CK_STEP;
+        for (i, c) in text.char_indices() {
+            if i >= next {
+                ck.push((i, col));
+                next = i + LONG_CK_STEP;
+            }
+            col += cc.char_width(c, col);
+        }
+        LongInfo {
+            ck,
+            total_cols: col,
+        }
+    }
+
+    /// バイト位置 `byte` の桁。
+    fn col_at(&self, text: &str, byte: usize, cc: &ColumnConfig) -> u32 {
+        let byte = byte.min(text.len());
+        let k = self.ck.partition_point(|(b, _)| *b <= byte) - 1;
+        let (mut b, mut col) = self.ck[k];
+        for c in text[b..].chars() {
+            if b >= byte {
+                break;
+            }
+            col += cc.char_width(c, col);
+            b += c.len_utf8();
+        }
+        col
+    }
+
+    /// 桁 `target` に最も近い（`nearest` でなければ手前の）文字境界のバイト位置。
+    fn byte_at_col(&self, text: &str, target: u32, nearest: bool, cc: &ColumnConfig) -> usize {
+        let k = self.ck.partition_point(|(_, c)| *c <= target).max(1) - 1;
+        let (mut b, mut col) = self.ck[k];
+        for c in text[b..].chars() {
+            let w = cc.char_width(c, col);
+            if col + w > target {
+                if nearest && (target - col) * 2 >= w {
+                    return b + c.len_utf8();
+                }
+                return b;
+            }
+            col += w;
+            b += c.len_utf8();
+        }
+        text.len()
+    }
 }
 
 struct CachedRow {
@@ -137,13 +210,18 @@ pub(crate) struct Renderer {
     text_format: IDWriteTextFormat,
     number_format: IDWriteTextFormat,
     metrics: FontMetrics,
-    cache: HashMap<(u64, u64), CachedRow>,
+    /// 行のレイアウト（行の開始位置, 次の行の開始位置, 長い行のレイアウト範囲の先頭の桁）
+    cache: HashMap<(u64, u64, u32), CachedRow>,
     /// キャッシュが対応する内容の版
     cache_version: u64,
     colors: Colors,
     font_family: String,
     font_size_pt: f32,
     tab_width: u32,
+    /// 長い行の桁の数え方
+    columns: ColumnConfig,
+    /// 長い行の桁の索引（行の開始位置, 次の行の開始位置）
+    long_cache: HashMap<(u64, u64), std::rc::Rc<LongInfo>>,
     dpi: f32,
     /// これまでに描画した行の最大幅（水平スクロールバー用）
     pub max_text_width: f32,
@@ -187,6 +265,11 @@ impl Renderer {
                 font_family: font_family.to_owned(),
                 font_size_pt,
                 tab_width,
+                columns: ColumnConfig {
+                    tab_width,
+                    ambiguous_wide: true,
+                },
+                long_cache: HashMap::new(),
                 dpi: dpi as f32,
                 max_text_width: 0.0,
             })
@@ -227,7 +310,36 @@ impl Renderer {
 
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+        self.long_cache.clear();
         self.max_text_width = 0.0;
+    }
+
+    /// 長い行の桁の数え方（東アジアの曖昧幅）を設定する。
+    pub fn set_ambiguous_wide(&mut self, wide: bool) {
+        self.columns.ambiguous_wide = wide;
+        self.clear_cache();
+    }
+
+    /// 長い行の桁の索引。
+    fn long_info(&mut self, row: &Row) -> std::rc::Rc<LongInfo> {
+        let key = (row.start, row.next);
+        if let Some(li) = self.long_cache.get(&key) {
+            return li.clone();
+        }
+        let li = std::rc::Rc::new(LongInfo::build(&row.text, &self.columns));
+        if self.long_cache.len() > 256 {
+            self.long_cache.clear();
+        }
+        self.long_cache.insert(key, li.clone());
+        li
+    }
+
+    /// 行のバイト位置 `byte`（`row.text` 内）の x 座標。
+    fn row_x(&self, rl: &RowLayout, row: &Row, byte: usize) -> f32 {
+        match &rl.long {
+            Some(li) => li.col_at(&row.text, byte, &self.columns) as f32 * self.metrics.char_width,
+            None => self.x_at(rl, utf16_index(&row.text, byte)),
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -300,11 +412,34 @@ impl Renderer {
     /// 行のレイアウトを作る。`insert` があれば、その位置（`row.text` 内のバイト位置）に
     /// 文字列を差し込んで下線を引く（IME の変換中文字列）。
     fn build_layout(&self, row: &Row, insert: Option<(usize, &str)>) -> Result<RowLayout> {
+        self.build_layout_window(row, insert, None)
+    }
+
+    /// `window`（`row.text` 内のバイト範囲と、先頭に置く空白の数）だけをレイアウトする。
+    fn build_layout_window(
+        &self,
+        row: &Row,
+        insert: Option<(usize, &str)>,
+        window: Option<(std::ops::Range<usize>, usize)>,
+    ) -> Result<RowLayout> {
         let brushes = self.target.as_ref().map(|t| &t.brushes);
-        let mut wide: Vec<u16> = Vec::with_capacity(row.text.len() + 16);
+        let mut wide: Vec<u16> = Vec::with_capacity(row.text.len().min(1 << 16) + 16);
         let mut effects: Vec<(u32, u32, &ID2D1SolidColorBrush)> = Vec::new();
         let mut underline = None;
+        if let Some((_, pad)) = &window {
+            wide.extend(std::iter::repeat_n(b' ' as u16, *pad));
+        }
         for span in &row.spans {
+            let span_range = match &window {
+                Some((w, _)) => {
+                    let (a, b) = (span.range.start.max(w.start), span.range.end.min(w.end));
+                    if a >= b {
+                        continue;
+                    }
+                    a..b
+                }
+                None => span.range.clone(),
+            };
             let mut piece = |r: std::ops::Range<usize>, wide: &mut Vec<u16>| {
                 let start = wide.len() as u32;
                 wide.extend(row.text[r].encode_utf16());
@@ -323,14 +458,14 @@ impl Renderer {
                 }
             };
             match insert {
-                Some((at, text)) if span.range.start <= at && at < span.range.end => {
-                    piece(span.range.start..at, &mut wide);
+                Some((at, text)) if span_range.start <= at && at < span_range.end => {
+                    piece(span_range.start..at, &mut wide);
                     let s = wide.len() as u32;
                     wide.extend(text.encode_utf16());
                     underline = Some((s, wide.len() as u32 - s));
-                    piece(at..span.range.end, &mut wide);
+                    piece(at..span_range.end, &mut wide);
                 }
-                _ => piece(span.range.clone(), &mut wide),
+                _ => piece(span_range, &mut wide),
             }
         }
         if let Some((at, text)) = insert
@@ -372,18 +507,55 @@ impl Renderer {
                 layout,
                 width: m.widthIncludingTrailingWhitespace,
                 wide: wide.into(),
+                x0: 0.0,
+                long: None,
             })
         }
     }
 
     fn row_layout(&mut self, row: &Row) -> Result<RowLayout> {
-        let key = (row.start, row.next);
+        let key = (row.start, row.next, u32::MAX);
         if let Some(c) = self.cache.get_mut(&key) {
             c.used = true;
             return Ok(c.row.clone());
         }
         let rl = self.build_layout(row, None)?;
         // 描画ターゲットがない（ブラシがない）状態で作ったレイアウトは色がないのでキャッシュしない
+        if self.target.is_some() {
+            self.cache.insert(
+                key,
+                CachedRow {
+                    row: rl.clone(),
+                    used: true,
+                },
+            );
+        }
+        Ok(rl)
+    }
+
+    /// 長い行の、表示中の横範囲（`scroll_x` から幅 `view_w`）を含む部分のレイアウト。
+    fn long_layout(&mut self, row: &Row, scroll_x: f32, view_w: f32) -> Result<RowLayout> {
+        let li = self.long_info(row);
+        let cw = self.metrics.char_width.max(0.1);
+        let scroll_col = (scroll_x.max(0.0) / cw) as u32;
+        let start_col = (scroll_col / LONG_WINDOW_COLS).saturating_sub(1) * LONG_WINDOW_COLS;
+        let key = (row.start, row.next, start_col);
+        if let Some(c) = self.cache.get_mut(&key) {
+            c.used = true;
+            return Ok(c.row.clone());
+        }
+        let end_col = start_col + (view_w / cw) as u32 + 3 * LONG_WINDOW_COLS;
+        let b0 = li.byte_at_col(&row.text, start_col, false, &self.columns);
+        let b1 = li
+            .byte_at_col(&row.text, end_col, false, &self.columns)
+            .max(b0);
+        let c0 = li.col_at(&row.text, b0, &self.columns);
+        // タブ位置がそろうよう、タブ幅の倍数の桁から空白で埋めて始める
+        let pad = c0 % self.tab_width.max(1);
+        let mut rl = self.build_layout_window(row, None, Some((b0..b1, pad as usize)))?;
+        rl.x0 = (c0 - pad) as f32 * cw;
+        rl.width = li.total_cols as f32 * cw;
+        rl.long = Some(li);
         if self.target.is_some() {
             self.cache.insert(
                 key,
@@ -479,6 +651,11 @@ impl Renderer {
 
     /// 行 `row` の中でオフセット `offset` の位置の x 座標（本文の左端からの DIP）。
     pub fn caret_x(&mut self, row: &Row, offset: u64) -> f32 {
+        if row.text.len() > LONG_ROW_BYTES {
+            let li = self.long_info(row);
+            let col = li.col_at(&row.text, row.text_index(offset), &self.columns);
+            return col as f32 * self.metrics.char_width;
+        }
         let idx = utf16_index(&row.text, row.text_index(offset));
         match self.row_layout(row) {
             Ok(rl) => self.x_at(&rl, idx),
@@ -488,6 +665,12 @@ impl Renderer {
 
     /// 行 `row` の中で x 座標（本文の左端からの DIP）に最も近い文字境界のオフセット。
     pub fn hit_test(&mut self, row: &Row, x: f32) -> u64 {
+        if row.text.len() > LONG_ROW_BYTES {
+            let li = self.long_info(row);
+            let col = (x.max(0.0) / self.metrics.char_width).round() as u32;
+            let b = li.byte_at_col(&row.text, col, true, &self.columns);
+            return row.offset_at(b);
+        }
         let Ok(rl) = self.row_layout(row) else {
             return row.start;
         };
@@ -575,7 +758,10 @@ impl Renderer {
                     .find(|&&o| row.shows_caret(o))
                     .map(|&o| (row.text_index(o), o, c))
             });
+            let long = row.text.len() > LONG_ROW_BYTES;
             let rl = match comp {
+                // 長い行では変換中の文字列を行内に表示しない（候補ウィンドウは表示される）
+                _ if long => self.long_layout(row, frame.scroll_x, size.width)?,
                 Some((at, _, c)) => self.build_layout(row, Some((at, &c.text)))?,
                 None => self.row_layout(row)?,
             };
@@ -586,10 +772,10 @@ impl Renderer {
                 if r.end <= row.start || r.start >= row.end {
                     continue;
                 }
-                let a = utf16_index(&row.text, row.text_index(r.start.max(row.start)));
-                let b = utf16_index(&row.text, row.text_index(r.end.min(row.end)));
+                let a = row.text_index(r.start.max(row.start));
+                let b = row.text_index(r.end.min(row.end));
                 if b > a {
-                    let (xa, xb) = (self.x_at(&rl, a), self.x_at(&rl, b));
+                    let (xa, xb) = (self.row_x(&rl, row, a), self.row_x(&rl, row, b));
                     match_rects.push(D2D_RECT_F {
                         left: text_x + xa.min(xb),
                         top: y,
@@ -605,11 +791,11 @@ impl Renderer {
                 {
                     continue;
                 }
-                let a = utf16_index(&row.text, row.text_index(r.start.max(row.start)));
-                let b = utf16_index(&row.text, row.text_index(r.end.min(row.end)));
+                let a = row.text_index(r.start.max(row.start));
+                let b = row.text_index(r.end.min(row.end));
                 if b > a {
                     // 行は折り返さない 1 行のレイアウトなので、両端のキャレット位置から矩形を求める
-                    let (xa, xb) = (self.x_at(&rl, a), self.x_at(&rl, b));
+                    let (xa, xb) = (self.row_x(&rl, row, a), self.row_x(&rl, row, b));
                     sel_rects.push(D2D_RECT_F {
                         left: text_x + xa.min(xb),
                         top: y,
@@ -619,7 +805,7 @@ impl Renderer {
                 }
                 // 改行も選択されている場合は行末に小さな矩形を描く
                 if row.ends_line && r.end > row.end && r.start <= row.end {
-                    let x = text_x + self.x_at(&rl, utf16_index(&row.text, row.text.len()));
+                    let x = text_x + self.row_x(&rl, row, row.text.len());
                     sel_rects.push(D2D_RECT_F {
                         left: x,
                         top: y,
@@ -636,11 +822,15 @@ impl Renderer {
                     if !row.shows_caret(c) {
                         continue;
                     }
-                    let mut idx = utf16_index(&row.text, row.text_index(c));
-                    if let Some((_, _, comp)) = comp.filter(|(_, o, _)| *o == c) {
-                        idx += comp.cursor;
-                    }
-                    let x = text_x + self.x_at(&rl, idx);
+                    let x = if long {
+                        text_x + self.row_x(&rl, row, row.text_index(c))
+                    } else {
+                        let mut idx = utf16_index(&row.text, row.text_index(c));
+                        if let Some((_, _, comp)) = comp.filter(|(_, o, _)| *o == c) {
+                            idx += comp.cursor;
+                        }
+                        text_x + self.x_at(&rl, idx)
+                    };
                     caret_rects.push(D2D_RECT_F {
                         left: x - 0.5,
                         top: y + 1.0,
@@ -652,9 +842,7 @@ impl Renderer {
             // 矩形選択（行末より右の仮想空白を含む）
             for rp in frame.rect.iter().filter(|rp| rp.row_start == row.start) {
                 let x_of = |(o, v): (u64, u32)| {
-                    text_x
-                        + self.x_at(&rl, utf16_index(&row.text, row.text_index(o)))
-                        + v as f32 * cw
+                    text_x + self.row_x(&rl, row, row.text_index(o)) + v as f32 * cw
                 };
                 let (l, r) = (x_of(rp.left), x_of(rp.right));
                 if r > l {
@@ -677,7 +865,7 @@ impl Renderer {
                     });
                 }
             }
-            layouts.push(rl.layout);
+            layouts.push((rl.layout, rl.x0));
         }
         self.cache.retain(|_, c| c.used);
 
@@ -745,10 +933,10 @@ impl Renderer {
             for r in &sel_rects {
                 rt.FillRectangle(r, &b.selection);
             }
-            for (i, layout) in layouts.iter().enumerate() {
+            for (i, (layout, x0)) in layouts.iter().enumerate() {
                 rt.DrawTextLayout(
                     Vector2 {
-                        X: text_x,
+                        X: text_x + x0,
                         Y: i as f32 * lh,
                     },
                     layout,
@@ -912,6 +1100,29 @@ mod tests {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use yy_buffer::Snapshot;
     use yy_layout::{RowConfig, rows_from};
+
+    #[test]
+    fn long_row_columns() {
+        let cc = ColumnConfig {
+            tab_width: 4,
+            ambiguous_wide: true,
+        };
+        let text = "abc\t日本".repeat(1000);
+        let li = LongInfo::build(&text, &cc);
+        // "abc\t" = 4 桁（タブは次のタブ位置まで）、"日本" = 4 桁 → 1 回あたり 8 桁
+        assert_eq!(li.total_cols, 8000);
+        let unit = "abc\t日本".len();
+        for k in [0usize, 1, 500, 999] {
+            let b = k * unit;
+            let c = 8 * k as u32;
+            assert_eq!(li.col_at(&text, b, &cc), c);
+            assert_eq!(li.byte_at_col(&text, c, false, &cc), b);
+            // "日" の途中の桁は手前・近い方に丸める
+            assert_eq!(li.byte_at_col(&text, c + 5, false, &cc), b + 4);
+            assert_eq!(li.byte_at_col(&text, c + 5, true, &cc), b + 7);
+        }
+        assert_eq!(li.byte_at_col(&text, u32::MAX, false, &cc), text.len());
+    }
 
     fn pixel(p: &[u8], width: u32, x: u32, y: u32) -> [u8; 3] {
         let i = ((y * width + x) * 4) as usize;

@@ -202,10 +202,20 @@ pub(crate) struct App {
     /// バックグラウンドで実行中のレコードの書き直し（完了時の後処理用）
     pending_record_op: Option<yy_core::csv::RecordOp>,
     grep_job: Option<GrepJob>,
+    /// 表示行のキャッシュ（長い行の表示テキストを作り直さないように）
+    row_cache: RefCell<RowCache>,
     /// 終わった Grep の結果（フレームで文書として開く）
     grep_done: Option<String>,
     /// 前回の Grep の条件
     grep_last: crate::grepdlg::GrepRequest,
+}
+
+/// 表示行のキャッシュ。文書の版・表示の設定が変わったら捨てる。
+#[derive(Default)]
+struct RowCache {
+    /// （文書の版, 区切り文字モードの設定, 表示行の最大バイト数）
+    key: (u64, usize, u64),
+    rows: std::collections::HashMap<u64, Row>,
 }
 
 /// バックグラウンドの Grep。
@@ -464,6 +474,8 @@ impl App {
                 config.colors.clone(),
                 dpi,
             )?;
+            let mut renderer = renderer;
+            renderer.set_ambiguous_wide(config.editor.ambiguous_wide);
             let ccfg = ColumnConfig {
                 tab_width: config.editor.tab_width,
                 ambiguous_wide: config.editor.ambiguous_wide,
@@ -506,6 +518,7 @@ impl App {
                 csv: None,
                 pending_record_op: None,
                 grep_job: None,
+                row_cache: RefCell::new(RowCache::default()),
                 grep_done: None,
                 grep_last: crate::grepdlg::GrepRequest {
                     files: "*.*".into(),
@@ -559,6 +572,42 @@ impl App {
     fn line_digits(&self) -> usize {
         let n = self.doc.snapshot().estimated_line_count();
         n.to_string().len()
+    }
+
+    /// `start` から最大 `count` 個の表示行（[`rows_from`] と同じ。作った行はキャッシュする）。
+    fn cached_rows(&self, start: u64, count: usize) -> Vec<Row> {
+        let snap = self.doc.snapshot();
+        let cfg = &self.rows_cfg;
+        let key = (
+            self.doc.version(),
+            cfg.cells.as_ref().map_or(0, |c| Arc::as_ptr(c) as usize),
+            cfg.max_row_bytes,
+        );
+        let mut cache = self.row_cache.borrow_mut();
+        if cache.key != key || cache.rows.len() > 1024 {
+            cache.rows.clear();
+            cache.key = key;
+        }
+        let len = snap.len();
+        let mut out = Vec::with_capacity(count.min(1024));
+        let mut pos = Some(start);
+        while out.len() < count {
+            let Some(p) = pos else { break };
+            if p > len || (p == len && !yy_layout::is_line_start(snap, p)) {
+                break;
+            }
+            let row = match cache.rows.get(&p) {
+                Some(r) => r.clone(),
+                None => {
+                    let r = row_at(snap, cfg, p);
+                    cache.rows.insert(p, r.clone());
+                    r
+                }
+            };
+            pos = next_row_start(snap, cfg, p);
+            out.push(row);
+        }
+        out
     }
 
     fn invalidate(&self) {
@@ -737,7 +786,7 @@ impl App {
             _ => {
                 self.scroll_mode = ScrollMode::Bytes;
                 let len = snap.len().max(1);
-                let rows = rows_from(snap, &self.rows_cfg, self.vp.top, page);
+                let rows = self.cached_rows(self.vp.top, page);
                 let visible = rows.last().map(|r| r.next - self.vp.top).unwrap_or(0);
                 si.nMin = 0;
                 si.nMax = SCROLL_RANGE - 1;
@@ -1697,7 +1746,7 @@ impl App {
         self.sync_renderer();
         let head = self.doc.selections().primary().head;
         let page = self.page_rows();
-        let rows = rows_from(self.doc.snapshot(), &self.rows_cfg, self.vp.top, page + 1);
+        let rows = self.cached_rows(self.vp.top, page + 1);
         let Some(i) = rows.iter().position(|r| r.shows_caret(head)) else {
             return;
         };
@@ -1758,7 +1807,7 @@ impl App {
             BeginPaint(self.view, &mut ps);
             let snap = self.doc.snapshot();
             let page = self.page_rows();
-            let rows = rows_from(snap, &self.rows_cfg, self.vp.top, page + 1);
+            let rows = self.cached_rows(self.vp.top, page + 1);
             let first = snap.line_of_offset(self.vp.top);
             // 表示範囲に関係する選択・キャレットだけを渡す
             let (lo, hi) = (
@@ -1836,6 +1885,8 @@ impl App {
         self.drag = None;
         self.rect = None;
         self.doc = doc;
+        // 新しい文書も版は 0 から始まるので、前の文書の表示行を捨てる
+        self.row_cache.borrow_mut().rows.clear();
         self.warned_noncanonical = false;
         self.find_job = None;
         self.count_job = None;

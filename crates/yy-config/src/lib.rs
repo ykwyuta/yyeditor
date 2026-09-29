@@ -84,7 +84,7 @@ impl Default for ViewConfig {
     fn default() -> Self {
         ViewConfig {
             line_numbers: true,
-            max_row_bytes: 8192,
+            max_row_bytes: 1 << 20,
             line_scroll_limit: 1_000_000,
             wheel_lines: 3,
         }

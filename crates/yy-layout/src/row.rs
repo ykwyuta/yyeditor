@@ -176,6 +176,27 @@ fn push(text: &mut String, spans: &mut Vec<Span>, s: &str, kind: SpanKind, src: 
 /// * タブ以外の C0 制御文字と DEL は Control Pictures（`␀` `␍` など）に置き換える
 /// * エスケープ文字（`U+10FE00`〜）は元のバイトを `\xNN` で表示する
 pub fn decode_row(bytes: &[u8]) -> (String, Vec<Span>) {
+    // よくある場合（制御文字・エスケープ文字を含まない正しい UTF-8）はそのまま使う
+    // （64 バイトずつ分岐なしで調べてベクトル化させる）
+    let plain = bytes.chunks(64).all(|c| {
+        let mut bad = false;
+        for &b in c {
+            bad |= ((b < 0x20) & (b != b'\t')) | (b == 0x7F) | (b == 0xF4);
+        }
+        !bad
+    });
+    if plain && let Ok(s) = std::str::from_utf8(bytes) {
+        let spans = if s.is_empty() {
+            Vec::new()
+        } else {
+            vec![Span {
+                range: 0..s.len(),
+                kind: SpanKind::Text,
+                src: 0..s.len(),
+            }]
+        };
+        return (s.to_owned(), spans);
+    }
     let mut text = String::with_capacity(bytes.len());
     let mut spans = Vec::new();
     let mut pos = 0usize;
