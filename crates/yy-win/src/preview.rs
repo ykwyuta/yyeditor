@@ -41,10 +41,13 @@ use crate::util::Context;
 
 /// プレビューのリンクから文書を開く要求（`lparam` は `Box<PathBuf>` のポインタ）。フレームに送る。
 pub(crate) const WM_APP_PREVIEW_OPEN: u32 = WM_APP + 21;
+/// WebView2 を使えなかった（プレビューの欄には案内を表示している）。フレームに送る。
+pub(crate) const WM_APP_PREVIEW_FAILED: u32 = WM_APP + 22;
 
 thread_local! {
     /// WebView2 を使えないときなどにプレビューの欄に表示する文字列。
-    static NOTICE: RefCell<String> = const { RefCell::new(String::new()) };
+    static NOTICE: RefCell<std::collections::HashMap<isize, String>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 // ---- WebView2 の読み込み --------------------------------------------------
@@ -139,6 +142,8 @@ struct Shared {
     web: RefCell<Option<Web>>,
     page: RefCell<Page>,
     visible: std::cell::Cell<bool>,
+    /// WebView2 を使えなかった
+    failed: std::cell::Cell<bool>,
 }
 
 /// プレビューの欄（子ウィンドウ）と、その中の WebView2。
@@ -177,9 +182,15 @@ impl Preview {
                 web: RefCell::new(None),
                 page: RefCell::new(Page::default()),
                 visible: std::cell::Cell::new(false),
+                failed: std::cell::Cell::new(false),
             }),
             started: false,
         })
+    }
+
+    /// WebView2 を使えなかったか。
+    pub(crate) fn is_unavailable(&self) -> bool {
+        self.shared.failed.get()
     }
 
     /// 表示・非表示を切り替える。
@@ -192,7 +203,7 @@ impl Preview {
             self.started = true;
             set_notice(self.hwnd, "プレビューを準備しています…");
             if let Err(e) = start(self.shared.clone()) {
-                set_notice(self.hwnd, &unavailable_message(&e));
+                fail(&self.shared, &e);
             }
         }
         if let Some(web) = self.web() {
@@ -319,8 +330,39 @@ impl Drop for Preview {
     }
 }
 
+/// 欄 `hwnd` に表示している案内。
+fn notice_of(hwnd: HWND) -> String {
+    NOTICE.with(|n| {
+        n.borrow()
+            .get(&(hwnd.0 as isize))
+            .cloned()
+            .unwrap_or_default()
+    })
+}
+
+/// WebView2 を使えない: 案内を表示し、フレームに知らせる。
+fn fail(shared: &Shared, reason: &str) {
+    shared.failed.set(true);
+    set_notice(shared.container, &unavailable_message(reason));
+    unsafe {
+        let _ = PostMessageW(
+            Some(shared.frame),
+            WM_APP_PREVIEW_FAILED,
+            WPARAM(0),
+            LPARAM(0),
+        );
+    }
+}
+
 fn set_notice(hwnd: HWND, text: &str) {
-    NOTICE.with(|n| *n.borrow_mut() = text.to_owned());
+    NOTICE.with(|n| {
+        let mut n = n.borrow_mut();
+        if text.is_empty() {
+            n.remove(&(hwnd.0 as isize));
+        } else {
+            n.insert(hwnd.0 as isize, text.to_owned());
+        }
+    });
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, true);
     }
@@ -347,7 +389,7 @@ fn start(shared: Rc<Shared>) -> std::result::Result<(), String> {
             let env = match (result, env) {
                 (Ok(()), Some(env)) => env,
                 (Err(e), _) => {
-                    set_notice(s.container, &unavailable_message(&e.message()));
+                    fail(&s, &e.message());
                     return Ok(());
                 }
                 (Ok(()), None) => return Ok(()),
@@ -359,10 +401,10 @@ fn start(shared: Rc<Shared>) -> std::result::Result<(), String> {
                     match (result, controller) {
                         (Ok(()), Some(controller)) => {
                             if let Err(e) = setup(&s2, env2, controller) {
-                                set_notice(s2.container, &unavailable_message(&e.message()));
+                                fail(&s2, &e.message());
                             }
                         }
-                        (Err(e), _) => set_notice(s2.container, &unavailable_message(&e.message())),
+                        (Err(e), _) => fail(&s2, &e.message()),
                         (Ok(()), None) => {}
                     }
                     Ok(())
@@ -370,7 +412,7 @@ fn start(shared: Rc<Shared>) -> std::result::Result<(), String> {
             ));
             unsafe {
                 if let Err(e) = env.CreateCoreWebView2Controller(s.container, &on_controller) {
-                    set_notice(s.container, &unavailable_message(&e.message()));
+                    fail(&s, &e.message());
                 }
             }
             Ok(())
@@ -693,7 +735,7 @@ pub(crate) extern "system" fn preview_proc(
                 let mut rc = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rc);
                 FillRect(dc, &rc, GetSysColorBrush(COLOR_WINDOW));
-                let text = NOTICE.with(|n| n.borrow().clone());
+                let text = notice_of(hwnd);
                 if !text.is_empty() {
                     let font =
                         crate::util::ui_font(windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd));
@@ -718,6 +760,10 @@ pub(crate) extern "system" fn preview_proc(
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
             }
+            WM_NCDESTROY => {
+                set_notice(hwnd, "");
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             WM_SIZE => {
                 let _ = InvalidateRect(Some(hwnd), None, true);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -737,17 +783,22 @@ pub(crate) fn modifiers() -> (bool, bool) {
     }
 }
 
+/// テスト用: メッセージの処理とページでのスクリプトの実行。
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
-    use std::cell::Cell;
     use std::time::{Duration, Instant};
     use webview2_com::ExecuteScriptCompletedHandler;
-    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+
+    impl Preview {
+        /// 読み込み終わったページの種類。
+        pub(crate) fn loaded_kind(&self) -> Option<Kind> {
+            self.shared.page.borrow().loaded
+        }
+    }
 
     /// `done` が `true` を返すか時間切れになるまでメッセージを処理する。
-    fn pump_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
+    pub(crate) fn pump_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             unsafe {
@@ -766,7 +817,7 @@ mod tests {
     }
 
     /// ページでスクリプトを実行して結果（JSON）を返す。
-    fn eval(preview: &Preview, script: &str) -> Option<String> {
+    pub(crate) fn eval(preview: &Preview, script: &str) -> Option<String> {
         let web = preview.web()?;
         let result: Rc<RefCell<Option<String>>> = Rc::default();
         let r = result.clone();
@@ -782,6 +833,16 @@ mod tests {
         pump_until(Duration::from_secs(10), || result.borrow().is_some());
         result.borrow_mut().take()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{eval, pump_until};
+    use super::*;
+    use std::cell::Cell;
+    use std::time::Duration;
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
     /// WebView2 でページを表示し、mermaid の図と KaTeX の数式が描かれること、本文の差し替えが
     /// 反映されることを確かめる。WebView2 ランタイムがなければ飛ばす
@@ -825,13 +886,13 @@ mod tests {
         let body = yy_preview::markdown_to_html(md, None);
         preview.show_markdown(&body, &PageOptions::default(), None, Some(0));
 
-        let unavailable = || NOTICE.with(|n| n.borrow().starts_with("プレビューを表示できません"));
+        let unavailable = || preview.is_unavailable();
         pump_until(Duration::from_secs(60), || {
             preview.shared.page.borrow().loaded == Some(Kind::Markdown) || unavailable()
         });
         let loaded = preview.shared.page.borrow().loaded == Some(Kind::Markdown);
         if !loaded {
-            let notice = NOTICE.with(|n| n.borrow().clone());
+            let notice = notice_of(preview.hwnd);
             if required {
                 panic!("WebView2 のページを読み込めませんでした: {notice}");
             }

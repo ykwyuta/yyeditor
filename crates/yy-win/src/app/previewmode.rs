@@ -202,6 +202,8 @@ pub(crate) fn translate_preview_shortcut(frame: HWND, vk: u32) -> bool {
         }
     } else if vk == VK_F3 {
         Some(if shift { ID_FIND_PREV } else { ID_FIND_NEXT })
+    } else if vk == VK_F1 {
+        Some(ID_HELP)
     } else {
         None
     };

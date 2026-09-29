@@ -35,6 +35,15 @@ fn extended_syntax() {
 }
 
 #[test]
+fn soft_breaks_between_japanese_are_joined() {
+    let html = md("日本語の文です。\n続きの文。\nEnglish\nwords\n");
+    assert!(
+        html.contains("日本語の文です。続きの文。\nEnglish\nwords"),
+        "{html}"
+    );
+}
+
+#[test]
 fn footnotes_are_collected_at_the_end() {
     let html = md("a[^n]\n\n[^n]: note body\n\nlast paragraph\n");
     let note = html.find("note body").unwrap();

@@ -345,6 +345,15 @@ impl Config {
         }
     }
 
+    /// 設定ファイルがないときに作る内容（既定値をすべて書き出したもの）。
+    pub fn default_file_contents() -> String {
+        let body = toml::to_string(&Config::default()).unwrap_or_default();
+        format!(
+            "# yyeditor の設定（既定値）。変更は次に起動したときから反映されます。\n\
+             # 項目の説明はヘルプ（F1）の「設定」を参照してください。\n\n{body}"
+        )
+    }
+
     /// 既定の場所から読み込む。失敗した場合は既定値とエラーを返す（起動は継続する）。
     pub fn load() -> (Config, Option<ConfigError>) {
         match Config::default_path() {
@@ -444,6 +453,13 @@ mod tests {
         let c = Config::default();
         let s = toml::to_string(&c).unwrap();
         assert_eq!(Config::from_toml(&s).unwrap(), c);
+    }
+
+    #[test]
+    fn default_file_contents_load_as_default() {
+        let s = Config::default_file_contents();
+        assert!(s.starts_with("# yyeditor"));
+        assert_eq!(Config::from_toml(&s).unwrap(), Config::default());
     }
 
     #[test]
