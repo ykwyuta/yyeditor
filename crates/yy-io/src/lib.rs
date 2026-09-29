@@ -149,9 +149,8 @@ pub fn open_file(path: &Path) -> io::Result<OpenedFile> {
     })
 }
 
-/// 書き込み共有が必要なファイルを、作業用ファイルにコピーしてから開く。
-/// 外部プロセスが書き換え中のファイルを直接 mmap しないための読み取り専用経路。
-pub fn open_shared_snapshot(path: &Path) -> io::Result<OpenedFile> {
+/// 他のアプリケーションが書き込み中でも開けるように、書き込み共有を許して読み取り用に開く。
+fn open_shared(path: &Path) -> io::Result<File> {
     let mut opts = OpenOptions::new();
     opts.read(true);
     #[cfg(windows)]
@@ -159,20 +158,61 @@ pub fn open_shared_snapshot(path: &Path) -> io::Result<OpenedFile> {
         use std::os::windows::fs::OpenOptionsExt;
         opts.share_mode(0x1 | 0x2 | 0x4); // READ | WRITE | DELETE
     }
-    let mut input = opts.open(path)?;
-    if input.metadata()?.is_dir() {
+    let file = opts.open(path)?;
+    if file.metadata()?.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "フォルダは開けません",
         ));
     }
+    Ok(file)
+}
+
+/// 書き込み共有が必要なファイルの先頭 `max` バイトまでを読む（文字コードの判別と、読み込み中の
+/// 表示用）。ファイル全体を読めたら `true` も返す。
+pub fn read_shared_head(path: &Path, max: usize) -> io::Result<(Vec<u8>, bool)> {
+    let file = open_shared(path)?;
+    let mut buf = Vec::new();
+    io::Read::read_to_end(&mut io::Read::take(file, max as u64 + 1), &mut buf)?;
+    let complete = buf.len() <= max;
+    buf.truncate(max);
+    Ok((buf, complete))
+}
+
+/// 書き込み共有が必要なファイルを、作業用ファイルにコピーしてから開く。
+/// 外部プロセスが書き換え中のファイルを直接 mmap しないための読み取り専用経路。
+pub fn open_shared_snapshot(path: &Path) -> io::Result<OpenedFile> {
+    copy_shared(path, &mut |_| true)
+}
+
+/// [`open_shared_snapshot`] を、進捗を知らせながら行う。`step(コピーしたバイト数)` が `false` を
+/// 返したら中止する（[`is_cancelled`] なエラー）。
+pub fn copy_shared(path: &Path, step: &mut dyn FnMut(u64) -> bool) -> io::Result<OpenedFile> {
+    let mut input = open_shared(path)?;
     let temp = temp_path("shared");
     let copied = (|| {
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temp)?;
-        let len = io::copy(&mut input, &mut output)?;
+        let mut buf = vec![0u8; 1 << 20];
+        let mut len = 0u64;
+        loop {
+            let n = match io::Read::read(&mut input, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            output.write_all(&buf[..n])?;
+            len += n as u64;
+            if !step(len) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "読み込みを中止しました",
+                ));
+            }
+        }
         output.flush()?;
         drop(output);
         if len == 0 {

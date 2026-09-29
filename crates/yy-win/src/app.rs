@@ -230,6 +230,8 @@ pub(crate) struct App {
     grep_done: Option<String>,
     /// バックグラウンドで保存中の保存の手順（完了時の後処理用）
     save_flow: Option<SaveFlow>,
+    /// 改行コードの変換（バックグラウンド）が終わったら始める保存
+    save_after_convert: Option<SaveFlow>,
     /// 終わった保存（フレームで結果を処理する）
     save_done: Option<(Option<SaveFlow>, yy_core::SaveDone)>,
     /// 作業中のタブの保存を待っている・結果を処理している（その間は裏のタブを表に出さない）
@@ -260,6 +262,7 @@ struct TabState {
     csv: Option<CsvState>,
     pending_record_op: Option<yy_core::csv::RecordOp>,
     save_flow: Option<SaveFlow>,
+    save_after_convert: Option<SaveFlow>,
     warned_noncanonical: bool,
     status_msg: String,
     syntax: Option<SyntaxState>,
@@ -278,6 +281,7 @@ impl TabState {
             csv: None,
             pending_record_op: None,
             save_flow: None,
+            save_after_convert: None,
             warned_noncanonical: false,
             status_msg: String::new(),
             syntax: None,
@@ -671,6 +675,7 @@ impl App {
                 row_cache: RefCell::new(RowCache::default()),
                 grep_done: None,
                 save_flow: None,
+                save_after_convert: None,
                 save_done: None,
                 defer_inactive_saves: 0,
                 grep_last: crate::grepdlg::GrepRequest {
@@ -999,10 +1004,7 @@ impl App {
                 "  保存しています（Esc で中止）… {:.0}%",
                 self.doc.save_progress().unwrap_or(0.0) * 100.0
             ),
-            (Some(p), _) => format!(
-                "  文字コードを変換しています（読み取り専用）… {:.0}%",
-                p * 100.0
-            ),
+            (Some(p), _) => format!("  読み込んでいます（読み取り専用）… {:.0}%", p * 100.0),
             _ if self.doc.replace_progress().is_some() => format!(
                 "  書き換えています（Esc で中止）… {:.0}%",
                 self.doc.replace_progress().unwrap_or(0.0) * 100.0
@@ -2262,6 +2264,7 @@ impl App {
             csv: self.csv.take(),
             pending_record_op: self.pending_record_op.take(),
             save_flow: self.save_flow.take(),
+            save_after_convert: self.save_after_convert.take(),
             warned_noncanonical: self.warned_noncanonical,
             status_msg: std::mem::take(&mut self.status_msg),
             syntax: self.syntax.take(),
@@ -2282,6 +2285,7 @@ impl App {
         self.csv = state.csv;
         self.pending_record_op = state.pending_record_op;
         self.save_flow = state.save_flow;
+        self.save_after_convert = state.save_after_convert;
         self.warned_noncanonical = state.warned_noncanonical;
         self.status_msg = state.status_msg;
         self.syntax = state.syntax;
@@ -2530,8 +2534,27 @@ impl App {
         self.poll_syntax();
         let was_replacing = self.doc.replace_progress().is_some();
         let was_loading = self.doc.is_loading();
+        let mut error = None;
         if self.doc.poll_indexing() {
-            if was_replacing && self.doc.replace_progress().is_none() {
+            if was_replacing
+                && self.doc.replace_progress().is_none()
+                && let Some(flow) = self.save_after_convert.take()
+            {
+                // 保存の前の改行コードの変換が終わった
+                self.after_edit();
+                match self.doc.take_replace_result() {
+                    Some(Ok(_)) => {
+                        if let Err(msg) = self.start_save(flow) {
+                            error = Some(format!("保存できませんでした。\n{msg}"));
+                        }
+                    }
+                    Some(Err(e)) => {
+                        self.status_msg = format!("改行コードを変換できませんでした: {e}");
+                        self.update_status();
+                    }
+                    None => {}
+                }
+            } else if was_replacing && self.doc.replace_progress().is_none() {
                 let op = self.pending_record_op.take();
                 match (self.doc.take_replace_result(), op) {
                     (Some(Ok(n)), Some(op)) => {
@@ -2554,7 +2577,7 @@ impl App {
                 self.renderer.clear_cache();
                 self.update_title();
                 if let Some(e) = self.doc.load_error() {
-                    let msg = format!("文字コードを変換できませんでした。\n{e}");
+                    let msg = format!("ファイルを読み込めませんでした。\n{e}");
                     self.update_status();
                     self.invalidate();
                     return Some(msg);
@@ -2569,7 +2592,7 @@ impl App {
             self.update_status();
             self.invalidate();
         }
-        None
+        error
     }
 
     // ---- 検索・置換 --------------------------------------------------------
@@ -3366,7 +3389,7 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
         info_box(hwnd, "読み取り専用で開いたファイルは保存できません。");
         return false;
     }
-    if with_app(|a| a.doc.is_saving()) == Some(true) {
+    if with_app(|a| a.doc.is_saving() || a.save_after_convert.is_some()) == Some(true) {
         info_box(hwnd, "保存中です。終わってから、もう一度保存してください。");
         return false;
     }
@@ -3388,7 +3411,7 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
         return false;
     };
     if loading {
-        info_box(hwnd, "文字コードの変換が終わるまで保存できません。");
+        info_box(hwnd, "読み込みが終わるまで保存できません。");
         return false;
     }
     let target = match current {
@@ -3448,32 +3471,40 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
         }
         with_app(|a| a.warned_noncanonical = true);
     }
-    if let Some(eol) = target.eol {
+    let flow = SaveFlow {
+        target,
+        fold_offered: false,
+        replaced: false,
+    };
+    if let Some(eol) = flow.target.eol {
         let r = with_app(|a| {
-            let r = unsafe {
-                let old = SetCursor(LoadCursorW(None, IDC_WAIT).ok());
-                let r = a.doc.convert_eol(eol);
-                SetCursor(Some(old));
-                r
-            };
-            if matches!(r, Ok(true)) {
-                a.after_edit();
+            let n = a.notifier();
+            let r = a.doc.convert_eol_with(eol, &a.pool, n);
+            match r {
+                Ok(Some(true)) => a.after_edit(),
+                Ok(None) => {
+                    a.update_status();
+                    a.invalidate();
+                }
+                _ => {}
             }
             r.map_err(|e| e.to_string())
         });
-        if let Some(Err(msg)) = r {
-            error_box(hwnd, &format!("改行コードを変換できませんでした。\n{msg}"));
-            return false;
+        match r {
+            // 大きな文書はバックグラウンドで変換し、終わってから保存する（on_index_progress）
+            Some(Ok(None)) => {
+                with_app(|a| a.save_after_convert = Some(flow));
+                return true;
+            }
+            Some(Ok(Some(_))) => {}
+            Some(Err(msg)) => {
+                error_box(hwnd, &format!("改行コードを変換できませんでした。\n{msg}"));
+                return false;
+            }
+            None => return false,
         }
     }
-    begin_save(
-        hwnd,
-        SaveFlow {
-            target,
-            fold_offered: false,
-            replaced: false,
-        },
-    )
+    begin_save(hwnd, flow)
 }
 
 /// バックグラウンドで保存を始める。始められなければエラーを表示して `false`。
@@ -3610,7 +3641,10 @@ fn handle_save_result(hwnd: HWND, flow: Option<SaveFlow>, done: yy_core::SaveDon
 /// （Esc で保存を中止できる）。
 fn wait_save() {
     with_app(|a| a.defer_inactive_saves += 1);
-    let busy = || with_app(|a| a.doc.is_saving() || a.save_done.is_some()).unwrap_or(false);
+    let busy = || {
+        with_app(|a| a.doc.is_saving() || a.save_after_convert.is_some() || a.save_done.is_some())
+            .unwrap_or(false)
+    };
     let mut msg = MSG::default();
     while busy() {
         unsafe {

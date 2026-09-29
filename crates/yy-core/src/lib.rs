@@ -142,6 +142,9 @@ const DETECT_SAMPLE: usize = 64 << 10;
 const PREVIEW_BYTES: usize = 1 << 20;
 /// 改行コードの変換をメモリ上で行う大きさの上限
 const EOL_IN_MEMORY: u64 = 64 << 20;
+/// 書き込み共有が必要なファイルを開くときに UI スレッドで読む先頭部分の大きさ
+/// （これより大きなファイルはバックグラウンドでコピーする）
+const SHARED_HEAD: usize = 1 << 20;
 
 pub struct Document {
     path: Option<PathBuf>,
@@ -328,47 +331,49 @@ impl Document {
 
     /// 他のアプリケーションが書き込み用に開いているファイルを読み取り専用で開く。
     /// 書き込み中の mmap は安全ではないため、作業用ファイルへコピーしてからマップする。
+    ///
+    /// UI スレッドを止めないよう、開くときに読むのは先頭部分だけにする。それより大きなファイルの
+    /// コピー（と変換）はバックグラウンドで行い（[`Document::start_indexing`] で始まる）、
+    /// その間は先頭部分を表示する。
     pub fn open_shared_read_only(path: &Path, opts: &OpenOptions) -> io::Result<Document> {
-        let f = yy_io::open_shared_snapshot(path)?;
-        let bytes = f.bytes();
+        let (head, complete) = yy_io::read_shared_head(path, SHARED_HEAD.max(DETECT_SAMPLE))?;
         let (encoding, bom_len) = match opts.encoding.filter(|_| !opts.raw) {
             Some(e) => {
                 let bom = e.bom();
                 (
                     e,
-                    usize::from(!bom.is_empty() && bytes.starts_with(bom)) * bom.len(),
+                    usize::from(!bom.is_empty() && head.starts_with(bom)) * bom.len(),
                 )
             }
-            None => detect_encoding(bytes, opts),
+            None => detect_encoding(&head, opts),
         };
         let mut doc = Document::new_empty();
-        doc.file_len = f.file_len;
         doc.read_only = true;
         doc.encoding = encoding;
         doc.bom = bom_len > 0;
-        doc.snapshot = if encoding == Encoding::Utf8 {
-            index_first_piece(f.snapshot(bom_len as u64..f.file_len))
-        } else if ((bytes.len() - bom_len) as u64) <= opts.sync_limit {
-            let decoded = transcode::decode_in_memory(encoding, &bytes[bom_len..]);
-            doc.decode_stats = decoded.stats;
-            doc.escapes = decoded.escapes;
-            index_first_piece(decoded.snapshot)
+        doc.file_len = std::fs::metadata(path).map_or(head.len() as u64, |m| m.len());
+        let body = &head[bom_len..];
+        doc.snapshot = if complete && head.len() as u64 <= opts.sync_limit.min(SHARED_HEAD as u64) {
+            // 小さなファイルは読んだ内容をそのまま使う
+            doc.file_len = head.len() as u64;
+            if encoding == Encoding::Utf8 {
+                index_first_piece(Snapshot::from_bytes(body.to_vec()))
+            } else {
+                let decoded = transcode::decode_in_memory(encoding, body);
+                doc.decode_stats = decoded.stats;
+                doc.escapes = decoded.escapes;
+                index_first_piece(decoded.snapshot)
+            }
         } else {
-            let source = f.source.clone().expect("non-empty file is mapped");
-            doc.loading = Some(transcode::Loader::new(
-                source,
-                bom_len..bytes.len(),
+            doc.loading = Some(transcode::Loader::shared(
+                path.to_owned(),
+                bom_len,
                 encoding,
             ));
-            index_first_piece(transcode::preview(
-                encoding,
-                &bytes[bom_len..],
-                PREVIEW_BYTES,
-            ))
+            index_first_piece(transcode::preview(encoding, body, PREVIEW_BYTES))
         };
         doc.eol = Eol::detect(&doc.snapshot).unwrap_or_else(Eol::platform_default);
-        doc.path = Some(f.path);
-        doc.source = f.source;
+        doc.path = Some(path.to_owned());
         Ok(doc)
     }
 
@@ -1226,70 +1231,119 @@ impl Document {
     /// 改行コードを `eol` に揃える（CRLF と LF。単独の CR はそのまま）。1 つの Undo 単位になる。
     /// 以後の入力もこの改行コードになる。変更があれば `true`。
     ///
-    /// 大きな文書は一時ファイルに書き出してマップする。
+    /// その場で行う（大きな文書は一時ファイルに書き出してマップする）。UI では
+    /// [`Document::convert_eol_with`] を使う。
     pub fn convert_eol(&mut self, eol: Eol) -> io::Result<bool> {
         if self.is_busy() {
             return Ok(false);
         }
         self.eol = eol;
-        let snap = self.snapshot.clone();
         let caret = self.sels.primary().head;
-        let mut conv = EolConverter::new(eol, caret);
-        let snapshot = if snap.len() <= EOL_IN_MEMORY {
-            let mut out = Vec::with_capacity(snap.len() as usize);
-            for c in snap.chunks(0..snap.len()) {
-                conv.feed(c, &mut |b| out.extend_from_slice(b));
-            }
-            conv.finish(&mut |b| out.extend_from_slice(b));
-            if !conv.changed {
-                return Ok(false);
-            }
-            Snapshot::from_bytes(out)
-        } else {
-            let path = yy_io::temp_path("eol");
-            let write = |conv: &mut EolConverter| -> io::Result<u64> {
-                let file = std::fs::File::create(&path)?;
-                let mut w = io::BufWriter::with_capacity(1 << 20, file);
-                let mut err = Ok(());
-                let mut n = 0u64;
-                let mut emit = |b: &[u8]| {
-                    n += b.len() as u64;
-                    if err.is_ok() {
-                        err = io::Write::write_all(&mut w, b);
-                    }
-                };
-                for c in snap.chunks(0..snap.len()) {
-                    conv.feed(c, &mut emit);
-                }
-                conv.finish(&mut emit);
-                err?;
-                // 一時ファイルなので永続化（sync）は不要
-                io::Write::flush(&mut w)?;
-                Ok(n)
-            };
-            let len = match write(&mut conv) {
-                Ok(n) => n,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&path);
-                    return Err(e);
-                }
-            };
-            if !conv.changed {
-                let _ = std::fs::remove_file(&path);
-                return Ok(false);
-            }
-            let map: SourceRef = yy_io::map_temp(&path)?;
-            index_first_piece(Snapshot::from_source(map, 0..len, false))
-        };
-        let caret = conv.mapped_caret();
-        self.typing = None;
-        self.commit(
-            snapshot,
-            SelectionSet::single(Selection::caret(caret)),
-            EditKind::Other,
-        );
-        Ok(true)
+        match convert_eol_snapshot(&self.snapshot, eol, caret, EOL_IN_MEMORY, &mut |_| true) {
+            Ok(o) => Ok(self.apply_replace(replace::Outcome::Eol(o)) > 0),
+            Err(ReplaceError::Io(e)) => Err(e),
+            Err(e) => Err(io::Error::other(e.to_string())),
+        }
     }
+
+    /// [`Document::convert_eol`] と同じ。ただし大きな文書（すべて置換をその場で行う上限より
+    /// 大きい）はバックグラウンドで始めて `Ok(None)` を返す（終わると
+    /// [`Document::poll_indexing`] で反映し、結果は [`Document::take_replace_result`] で
+    /// 受け取る。変換中は読み取り専用）。
+    pub fn convert_eol_with(
+        &mut self,
+        eol: Eol,
+        pool: &JobPool,
+        notify: Notifier,
+    ) -> io::Result<Option<bool>> {
+        if self.snapshot.len() <= self.replace_sync_limit || self.is_busy() {
+            return self.convert_eol(eol).map(Some);
+        }
+        self.eol = eol;
+        let caret = self.sels.primary().head;
+        let snap = self.snapshot.clone();
+        self.typing = None;
+        self.replacing = Some(replace::ReplaceJob::start_task(
+            pool,
+            notify,
+            0..snap.len(),
+            Box::new(move |step| {
+                convert_eol_snapshot(&snap, eol, caret, EOL_IN_MEMORY, step)
+                    .map(replace::Outcome::Eol)
+            }),
+        ));
+        Ok(None)
+    }
+}
+
+/// `snap` の改行コードを `eol` に揃えた内容と、カーソル `caret` を移した位置（変更がなければ
+/// `None`）。`in_memory` より大きな文書は一時ファイルに書き出してマップする。
+/// `step(処理した位置)` が `false` を返したら中止する。
+fn convert_eol_snapshot(
+    snap: &Snapshot,
+    eol: Eol,
+    caret: u64,
+    in_memory: u64,
+    step: &mut dyn FnMut(u64) -> bool,
+) -> Result<Option<(Snapshot, u64)>, ReplaceError> {
+    let mut conv = EolConverter::new(eol, caret);
+    // 進捗を知らせ、中止できるように分けて変換する
+    let mut feed_all =
+        |conv: &mut EolConverter, emit: &mut dyn FnMut(&[u8])| -> Result<(), ReplaceError> {
+            let mut pos = 0u64;
+            for c in snap.chunks(0..snap.len()) {
+                for part in c.chunks(1 << 20) {
+                    conv.feed(part, emit);
+                    pos += part.len() as u64;
+                    if !step(pos) {
+                        return Err(ReplaceError::Cancelled);
+                    }
+                }
+            }
+            conv.finish(emit);
+            Ok(())
+        };
+    let snapshot = if snap.len() <= in_memory {
+        let mut out = Vec::with_capacity(snap.len() as usize);
+        feed_all(&mut conv, &mut |b| out.extend_from_slice(b))?;
+        if !conv.changed {
+            return Ok(None);
+        }
+        Snapshot::from_bytes(out)
+    } else {
+        let path = yy_io::temp_path("eol");
+        let mut write = |conv: &mut EolConverter| -> Result<u64, ReplaceError> {
+            let file = std::fs::File::create(&path)?;
+            let mut w = io::BufWriter::with_capacity(1 << 20, file);
+            let mut err = Ok(());
+            let mut n = 0u64;
+            let mut emit = |b: &[u8]| {
+                n += b.len() as u64;
+                if err.is_ok() {
+                    err = io::Write::write_all(&mut w, b);
+                }
+            };
+            feed_all(conv, &mut emit)?;
+            err?;
+            // 一時ファイルなので永続化（sync）は不要
+            io::Write::flush(&mut w)?;
+            Ok(n)
+        };
+        let len = match write(&mut conv) {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                return Err(e);
+            }
+        };
+        if !conv.changed {
+            let _ = std::fs::remove_file(&path);
+            return Ok(None);
+        }
+        let map: SourceRef = yy_io::map_temp(&path)?;
+        Snapshot::from_source(map, 0..len, false)
+    };
+    Ok(Some((snapshot, conv.mapped_caret())))
 }
 
 impl Document {
@@ -1427,6 +1481,16 @@ impl Document {
                     );
                 }
                 n
+            }
+            replace::Outcome::Eol(None) => 0,
+            replace::Outcome::Eol(Some((snap, caret))) => {
+                self.typing = None;
+                self.commit(
+                    index_first_piece(snap),
+                    SelectionSet::single(Selection::caret(caret)),
+                    EditKind::Other,
+                );
+                1
             }
         }
     }
