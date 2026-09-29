@@ -78,6 +78,10 @@ pub struct ViewConfig {
     pub line_numbers: bool,
     /// 長大行を表示用に分割する単位（バイト）。02 章 3.5 参照
     pub max_row_bytes: u32,
+    /// 区切り文字モードで、これより短い行は分割せずに列を揃える（バイト。04 章 4）
+    pub csv_max_row_bytes: u32,
+    /// 区切り文字モードの 1 列の幅の上限（桁）。これより長いフィールドはその行だけ列がずれる
+    pub csv_max_column_width: u32,
     /// 行数がこれ以下なら縦スクロールバーを行数比例にする（超えるとバイト位置比例）
     pub line_scroll_limit: u64,
     /// マウスホイール 1 目盛りでスクロールする行数
@@ -89,6 +93,8 @@ impl Default for ViewConfig {
         ViewConfig {
             line_numbers: true,
             max_row_bytes: 1 << 20,
+            csv_max_row_bytes: 16 << 20,
+            csv_max_column_width: 1000,
             line_scroll_limit: 1_000_000,
             wheel_lines: 3,
         }

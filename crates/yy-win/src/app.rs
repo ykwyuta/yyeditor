@@ -2212,7 +2212,8 @@ impl App {
         self.status_msg.clear();
         self.csv = None;
         self.pending_record_op = None;
-        self.rows_cfg.cells = None;
+        self.vp = Viewport::default();
+        self.rebuild_cells();
         self.update_csv_menu();
         self.csv_mode_for_path();
         self.syntax = None;
