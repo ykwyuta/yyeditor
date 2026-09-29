@@ -133,6 +133,21 @@ range = [1, 6]
 token = "line-number"
 ```
 
+### Markdown・HTML のプレビュー
+
+表示メニューの「プレビュー」（Ctrl+Shift+V）で、エディタの右側にプレビューを表示します。境界はドラッグで動かせます。
+
+- Markdown は CommonMark に加えて拡張構文に対応します: 表、脚注、取り消し線（`~~x~~`）、タスクリスト、定義リスト、上付き・下付き（`^x^`・`~x~`）、見出しの属性（`{#id .class}`）、GitHub のアラート（`> [!NOTE]` など）、Wiki リンク（`[[page]]`）、YAML のフロントマター
+- ```` ```mermaid ```` のコードブロックを図にします（[Mermaid](https://mermaid.js.org/)）
+- `$…$`（インライン）・`$$…$$`（別行立て）・```` ```math ```` を数式にします（[KaTeX](https://katex.org/)）
+- コードブロックはシンタックスハイライトの定義で色付けします（色はハイライトの設定と同じ）
+- HTML 文書はそのまま表示します（スクリプトも動きます）
+- 入力するとすぐに（0.25 秒後）反映され、Markdown はエディタのスクロールに合わせてプレビューもスクロールします
+- 画像などの相対パスは文書のフォルダから読みます。リンクは、文書のフォルダの Markdown・HTML ならエディタで、それ以外（Web ページなど）は既定のブラウザで開きます
+- Mermaid と KaTeX は実行ファイルに埋め込んでいるので、インターネットに接続していなくても表示できます
+
+表示には Microsoft Edge WebView2 ランタイム（Windows 10 / 11 には通常インストール済み）を使います。ランタイムがない環境ではその旨を表示します。
+
 ### 16 進数（バイナリ）編集
 
 - 表示メニューの「16 進数表示」（Ctrl+Shift+X）で、1 行 16 バイトの 16 進ダンプ（オフセット・16 進・文字）に切り替えます。ファイル メニューの「バイナリとして開く」は最初から 16 進数表示で開きます。
@@ -195,12 +210,14 @@ crates/
   yy-core/     文書モデル、選択（マルチカーソル）、一括編集、Undo/Redo、カーソル移動、行数カウント
   yy-layout/   表示行の分割（長大行のセグメント化）、表示テキスト ⇔ オフセット変換、スクロール位置
   yy-syntax/   シンタックスハイライト（TOML の定義、複数パターンの正規表現、行の開始状態の記録、ファイル種類の判定）
+  yy-preview/  Markdown・HTML のプレビュー（Markdown → HTML、ページ、同梱の Mermaid・KaTeX）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
                     ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
 tools/gen-icon/     アイコン（apps/yyeditor/res/yyeditor.ico）の生成（Python + Pillow）
+tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX の取得（npm から）
 ```
 
 `yy-win` 以外は OS に依存しないため、Linux でもテストできます。
@@ -277,6 +294,10 @@ syntax = "cobol"                 # ハイライトの定義（"none" で色を�
 
 既定のフォントとして [UDEV Gothic](https://github.com/yuru7/udev-gothic)（v2.2.0、Regular）を実行ファイルに埋め込んでいます。インストールは不要で、yyeditor のプロセス内でだけ使えるよう登録します（比較画面も同じフォントで表示します）。全角文字が半角のちょうど 2 倍の幅なので、矩形選択の桁がずれません。UDEV Gothic は SIL Open Font License 1.1 で配布されています（[crates/yy-win/fonts/LICENSE-UDEVGothic.txt](crates/yy-win/fonts/LICENSE-UDEVGothic.txt)）。
 
+### 同梱ライブラリ（プレビュー）
+
+プレビューのため、[Mermaid](https://github.com/mermaid-js/mermaid) と [KaTeX](https://github.com/KaTeX/KaTeX)（フォントを含む）を実行ファイルに埋め込んでいます。どちらも MIT License です（[crates/yy-preview/assets/](crates/yy-preview/assets/) の `LICENSE-*.txt`。版は `VERSIONS.txt`）。WebView2 の読み込み処理（WebView2LoaderStatic.lib）は Microsoft の WebView2 SDK のものを静的にリンクしています。
+
 ## 保存の仕組み
 
 保存は、保存先と同じフォルダの一時ファイルに書き出して永続化してから置き換えます（途中で失敗しても元のファイルは残ります）。
@@ -303,6 +324,7 @@ syntax = "cobol"                 # ハイライトの定義（"none" で色を�
 
 ## 既知の制限
 
+- プレビュー: 8 MiB を超える文書はプレビューしません。下付き・上付きは前後が空白などで区切られている場合だけです（`H~2~O` のような語の途中は不可）。HTML 文書は編集のたびに読み直します（スクロール位置は保ちます）。プレビューのスクロールはエディタに合わせるだけで、逆方向（プレビューをスクロールしてエディタを動かす）には対応していません。
 - 矩形選択の桁は、半角 1・全角 2 の等幅を前提に数えます。全角文字が半角のちょうど 2 倍の幅でないフォント（Consolas と日本語フォントの組み合わせなど）では、矩形が見た目上わずかにずれます。既定の UDEV Gothic（同梱）や MS ゴシック・BIZ UDゴシックなど、全角・半角の幅がそろったフォントの利用をおすすめします。
 - 矩形選択で一度に編集できるのは 100 万行までです（超える場合はメッセージを表示します）。
 - 矩形内の連番挿入・大文字小文字変換・並べ替え・検索、Ctrl+K Ctrl+D（出現箇所のスキップ）は未実装です。

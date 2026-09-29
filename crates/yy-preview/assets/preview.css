@@ -1,0 +1,80 @@
+/* yyeditor の Markdown プレビューの見た目（GitHub に近い体裁） */
+:root {
+  --fg: #1f2328;
+  --muted: #59636e;
+  --border: #d1d9e0;
+  --code-bg: #f6f8fa;
+  --link: #0969da;
+}
+html { background: #ffffff; }
+body {
+  margin: 0;
+  color: var(--fg);
+  font-family: "Segoe UI", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  word-wrap: break-word;
+}
+#yy-content { max-width: 980px; margin: 0 auto; padding: 16px 28px 48px; }
+#yy-content > :first-child, #yy-content > .yy-line:first-child + * { margin-top: 0; }
+h1, h2, h3, h4, h5, h6 { margin: 24px 0 16px; font-weight: 600; line-height: 1.25; }
+h1 { font-size: 2em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h2 { font-size: 1.5em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.25em; }
+h4 { font-size: 1em; }
+h5 { font-size: .875em; }
+h6 { font-size: .85em; color: var(--muted); }
+p, blockquote, ul, ol, dl, table, pre, details { margin: 0 0 16px; }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { height: 2px; border: 0; background: var(--border); margin: 24px 0; }
+img { max-width: 100%; }
+code, pre, kbd, tt {
+  font-family: "UDEV Gothic", "Cascadia Mono", "Consolas", "BIZ UDGothic", monospace;
+  font-size: 90%;
+}
+:not(pre) > code { padding: .2em .4em; background: rgba(129, 139, 152, .15); border-radius: 6px; }
+pre { padding: 14px 16px; overflow: auto; background: var(--code-bg); border-radius: 6px; line-height: 1.45; }
+pre > code { background: none; padding: 0; font-size: 100%; }
+pre.front-matter { border-left: 4px solid var(--border); }
+blockquote { padding: 0 1em; color: var(--muted); border-left: .25em solid var(--border); }
+ul, ol { padding-left: 2em; }
+li + li { margin-top: .25em; }
+li > input[type=checkbox] { margin: 0 .3em 0 -1.3em; vertical-align: middle; }
+ul:has(> li > input[type=checkbox]) { list-style: none; }
+table { border-collapse: collapse; display: block; overflow: auto; width: max-content; max-width: 100%; }
+th, td { padding: 6px 13px; border: 1px solid var(--border); }
+th { font-weight: 600; background: var(--code-bg); }
+tr:nth-child(2n) td { background: #f6f8fa80; }
+dt { font-weight: 600; margin-top: 12px; }
+dd { margin: 0 0 12px 1.5em; }
+section.footnotes { margin-top: 32px; padding-top: 12px; border-top: 1px solid var(--border); }
+.footnote-definition { font-size: .9em; color: var(--muted); display: flex; gap: .5em; }
+.footnote-definition p { margin: 0; }
+sup.footnote-reference a { font-size: .8em; }
+del { color: var(--muted); }
+mark { background: #fff8c5; }
+.yy-line { display: none; }
+
+/* GitHub のアラート（> [!NOTE] など） */
+blockquote[class^="markdown-alert-"] { color: var(--fg); padding: 8px 16px; }
+blockquote[class^="markdown-alert-"]::before { display: block; font-weight: 600; margin-bottom: 4px; }
+blockquote[class^="markdown-alert-"] > :last-child { margin-bottom: 0; }
+.markdown-alert-note { border-left-color: #0969da !important; }
+.markdown-alert-note::before { content: "ⓘ Note"; color: #0969da; }
+.markdown-alert-tip { border-left-color: #1a7f37 !important; }
+.markdown-alert-tip::before { content: "💡 Tip"; color: #1a7f37; }
+.markdown-alert-important { border-left-color: #8250df !important; }
+.markdown-alert-important::before { content: "❗ Important"; color: #8250df; }
+.markdown-alert-warning { border-left-color: #9a6700 !important; }
+.markdown-alert-warning::before { content: "⚠ Warning"; color: #9a6700; }
+.markdown-alert-caution { border-left-color: #cf222e !important; }
+.markdown-alert-caution::before { content: "⛔ Caution"; color: #cf222e; }
+
+/* 数式と図 */
+.math-display { display: block; overflow-x: auto; overflow-y: hidden; margin: 0 0 16px; text-align: center; }
+pre.mermaid { background: none; text-align: center; }
+pre.mermaid:not(.yy-diagram) { color: transparent; }
+pre.mermaid.yy-error { color: #cf222e; background: #ffebe9; text-align: left; white-space: pre-wrap; }
+pre.mermaid.yy-error::before { content: "Mermaid: " attr(data-error) "\A\A"; font-weight: 600; }
+.math.yy-error { color: #cf222e; }
