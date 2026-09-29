@@ -238,6 +238,8 @@ pub(crate) struct App {
     bracket_cache: Option<BracketCache>,
     /// 16 進数（バイナリ）表示
     hex: Option<HexState>,
+    /// タブ・ステータスバーの文字のフォント（メニューと同じ Windows のフォント）
+    ui_font: windows::Win32::Graphics::Gdi::HFONT,
 }
 
 /// 非表示タブの文書と表示位置。検索条件と表示設定はウィンドウ全体で共有する。
@@ -667,9 +669,11 @@ impl App {
                 syntax_off: false,
                 bracket_cache: None,
                 hex: None,
+                ui_font: crate::util::ui_font(dpi),
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
             with_app(|a| {
+                a.apply_ui_font();
                 a.refresh_tabs();
                 a.update_line_number_menu();
                 a.update_syntax_menu();
@@ -788,6 +792,30 @@ impl App {
     }
 
     // ---- ステータスバー・タイトル ----------------------------------------
+
+    /// タブ・ステータスバーに画面の部品のフォントを設定する（設定しないとタブは
+    /// 古いシステムフォントになり、メニューなどと見た目がそろわない）。
+    fn apply_ui_font(&self) {
+        for w in [self.tabbar, self.status] {
+            unsafe {
+                SendMessageW(
+                    w,
+                    WM_SETFONT,
+                    Some(WPARAM(self.ui_font.0 as usize)),
+                    Some(LPARAM(1)),
+                );
+            }
+        }
+    }
+
+    /// DPI が変わったらフォントを作り直す。
+    fn set_ui_dpi(&mut self, dpi: u32) {
+        let old = std::mem::replace(&mut self.ui_font, crate::util::ui_font(dpi));
+        self.apply_ui_font();
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::DeleteObject(old.into());
+        }
+    }
 
     fn layout_children(&mut self) {
         unsafe {
@@ -4142,6 +4170,7 @@ pub(crate) extern "system" fn frame_proc(
                 a.renderer.set_dpi(dpi);
                 a.renderer.clear_cache();
                 a.findbar.set_dpi(dpi);
+                a.set_ui_dpi(dpi);
                 a.layout_children();
                 a.after_scroll();
             });
