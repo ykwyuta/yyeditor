@@ -398,7 +398,6 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             w!("名前を付けて保存(&A)...\tCtrl+Shift+S"),
         )?;
         item(file, ID_CLOSE, w!("閉じる(&C)\tCtrl+W"))?;
-        item(file, ID_DIFF, w!("開いているファイルを比較..."))?;
         sep(file)?;
         item(file, ID_EXIT, w!("終了(&X)\tAlt+F4"))?;
 
@@ -446,6 +445,8 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             w!("行番号(&L)"),
         )?;
         item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
+        sep(view)?;
+        item(view, ID_DIFF, w!("開いているファイルを比較..."))?;
 
         let search = CreatePopupMenu()?;
         item(search, ID_FIND, w!("検索(&F)...\tCtrl+F"))?;
