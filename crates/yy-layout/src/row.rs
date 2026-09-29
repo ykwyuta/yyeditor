@@ -8,6 +8,9 @@ pub enum SpanKind {
     Invalid,
     /// 制御文字（Unicode の Control Pictures で表示）
     Control,
+    /// 行・段落の区切りとして描画されてしまう文字（U+0085 NEL・U+2028・U+2029）。
+    /// `␤` `¶` で表示する。1 つのスパンが 1 文字
+    Break,
     /// 読み込んだ文字コードで不正だったバイトを表すエスケープ文字（`\xNN` と表示。03 章 2.4）
     Escape,
     /// 区切り文字モードの区切り文字（` │ ` と表示。04 章 4.2）。1 つのスパンが 1 単位
@@ -33,6 +36,7 @@ impl Span {
             SpanKind::Text => (1, 1),
             SpanKind::Invalid => (1, 4),
             SpanKind::Control => (1, 3),
+            SpanKind::Break => (self.src.len().max(1), self.range.len().max(1)),
             SpanKind::Escape => (4, 4),
             SpanKind::Delim => (self.src.len().max(1), self.range.len().max(1)),
             SpanKind::Pad => (0, 1),
@@ -172,7 +176,7 @@ fn push(text: &mut String, spans: &mut Vec<Span>, s: &str, kind: SpanKind, src: 
     match spans.last_mut() {
         Some(last)
             if last.kind == kind
-                && !matches!(kind, SpanKind::Delim | SpanKind::Pad)
+                && !matches!(kind, SpanKind::Delim | SpanKind::Pad | SpanKind::Break)
                 && last.range.end == start
                 && last.src.end == src.start =>
         {
@@ -191,6 +195,8 @@ fn push(text: &mut String, spans: &mut Vec<Span>, s: &str, kind: SpanKind, src: 
 ///
 /// * 不正な UTF-8 のバイトは `\xNN` に置き換える
 /// * タブ以外の C0 制御文字と DEL は Control Pictures（`␀` `␍` など）に置き換える
+/// * U+0085（NEL、EBCDIC の改行）・U+2028・U+2029 は `␤` `¶` に置き換える
+///   （そのまま描画すると行が分かれてしまうため）
 /// * エスケープ文字（`U+10FE00`〜）は元のバイトを `\xNN` で表示する
 pub fn decode_row(bytes: &[u8]) -> (String, Vec<Span>) {
     decode_row_with_controls(bytes, true)
@@ -202,7 +208,8 @@ pub fn decode_row_with_controls(bytes: &[u8], show_controls: bool) -> (String, V
     let plain = bytes.chunks(64).all(|c| {
         let mut bad = false;
         for &b in c {
-            bad |= ((b < 0x20) & (b != b'\t')) | (b == 0x7F) | (b == 0xF4);
+            bad |=
+                ((b < 0x20) & (b != b'\t')) | (b == 0x7F) | (b == 0xF4) | (b == 0xC2) | (b == 0xE2);
         }
         !bad
     });
@@ -241,6 +248,30 @@ pub fn decode_row_with_controls(bytes: &[u8], show_controls: bool) -> (String, V
                     pos + i..pos + i + 4,
                 );
                 run_start = i + 4;
+                continue;
+            }
+            let brk = match c {
+                '\u{85}' | '\u{2028}' => Some("\u{2424}"),
+                '\u{2029}' => Some("\u{B6}"),
+                _ => None,
+            };
+            if let Some(glyph) = brk {
+                push(
+                    &mut text,
+                    &mut spans,
+                    &valid[run_start..i],
+                    SpanKind::Text,
+                    pos + run_start..pos + i,
+                );
+                let glyph = if show_controls { glyph } else { " " };
+                push(
+                    &mut text,
+                    &mut spans,
+                    glyph,
+                    SpanKind::Break,
+                    pos + i..pos + i + c.len_utf8(),
+                );
+                run_start = i + c.len_utf8();
                 continue;
             }
             let pic = match c {
@@ -319,6 +350,23 @@ mod tests {
                 ("\\xE3\\x81", SpanKind::Invalid),
             ]
         );
+    }
+
+    #[test]
+    fn line_separators_do_not_break_rows() {
+        // NEL（2 バイト）と U+2028（3 バイト）が続く
+        let bytes = "a\u{85}\u{2028}b".as_bytes();
+        let r = Row::new(0, bytes.len() as u64, true, bytes);
+        assert_eq!(r.text, "a\u{2424}\u{2424}b");
+        assert_eq!(r.spans.len(), 4);
+        assert_eq!(r.text_index(1), 1);
+        assert_eq!(r.text_index(3), 4);
+        assert_eq!(r.text_index(6), 7);
+        assert_eq!(r.offset_at(4), 3);
+        assert_eq!(r.offset_at(7), 6);
+        let hidden = Row::new_with_controls(0, bytes.len() as u64, true, bytes, false);
+        assert_eq!(hidden.text, "a  b");
+        assert_eq!(hidden.offset_at(3), 6);
     }
 
     #[test]

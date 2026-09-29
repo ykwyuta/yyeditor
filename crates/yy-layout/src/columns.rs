@@ -106,6 +106,16 @@ pub fn units(row: &Row, cfg: &ColumnConfig) -> Vec<Unit> {
                 });
                 col += w;
             }
+            SpanKind::Break => {
+                // 1 文字を 1 桁
+                out.push(Unit {
+                    start: src0,
+                    end: row.start + span.src.end as u64,
+                    col_start: col,
+                    col_end: col + 1,
+                });
+                col += 1;
+            }
             SpanKind::Control | SpanKind::Invalid | SpanKind::Escape => {
                 let (w, step) = match span.kind {
                     SpanKind::Control => (1, 1),

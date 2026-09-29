@@ -1,0 +1,20 @@
+name = "gitignore"
+filenames = [".gitignore", ".dockerignore", ".npmignore", ".hgignore", ".prettierignore", ".eslintignore"]
+extensions = ["gitignore"]
+line_comment = "#"
+
+[[context.main]]
+match = '^\s*#.*$'
+token = "comment"
+
+[[context.main]]
+match = '^!'
+token = "operator"
+
+[[context.main]]
+match = '\*\*|[*?]|\[[^\]]*\]'
+token = "keyword"
+
+[[context.main]]
+match = '/$'
+token = "punctuation"

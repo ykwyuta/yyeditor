@@ -24,6 +24,15 @@ fn encodings() -> Vec<Encoding> {
         Encoding::Iso2022Jp,
     ];
     v.push(Encoding::from_name("windows-1252").unwrap());
+    // EBCDIC（M7）: 改行 NL・LF・固定長レコード
+    for name in [
+        "IBM-930/nl",
+        "IBM-939/fixed:100",
+        "IBM-1399/lf",
+        "IBM-037/nl",
+    ] {
+        v.push(Encoding::from_name(name).unwrap());
+    }
     v
 }
 
@@ -59,6 +68,7 @@ fn open(path: &Path, enc: Option<Encoding>, sync_limit: u64) -> Document {
         &OpenOptions {
             encoding: enc,
             sync_limit,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -129,6 +139,39 @@ fn detects_encoding_on_open() {
             );
         }
     }
+}
+
+#[test]
+fn detects_ebcdic_when_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("MASTER.DAT");
+    let enc = Encoding::from_name("IBM-930/fixed:80").unwrap();
+    let text: String = ["0001 ﾔﾏﾀﾞ ﾀﾛｳ  山田太郎", "0002 ｽｽﾞｷ ﾊﾅｺ  鈴木花子"]
+        .iter()
+        .map(|l| format!("{l}\n"))
+        .collect::<String>()
+        .repeat(20);
+    let bytes = yy_encoding::encode_all(enc, text.as_bytes(), EscapeMode::Reject).unwrap();
+    assert_eq!(bytes.len(), 80 * 40);
+    std::fs::write(&path, &bytes).unwrap();
+    // 既定では EBCDIC を判別しない
+    assert_ne!(open(&path, None, u64::MAX).encoding(), enc);
+    let pool = JobPool::new(2);
+    let mut d = Document::open_with(
+        &path,
+        &OpenOptions {
+            detect_ebcdic: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    d.start_indexing(&pool, Arc::new(|| {}));
+    assert_eq!(d.encoding(), enc);
+    // 各レコードは空白で埋められた 1 行
+    let first = String::from_utf8(d.snapshot().read(0..60)).unwrap();
+    assert!(first.starts_with("0001 ﾔﾏﾀﾞ ﾀﾛｳ  山田太郎    "), "{first:?}");
+    d.save().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 
 #[test]
@@ -224,6 +267,7 @@ fn background_loading_is_read_only_until_done() {
         &OpenOptions {
             encoding: None,
             sync_limit: 1 << 20,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -276,4 +320,34 @@ fn converts_line_endings_as_one_undo_step() {
     assert!(!d.convert_eol(yy_core::Eol::CrLf).unwrap());
     assert!(d.undo());
     assert_eq!(d.snapshot().read(0..d.snapshot().len()), b"a\nb\nc\rd\n");
+}
+
+#[test]
+fn raw_open_keeps_every_byte() {
+    // 16 進数編集: BOM・不正なバイトも内容として読み、そのまま書き戻す
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bin.dat");
+    let bytes = b"\xEF\xBB\xBFtext\x00\xFF\xFE\r\n\x80".to_vec();
+    std::fs::write(&path, &bytes).unwrap();
+    let mut d = Document::open_with(
+        &path,
+        &OpenOptions {
+            raw: true,
+            encoding: Some(Encoding::Cp932),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(d.encoding(), Encoding::Utf8);
+    assert!(!d.has_bom());
+    assert_eq!(d.snapshot().read(0..d.snapshot().len()), bytes);
+    assert!(d.apply_changes(
+        vec![yy_core::edit::Change::replace_bytes(3..4, b"T".to_vec())],
+        yy_core::EditKind::Typing,
+        |_| yy_core::SelectionSet::single(yy_core::Selection::caret(4)),
+    ));
+    d.save().unwrap();
+    let mut expect = bytes.clone();
+    expect[3] = b'T';
+    assert_eq!(std::fs::read(&path).unwrap(), expect);
 }

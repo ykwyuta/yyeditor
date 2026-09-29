@@ -1,0 +1,31 @@
+name = "Makefile"
+extensions = ["mk", "mak", "make"]
+filenames = ["Makefile", "makefile", "GNUmakefile", "BSDmakefile"]
+aliases = ["make"]
+line_comment = "#"
+
+[keywords]
+keyword = ["ifeq", "ifneq", "ifdef", "ifndef", "else", "endif", "include", "-include", "sinclude", "define", "endef", "export", "unexport", "override", "private", "vpath"]
+builtin = [".PHONY", ".SUFFIXES", ".DEFAULT", ".PRECIOUS", ".SILENT", ".ONESHELL"]
+
+[[context.main]]
+match = '#.*$'
+token = "comment"
+
+[[context.main]]
+match = '^([^\s:=#][^:=#]*?)\s*::?(?:[^=]|$)'
+captures = { 1 = "function" }
+
+[[context.main]]
+match = '^\s*([A-Za-z_][\w.]*)\s*(?:[:+?!]|::)?='
+captures = { 1 = "property" }
+
+[[context.main]]
+match = '\$\((?:[a-z]+\s)?[^)]*\)|\$\{[^}]*\}|\$[@<^?*%+|]'
+token = "variable"
+
+[[context.main]]
+begin = '"'
+end = '"|$'
+skip = '\\.'
+token = "string"

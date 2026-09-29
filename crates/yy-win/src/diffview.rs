@@ -16,7 +16,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::SetScrollInfo;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{HSTRING, PCWSTR};
 use yy_buffer::Snapshot;
 
 use crate::DIFF_CLASS;
@@ -80,6 +80,7 @@ pub(crate) fn show(
             None,
         )
         .map_err(|e| e.to_string())?;
+        crate::font::register_gdi();
         let font = CreateFontW(
             -16,
             0,
@@ -94,7 +95,7 @@ pub(crate) fn show(
             CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY,
             FF_MODERN.0 as u32,
-            w!("Consolas"),
+            &HSTRING::from(crate::font::BUNDLED_FAMILY),
         );
         let state = Box::new(DiffWindow {
             left: left.clone(),

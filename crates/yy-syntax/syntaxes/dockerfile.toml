@@ -1,0 +1,31 @@
+name = "Dockerfile"
+extensions = ["dockerfile", "containerfile"]
+filenames = ["Dockerfile", "Containerfile"]
+line_comment = "#"
+
+[keywords]
+case_sensitive = false
+keyword = ["from", "run", "cmd", "label", "expose", "env", "add", "copy", "entrypoint", "volume", "user", "workdir", "arg", "onbuild", "stopsignal", "healthcheck", "shell", "as", "maintainer"]
+
+[[context.main]]
+match = '^\s*#.*$'
+token = "comment"
+
+[[context.main]]
+begin = '"'
+end = '"|$'
+skip = '\\.'
+token = "string"
+
+[[context.main]]
+begin = "'"
+end = "'|$"
+token = "string"
+
+[[context.main]]
+match = '\$\{[^}]*\}|\$[A-Za-z_]\w*'
+token = "variable"
+
+[[context.main]]
+match = '--[a-z-]+'
+token = "attribute"

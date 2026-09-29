@@ -1,0 +1,33 @@
+name = "PL/I"
+extensions = ["pli", "pl1", "pli1", "plinc"]
+aliases = ["pl1"]
+block_comment = ["/*", "*/"]
+
+[keywords]
+case_sensitive = false
+keyword = ["alloc", "allocate", "begin", "by", "call", "close", "dcl", "declare", "default", "delete", "do", "else", "end", "entry", "exit", "fetch", "format", "free", "get", "go", "goto", "if", "leave", "locate", "on", "open", "otherwise", "proc", "procedure", "put", "read", "release", "return", "returns", "revert", "rewrite", "select", "signal", "stop", "then", "to", "until", "when", "while", "write", "iterate", "package", "options", "main", "list", "edit", "data", "skip", "file", "init", "initial", "like", "static", "automatic", "auto", "based", "controlled", "external", "internal", "builtin", "condition", "recursive", "reorder"]
+type = ["bin", "binary", "bit", "char", "character", "dec", "decimal", "fixed", "float", "picture", "pic", "pointer", "ptr", "varying", "var", "area", "offset", "label", "complex", "real", "aligned", "unaligned", "graphic", "widechar"]
+constant = ["null", "sysin", "sysprint", "endfile", "error", "zerodivide", "overflow", "conversion"]
+
+[[context.main]]
+begin = '/\*'
+end = '\*/'
+token = "comment"
+
+[[context.main]]
+begin = "'"
+end = "'"
+skip = "''"
+token = "string"
+
+[[context.main]]
+match = '^\s*%\w+'
+token = "preprocessor"
+
+[[context.main]]
+match = '^\s*([A-Za-z_]\w*)\s*:'
+captures = { 1 = "label" }
+
+[[context.main]]
+match = '\b[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?[bB]?\b'
+token = "number"

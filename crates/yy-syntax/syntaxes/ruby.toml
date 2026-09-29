@@ -1,0 +1,39 @@
+name = "Ruby"
+extensions = ["rb", "rake", "gemspec", "ru"]
+filenames = ["Rakefile", "Gemfile"]
+aliases = ["rb"]
+first_line = '^#!.*\bruby\b'
+line_comment = "#"
+
+[keywords]
+keyword = ["alias", "and", "begin", "break", "case", "class", "def", "defined?", "do", "else", "elsif", "end", "ensure", "for", "if", "in", "module", "next", "not", "or", "redo", "rescue", "retry", "return", "self", "super", "then", "undef", "unless", "until", "when", "while", "yield", "__method__", "require", "require_relative", "attr_accessor", "attr_reader", "attr_writer", "private", "protected", "public"]
+constant = ["nil", "true", "false"]
+[[context.main]]
+match = '#.*$'
+token = "comment"
+[[context.main]]
+begin = '^=begin'
+end = '^=end'
+token = "comment"
+[[context.main]]
+begin = '"'
+end = '"'
+skip = '\\.'
+token = "string"
+[[context.main]]
+begin = ''''''''
+end = ''''''''
+skip = '\\.'
+token = "string"
+[[context.main]]
+match = ':[A-Za-z_]\w*[?!]?'
+token = "constant"
+[[context.main]]
+match = '@{1,2}[A-Za-z_]\w*|\$[A-Za-z_]\w*'
+token = "variable"
+[[context.main]]
+match = '\b(def)\s+(?:self\.)?([A-Za-z_]\w*[?!=]?)'
+captures = { 1 = "keyword", 2 = "function" }
+[[context.main]]
+match = '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?)[a-zA-Z0-9]*\b'
+token = "number"

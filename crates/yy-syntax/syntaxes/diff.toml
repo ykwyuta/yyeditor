@@ -1,0 +1,27 @@
+name = "diff"
+extensions = ["diff", "patch", "rej"]
+aliases = ["patch"]
+
+[[context.main]]
+match = '^(?:\+\+\+|---)\s.*$'
+token = "meta"
+
+[[context.main]]
+match = '^(?:diff|index|new file|deleted file|similarity|rename|Only in|Binary files)\b.*$'
+token = "meta"
+
+[[context.main]]
+match = '^@@.*?@@'
+token = "section"
+
+[[context.main]]
+match = '^\+.*$'
+token = "inserted"
+
+[[context.main]]
+match = '^-.*$'
+token = "deleted"
+
+[[context.main]]
+match = '^[<>!].*$'
+token = "changed"

@@ -48,22 +48,26 @@ impl Default for Config {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EditorConfig {
-    /// フォント名。日本語グリフは DirectWrite のフォールバックで補われる
+    /// フォント名。既定は実行ファイルに同梱の UDEV Gothic。
+    /// ほかのフォントの日本語グリフは DirectWrite のフォールバックで補われる
     pub font_family: String,
     /// フォントサイズ（ポイント）
     pub font_size: f32,
     pub tab_width: u32,
     /// 東アジアの曖昧幅文字（①、○ など）を全角（2 桁）として数えるか。矩形選択の桁計算に使う
     pub ambiguous_wide: bool,
+    /// 文字コードの自動判別に EBCDIC を含める（03 章 3.3）
+    pub detect_ebcdic: bool,
 }
 
 impl Default for EditorConfig {
     fn default() -> Self {
         EditorConfig {
-            font_family: "Consolas".into(),
+            font_family: "UDEV Gothic".into(),
             font_size: 11.0,
             tab_width: 4,
             ambiguous_wide: true,
+            detect_ebcdic: false,
         }
     }
 }
@@ -109,6 +113,68 @@ pub struct Colors {
     /// 検索に一致した箇所の背景
     pub search_match: Color,
     pub caret: Color,
+    /// カーソル位置の括弧と対応する括弧の背景
+    pub bracket_match: Color,
+    /// シンタックスハイライトのトークンの色（`comment`・`keyword.control` など）。
+    /// 細分類（`keyword.control`）がなければ親（`keyword`）の色を使う
+    pub syntax: BTreeMap<String, Color>,
+}
+
+/// 既定のトークンの色（ライト）。
+fn default_syntax_colors() -> BTreeMap<String, Color> {
+    [
+        ("comment", "#008000"),
+        ("string", "#A31515"),
+        ("escape", "#EE0000"),
+        ("keyword", "#0000FF"),
+        ("type", "#267F99"),
+        ("builtin", "#267F99"),
+        ("constant", "#0070C1"),
+        ("number", "#098658"),
+        ("function", "#795E26"),
+        ("preprocessor", "#AF00DB"),
+        ("variable", "#001080"),
+        ("property", "#0451A5"),
+        ("attribute", "#E50000"),
+        ("tag", "#800000"),
+        ("punctuation", "#808080"),
+        ("label", "#795E26"),
+        ("section", "#0000FF"),
+        ("heading", "#800000"),
+        ("strong", "#000080"),
+        ("emphasis", "#800080"),
+        ("link", "#0066CC"),
+        ("code", "#A31515"),
+        ("regex", "#811F3F"),
+        ("meta", "#808080"),
+        ("inserted", "#098658"),
+        ("deleted", "#A31515"),
+        ("changed", "#0451A5"),
+        ("error", "#CD3131"),
+        ("warning", "#BF8803"),
+        ("info", "#1A85FF"),
+        ("debug", "#808080"),
+        ("date", "#0451A5"),
+        ("line-number", "#237893"),
+        ("data", "#5A5A5A"),
+        ("operator", "#000000"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.parse().unwrap()))
+    .collect()
+}
+
+impl Colors {
+    /// トークン名の色（細分類がなければ親の色）。
+    pub fn syntax_color(&self, token: &str) -> Option<Color> {
+        let mut name = token;
+        loop {
+            if let Some(c) = self.syntax.get(name) {
+                return Some(*c);
+            }
+            name = &name[..name.rfind('.')?];
+        }
+    }
 }
 
 impl Default for Colors {
@@ -124,6 +190,8 @@ impl Default for Colors {
             selection: Color::rgb(0xAD, 0xD6, 0xFF),
             search_match: Color::rgb(0xFF, 0xE0, 0x8A),
             caret: Color::rgb(0x00, 0x00, 0x00),
+            bracket_match: Color::rgb(0xD0, 0xE8, 0xD0),
+            syntax: default_syntax_colors(),
         }
     }
 }
@@ -199,6 +267,7 @@ pub struct FileType {
     pub delimiter: Option<String>,
     pub quote: Option<char>,
     pub rfc4180: Option<bool>,
+    /// 開くときの文字コード（`IBM-930/fixed:80` など。省略すると自動判別）
     pub encoding: Option<String>,
     pub syntax: Option<String>,
 }
@@ -236,6 +305,10 @@ impl Config {
         let mut c: Config = toml::from_str(s)?;
         for (k, v) in default_filetypes() {
             c.filetype.entry(k).or_insert(v);
+        }
+        // トークンの色は書いたものだけを既定値に上書きする
+        for (k, v) in default_syntax_colors() {
+            c.colors.syntax.entry(k).or_insert(v);
         }
         Ok(c)
     }
@@ -320,6 +393,32 @@ mod tests {
         assert_eq!(c.colors.foreground, Colors::default().foreground);
         assert_eq!(c.filetype_for_extension("LOG").unwrap().0, "log");
         assert_eq!(c.filetype_for_extension("csv").unwrap().0, "csv");
+    }
+
+    #[test]
+    fn syntax_colors_merge_and_inherit() {
+        let c = Config::from_toml(
+            "[colors.syntax]\ncomment = \"#111111\"\n\"keyword.control\" = \"#222222\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.colors.syntax_color("comment"),
+            Some(Color::rgb(0x11, 0x11, 0x11))
+        );
+        assert_eq!(
+            c.colors.syntax_color("keyword.control"),
+            Some(Color::rgb(0x22, 0x22, 0x22))
+        );
+        // 書いていない色は既定値、細分類は親の色
+        assert_eq!(
+            c.colors.syntax_color("string"),
+            Colors::default().syntax_color("string")
+        );
+        assert_eq!(
+            c.colors.syntax_color("string.quoted"),
+            c.colors.syntax_color("string")
+        );
+        assert_eq!(c.colors.syntax_color("nothing"), None);
     }
 
     #[test]

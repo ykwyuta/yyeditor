@@ -1,0 +1,21 @@
+[package]
+name = "yy-syntax"
+description = "Syntax highlighting for yyeditor: declarative definitions, multi-pattern engine, state checkpoints"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+yy-buffer.workspace = true
+regex-automata.workspace = true
+serde.workspace = true
+toml.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,42 @@
+name = "Python"
+extensions = ["py", "pyw", "pyi"]
+aliases = ["py", "python3"]
+first_line = '^#!.*\bpython[0-9.]*\b'
+line_comment = "#"
+
+[keywords]
+keyword = ["and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield", "match", "case"]
+constant = ["None", "True", "False", "self", "cls"]
+builtin = ["print", "len", "range", "int", "str", "float", "list", "dict", "set", "tuple", "bool", "open", "isinstance", "super", "type", "enumerate", "zip", "map", "filter", "sorted", "min", "max", "sum", "abs", "any", "all", "repr", "iter", "next", "object"]
+[[context.main]]
+match = '#.*$'
+token = "comment"
+[[context.main]]
+begin = '[rRbBuUfF]{0,2}"""'
+end = '"""'
+skip = '\\.'
+token = "string"
+[[context.main]]
+begin = "[rRbBuUfF]{0,2}'''"
+end = "'''"
+skip = '\\.'
+token = "string"
+[[context.main]]
+begin = '[rRbBuUfF]{0,2}"'
+end = '"|$'
+skip = '\\.'
+token = "string"
+[[context.main]]
+begin = '''[rRbBuUfF]{0,2}''''
+end = ''''|$'''
+skip = '\\.'
+token = "string"
+[[context.main]]
+match = '^\s*@[\w.]+'
+token = "attribute"
+[[context.main]]
+match = '\b(def|class)\s+([A-Za-z_]\w*)'
+captures = { 1 = "keyword", 2 = "function" }
+[[context.main]]
+match = '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?)[a-zA-Z0-9]*\b'
+token = "number"

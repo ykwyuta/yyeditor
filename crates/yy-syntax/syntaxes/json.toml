@@ -1,0 +1,25 @@
+name = "JSON"
+extensions = ["json", "jsonc", "json5", "geojson", "webmanifest"]
+line_comment = "//"
+block_comment = ["/*", "*/"]
+
+[keywords]
+constant = ["true", "false", "null"]
+[[context.main]]
+match = '//.*$'
+token = "comment"
+[[context.main]]
+begin = '/\*'
+end = '\*/'
+token = "comment"
+[[context.main]]
+match = '"(?:\\.|[^"\\])*"\s*:'
+token = "property"
+[[context.main]]
+begin = '"'
+end = '"|$'
+skip = '\\.'
+token = "string"
+[[context.main]]
+match = '-?\b[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\b'
+token = "number"

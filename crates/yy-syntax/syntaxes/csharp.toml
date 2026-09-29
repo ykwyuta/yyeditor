@@ -1,0 +1,39 @@
+name = "C#"
+extensions = ["cs", "csx"]
+aliases = ["cs", "c#"]
+line_comment = "//"
+block_comment = ["/*", "*/"]
+
+[keywords]
+keyword = ["abstract", "as", "base", "break", "case", "catch", "checked", "class", "const", "continue", "default", "delegate", "do", "else", "enum", "event", "explicit", "extern", "finally", "fixed", "for", "foreach", "goto", "if", "implicit", "in", "interface", "internal", "is", "lock", "namespace", "new", "operator", "out", "override", "params", "private", "protected", "public", "readonly", "ref", "return", "sealed", "sizeof", "stackalloc", "static", "struct", "switch", "this", "throw", "try", "typeof", "unchecked", "unsafe", "using", "virtual", "volatile", "while", "async", "await", "var", "dynamic", "yield", "where", "get", "set", "init", "value", "record", "when", "nameof", "partial", "global"]
+type = ["bool", "byte", "char", "decimal", "double", "float", "int", "long", "object", "sbyte", "short", "string", "uint", "ulong", "ushort", "void", "nint", "nuint"]
+constant = ["null", "true", "false"]
+[[context.main]]
+match = '//.*$'
+token = "comment"
+[[context.main]]
+begin = '/\*'
+end = '\*/'
+token = "comment"
+[[context.main]]
+begin = '@"'
+end = '"'
+skip = '""'
+token = "string"
+[[context.main]]
+begin = '\$?"'
+end = '"|$'
+skip = '\\.'
+token = "string"
+[[context.main]]
+match = ''''(?:\\.|[^'\\])''''
+token = "string"
+[[context.main]]
+match = '^\s*#\s*[a-zA-Z_]+'
+token = "preprocessor"
+[[context.main]]
+match = '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?)[a-zA-Z0-9]*\b'
+token = "number"
+[[context.main]]
+match = '\b([\p{L}_][\p{L}\p{N}_]*)\s*\('
+captures = { 1 = "function" }

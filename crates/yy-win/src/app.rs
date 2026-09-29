@@ -40,12 +40,16 @@ use yy_layout::{
 };
 
 mod csvmode;
+mod hexmode;
+mod syntaxmode;
 
 use crate::findbar::{self, FindBar};
 use crate::render::{Composition, Frame, RectPaint, Renderer};
 use crate::util::{Context, error_box, group_digits, human_size, info_box, wide};
 use crate::{FRAME_CLASS, VIEW_CLASS, clipboard, default_proc, hiword, ime, loword};
 use csvmode::*;
+use hexmode::*;
+use syntaxmode::*;
 
 // メニュー・アクセラレータのコマンド ID
 const ID_OPEN: u16 = 101;
@@ -172,6 +176,8 @@ pub(crate) struct App {
     menu_edit: HMENU,
     menu_view: HMENU,
     menu_csv: HMENU,
+    /// 「ハイライト」の子メニュー
+    menu_syntax: HMENU,
     config: Config,
     rows_cfg: RowConfig,
     pool: JobPool,
@@ -222,6 +228,16 @@ pub(crate) struct App {
     grep_done: Option<String>,
     /// 前回の Grep の条件
     grep_last: crate::grepdlg::GrepRequest,
+    /// ハイライトの定義の一覧（組み込み＋利用者の定義）
+    syntaxes: yy_core::syntax::Registry,
+    /// 文書のハイライト（なければ色を付けない）
+    syntax: Option<SyntaxState>,
+    /// 利用者が「なし」を選んだ（ファイル種類から選び直さない）
+    syntax_off: bool,
+    /// 括弧の対応（（表示の版, キャレット位置）, 結果）
+    bracket_cache: Option<BracketCache>,
+    /// 16 進数（バイナリ）表示
+    hex: Option<HexState>,
 }
 
 /// 非表示タブの文書と表示位置。検索条件と表示設定はウィンドウ全体で共有する。
@@ -235,6 +251,9 @@ struct TabState {
     pending_record_op: Option<yy_core::csv::RecordOp>,
     warned_noncanonical: bool,
     status_msg: String,
+    syntax: Option<SyntaxState>,
+    syntax_off: bool,
+    hex: Option<HexState>,
 }
 
 impl TabState {
@@ -249,6 +268,9 @@ impl TabState {
             pending_record_op: None,
             warned_noncanonical: false,
             status_msg: String::new(),
+            syntax: None,
+            syntax_off: false,
+            hex: None,
         }
     }
 }
@@ -339,6 +361,10 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
             ID_CARETS_AT_LINE_ENDS,
         ),
         (ctrl, b'G' as u16, ID_GOTO),
+        (ctrl_shift, b'X' as u16, ID_HEX_MODE),
+        (ctrl, VK_OEM_2.0, ID_TOGGLE_COMMENT),
+        (ctrl, VK_DIVIDE.0, ID_TOGGLE_COMMENT),
+        (ctrl, VK_OEM_6.0, ID_GOTO_BRACKET),
         (ctrl, b'F' as u16, ID_FIND),
         (ctrl, b'H' as u16, ID_REPLACE),
         (FVIRTKEY, VK_F3.0, ID_FIND_NEXT),
@@ -371,6 +397,7 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         let file = CreatePopupMenu()?;
         item(file, ID_NEW, w!("新規作成(&N)\tCtrl+N"))?;
         item(file, ID_OPEN, w!("開く(&O)...\tCtrl+O"))?;
+        item(file, ID_OPEN_BINARY, w!("バイナリとして開く(&B)..."))?;
         item(
             file,
             ID_OPEN_SHARED,
@@ -398,7 +425,6 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             w!("名前を付けて保存(&A)...\tCtrl+Shift+S"),
         )?;
         item(file, ID_CLOSE, w!("閉じる(&C)\tCtrl+W"))?;
-        item(file, ID_DIFF, w!("開いているファイルを比較..."))?;
         sep(file)?;
         item(file, ID_EXIT, w!("終了(&X)\tAlt+F4"))?;
 
@@ -431,6 +457,8 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         sep(edit)?;
         item(edit, ID_RECT_MODE, w!("矩形選択モード(&B)"))?;
         item(edit, ID_RECT_TO_CARETS, w!("矩形選択をカーソルに変換"))?;
+        sep(edit)?;
+        item(edit, ID_TOGGLE_COMMENT, w!("コメント化 / 解除(&M)\tCtrl+/"))?;
 
         let view = CreatePopupMenu()?;
         item(view, ID_GOTO, w!("行へ移動(&G)...\tCtrl+G"))?;
@@ -446,6 +474,9 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             w!("行番号(&L)"),
         )?;
         item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
+        item(view, ID_HEX_MODE, w!("16 進数表示(&X)\tCtrl+Shift+X"))?;
+        sep(view)?;
+        item(view, ID_DIFF, w!("開いているファイルを比較..."))?;
 
         let search = CreatePopupMenu()?;
         item(search, ID_FIND, w!("検索(&F)...\tCtrl+F"))?;
@@ -460,6 +491,11 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             w!("ファイルから検索 (Grep)(&G)...\tCtrl+Shift+F"),
         )?;
         item(search, ID_TAG_JUMP, w!("タグジャンプ(&J)\tF12"))?;
+        item(
+            search,
+            ID_GOTO_BRACKET,
+            w!("対応する括弧へ移動(&B)\tCtrl+]"),
+        )?;
 
         let help = CreatePopupMenu()?;
         item(help, ID_ABOUT, w!("バージョン情報(&A)"))?;
@@ -486,8 +522,19 @@ impl App {
         initial_line: Option<u64>,
     ) -> Result<HWND> {
         let (config, config_error) = Config::load();
+        // 外部の対応表（%APPDATA%\yyeditor\mappings\*.map）
+        let mut mapping_errors = yy_config::config_dir()
+            .map(|d| yy_encoding::load_mappings(&d.join("mappings")))
+            .unwrap_or_default();
+        // ハイライトの定義（%APPDATA%\yyeditor\syntax\*.toml で追加・置き換え）
+        let mut syntaxes = yy_core::syntax::Registry::builtin();
+        if let Some(d) = yy_config::config_dir() {
+            mapping_errors.extend(syntaxes.load_dir(&d.join("syntax")));
+        }
         unsafe {
             let (menu, menu_edit, menu_view, menu_csv) = create_menu().context("create_menu")?;
+            let menu_syntax =
+                append_syntax_menu(menu_view, &syntaxes.list()).context("create_menu")?;
             let frame = CreateWindowExW(
                 WS_EX_ACCEPTFILES,
                 FRAME_CLASS,
@@ -575,6 +622,7 @@ impl App {
                 menu_edit,
                 menu_view,
                 menu_csv,
+                menu_syntax,
                 rows_cfg: RowConfig::new(config.view.max_row_bytes.max(256) as u64),
                 show_line_numbers: config.view.line_numbers,
                 config,
@@ -614,11 +662,17 @@ impl App {
                     recursive: true,
                     ..Default::default()
                 },
+                syntaxes,
+                syntax: None,
+                syntax_off: false,
+                bracket_cache: None,
+                hex: None,
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
             with_app(|a| {
                 a.refresh_tabs();
                 a.update_line_number_menu();
+                a.update_syntax_menu();
                 a.layout_children();
                 a.update_title();
                 a.update_status();
@@ -630,6 +684,15 @@ impl App {
 
             if let Some(e) = config_error {
                 error_box(frame, &e.to_string());
+            }
+            if !mapping_errors.is_empty() {
+                error_box(
+                    frame,
+                    &format!(
+                        "対応表・ハイライトの定義を読み込めませんでした。\n\n{}",
+                        mapping_errors.join("\n")
+                    ),
+                );
             }
             if let Some(path) = initial_file {
                 open_path(frame, path, None, false);
@@ -743,7 +806,7 @@ impl App {
             let h = (rc.bottom - rc.top - sh - tab_h - bar_h).max(0);
             let _ = MoveWindow(self.view, 0, tab_h + bar_h, w, h, true);
             // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗
-            let parts = [w - 640, w - 520, w - 380, w - 310, w - 250, -1].map(|x| x.max(0));
+            let parts = [w - 850, w - 740, w - 480, w - 310, w - 250, -1].map(|x| x.max(0));
             SendMessageW(
                 self.status,
                 SB_SETPARTS,
@@ -847,6 +910,9 @@ impl App {
         if selected > 0 {
             text += &format!("  ({} バイト選択)", group_digits(selected));
         }
+        if self.hex.is_some() {
+            text = self.hex_status();
+        }
         self.set_status(0, &text);
         self.set_status(1, &format!("  {}", human_size(snap.len())));
         let mut enc = self.doc.encoding().name().to_owned();
@@ -857,9 +923,23 @@ impl App {
         if stats.invalid > 0 {
             enc += &format!("  不正バイト {}", group_digits(stats.invalid));
         }
+        if let Some(records) = self.doc.encoding().records() {
+            enc += &format!(" / {}", records.label());
+        }
         self.set_status(2, &format!("  {enc}"));
-        self.set_status(3, &format!("  {}", self.doc.eol().label()));
-        let mode = match (self.overwrite, self.rect_mode) {
+        let syntax = self
+            .syntax
+            .as_ref()
+            .filter(|_| self.csv.is_none())
+            .map(|s| format!("  {}", s.view.syntax().name))
+            .unwrap_or_default();
+        if self.hex.is_some() {
+            self.set_status(3, "  16 進数");
+        } else {
+            self.set_status(3, &format!("  {}{syntax}", self.doc.eol().label()));
+        }
+        let overwrite = self.hex.map_or(self.overwrite, |h| h.overwrite);
+        let mode = match (overwrite, self.rect_mode && self.hex.is_none()) {
             (false, false) => "  挿入",
             (true, false) => "  上書き",
             (false, true) => "  挿入 / 矩形",
@@ -915,6 +995,10 @@ impl App {
     }
 
     fn update_scrollbars(&mut self) {
+        if self.hex.is_some() {
+            self.hex_update_scrollbars();
+            return;
+        }
         let snap = self.doc.snapshot();
         let page = self.page_rows();
         let mut si = SCROLLINFO {
@@ -992,6 +1076,10 @@ impl App {
     }
 
     fn scroll_rows(&mut self, delta: i64) {
+        if self.hex.is_some() {
+            self.hex_scroll_rows(delta);
+            return;
+        }
         let page = self.page_rows();
         if self
             .vp
@@ -1002,6 +1090,10 @@ impl App {
     }
 
     fn scroll_to_offset(&mut self, offset: u64) {
+        if self.hex.is_some() {
+            self.hex_scroll_to(offset);
+            return;
+        }
         let page = self.page_rows();
         self.vp
             .scroll_to_offset(self.doc.snapshot(), &self.rows_cfg, offset, page);
@@ -1040,6 +1132,10 @@ impl App {
                 };
                 unsafe {
                     let _ = GetScrollInfo(self.view, SB_VERT, &mut si);
+                }
+                if self.hex.is_some() {
+                    self.hex_scroll_to_fraction(si.nTrackPos);
+                    return;
                 }
                 let snap = self.doc.snapshot().clone();
                 match self.scroll_mode {
@@ -1172,6 +1268,10 @@ impl App {
 
     /// 主キャレットが画面内に入るように縦横にスクロールする。
     fn ensure_caret_visible(&mut self) {
+        if self.hex.is_some() {
+            self.hex_ensure_visible();
+            return;
+        }
         self.sync_renderer();
         let head = self.doc.selections().primary().head;
         let page = self.page_rows();
@@ -1202,6 +1302,7 @@ impl App {
     fn after_edit(&mut self) {
         self.select_job = None;
         self.sync_csv();
+        self.sync_syntax();
         if !self.doc.snapshot().is_fully_indexed() {
             let n = self.notifier();
             self.doc.maintain_indexing(&self.pool, n);
@@ -1311,6 +1412,9 @@ impl App {
     fn on_key(&mut self, vk: VIRTUAL_KEY) -> bool {
         if vk == VK_ESCAPE && self.escape_search() {
             return true;
+        }
+        if self.hex.is_some() {
+            return self.hex_key(vk);
         }
         let ctrl = key_down(VK_CONTROL);
         let shift = key_down(VK_SHIFT);
@@ -1430,6 +1534,10 @@ impl App {
     }
 
     fn on_char(&mut self, code: u16) {
+        if self.hex.is_some() {
+            self.hex_char(code);
+            return;
+        }
         // Ctrl+英字などは制御文字として届くので無視する（AltGr = Ctrl+Alt は通す）
         if key_down(VK_CONTROL) && !key_down(VK_MENU) {
             return;
@@ -1791,6 +1899,10 @@ impl App {
     }
 
     fn on_lbutton_down(&mut self, x: i32, y: i32, double: bool) {
+        if self.hex.is_some() {
+            self.hex_mouse_down(x, y);
+            return;
+        }
         let shift = key_down(VK_SHIFT);
         let ctrl = key_down(VK_CONTROL);
         if !double && !ctrl && (key_down(VK_MENU) || self.rect_mode) {
@@ -1859,6 +1971,10 @@ impl App {
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) {
+        if self.hex.is_some() {
+            self.hex_mouse_move(x, y);
+            return;
+        }
         let Some(drag) = &self.drag else {
             return;
         };
@@ -1902,6 +2018,9 @@ impl App {
 
     /// 変換ウィンドウ・候補ウィンドウを主キャレットの位置に合わせる。
     fn update_ime_position(&mut self) {
+        if self.hex.is_some() {
+            return;
+        }
         self.sync_renderer();
         let head = self.doc.selections().primary().head;
         let page = self.page_rows();
@@ -1959,14 +2078,20 @@ impl App {
     // ---- 描画 ------------------------------------------------------------
 
     fn paint(&mut self) {
+        if self.hex.is_some() {
+            self.hex_paint();
+            return;
+        }
         // 区切り文字モード: 表示する行の列幅を先に測る（広がったら表示を作り直す）
         self.measure_visible();
         unsafe {
             let mut ps = PAINTSTRUCT::default();
             BeginPaint(self.view, &mut ps);
-            let snap = self.doc.snapshot();
             let page = self.page_rows();
             let rows = self.cached_rows(self.vp.top, page + 1);
+            let tokens = self.visible_tokens(&rows);
+            let brackets = self.caret_brackets();
+            let snap = self.doc.snapshot();
             let first = snap.line_of_offset(self.vp.top);
             // 表示範囲に関係する選択・キャレットだけを渡す
             let (lo, hi) = (
@@ -1994,7 +2119,7 @@ impl App {
                 _ => Vec::new(),
             };
             let frame = Frame {
-                version: self.doc.version(),
+                version: self.paint_version(),
                 rows: &rows,
                 first_line: first.line,
                 line_exact: first.exact,
@@ -2008,6 +2133,8 @@ impl App {
                 overwrite: self.overwrite,
                 composition: self.composition.as_ref(),
                 rect: &rect_paints,
+                tokens: &tokens,
+                brackets: &brackets,
             };
             let before = self.renderer.max_text_width;
             let result = self
@@ -2057,6 +2184,12 @@ impl App {
         self.rows_cfg.cells = None;
         self.update_csv_menu();
         self.csv_mode_for_path();
+        self.syntax = None;
+        self.syntax_off = false;
+        self.bracket_cache = None;
+        self.hex = None;
+        self.update_hex_menu();
+        self.syntax_for_path();
         let n = self.notifier();
         self.doc.start_indexing(&self.pool, n);
         self.vp = Viewport::default();
@@ -2077,6 +2210,9 @@ impl App {
             pending_record_op: self.pending_record_op.take(),
             warned_noncanonical: self.warned_noncanonical,
             status_msg: std::mem::take(&mut self.status_msg),
+            syntax: self.syntax.take(),
+            syntax_off: self.syntax_off,
+            hex: self.hex.take(),
         }
     }
 
@@ -2093,6 +2229,11 @@ impl App {
         self.pending_record_op = state.pending_record_op;
         self.warned_noncanonical = state.warned_noncanonical;
         self.status_msg = state.status_msg;
+        self.syntax = state.syntax;
+        self.syntax_off = state.syntax_off;
+        self.hex = state.hex;
+        self.update_hex_menu();
+        self.bracket_cache = None;
         self.find_job = None;
         self.select_job = None;
         self.count_job = None;
@@ -2100,6 +2241,7 @@ impl App {
         self.row_cache.borrow_mut().rows.clear();
         self.rebuild_cells();
         self.update_csv_menu();
+        self.update_syntax_menu();
         self.renderer.clear_cache();
         self.update_title();
         self.after_move();
@@ -2133,6 +2275,7 @@ impl App {
         let n = self.notifier();
         self.doc.start_indexing(&self.pool, n);
         self.csv_mode_for_path();
+        self.syntax_for_path();
         self.update_title();
     }
 
@@ -2161,8 +2304,15 @@ impl App {
         encoding: Option<Encoding>,
         shared_read_only: bool,
     ) -> std::result::Result<(), String> {
+        // 文字コードの指定がなければファイル種類の設定（拡張子）の文字コード
+        let configured = encoding.or_else(|| {
+            let ext = path.extension()?.to_string_lossy().into_owned();
+            let (_, ft) = self.config.filetype_for_extension(&ext)?;
+            Encoding::from_name(ft.encoding.as_deref()?)
+        });
         let opts = OpenOptions {
-            encoding,
+            encoding: configured,
+            detect_ebcdic: self.config.editor.detect_ebcdic,
             ..OpenOptions::default()
         };
         // 既に開いているパスなら、そのタブへ移動する（明示的な開き直しは別処理）。
@@ -2189,6 +2339,47 @@ impl App {
         .map_err(|e| format!("{}\n\n{e}", path.display()))?;
         self.add_document(doc);
         Ok(())
+    }
+
+    /// ファイルをバイト列のまま開き直す（16 進数表示用）。
+    fn reopen_raw(&mut self, path: PathBuf) -> std::result::Result<(), String> {
+        let opts = OpenOptions {
+            raw: true,
+            ..OpenOptions::default()
+        };
+        let doc = if self.doc.is_read_only() {
+            Document::open_shared_read_only(&path, &opts)
+        } else {
+            Document::open_with(&path, &opts)
+        }
+        .map_err(|e| format!("{}\n\n{e}", path.display()))?;
+        self.set_document(doc);
+        Ok(())
+    }
+
+    /// ファイルをバイト列のまま新しいタブで開き、16 進数表示にする。
+    fn open_raw(&mut self, path: PathBuf) -> std::result::Result<(), String> {
+        let opts = OpenOptions {
+            raw: true,
+            ..OpenOptions::default()
+        };
+        let doc =
+            Document::open_with(&path, &opts).map_err(|e| format!("{}\n\n{e}", path.display()))?;
+        self.add_document(doc);
+        self.set_hex(true);
+        Ok(())
+    }
+
+    /// 「16 進数表示」のチェックを今の表示に合わせる。
+    fn update_hex_menu(&self) {
+        let flag = if self.hex.is_some() {
+            MF_CHECKED
+        } else {
+            MF_UNCHECKED
+        };
+        unsafe {
+            CheckMenuItem(self.menu_view, ID_HEX_MODE as u32, (MF_BYCOMMAND | flag).0);
+        }
     }
 
     fn reopen(&mut self, path: PathBuf, encoding: Encoding) -> std::result::Result<(), String> {
@@ -2243,6 +2434,7 @@ impl App {
         if self.csv.is_some() {
             self.poll_csv();
         }
+        self.poll_syntax();
         let was_replacing = self.doc.replace_progress().is_some();
         let was_loading = self.doc.is_loading();
         if self.doc.poll_indexing() {
@@ -2264,6 +2456,8 @@ impl App {
             if was_loading && !self.doc.is_loading() {
                 // 変換が終わって内容を差し替えた
                 self.sync_csv();
+                self.syntax_for_path();
+                self.sync_syntax();
                 self.renderer.clear_cache();
                 self.update_title();
                 if let Some(e) = self.doc.load_error() {
@@ -2811,6 +3005,53 @@ impl App {
         }
     }
 
+    /// 保存できない文字のうち、似た文字に置き換えられる範囲。隣り合う範囲はまとめて
+    /// 置き換えられればまとめる（半角カナと濁点など）。まとめて置き換えられなければ 1 文字ずつ。
+    fn foldable(
+        &self,
+        ranges: &[std::ops::Range<u64>],
+        enc: Encoding,
+    ) -> Vec<std::ops::Range<u64>> {
+        let snap = self.doc.snapshot();
+        let can_fold = |r: &std::ops::Range<u64>| {
+            let bytes = snap.read(r.clone());
+            std::str::from_utf8(&bytes).is_ok_and(|s| {
+                !s.chars().any(|c| yy_encoding::unescape_char(c).is_some())
+                    && yy_encoding::fold_compat(enc, s).is_some()
+            })
+        };
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < ranges.len() {
+            let mut j = i + 1;
+            while j < ranges.len() && ranges[j].start == ranges[j - 1].end {
+                j += 1;
+            }
+            let group = ranges[i].start..ranges[j - 1].end;
+            if j - i > 1 && can_fold(&group) {
+                out.push(group);
+            } else {
+                out.extend(ranges[i..j].iter().filter(|r| can_fold(r)).cloned());
+            }
+            i = j;
+        }
+        out
+    }
+
+    /// [`App::foldable`] の範囲を似た文字に置き換える（1 回の Undo で戻せる）。
+    fn replace_folded(&mut self, ranges: &[std::ops::Range<u64>], enc: Encoding) {
+        self.rect = None;
+        let ok = self.doc.replace_ranges(ranges, |b| {
+            let s = String::from_utf8_lossy(b);
+            yy_encoding::fold_compat(enc, &s)
+                .map(String::into_bytes)
+                .unwrap_or_else(|| b.to_vec())
+        });
+        if ok {
+            self.after_edit();
+        }
+    }
+
     /// 保存できない最初の文字へ移動して選択する。
     fn select_range(&mut self, r: std::ops::Range<u64>) {
         self.rect = None;
@@ -3090,9 +3331,15 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
             return false;
         }
     }
-    for attempt in 0..2 {
+    // 似た文字への置き換えを尋ねたか・「?」などに置き換えたか
+    let (mut fold_offered, mut replaced) = (false, false);
+    loop {
         match with_app(|a| a.save_to(&target)) {
-            Some(Ok(())) => return true,
+            Some(Ok(())) => {
+                // 拡張子が変わっていればハイライトの定義も選び直す
+                with_app(|a| a.syntax_for_path());
+                return true;
+            }
             Some(Err(SaveFailure::Other(msg))) => {
                 error_box(hwnd, &format!("保存できませんでした。\n{msg}"));
                 return false;
@@ -3105,7 +3352,35 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
                     group_digits(total),
                     target.encoding.name()
                 );
-                if attempt > 0 || ranges.len() as u64 != total {
+                // 互換文字・半角カナなどを似た文字に置き換えられるか（03 章 4.1）
+                if !fold_offered {
+                    fold_offered = true;
+                    let foldable =
+                        with_app(|a| a.foldable(&ranges, target.encoding)).unwrap_or_default();
+                    if !foldable.is_empty() {
+                        let text = format!(
+                            "{msg}このうち {} か所は似た文字に置き換えられます\n\
+                             （① → (1)、Ⅱ → II、ｶﾞ → ガ、全角英数 → 半角 など）。\n\n\
+                             はい: 似た文字に置き換えて保存（置き換えられない文字は続けて尋ねます）\n\
+                             いいえ: 置き換えない\n\
+                             キャンセル: 保存せずに最初の文字へ移動\n\n\
+                             置き換えは「元に戻す」で取り消せます。",
+                            group_digits(foldable.len() as u64)
+                        );
+                        match message_box(hwnd, &text, MB_YESNOCANCEL | MB_ICONWARNING) {
+                            IDYES => {
+                                with_app(|a| a.replace_folded(&foldable, target.encoding));
+                                continue;
+                            }
+                            IDNO => {}
+                            _ => {
+                                with_app(|a| a.select_range(first));
+                                return false;
+                            }
+                        }
+                    }
+                }
+                if replaced || ranges.len() as u64 != total {
                     msg += "保存せずに最初の文字へ移動します。";
                     message_box(hwnd, &msg, MB_OK | MB_ICONWARNING);
                     with_app(|a| a.select_range(first));
@@ -3123,11 +3398,11 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
                         return false;
                     }
                 };
+                replaced = true;
             }
             None => return false,
         }
     }
-    false
 }
 
 // 保存・開くダイアログに追加するコントロールの ID
@@ -3151,7 +3426,7 @@ fn add_encoding_combo(c: &IFileDialogCustomize, selected: Option<Encoding>, auto
             let _ = c.AddControlItem(CTL_ENCODING, i as u32 + offset, &HSTRING::from(e.label()));
         }
         let sel = selected
-            .and_then(|s| all.iter().position(|e| *e == s))
+            .and_then(|s| all.iter().position(|e| e.same_charset(&s)))
             .map_or(0, |i| i as u32 + offset);
         let _ = c.SetSelectedControlItem(CTL_ENCODING, sel);
         let _ = c.EndVisualGroup();
@@ -3256,7 +3531,14 @@ fn show_save_dialog(
             eol: None,
         };
         if let Some(c) = &custom {
-            target.encoding = selected_encoding(c, false).unwrap_or(encoding);
+            target.encoding = match selected_encoding(c, false) {
+                // EBCDIC のレコードの区切り方は今のものを初期値にして尋ねる
+                Some(e) if e.same_charset(&encoding) && encoding.records().is_some() => {
+                    crate::recorddlg::ask_records(owner, encoding, "保存する")?
+                }
+                Some(e) => crate::recorddlg::confirm(owner, e, "保存する")?,
+                None => encoding,
+            };
             target.bom = c.GetCheckButtonState(CTL_BOM).map_or(bom, |b| b.as_bool());
             target.eol = match c.GetSelectedControlItem(CTL_EOL) {
                 Ok(1) => Some(Eol::CrLf),
@@ -3301,6 +3583,11 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_OPEN => {
             if let Some((paths, enc)) = show_open_dialog(hwnd) {
+                let enc = match enc.map(|e| crate::recorddlg::confirm(hwnd, e, "開く")) {
+                    Some(None) => return,
+                    Some(e) => e,
+                    None => None,
+                };
                 for p in paths {
                     open_path(hwnd, p, enc, false);
                 }
@@ -3308,6 +3595,11 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_OPEN_SHARED => {
             if let Some((paths, enc)) = show_open_dialog(hwnd) {
+                let enc = match enc.map(|e| crate::recorddlg::confirm(hwnd, e, "開く")) {
+                    Some(None) => return,
+                    Some(e) => e,
+                    None => None,
+                };
                 for p in paths {
                     open_path(hwnd, p, enc, true);
                 }
@@ -3315,8 +3607,22 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         id if id >= ID_REOPEN_BASE && ((id - ID_REOPEN_BASE) as usize) < Encoding::all().len() => {
             let enc = Encoding::all()[(id - ID_REOPEN_BASE) as usize];
-            let Some(Some(path)) = with_app(|a| a.doc.path().map(|p| p.to_owned())) else {
+            let Some((path, current)) =
+                with_app(|a| (a.doc.path().map(|p| p.to_owned()), a.doc.encoding()))
+            else {
+                return;
+            };
+            let Some(path) = path else {
                 info_box(hwnd, "ファイルを開いていません。");
+                return;
+            };
+            // EBCDIC はレコードの区切り方も尋ねる（同じ文字コードなら今の区切り方を初期値にする）
+            let enc = if enc.same_charset(&current) {
+                current
+            } else {
+                enc
+            };
+            let Some(enc) = crate::recorddlg::confirm(hwnd, enc, "開き直す") else {
                 return;
             };
             if confirm_discard(hwnd) {
@@ -3346,6 +3652,15 @@ fn on_command(hwnd: HWND, id: u16) {
                 };
                 a.switch_tab(next);
             });
+        }
+        ID_TOGGLE_COMMENT => {
+            with_app(|a| a.toggle_comment());
+        }
+        ID_GOTO_BRACKET => {
+            with_app(|a| a.goto_bracket());
+        }
+        id if (ID_SYNTAX_NONE..ID_SYNTAX_BASE + 150).contains(&id) => {
+            with_app(|a| a.choose_syntax(id));
         }
         ID_DIFF => {
             let Some((count, active)) = with_app(|a| (a.tabs.len(), a.active_tab)) else {
@@ -3410,6 +3725,30 @@ fn on_command(hwnd: HWND, id: u16) {
                     a.after_edit();
                 }
             });
+        }
+        ID_CUT | ID_COPY if with_app(|a| a.hex.is_some()) == Some(true) => {
+            if let Some(Some(text)) = with_app(|a| a.hex_copy_text()) {
+                if !clipboard::set_text(hwnd, &text, false) {
+                    error_box(hwnd, "クリップボードにコピーできませんでした。");
+                } else if id == ID_CUT {
+                    with_app(|a| a.hex_cut());
+                }
+            }
+        }
+        ID_PASTE if with_app(|a| a.hex.is_some()) == Some(true) => {
+            if let Some((text, _)) = clipboard::get_text(hwnd) {
+                with_app(|a| a.hex_paste(&text));
+            }
+        }
+        ID_DELETE if with_app(|a| a.hex.is_some()) == Some(true) => {
+            with_app(|a| a.hex_delete(false));
+        }
+        ID_GOTO if with_app(|a| a.hex.is_some()) == Some(true) => cmd_hex_goto(hwnd),
+        ID_HEX_MODE => cmd_toggle_hex(hwnd),
+        ID_OPEN_BINARY => {
+            if let Some((paths, _)) = show_open_dialog(hwnd) {
+                cmd_open_binary(hwnd, paths);
+            }
         }
         ID_CUT => cmd_copy(hwnd, true),
         ID_COPY => cmd_copy(hwnd, false),
@@ -3984,7 +4323,12 @@ pub(crate) extern "system" fn view_proc(
             unsafe {
                 let _ = ReleaseCapture();
             }
-            with_app(|a| a.drag = None);
+            with_app(|a| {
+                a.drag = None;
+                if let Some(h) = &mut a.hex {
+                    h.drag_anchor = None;
+                }
+            });
             LRESULT(0)
         }
         WM_IME_SETCONTEXT => {

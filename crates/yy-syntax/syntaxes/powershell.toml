@@ -1,0 +1,42 @@
+name = "PowerShell"
+extensions = ["ps1", "psm1", "psd1"]
+aliases = ["ps1", "pwsh"]
+line_comment = "#"
+block_comment = ["<#", "#>"]
+
+[keywords]
+case_sensitive = false
+keyword = ["begin", "break", "catch", "class", "continue", "data", "define", "do", "dynamicparam", "else", "elseif", "end", "enum", "exit", "filter", "finally", "for", "foreach", "from", "function", "if", "in", "param", "process", "return", "switch", "throw", "trap", "try", "until", "using", "var", "while", "workflow"]
+constant = ["$true", "$false", "$null"]
+[[context.main]]
+begin = '<#'
+end = '#>'
+token = "comment"
+[[context.main]]
+match = '#.*$'
+token = "comment"
+[[context.main]]
+begin = '"'
+end = '"'
+skip = '`.|""'
+token = "string"
+[[context.main]]
+begin = ''''''''
+end = ''''''''
+skip = ''''''''
+token = "string"
+[[context.main]]
+match = '\$(?:true|false|null)\b'
+token = "constant"
+[[context.main]]
+match = '\$[\w:]+|\$\{[^}]*\}'
+token = "variable"
+[[context.main]]
+match = '\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b'
+token = "function"
+[[context.main]]
+match = '-[A-Za-z]+\b'
+token = "operator"
+[[context.main]]
+match = '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?)[a-zA-Z0-9]*\b'
+token = "number"

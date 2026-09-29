@@ -1,0 +1,40 @@
+name = "TOML"
+extensions = ["toml"]
+filenames = ["Cargo.lock", "Pipfile"]
+line_comment = "#"
+
+[keywords]
+constant = ["true", "false", "inf", "nan"]
+[[context.main]]
+match = '#.*$'
+token = "comment"
+[[context.main]]
+match = '^\s*\[\[?[^\]]*\]\]?'
+token = "section"
+[[context.main]]
+begin = '"""'
+end = '"""'
+skip = '\\.'
+token = "string"
+[[context.main]]
+begin = "'''"
+end = "'''"
+token = "string"
+[[context.main]]
+begin = '"'
+end = '"|$'
+skip = '\\.'
+token = "string"
+[[context.main]]
+begin = ''''''''
+end = ''''|$'''
+token = "string"
+[[context.main]]
+match = '^\s*([A-Za-z0-9_.-]+|"[^"]*")\s*='
+captures = { 1 = "property" }
+[[context.main]]
+match = '[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9:.]+(?:Z|[+-][0-9:]+)?)?'
+token = "constant"
+[[context.main]]
+match = '[+-]?\b[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9]+)?\b|0x[0-9a-fA-F_]+'
+token = "number"

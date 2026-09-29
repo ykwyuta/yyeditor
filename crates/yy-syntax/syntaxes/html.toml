@@ -1,0 +1,32 @@
+name = "HTML"
+extensions = ["html", "htm", "xhtml", "vue", "svelte"]
+first_line = '(?i)^\s*<!doctype html'
+block_comment = ["<!--", "-->"]
+
+[[context.main]]
+begin = '<!--'
+end = '-->'
+token = "comment"
+[[context.main]]
+match = '(?i)<!doctype[^>]*>'
+token = "preprocessor"
+[[context.main]]
+begin = '(</?)([A-Za-z][\w:.-]*)'
+end = '/?>'
+token = "punctuation"
+captures = { 2 = "tag" }
+contains = "attrs"
+[[context.main]]
+match = '&[A-Za-z0-9#]+;'
+token = "escape"
+[[context.attrs]]
+match = '[A-Za-z_:][\w:.-]*'
+token = "attribute"
+[[context.attrs]]
+begin = '"'
+end = '"'
+token = "string"
+[[context.attrs]]
+begin = ''''''''
+end = ''''''''
+token = "string"

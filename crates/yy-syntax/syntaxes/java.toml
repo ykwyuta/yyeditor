@@ -1,0 +1,38 @@
+name = "Java"
+extensions = ["java"]
+line_comment = "//"
+block_comment = ["/*", "*/"]
+
+[keywords]
+keyword = ["abstract", "assert", "break", "case", "catch", "class", "const", "continue", "default", "do", "else", "enum", "extends", "final", "finally", "for", "goto", "if", "implements", "import", "instanceof", "interface", "native", "new", "package", "private", "protected", "public", "return", "static", "strictfp", "super", "switch", "synchronized", "this", "throw", "throws", "transient", "try", "volatile", "while", "var", "record", "sealed", "permits", "yield"]
+type = ["boolean", "byte", "char", "double", "float", "int", "long", "short", "void", "String", "Object", "Integer", "Long", "List", "Map"]
+constant = ["null", "true", "false"]
+[[context.main]]
+match = '//.*$'
+token = "comment"
+[[context.main]]
+begin = '/\*'
+end = '\*/'
+token = "comment"
+[[context.main]]
+begin = '"""'
+end = '"""'
+skip = '\\.'
+token = "string"
+[[context.main]]
+begin = '"'
+end = '"|$'
+skip = '\\.'
+token = "string"
+[[context.main]]
+match = ''''(?:\\.|[^'\\])''''
+token = "string"
+[[context.main]]
+match = '@[A-Za-z_]\w*'
+token = "attribute"
+[[context.main]]
+match = '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?)[a-zA-Z0-9]*\b'
+token = "number"
+[[context.main]]
+match = '\b([\p{L}_][\p{L}\p{N}_]*)\s*\('
+captures = { 1 = "function" }

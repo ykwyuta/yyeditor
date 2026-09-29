@@ -12,6 +12,9 @@
 
 mod dbcs;
 mod detect;
+mod ebcdic;
+mod fold;
+mod mapfile;
 mod tables;
 mod unicode;
 mod web;
@@ -19,7 +22,13 @@ mod web;
 use std::fmt;
 use std::ops::Range;
 
-pub use detect::{Detected, detect};
+pub use detect::{Detected, detect, detect_ebcdic};
+pub use ebcdic::{Ccsid, Records};
+pub use fold::fold_compat;
+pub use mapfile::{
+    Mapping, load_dir as load_mappings, mappings, parse as parse_mapping,
+    register as register_mapping,
+};
 
 /// エスケープ文字の先頭（`U+10FE00`〜`U+10FEFF` が不正なバイト 0x00〜0xFF を表す）。
 pub const ESCAPE_BASE: u32 = 0x10FE00;
@@ -62,6 +71,10 @@ pub enum Encoding {
     EucJis2004,
     /// ISO-2022-JP（RFC 1468、JIS X 0201 カナを含む）
     Iso2022Jp,
+    /// EBCDIC（メインフレーム）。レコード（行）の区切り方を含む
+    Ebcdic(Ccsid, Records),
+    /// 外部の対応表（`.map` ファイル）。EBCDIC が土台ならレコードの区切り方を使う
+    Custom(&'static Mapping, Records),
     /// `encoding_rs` が対応するその他の文字コード（欧州・中国語・韓国語など）
     Web(&'static encoding_rs::Encoding),
 }
@@ -119,12 +132,17 @@ impl Encoding {
             Encoding::EucJp => "EUC-JP",
             Encoding::EucJis2004 => "EUC-JIS-2004",
             Encoding::Iso2022Jp => "ISO-2022-JP",
+            Encoding::Ebcdic(c, _) => c.name(),
+            Encoding::Custom(m, _) => m.name(),
             Encoding::Web(e) => e.name(),
         }
     }
 
     /// 一覧に表示する説明付きの名前。
     pub fn label(&self) -> String {
+        if let Encoding::Custom(m, _) = self {
+            return format!("{} ({})", m.name(), m.description());
+        }
         let desc = match self {
             Encoding::Utf8 => "Unicode",
             Encoding::Utf16Le | Encoding::Utf16Be | Encoding::Utf32Le | Encoding::Utf32Be => {
@@ -135,7 +153,8 @@ impl Encoding {
             Encoding::ShiftJis2004 | Encoding::EucJis2004 => "日本語 JIS X 0213",
             Encoding::EucJp => "日本語",
             Encoding::Iso2022Jp => "日本語 JIS",
-            Encoding::Web(_) => "",
+            Encoding::Ebcdic(c, _) => c.description(),
+            Encoding::Custom(..) | Encoding::Web(_) => "",
         };
         if desc.is_empty() {
             self.name().to_owned()
@@ -159,12 +178,42 @@ impl Encoding {
             Encoding::EucJis2004,
             Encoding::Iso2022Jp,
         ];
+        v.extend(Ccsid::ALL.iter().map(|&c| Encoding::Ebcdic(c, Records::Nl)));
+        v.extend(
+            mappings()
+                .into_iter()
+                .map(|m| Encoding::Custom(m, Records::Nl)),
+        );
         v.extend(WEB_ENCODINGS.iter().map(|e| Encoding::Web(e)));
         v
     }
 
     /// 名前・別名から探す（大文字小文字、`-` `_` の違いは無視）。
+    ///
+    /// EBCDIC は `IBM-930`・`CCSID 930`・`cp930` などに、レコードの区切り方を
+    /// `/nl`・`/lf`・`/fixed:80` で続けられる（省略すると NL）。[`Encoding::spec`] の逆。
+    /// 外部の対応表の名前（`JEF/fixed:80` など）も探す。
     pub fn from_name(name: &str) -> Option<Encoding> {
+        if let Some(e) = Self::from_builtin_name(name) {
+            return Some(e);
+        }
+        let (base, rec) = match name.split_once('/') {
+            Some((a, b)) => (a, Some(b)),
+            None => (name, None),
+        };
+        let m = mapfile::find(base.trim())?;
+        let records = match rec {
+            Some(r) => parse_records(r)?,
+            None => Records::Nl,
+        };
+        Some(Encoding::Custom(m, records))
+    }
+
+    /// 組み込みの文字コードを名前・別名から探す。
+    pub(crate) fn from_builtin_name(name: &str) -> Option<Encoding> {
+        if let Some(e) = ebcdic_from_name(name) {
+            return Some(e);
+        }
         let key: String = name
             .chars()
             .filter(|c| !matches!(c, '-' | '_' | ' '))
@@ -188,6 +237,43 @@ impl Encoding {
             }
         };
         Some(e)
+    }
+
+    /// 設定ファイルに書ける名前（[`Encoding::from_name`] で元に戻せる）。
+    pub fn spec(&self) -> String {
+        match self.records() {
+            Some(Records::Nl) => format!("{}/nl", self.name()),
+            Some(Records::Lf) => format!("{}/lf", self.name()),
+            Some(Records::Fixed(n)) => format!("{}/fixed:{n}", self.name()),
+            None => self.name().to_owned(),
+        }
+    }
+
+    /// EBCDIC（EBCDIC が土台の外部の対応表を含む）のレコードの区切り方。それ以外は `None`。
+    pub fn records(&self) -> Option<Records> {
+        match self {
+            Encoding::Ebcdic(_, r) => Some(*r),
+            Encoding::Custom(m, r) if m.is_ebcdic() => Some(*r),
+            _ => None,
+        }
+    }
+
+    /// レコードの区切り方を変えたもの（EBCDIC 以外はそのまま）。
+    pub fn with_records(self, records: Records) -> Encoding {
+        match self {
+            Encoding::Ebcdic(c, _) => Encoding::Ebcdic(c, records),
+            Encoding::Custom(m, _) if m.is_ebcdic() => Encoding::Custom(m, records),
+            e => e,
+        }
+    }
+
+    /// 文字の対応が同じか（EBCDIC のレコードの区切り方の違いは無視する）。
+    pub fn same_charset(&self, other: &Encoding) -> bool {
+        match (self, other) {
+            (Encoding::Ebcdic(a, _), Encoding::Ebcdic(b, _)) => a == b,
+            (Encoding::Custom(a, _), Encoding::Custom(b, _)) => a == b,
+            _ => self == other,
+        }
     }
 
     /// `encoding_rs` の文字コードから（独自実装のあるものはそちらにする）。
@@ -246,6 +332,7 @@ impl Encoding {
             | Encoding::ShiftJis2004
             | Encoding::EucJp
             | Encoding::EucJis2004 => true,
+            Encoding::Custom(m, _) => !m.is_ebcdic(),
             Encoding::Web(e) => e.is_single_byte(),
             _ => false,
         }
@@ -264,6 +351,11 @@ impl Encoding {
             | Encoding::EucJp
             | Encoding::EucJis2004 => DecImp::Dbcs(dbcs::table(*self)),
             Encoding::Iso2022Jp => DecImp::Web(web::WebDecoder::new(encoding_rs::ISO_2022_JP)),
+            Encoding::Ebcdic(c, r) => DecImp::Ebcdic(ebcdic::Decoder::new(c.table(), *r)),
+            Encoding::Custom(m, r) => match &m.kind {
+                mapfile::Kind::Ebcdic(t) => DecImp::Ebcdic(ebcdic::Decoder::new(t, *r)),
+                mapfile::Kind::Dbcs(t) => DecImp::Dbcs(t),
+            },
             Encoding::Web(e) => DecImp::Web(web::WebDecoder::new(e)),
         };
         Decoder {
@@ -288,6 +380,11 @@ impl Encoding {
             | Encoding::EucJp
             | Encoding::EucJis2004 => EncImp::Dbcs(dbcs::table(*self)),
             Encoding::Iso2022Jp => EncImp::Web(web::WebEncoder::new(encoding_rs::ISO_2022_JP)),
+            Encoding::Ebcdic(c, r) => EncImp::Ebcdic(ebcdic::Encoder::new(c.table(), *r)),
+            Encoding::Custom(m, r) => match &m.kind {
+                mapfile::Kind::Ebcdic(t) => EncImp::Ebcdic(ebcdic::Encoder::new(t, *r)),
+                mapfile::Kind::Dbcs(t) => EncImp::Dbcs(t),
+            },
             Encoding::Web(e) => EncImp::Web(web::WebEncoder::new(e)),
         };
         Encoder {
@@ -359,6 +456,7 @@ enum DecImp {
     Utf8,
     Unicode(unicode::Form),
     Dbcs(&'static dbcs::Table),
+    Ebcdic(ebcdic::Decoder),
     Web(web::WebDecoder),
 }
 
@@ -383,16 +481,17 @@ impl Decoder {
         match &mut self.imp {
             DecImp::Utf8 => sink.dst.extend_from_slice(src),
             DecImp::Web(w) => w.decode(src, &mut sink, last),
-            DecImp::Unicode(_) | DecImp::Dbcs(_) => {
+            DecImp::Unicode(_) | DecImp::Dbcs(_) | DecImp::Ebcdic(_) => {
                 let input: &[u8] = if self.buf.is_empty() {
                     src
                 } else {
                     self.buf.extend_from_slice(src);
                     &self.buf
                 };
-                let used = match &self.imp {
+                let used = match &mut self.imp {
                     DecImp::Unicode(f) => unicode::decode(*f, input, last, &mut sink),
                     DecImp::Dbcs(t) => t.decode(input, last, &mut sink),
+                    DecImp::Ebcdic(d) => d.decode(input, last, &mut sink),
                     _ => unreachable!(),
                 };
                 let rest = input[used..].to_vec();
@@ -410,6 +509,7 @@ enum EncImp {
     Utf8,
     Unicode(unicode::Form),
     Dbcs(&'static dbcs::Table),
+    Ebcdic(ebcdic::Encoder),
     Web(web::WebEncoder),
 }
 
@@ -501,6 +601,9 @@ impl Encoder {
                         self.flush_run(&input, run..i, dst, false, bad);
                         if self.escapes == EscapeMode::Restore {
                             dst.push(orig);
+                            if let EncImp::Ebcdic(e) = &mut self.imp {
+                                e.raw(orig);
+                            }
                         } else {
                             bad(self.pos + i as u64..self.pos + (i + n) as u64);
                         }
@@ -517,6 +620,7 @@ impl Encoder {
         } else {
             match &self.imp {
                 EncImp::Dbcs(t) => t.hold_from(&input[run..i]).map_or(i, |k| run + k),
+                EncImp::Ebcdic(e) => e.hold_from(&input[run..i]).map_or(i, |k| run + k),
                 _ => i,
             }
         };
@@ -547,6 +651,7 @@ impl Encoder {
             EncImp::Utf8 => dst.extend_from_slice(s.as_bytes()),
             EncImp::Unicode(f) => unicode::encode(*f, s, dst),
             EncImp::Dbcs(t) => t.encode(s, dst, &mut report),
+            EncImp::Ebcdic(e) => e.encode(s, dst, last, &mut report),
             EncImp::Web(w) => w.encode(s, dst, last, &mut report),
         }
     }
@@ -586,6 +691,45 @@ impl Encoder {
         dst.extend_from_slice(&input[copied..keep]);
         self.pos += keep as u64;
         self.buf = input[keep..].to_vec();
+    }
+}
+
+/// `IBM-930/fixed:80` などの EBCDIC の名前。
+fn ebcdic_from_name(name: &str) -> Option<Encoding> {
+    let (cs, rec) = match name.split_once('/') {
+        Some((a, b)) => (a, Some(b)),
+        None => (name, None),
+    };
+    let key: String = cs
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_' | ' '))
+        .flat_map(char::to_lowercase)
+        .collect();
+    let digits = ["ibm", "ccsid", "cp", "ebcdic"]
+        .iter()
+        .find_map(|p| key.strip_prefix(p))?;
+    let ccsid = Ccsid::from_number(digits.parse().ok()?)?;
+    let records = match rec {
+        None => Records::Nl,
+        Some(r) => parse_records(r)?,
+    };
+    Some(Encoding::Ebcdic(ccsid, records))
+}
+
+/// `nl`・`lf`・`fixed:80`
+fn parse_records(r: &str) -> Option<Records> {
+    let r = r.trim().to_ascii_lowercase();
+    match r.as_str() {
+        "nl" => Some(Records::Nl),
+        "lf" => Some(Records::Lf),
+        _ => {
+            let n: u32 = r
+                .strip_prefix("fixed")?
+                .trim_start_matches([':', '='])
+                .parse()
+                .ok()?;
+            (n > 0).then_some(Records::Fixed(n))
+        }
     }
 }
 
