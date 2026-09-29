@@ -1,5 +1,7 @@
 # yyeditor
 
+<img src="apps/yyeditor/res/yyeditor-256.png" alt="yyeditor のアイコン" width="96">
+
 Rust で実装する、Windows 向けの軽量テキストエディタです。数 GB のファイルを即座に開ける巨大ファイル対応、日本語の幅広い文字コード、区切り文字（CSV/TSV）編集などを目指しています。
 
 設計は [docs/proposal/](docs/proposal/README.md) の提案書を参照してください。
@@ -192,10 +194,11 @@ crates/
   yy-layout/   表示行の分割（長大行のセグメント化）、表示テキスト ⇔ オフセット変換、スクロール位置
   yy-syntax/   シンタックスハイライト（TOML の定義、複数パターンの正規表現、行の開始状態の記録、ファイル種類の判定）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ）
-apps/yyeditor/ 実行ファイル（マニフェスト埋め込み）
+apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
                     ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
+tools/gen-icon/     アイコン（apps/yyeditor/res/yyeditor.ico）の生成（Python + Pillow）
 ```
 
 `yy-win` 以外は OS に依存しないため、Linux でもテストできます。
