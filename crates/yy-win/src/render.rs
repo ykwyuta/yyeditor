@@ -206,7 +206,7 @@ struct CachedRow {
 pub(crate) struct Renderer {
     d2d: ID2D1Factory,
     dwrite: IDWriteFactory,
-    /// システムのフォントと同梱フォント。作れなければ `None`（システムのフォントだけ）
+    /// 同梱フォントだけのコレクション。作れなければ `None`
     fonts: Option<IDWriteFontCollection>,
     target: Option<Target>,
     text_format: IDWriteTextFormat,
@@ -999,11 +999,13 @@ fn utf8_index(text: &str, u16_idx: usize) -> usize {
 }
 
 /// 指定のフォントがインストールされていなければ、等幅の代替フォントを選ぶ。
+///
+/// 選んだフォント名と、それを含むコレクション（`None` はシステムのフォント）を返す。
 fn resolve_family(
     dwrite: &IDWriteFactory,
-    fonts: Option<&IDWriteFontCollection>,
+    bundled: Option<&IDWriteFontCollection>,
     requested: &str,
-) -> String {
+) -> (String, Option<IDWriteFontCollection>) {
     const FALLBACKS: [&str; 6] = [
         crate::font::BUNDLED_FAMILY,
         "Consolas",
@@ -1013,43 +1015,39 @@ fn resolve_family(
         "Segoe UI",
     ];
     unsafe {
-        let mut collection = fonts.cloned();
-        if collection.is_none()
-            && dwrite
-                .GetSystemFontCollection(&mut collection, false)
-                .is_err()
-        {
-            return requested.to_owned();
-        }
-        let Some(collection) = collection else {
-            return requested.to_owned();
-        };
-        let exists = |name: &str| {
+        let mut system = None;
+        let _ = dwrite.GetSystemFontCollection(&mut system, false);
+        let exists = |collection: Option<&IDWriteFontCollection>, name: &str| {
             let mut index = 0u32;
             let mut found = windows::core::BOOL(0);
-            collection
-                .FindFamilyName(&HSTRING::from(name), &mut index, &mut found)
-                .is_ok()
-                && found.as_bool()
+            collection.is_some_and(|c| {
+                c.FindFamilyName(&HSTRING::from(name), &mut index, &mut found)
+                    .is_ok()
+                    && found.as_bool()
+            })
         };
-        if let Some(name) = std::iter::once(requested)
-            .chain(FALLBACKS)
-            .find(|n| exists(n))
-        {
-            return name.to_owned();
+        // インストールされているフォントを同梱フォントより優先する
+        for name in std::iter::once(requested).chain(FALLBACKS) {
+            if exists(system.as_ref(), name) {
+                return (name.to_owned(), None);
+            }
+            if exists(bundled, name) {
+                return (name.to_owned(), bundled.cloned());
+            }
         }
         // どれもなければ最初にインストールされているフォント
-        if collection.GetFontFamilyCount() > 0
+        if let Some(collection) = &system
+            && collection.GetFontFamilyCount() > 0
             && let Ok(fam) = collection.GetFontFamily(0)
             && let Ok(names) = fam.GetFamilyNames()
         {
             let mut buf = [0u16; 128];
             if names.GetString(0, &mut buf).is_ok() {
                 let n = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
-                return String::from_utf16_lossy(&buf[..n]);
+                return (String::from_utf16_lossy(&buf[..n]), None);
             }
         }
-        requested.to_owned()
+        (requested.to_owned(), None)
     }
 }
 
@@ -1062,11 +1060,12 @@ unsafe fn create_formats(
     tab_width: u32,
 ) -> Result<(IDWriteTextFormat, IDWriteTextFormat, FontMetrics)> {
     let size_dip = size_pt * 96.0 / 72.0;
-    let family = HSTRING::from(resolve_family(dwrite, fonts, family));
+    let (family, collection) = resolve_family(dwrite, fonts, family);
+    let family = HSTRING::from(family);
     let make = || unsafe {
         dwrite.CreateTextFormat(
             &family,
-            fonts,
+            collection.as_ref(),
             DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
