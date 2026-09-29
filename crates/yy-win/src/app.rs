@@ -74,6 +74,9 @@ const ID_LINE_NUMBERS: u16 = 205;
 const ID_CONTROL_CHARS: u16 = 206;
 const ID_WHITESPACE: u16 = 208;
 const ID_ABOUT: u16 = 301;
+const ID_HELP: u16 = 302;
+const ID_HELP_KEYS: u16 = 303;
+const ID_OPEN_SETTINGS: u16 = 304;
 const ID_UNDO: u16 = 401;
 const ID_REDO: u16 = 402;
 const ID_CUT: u16 = 403;
@@ -401,6 +404,7 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
         (FVIRTKEY | FSHIFT, VK_F3.0, ID_FIND_PREV),
         (ctrl_shift, b'F' as u16, ID_GREP),
         (FVIRTKEY, VK_F12.0, ID_TAG_JUMP),
+        (FVIRTKEY, VK_F1.0, ID_HELP),
         (ctrl, VK_ADD.0, ID_ZOOM_IN),
         (ctrl, VK_OEM_PLUS.0, ID_ZOOM_IN),
         (ctrl, VK_SUBTRACT.0, ID_ZOOM_OUT),
@@ -530,6 +534,10 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         )?;
 
         let help = CreatePopupMenu()?;
+        item(help, ID_HELP, w!("ヘルプ(&H)\tF1"))?;
+        item(help, ID_HELP_KEYS, w!("キーボードショートカット(&K)"))?;
+        item(help, ID_OPEN_SETTINGS, w!("設定ファイルを開く(&S)"))?;
+        sep(help)?;
         item(help, ID_ABOUT, w!("バージョン情報(&A)"))?;
         AppendMenuW(bar, MF_POPUP, file.0 as usize, w!("ファイル(&F)"))?;
         AppendMenuW(bar, MF_POPUP, edit.0 as usize, w!("編集(&E)"))?;
@@ -3385,6 +3393,40 @@ fn confirm_discard(hwnd: HWND) -> bool {
     }
 }
 
+/// 設定ファイル（%APPDATA%\yyeditor\config.toml）を開く。なければ既定値を書き出して作る。
+fn open_settings(hwnd: HWND) {
+    let Some(path) = Config::default_path() else {
+        error_box(hwnd, "設定ファイルの場所（%APPDATA%）が分かりません。");
+        return;
+    };
+    if !path.exists() {
+        let created = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, Config::default_file_contents()));
+        if let Err(e) = created {
+            error_box(
+                hwnd,
+                &format!(
+                    "設定ファイルを作れませんでした。\n{}\n\n{e}",
+                    path.display()
+                ),
+            );
+            return;
+        }
+    }
+    open_path(hwnd, path, None, false);
+    with_app(|a| {
+        a.status_msg = "設定の変更は次に起動したときから反映されます".into();
+        a.update_status();
+    });
+}
+
+/// `wparam`（WM_COMMAND）が「閉じる」か（ヘルプのウィンドウで Ctrl+W を受けるため）。
+pub(crate) fn is_close_command(wparam: WPARAM) -> bool {
+    loword(wparam.0) as u16 == ID_CLOSE
+}
+
 fn open_path(hwnd: HWND, path: PathBuf, encoding: Option<Encoding>, shared_read_only: bool) {
     if let Some(Err(msg)) = with_app(|a| a.open(path, encoding, shared_read_only)) {
         error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
@@ -4297,6 +4339,13 @@ fn on_command(hwnd: HWND, id: u16) {
                 a.invalidate();
             });
         }
+        ID_HELP | ID_HELP_KEYS => {
+            let section = (id == ID_HELP_KEYS).then_some("shortcuts");
+            if let Err(e) = crate::help::show(section) {
+                error_box(hwnd, &format!("ヘルプを表示できません。\n{}", e.message()));
+            }
+        }
+        ID_OPEN_SETTINGS => open_settings(hwnd),
         ID_ABOUT => info_box(
             hwnd,
             &format!(

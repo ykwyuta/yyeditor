@@ -163,6 +163,7 @@ pub fn markdown_to_html(src: &str, syntaxes: Option<&yy_syntax::Registry>) -> St
             e => out_events.push(e),
         }
     }
+    join_cjk_lines(&mut out_events);
     if !footnotes.is_empty() {
         out_events.push(Event::Html("<section class=\"footnotes\">\n".into()));
         out_events.extend(footnotes);
@@ -171,6 +172,39 @@ pub fn markdown_to_html(src: &str, syntaxes: Option<&yy_syntax::Registry>) -> St
     let mut html = String::with_capacity(src.len() * 3 / 2);
     pulldown_cmark::html::push_html(&mut html, out_events.into_iter());
     html
+}
+
+/// 日本語などの文の途中の改行（ソフト改行）を消す。そのままではブラウザが空白として表示し、
+/// 「です。 次の文」のように余計な空きができる。
+fn join_cjk_lines(events: &mut Vec<Event>) {
+    let is_cjk = |c: char| {
+        matches!(c,
+            '\u{2E80}'..='\u{9FFF}'      // 部首・記号・かな・漢字
+            | '\u{F900}'..='\u{FAFF}'    // 互換漢字
+            | '\u{FF00}'..='\u{FFEF}'    // 全角英数・半角カナ
+            | '\u{20000}'..='\u{3FFFF}') // 拡張漢字
+    };
+    let text_edge = |e: &Event, last: bool| match e {
+        Event::Text(t) | Event::Code(t) => {
+            if last {
+                t.chars().next_back()
+            } else {
+                t.chars().next()
+            }
+        }
+        _ => None,
+    };
+    let mut i = 1;
+    while i + 1 < events.len() {
+        if matches!(events[i], Event::SoftBreak)
+            && text_edge(&events[i - 1], true).is_some_and(is_cjk)
+            && text_edge(&events[i + 1], false).is_some_and(is_cjk)
+        {
+            events.remove(i);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 fn level_tag(level: HeadingLevel) -> &'static str {

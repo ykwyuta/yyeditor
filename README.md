@@ -48,6 +48,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 | 大きな UTF-8 以外のファイルのバックグラウンド変換（変換中は先頭部分を読み取り専用で表示） | ✅ |
 | 検索バー（Ctrl+F）・置換バー（Ctrl+H）、次を検索（F3 / Enter）・前を検索（Shift+F3 / Shift+Enter）、入力中のインクリメンタル検索 | ✅ |
 | 検索欄の下のボタン: 置換の表示・非表示、一致箇所をすべて選択、フォルダ内を検索 (Grep)（メニューと同じ機能） | ✅ |
+| ヘルプ（F1。機能・キーボードショートカット・設定の説明）、「設定ファイルを開く」（なければ既定値で作る） | ✅ |
 | 検索オプション（大文字小文字・単語単位・正規表現）、表示範囲の一致箇所のハイライト、件数表示 | ✅ |
 | 正規表現（`regex-automata`、線形時間保証。行頭・行末は CRLF 対応）、置換文字列の `$1` `${name}` `\n` `\U` `\L` など | ✅ |
 | すべて置換（1 回の Undo で戻せる。大きな文書はバックグラウンドで一時ファイルに書き直し、Esc で中止） | ✅ |
@@ -211,7 +212,7 @@ crates/
   yy-layout/   表示行の分割（長大行のセグメント化）、表示テキスト ⇔ オフセット変換、スクロール位置
   yy-syntax/   シンタックスハイライト（TOML の定義、複数パターンの正規表現、行の開始状態の記録、ファイル種類の判定）
   yy-preview/  Markdown・HTML のプレビュー（Markdown → HTML、ページ、同梱の Mermaid・KaTeX）
-  yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ）
+  yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）

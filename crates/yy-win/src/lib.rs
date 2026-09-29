@@ -21,6 +21,7 @@ mod findbar;
 mod font;
 mod goto;
 mod grepdlg;
+mod help;
 mod highlight;
 mod ime;
 mod preview;
@@ -42,6 +43,7 @@ pub(crate) const FRAME_CLASS: PCWSTR = w!("YYEditorFrame");
 pub(crate) const VIEW_CLASS: PCWSTR = w!("YYEditorView");
 pub(crate) const FINDBAR_CLASS: PCWSTR = w!("YYEditorFindBar");
 pub(crate) const PREVIEW_CLASS: PCWSTR = w!("YYEditorPreview");
+pub(crate) const HELP_CLASS: PCWSTR = w!("YYEditorHelp");
 pub(crate) const DIFF_CLASS: PCWSTR = w!("YYEditorDiff");
 
 /// 実行ファイルに埋め込んだアイコンのリソース ID（apps/yyeditor/build.rs）
@@ -160,6 +162,23 @@ fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>
             return Err(windows::core::Error::from_thread());
         }
 
+        let help_class = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(help::help_proc),
+            hInstance: hinstance,
+            hCursor: cursor,
+            hIcon: icon,
+            hIconSm: icon_small,
+            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
+                (windows::Win32::Graphics::Gdi::COLOR_WINDOW.0 + 1) as usize as *mut _,
+            ),
+            lpszClassName: HELP_CLASS,
+            ..Default::default()
+        };
+        if RegisterClassExW(&help_class) == 0 {
+            return Err(windows::core::Error::from_thread());
+        }
+
         let diff_class = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
@@ -182,7 +201,9 @@ fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             // 検索バーの入力欄では、編集用のショートカット（Ctrl+C など）を入力欄に任せる
             let bar = app::findbar_with_focus();
-            let use_accel = bar.is_none() || app::is_global_shortcut(&msg);
+            // ヘルプのウィンドウでは、エディタのショートカット（Ctrl+C など）を使わない
+            let in_help = help::contains(msg.hwnd);
+            let use_accel = !in_help && (bar.is_none() || app::is_global_shortcut(&msg));
             if use_accel && TranslateAcceleratorW(frame, accel, &msg) != 0 {
                 continue;
             }
