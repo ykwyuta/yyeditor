@@ -87,9 +87,9 @@ yyeditor/
                        │
                     yy-win ─────────────┐
                        │                │
-      ┌────────┬───────┼────────┬───────┴─┬──────────┐
-  yy-layout yy-search yy-delimited yy-backup yy-config yy-syntax
-      └────────┴───────┼────────┴─────────┴──────────┘
+      ┌────────┬───────┼────────┬───────┴──┐
+  yy-layout yy-search yy-delimited yy-config yy-syntax
+      └────────┴───────┼────────┴──────────┘
                     yy-core
                   ┌────┴─────┐
                yy-io      yy-jobs
