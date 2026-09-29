@@ -487,6 +487,10 @@ impl App {
         initial_line: Option<u64>,
     ) -> Result<HWND> {
         let (config, config_error) = Config::load();
+        // 外部の対応表（%APPDATA%\yyeditor\mappings\*.map）
+        let mapping_errors = yy_config::config_dir()
+            .map(|d| yy_encoding::load_mappings(&d.join("mappings")))
+            .unwrap_or_default();
         unsafe {
             let (menu, menu_edit, menu_view, menu_csv) = create_menu().context("create_menu")?;
             let frame = CreateWindowExW(
@@ -631,6 +635,15 @@ impl App {
 
             if let Some(e) = config_error {
                 error_box(frame, &e.to_string());
+            }
+            if !mapping_errors.is_empty() {
+                error_box(
+                    frame,
+                    &format!(
+                        "対応表を読み込めませんでした。\n\n{}",
+                        mapping_errors.join("\n")
+                    ),
+                );
             }
             if let Some(path) = initial_file {
                 open_path(frame, path, None, false);
@@ -2822,6 +2835,53 @@ impl App {
         }
     }
 
+    /// 保存できない文字のうち、似た文字に置き換えられる範囲。隣り合う範囲はまとめて
+    /// 置き換えられればまとめる（半角カナと濁点など）。まとめて置き換えられなければ 1 文字ずつ。
+    fn foldable(
+        &self,
+        ranges: &[std::ops::Range<u64>],
+        enc: Encoding,
+    ) -> Vec<std::ops::Range<u64>> {
+        let snap = self.doc.snapshot();
+        let can_fold = |r: &std::ops::Range<u64>| {
+            let bytes = snap.read(r.clone());
+            std::str::from_utf8(&bytes).is_ok_and(|s| {
+                !s.chars().any(|c| yy_encoding::unescape_char(c).is_some())
+                    && yy_encoding::fold_compat(enc, s).is_some()
+            })
+        };
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < ranges.len() {
+            let mut j = i + 1;
+            while j < ranges.len() && ranges[j].start == ranges[j - 1].end {
+                j += 1;
+            }
+            let group = ranges[i].start..ranges[j - 1].end;
+            if j - i > 1 && can_fold(&group) {
+                out.push(group);
+            } else {
+                out.extend(ranges[i..j].iter().filter(|r| can_fold(r)).cloned());
+            }
+            i = j;
+        }
+        out
+    }
+
+    /// [`App::foldable`] の範囲を似た文字に置き換える（1 回の Undo で戻せる）。
+    fn replace_folded(&mut self, ranges: &[std::ops::Range<u64>], enc: Encoding) {
+        self.rect = None;
+        let ok = self.doc.replace_ranges(ranges, |b| {
+            let s = String::from_utf8_lossy(b);
+            yy_encoding::fold_compat(enc, &s)
+                .map(String::into_bytes)
+                .unwrap_or_else(|| b.to_vec())
+        });
+        if ok {
+            self.after_edit();
+        }
+    }
+
     /// 保存できない最初の文字へ移動して選択する。
     fn select_range(&mut self, r: std::ops::Range<u64>) {
         self.rect = None;
@@ -3101,7 +3161,9 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
             return false;
         }
     }
-    for attempt in 0..2 {
+    // 似た文字への置き換えを尋ねたか・「?」などに置き換えたか
+    let (mut fold_offered, mut replaced) = (false, false);
+    loop {
         match with_app(|a| a.save_to(&target)) {
             Some(Ok(())) => return true,
             Some(Err(SaveFailure::Other(msg))) => {
@@ -3116,7 +3178,35 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
                     group_digits(total),
                     target.encoding.name()
                 );
-                if attempt > 0 || ranges.len() as u64 != total {
+                // 互換文字・半角カナなどを似た文字に置き換えられるか（03 章 4.1）
+                if !fold_offered {
+                    fold_offered = true;
+                    let foldable =
+                        with_app(|a| a.foldable(&ranges, target.encoding)).unwrap_or_default();
+                    if !foldable.is_empty() {
+                        let text = format!(
+                            "{msg}このうち {} か所は似た文字に置き換えられます\n\
+                             （① → (1)、Ⅱ → II、ｶﾞ → ガ、全角英数 → 半角 など）。\n\n\
+                             はい: 似た文字に置き換えて保存（置き換えられない文字は続けて尋ねます）\n\
+                             いいえ: 置き換えない\n\
+                             キャンセル: 保存せずに最初の文字へ移動\n\n\
+                             置き換えは「元に戻す」で取り消せます。",
+                            group_digits(foldable.len() as u64)
+                        );
+                        match message_box(hwnd, &text, MB_YESNOCANCEL | MB_ICONWARNING) {
+                            IDYES => {
+                                with_app(|a| a.replace_folded(&foldable, target.encoding));
+                                continue;
+                            }
+                            IDNO => {}
+                            _ => {
+                                with_app(|a| a.select_range(first));
+                                return false;
+                            }
+                        }
+                    }
+                }
+                if replaced || ranges.len() as u64 != total {
                     msg += "保存せずに最初の文字へ移動します。";
                     message_box(hwnd, &msg, MB_OK | MB_ICONWARNING);
                     with_app(|a| a.select_range(first));
@@ -3134,11 +3224,11 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
                         return false;
                     }
                 };
+                replaced = true;
             }
             None => return false,
         }
     }
-    false
 }
 
 // 保存・開くダイアログに追加するコントロールの ID

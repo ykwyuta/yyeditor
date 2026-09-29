@@ -41,6 +41,7 @@ enum Family {
     Euc,
 }
 
+#[derive(Clone)]
 pub(crate) struct Table {
     family: Family,
     single: [u32; 256],
@@ -56,6 +57,18 @@ pub(crate) struct Table {
     enc_pairs: HashMap<(u32, u32), u32>,
     /// 組の 1 文字目になる文字（次の文字を見ないと符号が決まらない）
     bases: HashSet<u32>,
+}
+
+/// 表駆動の日本語マルチバイト文字コード（外部の対応表の土台にできる）か。
+pub(crate) fn is_dbcs(enc: Encoding) -> bool {
+    matches!(
+        enc,
+        Encoding::ShiftJis
+            | Encoding::Cp932
+            | Encoding::ShiftJis2004
+            | Encoding::EucJp
+            | Encoding::EucJis2004
+    )
 }
 
 pub(crate) fn table(enc: Encoding) -> &'static Table {
@@ -214,6 +227,49 @@ impl Builder {
 }
 
 impl Table {
+    /// 外部の対応表の対応（1〜2 バイト、EUC は 0x8F で始まる 3 バイトも）を加えたもの。
+    /// 同じ符号の元の対応は置き換え、元の文字はその符号に変換しなくなる。
+    pub(crate) fn overlay(&self, entries: &[(Vec<u8>, u32)]) -> Result<Table, String> {
+        let mut t = self.clone();
+        for (bytes, cp) in entries {
+            let code = pack(bytes);
+            let old = match bytes.as_slice() {
+                [b] if *b >= 0x80 => {
+                    let old = t.single[*b as usize];
+                    t.single[*b as usize] = *cp;
+                    (old < LEAD3).then_some(old)
+                }
+                [l, _] => {
+                    let lead = &mut t.single[*l as usize];
+                    if *lead != LEAD2 {
+                        if *l < 0x80 || *lead == LEAD3 {
+                            return Err(format!("{bytes:02X?} は 2 バイトの符号にできません"));
+                        }
+                        *lead = LEAD2;
+                    }
+                    let i = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+                    Some(std::mem::replace(&mut t.dec2[i], *cp))
+                        .filter(|v| *v != 0 && v & PAIR == 0)
+                        .map(|v| v & CP_MASK)
+                }
+                [0x8F, a, b] if t.family == Family::Euc => {
+                    let i = u16::from_be_bytes([*a, *b]) as usize;
+                    Some(std::mem::replace(&mut t.dec3[i], *cp))
+                        .filter(|v| *v != 0 && v & PAIR == 0)
+                        .map(|v| v & CP_MASK)
+                }
+                _ => return Err(format!("{bytes:02X?} はこの文字コードの符号にできません")),
+            };
+            if let Some(old) = old
+                && t.enc(old) == code
+            {
+                t.set_enc(old, 0);
+            }
+            t.set_enc(*cp, code);
+        }
+        Ok(t)
+    }
+
     fn enc(&self, cp: u32) -> u32 {
         if cp < 0x10000 {
             self.enc_bmp[cp as usize]

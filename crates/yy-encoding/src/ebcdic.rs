@@ -114,27 +114,7 @@ impl Ccsid {
     pub(crate) fn table(self) -> &'static Table {
         static TABLES: [OnceLock<Table>; 9] = [const { OnceLock::new() }; 9];
         let i = Ccsid::ALL.iter().position(|c| *c == self).unwrap();
-        TABLES[i].get_or_init(|| {
-            let (sb, db): (&[SbEntry], Option<&[DbEntry]>) = match self {
-                Ccsid::Ibm037 => (&t::IBM037, None),
-                Ccsid::Ibm500 => (&t::IBM500, None),
-                Ccsid::Ibm1047 => (&t::IBM1047, None),
-                Ccsid::Ibm290 => (&t::IBM290, None),
-                Ccsid::Ibm1027 => (&t::IBM1027, None),
-                Ccsid::Ibm930 => (&t::IBM930, Some(&t::DBCS300)),
-                Ccsid::Ibm939 => (&t::IBM939, Some(&t::DBCS300)),
-                Ccsid::Ibm1390 => (&t::IBM1390, Some(&t::DBCS16684)),
-                Ccsid::Ibm1399 => (&t::IBM1399, Some(&t::DBCS16684)),
-            };
-            let mut b = TableBuilder::new(db.is_some());
-            for &(code, a, b2, prec) in sb {
-                b.add(&[code], a, b2, prec);
-            }
-            for &(code, a, b2, prec) in db.into_iter().flatten() {
-                b.add(&code.to_be_bytes(), a, b2, prec);
-            }
-            b.finish()
-        })
+        TABLES[i].get_or_init(|| TableBuilder::from_ccsid(self).finish())
     }
 }
 
@@ -193,9 +173,13 @@ pub(crate) struct Table {
 }
 
 pub(crate) struct TableBuilder {
-    t: Table,
-    /// 往復しない（Unicode → 符号のみの）対応
-    fallback: Vec<(Key, u32)>,
+    mixed: bool,
+    so: u8,
+    si: u8,
+    /// 符号 → (文字, 往復しないか)。後から加えた対応で置き換わる
+    dec: HashMap<u32, (Key, bool)>,
+    /// 往復する対応（加えた順）。符号が別の文字に置き換えられたものは使わない
+    roundtrip: Vec<(Key, u32)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -217,23 +201,49 @@ impl Table {
 impl TableBuilder {
     pub(crate) fn new(mixed: bool) -> TableBuilder {
         TableBuilder {
-            t: Table {
-                sb_dec: [NONE; 256],
-                db_dec: if mixed { vec![0; 1 << 16] } else { Vec::new() },
-                pairs: Vec::new(),
-                enc: HashMap::new(),
-                enc_pairs: HashMap::new(),
-                bases: HashSet::new(),
-                mixed,
-                so: SO,
-                si: SI,
-            },
-            fallback: Vec::new(),
+            mixed,
+            so: SO,
+            si: SI,
+            dec: HashMap::new(),
+            roundtrip: Vec::new(),
         }
     }
 
+    /// 生成した対応表から作る。
+    pub(crate) fn from_ccsid(c: Ccsid) -> TableBuilder {
+        let (sb, db): (&[SbEntry], Option<&[DbEntry]>) = match c {
+            Ccsid::Ibm037 => (&t::IBM037, None),
+            Ccsid::Ibm500 => (&t::IBM500, None),
+            Ccsid::Ibm1047 => (&t::IBM1047, None),
+            Ccsid::Ibm290 => (&t::IBM290, None),
+            Ccsid::Ibm1027 => (&t::IBM1027, None),
+            Ccsid::Ibm930 => (&t::IBM930, Some(&t::DBCS300)),
+            Ccsid::Ibm939 => (&t::IBM939, Some(&t::DBCS300)),
+            Ccsid::Ibm1390 => (&t::IBM1390, Some(&t::DBCS16684)),
+            Ccsid::Ibm1399 => (&t::IBM1399, Some(&t::DBCS16684)),
+        };
+        let mut b = TableBuilder::new(db.is_some());
+        for &(code, a, b2, prec) in sb {
+            b.add(&[code], a, b2, prec);
+        }
+        for &(code, a, b2, prec) in db.into_iter().flatten() {
+            b.add(&code.to_be_bytes(), a, b2, prec);
+        }
+        b
+    }
+
+    /// 2 バイト部を持たせる（外部の対応表で 2 バイトの符号を加える場合）。
+    pub(crate) fn set_mixed(&mut self) {
+        self.mixed = true;
+    }
+
     /// 対応を加える。`prec` は ICU の精度（0 = 往復、1 = Unicode → 符号のみ、
-    /// 3 = 符号 → Unicode のみ）。同じ符号・文字の対応があれば置き換える。
+    /// 3 = 符号 → Unicode のみ）。同じ符号の対応があれば置き換える。
+    ///
+    /// Unicode → 符号のみの対応（全角英数 → 半角など）は使わない。保存すると文書と
+    /// ファイルの内容が黙って食い違うため、変換できない文字として報告し、似た文字への
+    /// 置き換え（[`crate::fold_compat`]）を利用者に選んでもらう。
+    /// `b` は結合する 2 文字目（なければ 0）。
     pub(crate) fn add(&mut self, bytes: &[u8], a: u32, b: u32, prec: u8) {
         let key = if b == 0 { Key::One(a) } else { Key::Two(a, b) };
         let code = match *bytes {
@@ -241,62 +251,75 @@ impl TableBuilder {
             [x, y] => 0x10000 | u16::from_be_bytes([x, y]) as u32,
             _ => return,
         };
-        if prec != 1 {
-            let mut v = match key {
-                Key::One(cp) => cp,
-                Key::Two(a, b) => {
-                    self.t.pairs.push((a, b));
-                    PAIR | (self.t.pairs.len() as u32 - 1)
-                }
-            };
-            if prec == 3 {
-                v |= NONCANON;
-            }
-            match *bytes {
-                [x] => self.t.sb_dec[x as usize] = v,
-                [x, y] if self.t.mixed => {
-                    self.t.db_dec[u16::from_be_bytes([x, y]) as usize] = v;
-                }
-                _ => return,
-            }
-        }
         match prec {
-            0 => self.set_enc(key, code),
-            1 => self.fallback.push((key, code)),
+            0 => {
+                self.dec.insert(code, (key, false));
+                self.roundtrip.push((key, code));
+            }
+            3 => {
+                self.dec.insert(code, (key, true));
+            }
             _ => {}
         }
     }
 
-    fn set_enc(&mut self, key: Key, code: u32) {
-        match key {
+    /// シフトのバイトを変える（外部の対応表用）。
+    pub(crate) fn shifts(&mut self, so: u8, si: u8) {
+        self.so = so;
+        self.si = si;
+    }
+
+    pub(crate) fn finish(self) -> Table {
+        let mut t = Table {
+            sb_dec: [NONE; 256],
+            db_dec: if self.mixed {
+                vec![0; 1 << 16]
+            } else {
+                Vec::new()
+            },
+            pairs: Vec::new(),
+            enc: HashMap::new(),
+            enc_pairs: HashMap::new(),
+            bases: HashSet::new(),
+            mixed: self.mixed,
+            so: self.so,
+            si: self.si,
+        };
+        let mut codes: Vec<_> = self.dec.iter().collect();
+        codes.sort_by_key(|(code, _)| **code);
+        for (&code, &(key, noncanon)) in codes {
+            let mut v = match key {
+                Key::One(cp) => cp,
+                Key::Two(a, b) => {
+                    t.pairs.push((a, b));
+                    PAIR | (t.pairs.len() as u32 - 1)
+                }
+            };
+            if noncanon {
+                v |= NONCANON;
+            }
+            if code < 0x10000 {
+                t.sb_dec[(code & 0xFF) as usize] = v;
+            } else if self.mixed {
+                t.db_dec[(code & 0xFFFF) as usize] = v;
+            }
+        }
+        let set = |t: &mut Table, key: Key, code: u32| match key {
             Key::One(cp) => {
-                self.t.enc.insert(cp, code);
+                t.enc.insert(cp, code);
             }
             Key::Two(a, b) => {
-                self.t.enc_pairs.insert((a, b), code);
-                self.t.bases.insert(a);
+                t.enc_pairs.insert((a, b), code);
+                t.bases.insert(a);
+            }
+        };
+        for &(key, code) in &self.roundtrip {
+            // 後から別の文字に置き換えられた符号は使わない
+            if self.dec.get(&code) == Some(&(key, false)) {
+                set(&mut t, key, code);
             }
         }
-    }
-
-    /// シフトのバイトを変える（外部の対応表用）。
-    #[allow(dead_code)]
-    pub(crate) fn shifts(&mut self, so: u8, si: u8) {
-        self.t.so = so;
-        self.t.si = si;
-    }
-
-    pub(crate) fn finish(mut self) -> Table {
-        for (key, code) in std::mem::take(&mut self.fallback) {
-            let exists = match key {
-                Key::One(cp) => self.t.enc.contains_key(&cp),
-                Key::Two(a, b) => self.t.enc_pairs.contains_key(&(a, b)),
-            };
-            if !exists {
-                self.set_enc(key, code);
-            }
-        }
-        self.t
+        t
     }
 }
 

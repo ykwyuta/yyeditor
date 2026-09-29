@@ -46,6 +46,8 @@ fn single_byte_samples() {
     );
     assert_eq!(decode_str(enc(Ccsid::Ibm939, Records::Nl), b"\x81"), "a");
     assert_eq!(decode_str(enc(Ccsid::Ibm930, Records::Nl), b"\x62"), "a");
+    // ICU の Unicode → 符号のみの対応（全角英数 → 半角など）は使わず、変換できない文字にする
+    assert!(encode_all(e, "Ｗ".as_bytes(), EscapeMode::Restore).is_err());
 }
 
 #[test]

@@ -45,6 +45,7 @@ memmap2 = "0.9"
 crossbeam-channel = "0.5"
 unicode-segmentation = "1.12"
 unicode-width = "0.2"
+unicode-normalization = "0.1"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 thiserror = "2"
