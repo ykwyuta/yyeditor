@@ -9,15 +9,18 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM}
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::UI::Controls::{
-    SB_SETPARTS, SB_SETTEXTW, SBARS_SIZEGRIP, STATUSCLASSNAMEW, SetScrollInfo,
+    NMHDR, SB_SETPARTS, SB_SETTEXTW, SBARS_SIZEGRIP, STATUSCLASSNAMEW, SetScrollInfo, TCIF_TEXT,
+    TCITEMW, TCM_DELETEALLITEMS, TCM_GETCURSEL, TCM_INSERTITEMW, TCM_SETCURSEL, TCN_SELCHANGE,
+    WC_TABCONTROLW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::Ime::ISC_SHOWUICOMPOSITIONWINDOW;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
-    DragAcceptFiles, DragFinish, DragQueryFileW, FileOpenDialog, FileSaveDialog, HDROP,
-    IFileDialog, IFileDialogCustomize, IFileOpenDialog, IFileSaveDialog, SIGDN_FILESYSPATH,
+    DragAcceptFiles, DragFinish, DragQueryFileW, FOS_ALLOWMULTISELECT, FileOpenDialog,
+    FileSaveDialog, HDROP, IFileDialog, IFileDialogCustomize, IFileOpenDialog, IFileSaveDialog,
+    SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, Interface, Result, w};
@@ -51,11 +54,16 @@ const ID_EXIT: u16 = 103;
 const ID_NEW: u16 = 104;
 const ID_SAVE: u16 = 105;
 const ID_SAVE_AS: u16 = 106;
+const ID_OPEN_SHARED: u16 = 107;
+const ID_TAB_NEXT: u16 = 108;
+const ID_TAB_PREV: u16 = 109;
+const ID_DIFF: u16 = 110;
 const ID_GOTO: u16 = 201;
 const ID_ZOOM_IN: u16 = 202;
 const ID_ZOOM_OUT: u16 = 203;
 const ID_ZOOM_RESET: u16 = 204;
 const ID_LINE_NUMBERS: u16 = 205;
+const ID_CONTROL_CHARS: u16 = 206;
 const ID_ABOUT: u16 = 301;
 const ID_UNDO: u16 = 401;
 const ID_REDO: u16 = 402;
@@ -84,10 +92,12 @@ const ID_FIND_OK: u16 = 509;
 const ID_FIND_INCREMENTAL: u16 = 510;
 const ID_GREP: u16 = 511;
 const ID_TAG_JUMP: u16 = 512;
+const ID_SELECT_SEARCH_MATCHES: u16 = 513;
 /// 「文字コードを指定して開き直す」の各項目（`Encoding::all()` の順）
 const ID_REOPEN_BASE: u16 = 600;
 
 const ID_STATUS: i32 = 1000;
+const ID_TABS: i32 = 1001;
 const TIMER_BLINK: usize = 1;
 
 /// ワーカースレッドから行数カウントの進捗を知らせるメッセージ
@@ -156,6 +166,9 @@ pub(crate) struct App {
     frame: HWND,
     view: HWND,
     status: HWND,
+    tabbar: HWND,
+    tabs: Vec<Option<TabState>>,
+    active_tab: usize,
     menu_edit: HMENU,
     menu_view: HMENU,
     menu_csv: HMENU,
@@ -192,6 +205,7 @@ pub(crate) struct App {
     searcher: Option<Arc<Searcher>>,
     /// バックグラウンドの「次を検索」と件数カウント
     find_job: Option<FindJob>,
+    select_job: Option<SelectJob>,
     count_job: Option<CountJob>,
     /// 件数と、数えたときの文書の版
     match_count: Option<(u64, u64)>,
@@ -210,11 +224,40 @@ pub(crate) struct App {
     grep_last: crate::grepdlg::GrepRequest,
 }
 
+/// 非表示タブの文書と表示位置。検索条件と表示設定はウィンドウ全体で共有する。
+struct TabState {
+    doc: Document,
+    vp: Viewport,
+    scroll_x: f32,
+    scroll_mode: ScrollMode,
+    rect: Option<RectSelection>,
+    csv: Option<CsvState>,
+    pending_record_op: Option<yy_core::csv::RecordOp>,
+    warned_noncanonical: bool,
+    status_msg: String,
+}
+
+impl TabState {
+    fn new(doc: Document) -> Self {
+        Self {
+            doc,
+            vp: Viewport::default(),
+            scroll_x: 0.0,
+            scroll_mode: ScrollMode::Lines,
+            rect: None,
+            csv: None,
+            pending_record_op: None,
+            warned_noncanonical: false,
+            status_msg: String::new(),
+        }
+    }
+}
+
 /// 表示行のキャッシュ。文書の版・表示の設定が変わったら捨てる。
 #[derive(Default)]
 struct RowCache {
     /// （文書の版, 区切り文字モードの設定, 表示行の最大バイト数）
-    key: (u64, usize, u64),
+    key: (u64, usize, u64, bool),
     rows: std::collections::HashMap<u64, Row>,
 }
 
@@ -232,6 +275,12 @@ impl Drop for FindJob {
 }
 
 impl Drop for CountJob {
+    fn drop(&mut self) {
+        self.job.cancel();
+    }
+}
+
+impl Drop for SelectJob {
     fn drop(&mut self) {
         self.job.cancel();
     }
@@ -257,6 +306,12 @@ struct CountJob {
     version: u64,
 }
 
+struct SelectJob {
+    job: JobHandle,
+    rx: crossbeam_channel::Receiver<Vec<std::ops::Range<u64>>>,
+    version: u64,
+}
+
 pub(crate) fn create_accelerators() -> Result<HACCEL> {
     let ctrl = FVIRTKEY | FCONTROL;
     let ctrl_shift = FVIRTKEY | FCONTROL | FSHIFT;
@@ -266,6 +321,8 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
         (ctrl, b'S' as u16, ID_SAVE),
         (ctrl_shift, b'S' as u16, ID_SAVE_AS),
         (ctrl, b'W' as u16, ID_CLOSE),
+        (ctrl, VK_TAB.0, ID_TAB_NEXT),
+        (ctrl_shift, VK_TAB.0, ID_TAB_PREV),
         (ctrl, b'Z' as u16, ID_UNDO),
         (ctrl, b'Y' as u16, ID_REDO),
         (ctrl_shift, b'Z' as u16, ID_REDO),
@@ -275,6 +332,7 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
         (ctrl, b'A' as u16, ID_SELECT_ALL),
         (ctrl, b'D' as u16, ID_SELECT_NEXT),
         (ctrl_shift, b'L' as u16, ID_SELECT_ALL_OCCURRENCES),
+        (ctrl_shift, b'M' as u16, ID_SELECT_SEARCH_MATCHES),
         (
             FVIRTKEY | FALT | FSHIFT,
             b'I' as u16,
@@ -313,6 +371,11 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         let file = CreatePopupMenu()?;
         item(file, ID_NEW, w!("新規作成(&N)\tCtrl+N"))?;
         item(file, ID_OPEN, w!("開く(&O)...\tCtrl+O"))?;
+        item(
+            file,
+            ID_OPEN_SHARED,
+            w!("共有中のファイルを読み取り専用で開く..."),
+        )?;
         let reopen = CreatePopupMenu()?;
         for (i, e) in Encoding::all().iter().enumerate() {
             AppendMenuW(
@@ -335,6 +398,7 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             w!("名前を付けて保存(&A)...\tCtrl+Shift+S"),
         )?;
         item(file, ID_CLOSE, w!("閉じる(&C)\tCtrl+W"))?;
+        item(file, ID_DIFF, w!("開いているファイルを比較..."))?;
         sep(file)?;
         item(file, ID_EXIT, w!("終了(&X)\tAlt+F4"))?;
 
@@ -353,6 +417,11 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             edit,
             ID_SELECT_ALL_OCCURRENCES,
             w!("すべての出現箇所を選択\tCtrl+Shift+L"),
+        )?;
+        item(
+            edit,
+            ID_SELECT_SEARCH_MATCHES,
+            w!("検索条件に一致する箇所をすべて選択\tCtrl+Shift+M"),
         )?;
         item(
             edit,
@@ -376,6 +445,7 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             ID_LINE_NUMBERS as usize,
             w!("行番号(&L)"),
         )?;
+        item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
 
         let search = CreatePopupMenu()?;
         item(search, ID_FIND, w!("検索(&F)...\tCtrl+F"))?;
@@ -448,6 +518,21 @@ impl App {
                 None,
             )
             .context("CreateWindowExW(view)")?;
+            let tabbar = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                WC_TABCONTROLW,
+                None,
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                0,
+                0,
+                0,
+                0,
+                Some(frame),
+                Some(HMENU(ID_TABS as isize as *mut _)),
+                Some(hinstance),
+                None,
+            )
+            .context("CreateWindowExW(tabs)")?;
             let status = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 STATUSCLASSNAMEW,
@@ -484,6 +569,9 @@ impl App {
                 frame,
                 view,
                 status,
+                tabbar,
+                tabs: vec![None],
+                active_tab: 0,
                 menu_edit,
                 menu_view,
                 menu_csv,
@@ -512,6 +600,7 @@ impl App {
                 findbar,
                 searcher: None,
                 find_job: None,
+                select_job: None,
                 count_job: None,
                 match_count: None,
                 status_msg: String::new(),
@@ -528,6 +617,7 @@ impl App {
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
             with_app(|a| {
+                a.refresh_tabs();
                 a.update_line_number_menu();
                 a.layout_children();
                 a.update_title();
@@ -542,7 +632,7 @@ impl App {
                 error_box(frame, &e.to_string());
             }
             if let Some(path) = initial_file {
-                open_path(frame, path, None);
+                open_path(frame, path, None, false);
                 if let Some(line) = initial_line.filter(|n| *n >= 1) {
                     with_app(|a| a.goto_line(line));
                 }
@@ -582,6 +672,7 @@ impl App {
             self.doc.version(),
             cfg.cells.as_ref().map_or(0, |c| Arc::as_ptr(c) as usize),
             cfg.max_row_bytes,
+            cfg.show_controls,
         );
         let mut cache = self.row_cache.borrow_mut();
         if cache.key != key || cache.rows.len() > 1024 {
@@ -644,10 +735,13 @@ impl App {
             let _ = GetWindowRect(self.status, &mut src);
             let sh = src.bottom - src.top;
             let w = rc.right - rc.left;
+            let tab_h = (32 * GetDpiForWindow(self.frame) as i32 / 96).max(24);
+            let _ = MoveWindow(self.tabbar, 0, 0, w, tab_h, true);
             let bar_h = self.findbar.height();
             self.findbar.layout(w);
-            let h = (rc.bottom - rc.top - sh - bar_h).max(0);
-            let _ = MoveWindow(self.view, 0, bar_h, w, h, true);
+            let _ = MoveWindow(self.findbar.hwnd, 0, tab_h, w, bar_h, true);
+            let h = (rc.bottom - rc.top - sh - tab_h - bar_h).max(0);
+            let _ = MoveWindow(self.view, 0, tab_h + bar_h, w, h, true);
             // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗
             let parts = [w - 640, w - 520, w - 380, w - 310, w - 250, -1].map(|x| x.max(0));
             SendMessageW(
@@ -673,9 +767,55 @@ impl App {
 
     fn update_title(&self) {
         let mark = if self.doc.is_modified() { "*" } else { "" };
-        let title = format!("{mark}{} - yyeditor", self.doc.display_name());
+        let read = if self.doc.is_read_only() {
+            " [読み取り専用]"
+        } else {
+            ""
+        };
+        let title = format!("{mark}{}{read} - yyeditor", self.doc.display_name());
         unsafe {
             let _ = SetWindowTextW(self.frame, &HSTRING::from(title));
+        }
+        self.refresh_tabs();
+    }
+
+    fn refresh_tabs(&self) {
+        unsafe {
+            SendMessageW(self.tabbar, TCM_DELETEALLITEMS, None, None);
+            for (i, slot) in self.tabs.iter().enumerate() {
+                let doc = if i == self.active_tab {
+                    &self.doc
+                } else {
+                    &slot.as_ref().expect("inactive tab").doc
+                };
+                let mut label = format!(
+                    "{}{}{}",
+                    if doc.is_modified() { "*" } else { "" },
+                    doc.display_name(),
+                    if doc.is_read_only() { " [読]" } else { "" }
+                );
+                if label.chars().count() > 32 {
+                    label = label.chars().take(29).collect::<String>() + "...";
+                }
+                let mut wide_label = wide(&label);
+                let item = TCITEMW {
+                    mask: TCIF_TEXT,
+                    pszText: windows::core::PWSTR(wide_label.as_mut_ptr()),
+                    ..Default::default()
+                };
+                SendMessageW(
+                    self.tabbar,
+                    TCM_INSERTITEMW,
+                    Some(WPARAM(i)),
+                    Some(LPARAM((&item as *const TCITEMW) as isize)),
+                );
+            }
+            SendMessageW(
+                self.tabbar,
+                TCM_SETCURSEL,
+                Some(WPARAM(self.active_tab)),
+                None,
+            );
         }
     }
 
@@ -744,6 +884,13 @@ impl App {
             _ if self.find_job.is_some() => format!(
                 "  検索しています（Esc で中止）… {:.0}%",
                 self.find_job
+                    .as_ref()
+                    .map_or(0.0, |j| j.job.progress().fraction())
+                    * 100.0
+            ),
+            _ if self.select_job.is_some() => format!(
+                "  一致箇所を選択しています（Esc で中止）… {:.0}%",
+                self.select_job
                     .as_ref()
                     .map_or(0.0, |j| j.job.progress().fraction())
                     * 100.0
@@ -822,9 +969,9 @@ impl App {
         set(ID_UNDO, self.doc.can_undo());
         set(ID_REDO, self.doc.can_redo());
         let has_sel = has_sel || self.rect.is_some_and(|r| !r.is_zero_width());
-        set(ID_CUT, has_sel);
+        set(ID_CUT, has_sel && !self.doc.is_read_only());
         set(ID_COPY, has_sel);
-        set(ID_DELETE, has_sel);
+        set(ID_DELETE, has_sel && !self.doc.is_read_only());
         set(ID_RECT_TO_CARETS, self.rect.is_some());
         let flag = if self.rect_mode {
             MF_CHECKED
@@ -980,6 +1127,17 @@ impl App {
                 ID_LINE_NUMBERS as u32,
                 (MF_BYCOMMAND | flag).0,
             );
+            CheckMenuItem(
+                self.menu_view,
+                ID_CONTROL_CHARS as u32,
+                (MF_BYCOMMAND
+                    | if self.rows_cfg.show_controls {
+                        MF_CHECKED
+                    } else {
+                        MF_UNCHECKED
+                    })
+                .0,
+            );
         }
     }
 
@@ -1042,6 +1200,7 @@ impl App {
 
     /// 内容を変更した後の共通処理。
     fn after_edit(&mut self) {
+        self.select_job = None;
         self.sync_csv();
         if !self.doc.snapshot().is_fully_indexed() {
             let n = self.notifier();
@@ -1889,9 +2048,14 @@ impl App {
         self.row_cache.borrow_mut().rows.clear();
         self.warned_noncanonical = false;
         self.find_job = None;
+        self.select_job = None;
         self.count_job = None;
         self.match_count = None;
         self.status_msg.clear();
+        self.csv = None;
+        self.pending_record_op = None;
+        self.rows_cfg.cells = None;
+        self.update_csv_menu();
         self.csv_mode_for_path();
         let n = self.notifier();
         self.doc.start_indexing(&self.pool, n);
@@ -1902,17 +2066,142 @@ impl App {
         self.after_move();
     }
 
+    fn take_active_tab(&mut self) -> TabState {
+        TabState {
+            doc: std::mem::replace(&mut self.doc, Document::new_empty()),
+            vp: self.vp,
+            scroll_x: self.scroll_x,
+            scroll_mode: self.scroll_mode,
+            rect: self.rect.take(),
+            csv: self.csv.take(),
+            pending_record_op: self.pending_record_op.take(),
+            warned_noncanonical: self.warned_noncanonical,
+            status_msg: std::mem::take(&mut self.status_msg),
+        }
+    }
+
+    fn restore_tab(&mut self, state: TabState) {
+        ime::cancel(self.view);
+        self.composition = None;
+        self.drag = None;
+        self.doc = state.doc;
+        self.vp = state.vp;
+        self.scroll_x = state.scroll_x;
+        self.scroll_mode = state.scroll_mode;
+        self.rect = state.rect;
+        self.csv = state.csv;
+        self.pending_record_op = state.pending_record_op;
+        self.warned_noncanonical = state.warned_noncanonical;
+        self.status_msg = state.status_msg;
+        self.find_job = None;
+        self.select_job = None;
+        self.count_job = None;
+        self.match_count = None;
+        self.row_cache.borrow_mut().rows.clear();
+        self.rebuild_cells();
+        self.update_csv_menu();
+        self.renderer.clear_cache();
+        self.update_title();
+        self.after_move();
+        // 非表示中に完了した行数カウント・変換を反映する。
+        let _ = self.on_index_progress();
+    }
+
+    fn switch_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() || index == self.active_tab {
+            return;
+        }
+        let next = self.tabs[index].take().expect("inactive tab");
+        let old = self.take_active_tab();
+        self.tabs[self.active_tab] = Some(old);
+        self.active_tab = index;
+        self.restore_tab(next);
+    }
+
+    fn add_document(&mut self, doc: Document) {
+        if self.tabs.len() == 1
+            && self.doc.path().is_none()
+            && !self.doc.is_modified()
+            && self.doc.snapshot().is_empty()
+        {
+            self.set_document(doc);
+            return;
+        }
+        let index = self.tabs.len();
+        self.tabs.push(Some(TabState::new(doc)));
+        self.switch_tab(index);
+        let n = self.notifier();
+        self.doc.start_indexing(&self.pool, n);
+        self.csv_mode_for_path();
+        self.update_title();
+    }
+
+    fn new_tab(&mut self) {
+        let index = self.tabs.len();
+        self.tabs.push(Some(TabState::new(Document::new_empty())));
+        self.switch_tab(index);
+    }
+
+    fn close_tab(&mut self) {
+        self.tabs.remove(self.active_tab);
+        if self.tabs.is_empty() {
+            self.tabs.push(None);
+            self.active_tab = 0;
+            self.set_document(Document::new_empty());
+        } else {
+            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+            let state = self.tabs[self.active_tab].take().expect("inactive tab");
+            self.restore_tab(state);
+        }
+    }
+
     fn open(
         &mut self,
         path: PathBuf,
         encoding: Option<Encoding>,
+        shared_read_only: bool,
     ) -> std::result::Result<(), String> {
         let opts = OpenOptions {
             encoding,
             ..OpenOptions::default()
         };
-        let doc =
-            Document::open_with(&path, &opts).map_err(|e| format!("{}\n\n{e}", path.display()))?;
+        // 既に開いているパスなら、そのタブへ移動する（明示的な開き直しは別処理）。
+        if encoding.is_none() {
+            if self.doc.path() == Some(path.as_path())
+                && self.doc.is_read_only() == shared_read_only
+            {
+                return Ok(());
+            }
+            if let Some(index) = self.tabs.iter().position(|slot| {
+                slot.as_ref().is_some_and(|t| {
+                    t.doc.path() == Some(path.as_path()) && t.doc.is_read_only() == shared_read_only
+                })
+            }) {
+                self.switch_tab(index);
+                return Ok(());
+            }
+        }
+        let doc = if shared_read_only {
+            Document::open_shared_read_only(&path, &opts)
+        } else {
+            Document::open_with(&path, &opts)
+        }
+        .map_err(|e| format!("{}\n\n{e}", path.display()))?;
+        self.add_document(doc);
+        Ok(())
+    }
+
+    fn reopen(&mut self, path: PathBuf, encoding: Encoding) -> std::result::Result<(), String> {
+        let opts = OpenOptions {
+            encoding: Some(encoding),
+            ..OpenOptions::default()
+        };
+        let doc = if self.doc.is_read_only() {
+            Document::open_shared_read_only(&path, &opts)
+        } else {
+            Document::open_with(&path, &opts)
+        }
+        .map_err(|e| format!("{}\n\n{e}", path.display()))?;
         self.set_document(doc);
         Ok(())
     }
@@ -2026,7 +2315,10 @@ impl App {
 
     /// Esc: 実行中の検索・置換を中止するか、検索バーを閉じる。何かしたら `true`。
     fn escape_search(&mut self) -> bool {
-        if self.find_job.take().is_some() || self.grep_job.take().is_some() {
+        if self.find_job.take().is_some()
+            | self.select_job.take().is_some()
+            | self.grep_job.take().is_some()
+        {
             self.status_msg = "検索を中止しました".into();
             self.update_status();
             return true;
@@ -2045,6 +2337,7 @@ impl App {
     /// 検索バーの条件をコンパイルする。誤りがあればステータスバーに表示して `false`。
     fn compile_search(&mut self) -> bool {
         let q = self.findbar.query();
+        self.select_job = None;
         self.match_count = None;
         self.count_job = None;
         if q.pattern.is_empty() {
@@ -2143,6 +2436,69 @@ impl App {
         self.update_status();
     }
 
+    /// 検索バーの条件に一致する文字列を複数選択にする。通常のコピーで改行区切りにできる。
+    fn select_search_matches(&mut self) -> (usize, bool) {
+        if !self.compile_search() {
+            return (0, false);
+        }
+        let Some(searcher) = self.searcher.clone() else {
+            return (0, false);
+        };
+        let snap = self.doc.snapshot().clone();
+        if snap.len() > SYNC_SEARCH_BYTES {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            let notify = self.notifier();
+            let version = self.doc.version();
+            let job = self.pool.spawn(move |ctx| {
+                let len = snap.len();
+                ctx.progress.set_total(len);
+                let result =
+                    searcher.matches_cancellable(&snap, 0..len, CARET_LIMIT + 1, &mut |pos| {
+                        ctx.progress.set_done(pos);
+                        !ctx.cancel.is_cancelled()
+                    });
+                if let Ok(matches) = result {
+                    let _ = tx.send(matches);
+                    notify();
+                }
+            });
+            self.select_job = Some(SelectJob { job, rx, version });
+            self.update_status();
+            return (0, false);
+        }
+        let matches = searcher.matches_in(&snap, 0..snap.len(), CARET_LIMIT + 1);
+        self.apply_search_matches(matches)
+    }
+
+    fn apply_search_matches(&mut self, matches: Vec<std::ops::Range<u64>>) -> (usize, bool) {
+        let truncated = matches.len() > CARET_LIMIT;
+        let sels: Vec<_> = matches
+            .into_iter()
+            .filter(|m| !m.is_empty())
+            .take(CARET_LIMIT)
+            .map(|m| Selection::new(m.start, m.end))
+            .collect();
+        let count = sels.len();
+        if count == 0 {
+            self.not_found();
+            return (0, false);
+        }
+        let start = sels[0].start();
+        self.rect = None;
+        self.doc.set_selections(SelectionSet::from_vec(sels, 0));
+        self.scroll_to_offset(start);
+        self.status_msg = if truncated {
+            format!(
+                "先頭から {} 箇所を選択しました（上限）",
+                group_digits(count as u64)
+            )
+        } else {
+            format!("{} 箇所を選択しました", group_digits(count as u64))
+        };
+        self.after_move();
+        (count, truncated)
+    }
+
     /// カーソル位置に空の一致があるか（そこで止まり続けないようにするため）。
     fn last_found_empty(&self, s: &Searcher, at: u64) -> bool {
         let snap = self.doc.snapshot();
@@ -2217,6 +2573,15 @@ impl App {
                 None => self.not_found(),
             }
         }
+        if let Some(j) = &self.select_job
+            && let Ok(matches) = j.rx.try_recv()
+        {
+            let current = j.version == self.doc.version();
+            self.select_job = None;
+            if current {
+                self.apply_search_matches(matches);
+            }
+        }
         if let Some(j) = &self.count_job
             && let Ok(n) = j.rx.try_recv()
         {
@@ -2230,7 +2595,7 @@ impl App {
             self.grep_job = None;
             self.grep_done = Some(text);
         }
-        if self.find_job.is_some() || self.grep_job.is_some() {
+        if self.find_job.is_some() || self.select_job.is_some() || self.grep_job.is_some() {
             self.update_status();
         }
     }
@@ -2420,14 +2785,11 @@ impl App {
         if !path.is_file() {
             return Some(format!("ファイルが見つかりません。\n{}", path.display()));
         }
-        let exe = std::env::current_exe().ok()?;
-        match std::process::Command::new(exe)
-            .arg(&path)
-            .arg("--line")
-            .arg(n.to_string())
-            .spawn()
-        {
-            Ok(_) => None,
+        match self.open(path, None, false) {
+            Ok(()) => {
+                self.goto_line(n);
+                None
+            }
             Err(e) => Some(format!("開けませんでした。\n{e}")),
         }
     }
@@ -2592,8 +2954,8 @@ fn confirm_discard(hwnd: HWND) -> bool {
     }
 }
 
-fn open_path(hwnd: HWND, path: PathBuf, encoding: Option<Encoding>) {
-    if let Some(Err(msg)) = with_app(|a| a.open(path, encoding)) {
+fn open_path(hwnd: HWND, path: PathBuf, encoding: Option<Encoding>, shared_read_only: bool) {
+    if let Some(Err(msg)) = with_app(|a| a.open(path, encoding, shared_read_only)) {
         error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
     }
 }
@@ -2628,6 +2990,10 @@ fn message_box(hwnd: HWND, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RE
 
 /// 保存する。`as_new` または名前がなければ保存先と形式を尋ねる。保存できたら `true`。
 fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
+    if with_app(|a| a.doc.is_read_only()) == Some(true) {
+        info_box(hwnd, "読み取り専用で開いたファイルは保存できません。");
+        return false;
+    }
     let Some((current, encoding, bom, eol, loading, noncanonical)) = with_app(|a| {
         let nc = if a.warned_noncanonical {
             0
@@ -2811,18 +3177,30 @@ fn dialog_result(dialog: &IFileDialog) -> Option<PathBuf> {
 }
 
 /// 開くファイルと文字コード（`None` なら自動判別）を尋ねる。
-fn show_open_dialog(owner: HWND) -> Option<(PathBuf, Option<Encoding>)> {
+fn show_open_dialog(owner: HWND) -> Option<(Vec<PathBuf>, Option<Encoding>)> {
     unsafe {
         let dialog: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        dialog
+            .SetOptions(dialog.GetOptions().ok()? | FOS_ALLOWMULTISELECT)
+            .ok()?;
         let custom = dialog.cast::<IFileDialogCustomize>().ok();
         if let Some(c) = &custom {
             add_encoding_combo(c, None, true);
         }
         dialog.Show(Some(owner)).ok()?;
-        let path = dialog_result(&dialog.cast().ok()?)?;
+        let results = dialog.GetResults().ok()?;
+        let count = results.GetCount().ok()?;
+        let mut paths = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let item = results.GetItemAt(i).ok()?;
+            let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let path = name.to_string().ok();
+            CoTaskMemFree(Some(name.0 as *const _));
+            paths.push(PathBuf::from(path?));
+        }
         let enc = custom.as_ref().and_then(|c| selected_encoding(c, true));
-        Some((path, enc))
+        Some((paths, enc))
     }
 }
 
@@ -2919,15 +3297,20 @@ fn cmd_copy(hwnd: HWND, cut: bool) {
 fn on_command(hwnd: HWND, id: u16) {
     match id {
         ID_NEW => {
-            if confirm_discard(hwnd) {
-                with_app(|a| a.set_document(Document::new_empty()));
-            }
+            with_app(|a| a.new_tab());
         }
         ID_OPEN => {
-            if confirm_discard(hwnd)
-                && let Some((p, enc)) = show_open_dialog(hwnd)
-            {
-                open_path(hwnd, p, enc);
+            if let Some((paths, enc)) = show_open_dialog(hwnd) {
+                for p in paths {
+                    open_path(hwnd, p, enc, false);
+                }
+            }
+        }
+        ID_OPEN_SHARED => {
+            if let Some((paths, enc)) = show_open_dialog(hwnd) {
+                for p in paths {
+                    open_path(hwnd, p, enc, true);
+                }
             }
         }
         id if id >= ID_REOPEN_BASE && ((id - ID_REOPEN_BASE) as usize) < Encoding::all().len() => {
@@ -2937,7 +3320,9 @@ fn on_command(hwnd: HWND, id: u16) {
                 return;
             };
             if confirm_discard(hwnd) {
-                open_path(hwnd, path, Some(enc));
+                if let Some(Err(msg)) = with_app(|a| a.reopen(path, enc)) {
+                    error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
+                }
             }
         }
         ID_SAVE => {
@@ -2948,7 +3333,61 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_CLOSE => {
             if confirm_discard(hwnd) {
-                with_app(|a| a.set_document(Document::new_empty()));
+                with_app(|a| a.close_tab());
+            }
+        }
+        ID_TAB_NEXT | ID_TAB_PREV => {
+            with_app(|a| {
+                let n = a.tabs.len();
+                let next = if id == ID_TAB_NEXT {
+                    (a.active_tab + 1) % n
+                } else {
+                    (a.active_tab + n - 1) % n
+                };
+                a.switch_tab(next);
+            });
+        }
+        ID_DIFF => {
+            let Some((count, active)) = with_app(|a| (a.tabs.len(), a.active_tab)) else {
+                return;
+            };
+            if count < 2 {
+                info_box(hwnd, "比較するファイルをもう 1 つ開いてください。");
+                return;
+            }
+            let other = if count == 2 {
+                1 - active
+            } else {
+                let prompt = format!("比較先タブの番号（1 〜 {count}、現在は {}）:", active + 1);
+                let Some(n) =
+                    crate::goto::prompt_line(hwnd, &prompt, ((active + 1) % count + 1) as u64)
+                else {
+                    return;
+                };
+                let index = n as usize - 1;
+                if index >= count || index == active {
+                    info_box(hwnd, "現在のタブ以外の番号を指定してください。");
+                    return;
+                }
+                index
+            };
+            let docs = with_app(|a| {
+                let target = &a.tabs[other].as_ref().expect("inactive tab").doc;
+                (
+                    a.doc.display_name(),
+                    a.doc.snapshot().clone(),
+                    a.doc.is_loading(),
+                    target.display_name(),
+                    target.snapshot().clone(),
+                    target.is_loading(),
+                )
+            });
+            if let Some((ln, ls, ll, rn, rs, rl)) = docs {
+                if ll || rl {
+                    info_box(hwnd, "文字コードの変換が終わってから比較してください。");
+                } else if let Err(e) = crate::diffview::show(hwnd, &ln, &ls, &rn, &rs) {
+                    error_box(hwnd, &e);
+                }
             }
         }
         ID_EXIT => unsafe {
@@ -3019,6 +3458,17 @@ fn on_command(hwnd: HWND, id: u16) {
                     hwnd,
                     &format!(
                         "カーソルが多すぎるため、先頭から {} 個までにしました。",
+                        group_digits(n as u64)
+                    ),
+                );
+            }
+        }
+        ID_SELECT_SEARCH_MATCHES => {
+            if let Some((n, true)) = with_app(|a| a.select_search_matches()) {
+                info_box(
+                    hwnd,
+                    &format!(
+                        "一致が多いため、先頭から {} 箇所まで選択しました。",
                         group_digits(n as u64)
                     ),
                 );
@@ -3153,6 +3603,15 @@ fn on_command(hwnd: HWND, id: u16) {
                 a.after_scroll();
             });
         }
+        ID_CONTROL_CHARS => {
+            with_app(|a| {
+                a.rows_cfg.show_controls = !a.rows_cfg.show_controls;
+                a.row_cache.borrow_mut().rows.clear();
+                a.renderer.clear_cache();
+                a.update_line_number_menu();
+                a.invalidate();
+            });
+        }
         ID_ABOUT => info_box(
             hwnd,
             &format!(
@@ -3178,7 +3637,12 @@ pub(crate) fn is_global_shortcut(msg: &MSG) -> bool {
     if vk == VK_F3 {
         return true;
     }
-    key_down(VK_CONTROL) && matches!(vk.0 as u8, b'F' | b'H' | b'S' | b'O' | b'N' | b'G' | b'W')
+    key_down(VK_CONTROL)
+        && (vk == VK_TAB
+            || matches!(
+                vk.0 as u8,
+                b'F' | b'H' | b'S' | b'O' | b'N' | b'G' | b'W' | b'M'
+            ))
 }
 
 /// 検索バーのウィンドウプロシージャ。コントロールの通知をフレームへのコマンドにする。
@@ -3227,17 +3691,16 @@ pub(crate) extern "system" fn findbar_proc(
     }
 }
 
-fn dropped_file(hdrop: HDROP) -> Option<PathBuf> {
+fn dropped_files(hdrop: HDROP) -> Vec<PathBuf> {
     unsafe {
         let count = DragQueryFileW(hdrop, u32::MAX, None);
-        let result = if count > 0 {
-            let len = DragQueryFileW(hdrop, 0, None) as usize;
+        let mut result = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let len = DragQueryFileW(hdrop, i, None) as usize;
             let mut buf = vec![0u16; len + 1];
-            DragQueryFileW(hdrop, 0, Some(&mut buf));
-            Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
-        } else {
-            None
-        };
+            DragQueryFileW(hdrop, i, Some(&mut buf));
+            result.push(PathBuf::from(String::from_utf16_lossy(&buf[..len])));
+        }
         DragFinish(hdrop);
         result
     }
@@ -3279,11 +3742,32 @@ pub(crate) extern "system" fn frame_proc(
             on_command(hwnd, loword(wparam.0) as u16);
             LRESULT(0)
         }
+        WM_NOTIFY => {
+            if lparam.0 != 0 {
+                let hdr = unsafe { &*(lparam.0 as *const NMHDR) };
+                if hdr.code as u32 == TCN_SELCHANGE {
+                    let view = with_app(|a| {
+                        if hdr.hwndFrom == a.tabbar {
+                            let index =
+                                unsafe { SendMessageW(a.tabbar, TCM_GETCURSEL, None, None).0 };
+                            if index >= 0 {
+                                a.switch_tab(index as usize);
+                            }
+                        }
+                        a.view
+                    });
+                    if let Some(view) = view {
+                        unsafe {
+                            let _ = SetFocus(Some(view));
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_DROPFILES => {
-            if let Some(p) = dropped_file(HDROP(wparam.0 as *mut _))
-                && confirm_discard(hwnd)
-            {
-                open_path(hwnd, p, None);
+            for p in dropped_files(HDROP(wparam.0 as *mut _)) {
+                open_path(hwnd, p, None, false);
             }
             LRESULT(0)
         }
@@ -3292,11 +3776,9 @@ pub(crate) extern "system" fn frame_proc(
                 error_box(hwnd, &msg);
             }
             // Grep の結果を新しい文書として開く
-            if let Some(Some(text)) = with_app(|a| a.grep_done.take())
-                && confirm_discard(hwnd)
-            {
+            if let Some(Some(text)) = with_app(|a| a.grep_done.take()) {
                 with_app(|a| {
-                    a.set_document(Document::from_text(&text));
+                    a.add_document(Document::from_text(&text));
                     a.status_msg = "Grep の結果（F12 でファイルを開く）".into();
                     a.update_status();
                 });
@@ -3327,7 +3809,16 @@ pub(crate) extern "system" fn frame_proc(
             LRESULT(0)
         }
         WM_CLOSE => {
-            if confirm_discard(hwnd) {
+            let count = with_app(|a| a.tabs.len()).unwrap_or(0);
+            let mut ok = true;
+            for index in 0..count {
+                with_app(|a| a.switch_tab(index));
+                if !confirm_discard(hwnd) {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
                 unsafe {
                     let _ = DestroyWindow(hwnd);
                 }

@@ -60,13 +60,24 @@ pub struct Row {
 }
 
 impl Row {
+    #[cfg(test)]
     pub(crate) fn new(start: u64, next: u64, line_start: bool, bytes: &[u8]) -> Row {
+        Self::new_with_controls(start, next, line_start, bytes, true)
+    }
+
+    pub(crate) fn new_with_controls(
+        start: u64,
+        next: u64,
+        line_start: bool,
+        bytes: &[u8],
+        show_controls: bool,
+    ) -> Row {
         let (content, ends_line) = match bytes {
             [rest @ .., b'\r', b'\n'] => (rest, true),
             [rest @ .., b'\n'] => (rest, true),
             _ => (bytes, false),
         };
-        let (text, spans) = decode_row(content);
+        let (text, spans) = decode_row_with_controls(content, show_controls);
         Row {
             start,
             end: start + content.len() as u64,
@@ -120,8 +131,14 @@ impl Row {
 }
 
 /// `bytes`（行の内容の `base` バイト目から）を表示用テキストにして追加する。
-pub(crate) fn append_decoded(text: &mut String, spans: &mut Vec<Span>, bytes: &[u8], base: usize) {
-    let (t, sp) = decode_row(bytes);
+pub(crate) fn append_decoded(
+    text: &mut String,
+    spans: &mut Vec<Span>,
+    bytes: &[u8],
+    base: usize,
+    show_controls: bool,
+) {
+    let (t, sp) = decode_row_with_controls(bytes, show_controls);
     let off = text.len();
     for s in sp {
         push(
@@ -176,6 +193,10 @@ fn push(text: &mut String, spans: &mut Vec<Span>, s: &str, kind: SpanKind, src: 
 /// * タブ以外の C0 制御文字と DEL は Control Pictures（`␀` `␍` など）に置き換える
 /// * エスケープ文字（`U+10FE00`〜）は元のバイトを `\xNN` で表示する
 pub fn decode_row(bytes: &[u8]) -> (String, Vec<Span>) {
+    decode_row_with_controls(bytes, true)
+}
+
+pub fn decode_row_with_controls(bytes: &[u8], show_controls: bool) -> (String, Vec<Span>) {
     // よくある場合（制御文字・エスケープ文字を含まない正しい UTF-8）はそのまま使う
     // （64 バイトずつ分岐なしで調べてベクトル化させる）
     let plain = bytes.chunks(64).all(|c| {
@@ -237,11 +258,20 @@ pub fn decode_row(bytes: &[u8]) -> (String, Vec<Span>) {
                     pos + run_start..pos + i,
                 );
                 let mut buf = [0u8; 4];
+                let glyph = if show_controls {
+                    pic.encode_utf8(&mut buf)
+                } else {
+                    " "
+                };
                 push(
                     &mut text,
                     &mut spans,
-                    pic.encode_utf8(&mut buf),
-                    SpanKind::Control,
+                    glyph,
+                    if show_controls {
+                        SpanKind::Control
+                    } else {
+                        SpanKind::Text
+                    },
                     pos + i..pos + i + 1,
                 );
                 run_start = i + c.len_utf8();
@@ -289,6 +319,16 @@ mod tests {
                 ("\\xE3\\x81", SpanKind::Invalid),
             ]
         );
+    }
+
+    #[test]
+    fn control_display_can_be_hidden_without_changing_offsets() {
+        let shown = Row::new_with_controls(0, 3, true, b"a\x01b", true);
+        let hidden = Row::new_with_controls(0, 3, true, b"a\x01b", false);
+        assert_eq!(shown.text, "a\u{2401}b");
+        assert_eq!(hidden.text, "a b");
+        assert_eq!(hidden.text_index(2), 2);
+        assert_eq!(hidden.offset_at(1), 1);
     }
 
     #[test]

@@ -36,6 +36,8 @@ use yy_buffer::{LinePosition, Snapshot};
 #[derive(Clone, Debug)]
 pub struct RowConfig {
     pub max_row_bytes: u64,
+    /// C0 制御文字と DEL を記号で表示する。
+    pub show_controls: bool,
     /// 区切り文字モード（列揃え表示）
     pub cells: Option<Arc<CellLayout>>,
 }
@@ -44,6 +46,7 @@ impl Default for RowConfig {
     fn default() -> Self {
         RowConfig {
             max_row_bytes: 8192,
+            show_controls: true,
             cells: None,
         }
     }
@@ -54,6 +57,7 @@ impl RowConfig {
         assert!(max_row_bytes >= 8, "max_row_bytes too small");
         RowConfig {
             max_row_bytes,
+            show_controls: true,
             cells: None,
         }
     }
@@ -157,14 +161,20 @@ pub fn row_at(snap: &Snapshot, cfg: &RowConfig, start: u64) -> Row {
     let len = snap.len();
     let next = next_row_start(snap, cfg, start).unwrap_or(len);
     let bytes = snap.read(start..next);
-    let mut row = Row::new(start, next, is_line_start(snap, start), &bytes);
+    let mut row = Row::new_with_controls(
+        start,
+        next,
+        is_line_start(snap, start),
+        &bytes,
+        cfg.show_controls,
+    );
     // 区切り文字モード: 論理行全体が 1 表示行に収まる行だけ列を揃える
     if let Some(cl) = &cfg.cells
         && row.line_start
         && (row.ends_line || next == len)
     {
         let content = &bytes[..(row.end - row.start) as usize];
-        row.apply_cells(content, snap, cl);
+        row.apply_cells(content, snap, cl, cfg.show_controls);
     }
     row
 }

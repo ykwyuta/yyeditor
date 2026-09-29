@@ -4,6 +4,7 @@
 //! すべてスナップショットの差し替えとして行う（01 章 4.3、06 章）。
 
 pub mod csv;
+pub mod diff;
 pub mod edit;
 pub mod grep;
 mod history;
@@ -118,6 +119,8 @@ const EOL_IN_MEMORY: u64 = 64 << 20;
 
 pub struct Document {
     path: Option<PathBuf>,
+    /// 共有中のファイルから独立したスナップショット。編集と保存は禁止。
+    read_only: bool,
     file_len: u64,
     encoding: Encoding,
     bom: bool,
@@ -194,6 +197,7 @@ impl Document {
     pub fn new_empty() -> Document {
         Document {
             path: None,
+            read_only: false,
             file_len: 0,
             encoding: Encoding::Utf8,
             bom: false,
@@ -278,6 +282,60 @@ impl Document {
         Ok(doc)
     }
 
+    /// 他のアプリケーションが書き込み用に開いているファイルを読み取り専用で開く。
+    /// 書き込み中の mmap は安全ではないため、作業用ファイルへコピーしてからマップする。
+    pub fn open_shared_read_only(path: &Path, opts: &OpenOptions) -> io::Result<Document> {
+        let f = yy_io::open_shared_snapshot(path)?;
+        let bytes = f.bytes();
+        let (encoding, bom_len) = match opts.encoding {
+            Some(e) => {
+                let bom = e.bom();
+                (
+                    e,
+                    usize::from(!bom.is_empty() && bytes.starts_with(bom)) * bom.len(),
+                )
+            }
+            None => {
+                let n = bytes.len().min(DETECT_SAMPLE);
+                let d = yy_encoding::detect(&bytes[..n], n == bytes.len());
+                (d.encoding, d.bom_len)
+            }
+        };
+        let mut doc = Document::new_empty();
+        doc.file_len = f.file_len;
+        doc.read_only = true;
+        doc.encoding = encoding;
+        doc.bom = bom_len > 0;
+        doc.snapshot = if encoding == Encoding::Utf8 {
+            index_first_piece(f.snapshot(bom_len as u64..f.file_len))
+        } else if ((bytes.len() - bom_len) as u64) <= opts.sync_limit {
+            let decoded = transcode::decode_in_memory(encoding, &bytes[bom_len..]);
+            doc.decode_stats = decoded.stats;
+            doc.escapes = decoded.escapes;
+            index_first_piece(decoded.snapshot)
+        } else {
+            let source = f.source.clone().expect("non-empty file is mapped");
+            doc.loading = Some(transcode::Loader::new(
+                source,
+                bom_len..bytes.len(),
+                encoding,
+            ));
+            index_first_piece(transcode::preview(
+                encoding,
+                &bytes[bom_len..],
+                PREVIEW_BYTES,
+            ))
+        };
+        doc.eol = Eol::detect(&doc.snapshot).unwrap_or_else(Eol::platform_default);
+        doc.path = Some(f.path);
+        doc.source = f.source;
+        Ok(doc)
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
     }
@@ -320,7 +378,7 @@ impl Document {
 
     /// バックグラウンドの処理（文字コードの変換・すべて置換）中で編集できないか。
     pub fn is_busy(&self) -> bool {
-        self.loading.is_some() || self.replacing.is_some()
+        self.read_only || self.loading.is_some() || self.replacing.is_some()
     }
 
     /// すべて置換の進捗率。実行中でなければ `None`。

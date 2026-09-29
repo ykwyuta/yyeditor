@@ -15,6 +15,8 @@
 
 mod app;
 mod clipboard;
+mod diffstream;
+mod diffview;
 mod findbar;
 mod goto;
 mod grepdlg;
@@ -34,6 +36,7 @@ use crate::util::Context;
 pub(crate) const FRAME_CLASS: PCWSTR = w!("YYEditorFrame");
 pub(crate) const VIEW_CLASS: PCWSTR = w!("YYEditorView");
 pub(crate) const FINDBAR_CLASS: PCWSTR = w!("YYEditorFindBar");
+pub(crate) const DIFF_CLASS: PCWSTR = w!("YYEditorDiff");
 
 /// エディタを起動し、ウィンドウが閉じられるまでメッセージループを回す。
 ///
@@ -105,6 +108,19 @@ fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>
             ..Default::default()
         };
         if RegisterClassExW(&bar_class) == 0 {
+            return Err(windows::core::Error::from_thread());
+        }
+
+        let diff_class = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(diffview::proc),
+            hInstance: hinstance,
+            hCursor: cursor,
+            lpszClassName: DIFF_CLASS,
+            ..Default::default()
+        };
+        if RegisterClassExW(&diff_class) == 0 {
             return Err(windows::core::Error::from_thread());
         }
 

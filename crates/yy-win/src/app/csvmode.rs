@@ -124,7 +124,7 @@ impl App {
         }
     }
 
-    fn update_csv_menu(&self) {
+    pub(crate) fn update_csv_menu(&self) {
         let current = self
             .csv
             .as_ref()

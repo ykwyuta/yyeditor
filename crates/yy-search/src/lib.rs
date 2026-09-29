@@ -357,18 +357,23 @@ impl Searcher {
 
     /// `range` の中のすべてのマッチ（表示範囲のハイライトなど、狭い範囲用）。
     pub fn matches_in(&self, snap: &Snapshot, range: Range<u64>, limit: usize) -> Vec<Range<u64>> {
+        self.matches_cancellable(snap, range, limit, &mut |_| true)
+            .unwrap_or_default()
+    }
+
+    /// 広い範囲の一致を、進捗通知と中止を受けながら収集する。
+    pub fn matches_cancellable(
+        &self,
+        snap: &Snapshot,
+        range: Range<u64>,
+        limit: usize,
+        step: &mut dyn FnMut(u64) -> bool,
+    ) -> Result<Vec<Range<u64>>, Cancelled> {
         let mut out = Vec::new();
-        let _ = self.scan(
-            snap,
-            range.clone(),
-            range.start,
-            None,
-            &mut |_| true,
-            &mut |m, _| {
-                out.push(m);
-                out.len() < limit
-            },
-        );
-        out
+        self.scan(snap, range.clone(), range.start, None, step, &mut |m, _| {
+            out.push(m);
+            out.len() < limit
+        })?;
+        Ok(out)
     }
 }

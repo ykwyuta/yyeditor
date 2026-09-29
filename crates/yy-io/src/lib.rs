@@ -149,6 +149,55 @@ pub fn open_file(path: &Path) -> io::Result<OpenedFile> {
     })
 }
 
+/// 書き込み共有が必要なファイルを、作業用ファイルにコピーしてから開く。
+/// 外部プロセスが書き換え中のファイルを直接 mmap しないための読み取り専用経路。
+pub fn open_shared_snapshot(path: &Path) -> io::Result<OpenedFile> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.share_mode(0x1 | 0x2 | 0x4); // READ | WRITE | DELETE
+    }
+    let mut input = opts.open(path)?;
+    if input.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "フォルダは開けません",
+        ));
+    }
+    let temp = temp_path("shared");
+    let copied = (|| {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        let len = io::copy(&mut input, &mut output)?;
+        output.flush()?;
+        drop(output);
+        if len == 0 {
+            std::fs::remove_file(&temp)?;
+            return Ok(OpenedFile {
+                path: path.to_owned(),
+                file_len: 0,
+                source: None,
+                guard: None,
+            });
+        }
+        let source = map_temp(&temp)?;
+        Ok(OpenedFile {
+            path: path.to_owned(),
+            file_len: len,
+            source: Some(source),
+            guard: None,
+        })
+    })();
+    if copied.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    copied
+}
+
 /// 作業用の一時ファイルの名前（OS の一時フォルダ内）。
 pub fn temp_path(tag: &str) -> PathBuf {
     let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -422,6 +471,16 @@ mod tests {
         assert_eq!(snap.read(0..snap.len()), b"hello\nworld\n");
         assert!(!snap.is_fully_indexed());
         assert_eq!(snap.line_start(1, true), LineLookup::Found(6));
+    }
+
+    #[test]
+    fn shared_snapshot_stays_stable_when_original_changes() {
+        let d = tempfile::tempdir().unwrap();
+        let p = temp_file(&d, b"before\n");
+        let opened = open_shared_snapshot(&p).unwrap();
+        std::fs::write(&p, b"after\n").unwrap();
+        assert_eq!(opened.bytes(), b"before\n");
+        assert_eq!(opened.path, p);
     }
 
     #[test]

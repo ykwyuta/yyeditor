@@ -120,6 +120,7 @@ pub(crate) fn layout_line(
     content: &[u8],
     state: LineState,
     cl: &CellLayout,
+    show_controls: bool,
 ) -> (String, Vec<Span>, LineState) {
     let (cells, next) = split_line(content, &cl.dialect, state);
     let mut text = String::with_capacity(content.len() * 2);
@@ -143,6 +144,7 @@ pub(crate) fn layout_line(
             &mut spans,
             &content[c.range.clone()],
             c.range.start,
+            show_controls,
         );
         col += spans_width(&text, &spans[first_span..], &cl.ccfg, col);
         let Some(d) = &c.delim else { break };
@@ -171,9 +173,15 @@ pub(crate) fn layout_line(
 
 impl Row {
     /// 区切り文字モードの表示にする（論理行全体が 1 表示行の場合のみ）。
-    pub(crate) fn apply_cells(&mut self, content: &[u8], snap: &Snapshot, cl: &CellLayout) {
+    pub(crate) fn apply_cells(
+        &mut self,
+        content: &[u8],
+        snap: &Snapshot,
+        cl: &CellLayout,
+        show_controls: bool,
+    ) {
         let state = cl.line_state(snap, self.start);
-        let (text, spans, next) = layout_line(content, state, cl);
+        let (text, spans, next) = layout_line(content, state, cl, show_controls);
         self.text = text;
         self.spans = spans;
         if self.ends_line {
