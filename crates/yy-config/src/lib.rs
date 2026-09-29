@@ -101,6 +101,9 @@ pub struct Colors {
     pub invalid_byte: Color,
     /// 制御文字
     pub control: Color,
+    /// 選択範囲の背景
+    pub selection: Color,
+    pub caret: Color,
 }
 
 impl Default for Colors {
@@ -113,6 +116,8 @@ impl Default for Colors {
             line_number_estimated: Color::rgb(0xB0, 0xB0, 0xB0),
             invalid_byte: Color::rgb(0xC0, 0x30, 0x30),
             control: Color::rgb(0x80, 0x80, 0xC0),
+            selection: Color::rgb(0xAD, 0xD6, 0xFF),
+            caret: Color::rgb(0x00, 0x00, 0x00),
         }
     }
 }

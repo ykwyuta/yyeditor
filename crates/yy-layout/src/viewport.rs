@@ -76,6 +76,42 @@ impl Viewport {
         self.clamp(snap, cfg, page_rows);
     }
 
+    /// `offset` を含む表示行が画面内（先頭から `page_rows` 行）に入るようにスクロールする。
+    /// 動かしたら `true`。
+    pub fn ensure_visible(
+        &mut self,
+        snap: &Snapshot,
+        cfg: RowConfig,
+        offset: u64,
+        page_rows: usize,
+    ) -> bool {
+        let row = row_containing(snap, cfg, offset);
+        if row < self.top {
+            self.top = row;
+            return true;
+        }
+        let mut r = self.top;
+        for _ in 0..page_rows.max(1) {
+            if r == row {
+                return false;
+            }
+            match next_row_start(snap, cfg, r) {
+                Some(n) if n <= row => r = n,
+                _ => break,
+            }
+        }
+        let mut t = row;
+        for _ in 1..page_rows.max(1) {
+            match prev_row_start(snap, cfg, t) {
+                Some(p) => t = p,
+                None => break,
+            }
+        }
+        let moved = t != self.top;
+        self.top = t;
+        moved
+    }
+
     /// 文書全体に対する位置（0.0〜1.0、バイト位置比例）。
     pub fn fraction(&self, snap: &Snapshot) -> f64 {
         if snap.is_empty() {

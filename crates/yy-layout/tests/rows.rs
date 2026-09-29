@@ -145,3 +145,25 @@ fn rows_have_decoded_text() {
     assert_eq!(texts, vec!["abc", "\\xFFdef", ""]);
     assert!(rows[0].line_start && rows[1].line_start && rows[2].line_start);
 }
+
+#[test]
+fn ensure_visible_scrolls_minimally() {
+    let mut data = Vec::new();
+    for i in 0..100 {
+        data.extend_from_slice(format!("line {i}\n").as_bytes());
+    }
+    let snap = snapshot(&data, 64);
+    let cfg = RowConfig::new(64);
+    let line = |n: u64| match snap.line_start(n, false) {
+        yy_buffer::LineLookup::Found(o) => o,
+        other => panic!("{other:?}"),
+    };
+    let mut vp = Viewport::default();
+    assert!(!vp.ensure_visible(&snap, cfg, line(9), 10));
+    assert!(vp.ensure_visible(&snap, cfg, line(10), 10));
+    assert_eq!(vp.top, line(1));
+    assert!(vp.ensure_visible(&snap, cfg, line(50) + 2, 10));
+    assert_eq!(vp.top, line(41));
+    assert!(vp.ensure_visible(&snap, cfg, line(5), 10));
+    assert_eq!(vp.top, line(5));
+}

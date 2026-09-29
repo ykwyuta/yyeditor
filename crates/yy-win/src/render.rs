@@ -16,8 +16,19 @@ use yy_layout::{Row, SpanKind};
 
 use crate::util::Context;
 
+/// IME で変換中の文字列（キャレット位置にインライン表示する）。
+pub(crate) struct Composition {
+    /// 挿入位置（文書のオフセット）
+    pub offset: u64,
+    pub text: String,
+    /// 変換中の文字列内のカーソル位置（UTF-16 単位）
+    pub cursor: usize,
+}
+
 /// 描画に必要な文書側の情報。
 pub(crate) struct Frame<'a> {
+    /// 内容の版（変わったら行レイアウトのキャッシュを捨てる）
+    pub version: u64,
     pub rows: &'a [Row],
     /// 先頭の表示行の論理行番号（0 始まり）
     pub first_line: u64,
@@ -27,6 +38,14 @@ pub(crate) struct Frame<'a> {
     pub line_digits: usize,
     pub show_line_numbers: bool,
     pub scroll_x: f32,
+    /// 空でない選択範囲（昇順）
+    pub selections: &'a [std::ops::Range<u64>],
+    /// キャレット位置（昇順）
+    pub carets: &'a [u64],
+    pub caret_visible: bool,
+    /// 上書きモード（キャレットを太く表示する）
+    pub overwrite: bool,
+    pub composition: Option<&'a Composition>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -36,13 +55,14 @@ pub(crate) struct FontMetrics {
 }
 
 struct Brushes {
-    background: ID2D1SolidColorBrush,
     foreground: ID2D1SolidColorBrush,
     gutter_background: ID2D1SolidColorBrush,
     line_number: ID2D1SolidColorBrush,
     line_number_estimated: ID2D1SolidColorBrush,
     invalid: ID2D1SolidColorBrush,
     control: ID2D1SolidColorBrush,
+    selection: ID2D1SolidColorBrush,
+    caret: ID2D1SolidColorBrush,
 }
 
 struct Target {
@@ -62,13 +82,14 @@ impl Target {
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_DEFAULT);
             let brush = |c: Color| rt.CreateSolidColorBrush(&color_f(c), None);
             let brushes = Brushes {
-                background: brush(c.background)?,
                 foreground: brush(c.foreground)?,
                 gutter_background: brush(c.gutter_background)?,
                 line_number: brush(c.line_number)?,
                 line_number_estimated: brush(c.line_number_estimated)?,
                 invalid: brush(c.invalid_byte)?,
                 control: brush(c.control)?,
+                selection: brush(c.selection)?,
+                caret: brush(c.caret)?,
             };
             Ok(Target {
                 rt,
@@ -79,9 +100,16 @@ impl Target {
     }
 }
 
-struct CachedRow {
+/// 1 行分のレイアウトと、その元の UTF-16 テキスト。
+#[derive(Clone)]
+struct RowLayout {
     layout: IDWriteTextLayout,
     width: f32,
+    wide: std::rc::Rc<[u16]>,
+}
+
+struct CachedRow {
+    row: RowLayout,
     used: bool,
 }
 
@@ -93,6 +121,8 @@ pub(crate) struct Renderer {
     number_format: IDWriteTextFormat,
     metrics: FontMetrics,
     cache: HashMap<(u64, u64), CachedRow>,
+    /// キャッシュが対応する内容の版
+    cache_version: u64,
     colors: Colors,
     font_family: String,
     font_size_pt: f32,
@@ -135,6 +165,7 @@ impl Renderer {
                 number_format,
                 metrics,
                 cache: HashMap::new(),
+                cache_version: 0,
                 colors,
                 font_family: font_family.to_owned(),
                 font_size_pt,
@@ -241,24 +272,52 @@ impl Renderer {
         Ok(())
     }
 
-    fn row_layout(&mut self, row: &Row) -> Result<(IDWriteTextLayout, f32)> {
-        let key = (row.start, row.next);
-        if let Some(c) = self.cache.get_mut(&key) {
-            c.used = true;
-            return Ok((c.layout.clone(), c.width));
+    /// 内容の版が変わっていたら行レイアウトのキャッシュを捨てる。
+    pub fn set_version(&mut self, version: u64) {
+        if version != self.cache_version {
+            self.cache.clear();
+            self.cache_version = version;
         }
-        let target = self.target.as_ref().expect("target must exist");
-        let mut wide: Vec<u16> = Vec::with_capacity(row.text.len());
+    }
+
+    /// 行のレイアウトを作る。`insert` があれば、その位置（`row.text` 内のバイト位置）に
+    /// 文字列を差し込んで下線を引く（IME の変換中文字列）。
+    fn build_layout(&self, row: &Row, insert: Option<(usize, &str)>) -> Result<RowLayout> {
+        let brushes = self.target.as_ref().map(|t| &t.brushes);
+        let mut wide: Vec<u16> = Vec::with_capacity(row.text.len() + 16);
         let mut effects: Vec<(u32, u32, &ID2D1SolidColorBrush)> = Vec::new();
+        let mut underline = None;
         for span in &row.spans {
-            let start = wide.len() as u32;
-            wide.extend(row.text[span.range.clone()].encode_utf16());
-            let len = wide.len() as u32 - start;
-            match span.kind {
-                SpanKind::Text => {}
-                SpanKind::Invalid => effects.push((start, len, &target.brushes.invalid)),
-                SpanKind::Control => effects.push((start, len, &target.brushes.control)),
+            let mut piece = |r: std::ops::Range<usize>, wide: &mut Vec<u16>| {
+                let start = wide.len() as u32;
+                wide.extend(row.text[r].encode_utf16());
+                let len = wide.len() as u32 - start;
+                if let Some(b) = brushes {
+                    match span.kind {
+                        SpanKind::Text => {}
+                        SpanKind::Invalid => effects.push((start, len, &b.invalid)),
+                        SpanKind::Control => effects.push((start, len, &b.control)),
+                    }
+                }
+            };
+            match insert {
+                Some((at, text)) if span.range.start <= at && at < span.range.end => {
+                    piece(span.range.start..at, &mut wide);
+                    let s = wide.len() as u32;
+                    wide.extend(text.encode_utf16());
+                    underline = Some((s, wide.len() as u32 - s));
+                    piece(at..span.range.end, &mut wide);
+                }
+                _ => piece(span.range.clone(), &mut wide),
             }
+        }
+        if let Some((at, text)) = insert
+            && underline.is_none()
+            && at >= row.text.len()
+        {
+            let s = wide.len() as u32;
+            wide.extend(text.encode_utf16());
+            underline = Some((s, wide.len() as u32 - s));
         }
         unsafe {
             let layout = self.dwrite.CreateTextLayout(
@@ -276,19 +335,142 @@ impl Renderer {
                     },
                 )?;
             }
+            if let Some((start, length)) = underline {
+                layout.SetUnderline(
+                    true,
+                    DWRITE_TEXT_RANGE {
+                        startPosition: start,
+                        length,
+                    },
+                )?;
+            }
             let mut m = DWRITE_TEXT_METRICS::default();
             layout.GetMetrics(&mut m)?;
-            let width = m.widthIncludingTrailingWhitespace;
+            Ok(RowLayout {
+                layout,
+                width: m.widthIncludingTrailingWhitespace,
+                wide: wide.into(),
+            })
+        }
+    }
+
+    fn row_layout(&mut self, row: &Row) -> Result<RowLayout> {
+        let key = (row.start, row.next);
+        if let Some(c) = self.cache.get_mut(&key) {
+            c.used = true;
+            return Ok(c.row.clone());
+        }
+        let rl = self.build_layout(row, None)?;
+        // 描画ターゲットがない（ブラシがない）状態で作ったレイアウトは色がないのでキャッシュしない
+        if self.target.is_some() {
             self.cache.insert(
                 key,
                 CachedRow {
-                    layout: layout.clone(),
-                    width,
+                    row: rl.clone(),
                     used: true,
                 },
             );
-            Ok((layout, width))
         }
+        Ok(rl)
+    }
+
+    /// UTF-16 テキストの先頭 `len` 文字分の幅（ヒットテストが使えない環境向けの代替）。
+    fn prefix_width(&self, wide: &[u16]) -> f32 {
+        if wide.is_empty() {
+            return 0.0;
+        }
+        unsafe {
+            let Ok(layout) = self.dwrite.CreateTextLayout(
+                wide,
+                &self.text_format,
+                LAYOUT_MAX_WIDTH,
+                self.metrics.line_height,
+            ) else {
+                return 0.0;
+            };
+            let mut m = DWRITE_TEXT_METRICS::default();
+            match layout.GetMetrics(&mut m) {
+                Ok(()) => m.widthIncludingTrailingWhitespace,
+                Err(_) => 0.0,
+            }
+        }
+    }
+
+    /// UTF-16 位置 `idx` のキャレットの x 座標。
+    fn x_at(&self, rl: &RowLayout, idx: usize) -> f32 {
+        let idx = idx.min(rl.wide.len());
+        unsafe {
+            let (mut x, mut y) = (0.0f32, 0.0f32);
+            let mut m = DWRITE_HIT_TEST_METRICS::default();
+            match rl
+                .layout
+                .HitTestTextPosition(idx as u32, false, &mut x, &mut y, &mut m)
+            {
+                Ok(()) => x,
+                // HitTestTextPosition が実装されていない環境（Wine など）では幅を測って求める
+                Err(_) => self.prefix_width(&rl.wide[..idx]),
+            }
+        }
+    }
+
+    /// x 座標に最も近い文字境界の UTF-16 位置。
+    fn index_at(&self, rl: &RowLayout, x: f32) -> usize {
+        unsafe {
+            let mut trailing = windows::core::BOOL(0);
+            let mut inside = windows::core::BOOL(0);
+            let mut m = DWRITE_HIT_TEST_METRICS::default();
+            if rl
+                .layout
+                .HitTestPoint(x, 1.0, &mut trailing, &mut inside, &mut m)
+                .is_ok()
+            {
+                return m.textPosition as usize
+                    + if trailing.as_bool() {
+                        m.length as usize
+                    } else {
+                        0
+                    };
+            }
+        }
+        // 代替: 文字境界（サロゲートの途中を除く）を二分探索する
+        let bounds: Vec<usize> = (0..=rl.wide.len())
+            .filter(|&i| i == rl.wide.len() || !(0xDC00..=0xDFFF).contains(&rl.wide[i]))
+            .collect();
+        let (mut lo, mut hi) = (0usize, bounds.len() - 1);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.prefix_width(&rl.wide[..bounds[mid]]) < x {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo > 0 {
+            let right = self.prefix_width(&rl.wide[..bounds[lo]]);
+            let left = self.prefix_width(&rl.wide[..bounds[lo - 1]]);
+            if x - left < right - x {
+                return bounds[lo - 1];
+            }
+        }
+        bounds[lo]
+    }
+
+    /// 行 `row` の中でオフセット `offset` の位置の x 座標（本文の左端からの DIP）。
+    pub fn caret_x(&mut self, row: &Row, offset: u64) -> f32 {
+        let idx = utf16_index(&row.text, row.text_index(offset));
+        match self.row_layout(row) {
+            Ok(rl) => self.x_at(&rl, idx),
+            Err(_) => 0.0,
+        }
+    }
+
+    /// 行 `row` の中で x 座標（本文の左端からの DIP）に最も近い文字境界のオフセット。
+    pub fn hit_test(&mut self, row: &Row, x: f32) -> u64 {
+        let Ok(rl) = self.row_layout(row) else {
+            return row.start;
+        };
+        let pos16 = self.index_at(&rl, x);
+        row.offset_at(utf8_index(&row.text, pos16))
     }
 
     /// 1 画面分を描画する。
@@ -348,20 +530,83 @@ impl Renderer {
     }
 
     fn draw_frame(&mut self, frame: &Frame) -> Result<bool> {
+        self.set_version(frame.version);
         for c in self.cache.values_mut() {
             c.used = false;
         }
         let lh = self.metrics.line_height;
+        let cw = self.metrics.char_width;
         let size = unsafe { self.target.as_ref().unwrap().rt.GetSize() };
         let gutter = self.gutter_width(frame.line_digits, frame.show_line_numbers);
-        let text_x = gutter + TEXT_PAD;
+        let text_x = gutter + TEXT_PAD - frame.scroll_x;
 
-        // 先にレイアウトを用意する（描画中にキャッシュを更新しないため）
+        // 先にレイアウトと装飾（選択範囲の矩形・キャレット位置）を計算する
         let mut layouts = Vec::with_capacity(frame.rows.len());
-        for row in frame.rows {
-            let (layout, w) = self.row_layout(row)?;
-            self.max_text_width = self.max_text_width.max(w);
-            layouts.push(layout);
+        let mut sel_rects: Vec<D2D_RECT_F> = Vec::new();
+        let mut caret_rects: Vec<D2D_RECT_F> = Vec::new();
+        for (i, row) in frame.rows.iter().enumerate() {
+            let y = i as f32 * lh;
+            let comp = frame
+                .composition
+                .filter(|c| row.shows_caret(c.offset))
+                .map(|c| (row.text_index(c.offset), c));
+            let rl = match comp {
+                Some((at, c)) => self.build_layout(row, Some((at, &c.text)))?,
+                None => self.row_layout(row)?,
+            };
+            self.max_text_width = self.max_text_width.max(rl.width);
+
+            // 選択範囲
+            for r in frame.selections {
+                if r.end < row.start || r.start > row.end || (r.start == row.end && !row.ends_line)
+                {
+                    continue;
+                }
+                let a = utf16_index(&row.text, row.text_index(r.start.max(row.start)));
+                let b = utf16_index(&row.text, row.text_index(r.end.min(row.end)));
+                if b > a {
+                    // 行は折り返さない 1 行のレイアウトなので、両端のキャレット位置から矩形を求める
+                    let (xa, xb) = (self.x_at(&rl, a), self.x_at(&rl, b));
+                    sel_rects.push(D2D_RECT_F {
+                        left: text_x + xa.min(xb),
+                        top: y,
+                        right: text_x + xa.max(xb),
+                        bottom: y + lh,
+                    });
+                }
+                // 改行も選択されている場合は行末に小さな矩形を描く
+                if row.ends_line && r.end > row.end && r.start <= row.end {
+                    let x = text_x + self.x_at(&rl, utf16_index(&row.text, row.text.len()));
+                    sel_rects.push(D2D_RECT_F {
+                        left: x,
+                        top: y,
+                        right: x + cw * 0.6,
+                        bottom: y + lh,
+                    });
+                }
+            }
+
+            // キャレット
+            if frame.caret_visible {
+                let width = if frame.overwrite { cw.max(2.0) } else { 2.0 };
+                for &c in frame.carets {
+                    if !row.shows_caret(c) {
+                        continue;
+                    }
+                    let mut idx = utf16_index(&row.text, row.text_index(c));
+                    if let Some((_, comp)) = comp.filter(|(_, comp)| comp.offset == c) {
+                        idx += comp.cursor;
+                    }
+                    let x = text_x + self.x_at(&rl, idx);
+                    caret_rects.push(D2D_RECT_F {
+                        left: x - 0.5,
+                        top: y + 1.0,
+                        right: x - 0.5 + width,
+                        bottom: y + lh - 1.0,
+                    });
+                }
+            }
+            layouts.push(rl.layout);
         }
         self.cache.retain(|_, c| c.used);
 
@@ -423,10 +668,13 @@ impl Renderer {
                 },
                 D2D1_ANTIALIAS_MODE_ALIASED,
             );
+            for r in &sel_rects {
+                rt.FillRectangle(r, &b.selection);
+            }
             for (i, layout) in layouts.iter().enumerate() {
                 rt.DrawTextLayout(
                     Vector2 {
-                        X: text_x - frame.scroll_x,
+                        X: text_x,
                         Y: i as f32 * lh,
                     },
                     layout,
@@ -434,8 +682,10 @@ impl Renderer {
                     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
                 );
             }
+            for r in &caret_rects {
+                rt.FillRectangle(r, &b.caret);
+            }
             rt.PopAxisAlignedClip();
-            let _ = &b.background;
             rt.EndDraw(None, None)
         };
         if let Err(e) = result {
@@ -448,6 +698,26 @@ impl Renderer {
         }
         Ok(true)
     }
+}
+
+/// UTF-8 のバイト位置を UTF-16 の位置に変換する。
+fn utf16_index(text: &str, byte_idx: usize) -> usize {
+    text[..byte_idx.min(text.len())].encode_utf16().count()
+}
+
+/// UTF-16 の位置を UTF-8 のバイト位置に変換する（サロゲートの途中は前に丸める）。
+fn utf8_index(text: &str, u16_idx: usize) -> usize {
+    let mut n = 0;
+    for (i, c) in text.char_indices() {
+        if n >= u16_idx {
+            return i;
+        }
+        n += c.len_utf16();
+        if n > u16_idx {
+            return i;
+        }
+    }
+    text.len()
 }
 
 /// 指定のフォントがインストールされていなければ、等幅の代替フォントを選ぶ。
@@ -589,12 +859,18 @@ mod tests {
         let rows = rows_from(&snap, RowConfig::default(), 0, 10);
         assert_eq!(rows.len(), 5);
         let frame = Frame {
+            version: 0,
             rows: &rows,
             first_line: 0,
             line_exact: true,
             line_digits: 1,
             show_line_numbers: true,
             scroll_x: 0.0,
+            selections: &[],
+            carets: &[],
+            caret_visible: false,
+            overwrite: false,
+            composition: None,
         };
         let (w, h) = (400, 120);
         let px = r.render_offscreen(w, h, &frame).unwrap();
@@ -623,5 +899,51 @@ mod tests {
         if let Some(path) = std::env::var_os("YY_RENDER_DUMP") {
             std::fs::write(path, crate::util::encode_bmp(w, h, &px)).unwrap();
         }
+    }
+
+    /// 選択範囲の背景とキャレットが指定の行にだけ描かれることを確認する。
+    #[test]
+    fn renders_selection_and_caret() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let colors = Colors::default();
+        let mut r = Renderer::new("Consolas", 11.0, 4, colors.clone(), 96).unwrap();
+        let snap = Snapshot::from_bytes("hello world\nsecond line\n");
+        let rows = rows_from(&snap, RowConfig::default(), 0, 10);
+        let selections = vec![std::ops::Range {
+            start: 0u64,
+            end: 5,
+        }];
+        let carets = [5u64];
+        let frame = Frame {
+            version: 0,
+            rows: &rows,
+            first_line: 0,
+            line_exact: true,
+            line_digits: 1,
+            show_line_numbers: false,
+            scroll_x: 0.0,
+            selections: &selections,
+            carets: &carets,
+            caret_visible: true,
+            overwrite: false,
+            composition: None,
+        };
+        let (w, h) = (300, 60);
+        let px = r.render_offscreen(w, h, &frame).unwrap();
+        let lh = r.metrics().line_height as u32;
+        if let Some(path) = std::env::var_os("YY_RENDER_DUMP_SELECTION") {
+            std::fs::write(path, crate::util::encode_bmp(w, h, &px)).unwrap();
+        }
+        let any_in = |y0: u32, y1: u32, c: Color| {
+            (y0..y1).any(|y| (0..w).any(|x| pixel(&px, w, x, y) == [c.r, c.g, c.b]))
+        };
+        assert!(any_in(0, lh, colors.selection), "selection on row 1");
+        assert!(
+            !any_in(lh + 1, lh * 2, colors.selection),
+            "no selection on row 2"
+        );
+        assert!(any_in(2, lh - 2, colors.caret), "caret on row 1");
     }
 }

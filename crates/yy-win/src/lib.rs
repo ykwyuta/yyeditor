@@ -14,7 +14,9 @@
 #![allow(unsafe_code)]
 
 mod app;
+mod clipboard;
 mod goto;
+mod ime;
 mod render;
 mod util;
 
@@ -137,12 +139,18 @@ pub fn render_to_bmp(
     let rows = yy_layout::rows_from(snap, rows_cfg, 0, page);
     let first = snap.line_of_offset(0);
     let frame = render::Frame {
+        version: 0,
         rows: &rows,
         first_line: first.line,
         line_exact: first.exact,
         line_digits: snap.estimated_line_count().to_string().len(),
         show_line_numbers: config.view.line_numbers,
         scroll_x: 0.0,
+        selections: &[],
+        carets: &[],
+        caret_visible: false,
+        overwrite: false,
+        composition: None,
     };
     let pixels = renderer
         .render_offscreen(width, height, &frame)
