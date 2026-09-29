@@ -3,10 +3,14 @@
 //! 文書は UTF-8 で持つため、UTF-8 以外のファイルは開くときにデコードする。
 //! 小さいファイルはその場でメモリに、大きいファイルはバックグラウンドで UTF-8 の一時ファイルに
 //! 変換してメモリマップする（変換中は先頭部分を読み取り専用で表示する）。
+//!
+//! 他のアプリケーションが書き込み中のファイル（読み取り専用で開く）は、作業用ファイルへの
+//! コピーもバックグラウンドで行う。
 
 use std::fs::OpenOptions;
 use std::io::{self, BufWriter, Write};
 use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, bounded};
@@ -177,10 +181,22 @@ enum State {
     },
 }
 
-/// バックグラウンドの変換。ドロップするとキャンセルする。
+/// 読み込む内容。
+#[derive(Clone)]
+enum Input {
+    /// メモリマップしたファイルの範囲
+    Mapped {
+        source: Arc<MmapSource>,
+        range: Range<usize>,
+    },
+    /// 書き込み共有が必要なファイル（作業用ファイルにコピーしてから、先頭 `bom_len` バイトを
+    /// 除いて読む）
+    Shared { path: PathBuf, bom_len: usize },
+}
+
+/// バックグラウンドの読み込み（コピーと変換）。ドロップするとキャンセルする。
 pub(crate) struct Loader {
-    source: Arc<MmapSource>,
-    range: Range<usize>,
+    input: Input,
     enc: Encoding,
     state: State,
 }
@@ -188,8 +204,16 @@ pub(crate) struct Loader {
 impl Loader {
     pub fn new(source: Arc<MmapSource>, range: Range<usize>, enc: Encoding) -> Loader {
         Loader {
-            source,
-            range,
+            input: Input::Mapped { source, range },
+            enc,
+            state: State::Pending,
+        }
+    }
+
+    /// 書き込み共有が必要なファイルを作業用ファイルにコピーして読み込む（UTF-8 以外なら変換する）。
+    pub fn shared(path: PathBuf, bom_len: usize, enc: Encoding) -> Loader {
+        Loader {
+            input: Input::Shared { path, bom_len },
             enc,
             state: State::Pending,
         }
@@ -201,8 +225,55 @@ impl Loader {
             return;
         }
         let (tx, rx) = bounded(1);
-        let (source, range, enc) = (self.source.clone(), self.range.clone(), self.enc);
+        let (input, enc) = (self.input.clone(), self.enc);
         let job = pool.spawn(move |ctx| {
+            let (source, range) = match input {
+                Input::Mapped { source, range } => (source, range),
+                Input::Shared { path, bom_len } => {
+                    // 進捗は、コピーが終わると変換の分に切り替わる
+                    ctx.progress
+                        .set_total(std::fs::metadata(&path).map_or(0, |m| m.len()));
+                    let copied = yy_io::copy_shared(&path, &mut |n| {
+                        ctx.progress.set_done(n);
+                        !ctx.cancel.is_cancelled()
+                    });
+                    let opened = match copied {
+                        Err(e) if yy_io::is_cancelled(&e) => return,
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
+                            notify();
+                            return;
+                        }
+                        Ok(o) => o,
+                    };
+                    let Some(source) = opened.source else {
+                        let _ = tx.send(Ok(Decoded {
+                            snapshot: Snapshot::empty(),
+                            stats: DecodeStats::default(),
+                            escapes: EscapeMode::Literal,
+                        }));
+                        notify();
+                        return;
+                    };
+                    let len = source.bytes().len();
+                    if enc == Encoding::Utf8 {
+                        // UTF-8 はコピーをそのまま使う
+                        let map: SourceRef = source;
+                        let _ = tx.send(Ok(Decoded {
+                            snapshot: Snapshot::from_source(
+                                map,
+                                bom_len.min(len) as u64..len as u64,
+                                false,
+                            ),
+                            stats: DecodeStats::default(),
+                            escapes: EscapeMode::Literal,
+                        }));
+                        notify();
+                        return;
+                    }
+                    (source, bom_len.min(len)..len)
+                }
+            };
             let path = yy_io::temp_path("decode");
             let input = &source.bytes()[range];
             ctx.progress.set_total(input.len() as u64);

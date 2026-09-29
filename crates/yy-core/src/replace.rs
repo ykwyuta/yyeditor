@@ -24,6 +24,8 @@ pub(crate) enum Outcome {
     Edits(Vec<(Range<u64>, Vec<u8>)>),
     /// 置き換えた数と、置換後の文書全体
     Rewritten(u64, Snapshot),
+    /// 改行コードを揃えた文書全体と、移したカーソルの位置（変更がなければ `None`）
+    Eol(Option<(Snapshot, u64)>),
 }
 
 /// すべて置換を実行する（その場で）。

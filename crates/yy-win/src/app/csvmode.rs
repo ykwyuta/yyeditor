@@ -224,19 +224,20 @@ impl App {
         self.measure_widths(start, page);
     }
 
-    /// カーソルのある行の先頭と、行の内容（改行を除く）。
-    fn caret_line(&self) -> (u64, Vec<u8>) {
+    /// カーソルのある行の先頭と、行の内容（改行を除く）。列を揃えない長い行（数 GB の行など。
+    /// 毎回読むと UI が止まる）なら `None`。
+    fn caret_line(&self) -> Option<(u64, Vec<u8>)> {
         let snap = self.doc.snapshot();
         let head = self.doc.selections().primary().head;
         let start = motion::line_start(snap, head);
         let end = motion::line_end(snap, start);
-        (start, snap.read(start..end))
+        (end - start <= self.rows_cfg.max_row_bytes).then(|| (start, snap.read(start..end)))
     }
 
     /// カーソルのあるフィールド。
     fn caret_cell(&self) -> Option<CaretCell> {
         let cl = self.rows_cfg.cells.clone()?;
-        let (line_start, line) = self.caret_line();
+        let (line_start, line) = self.caret_line()?;
         let head = self.doc.selections().primary().head;
         let (range, field, delim) =
             yy_layout::cells::cell_at(self.doc.snapshot(), &cl, line_start, &line, head)?;
@@ -292,9 +293,16 @@ impl App {
                     // 行の最初のフィールドなら前の行の最後のフィールド
                     None if start > 0 => {
                         let prev = motion::line_start(&snap, start - 1);
-                        let pline = snap.read(prev..motion::line_end(&snap, prev));
-                        let (pc, _) = split_line(&pline, &cl.dialect, cl.line_state(&snap, prev));
-                        prev + pc.last().map_or(0, |c| c.range.start as u64)
+                        let prev_end = motion::line_end(&snap, prev);
+                        if prev_end - prev > self.rows_cfg.max_row_bytes {
+                            // 列を揃えない長い行は読まずに行頭へ
+                            prev
+                        } else {
+                            let pline = snap.read(prev..prev_end);
+                            let (pc, _) =
+                                split_line(&pline, &cl.dialect, cl.line_state(&snap, prev));
+                            prev + pc.last().map_or(0, |c| c.range.start as u64)
+                        }
                     }
                     None => 0,
                 }

@@ -76,6 +76,8 @@ impl Default for EditorConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ViewConfig {
     pub line_numbers: bool,
+    /// 半角スペース・タブ・改行（CRLF・LF）を記号で表示する
+    pub show_whitespace: bool,
     /// 長大行を表示用に分割する単位（バイト）。02 章 3.5 参照
     pub max_row_bytes: u32,
     /// 区切り文字モードで、これより短い行は分割せずに列を揃える（バイト。04 章 4）
@@ -92,6 +94,7 @@ impl Default for ViewConfig {
     fn default() -> Self {
         ViewConfig {
             line_numbers: true,
+            show_whitespace: true,
             max_row_bytes: 1 << 20,
             csv_max_row_bytes: 16 << 20,
             csv_max_column_width: 1000,
@@ -121,6 +124,8 @@ pub struct Colors {
     pub caret: Color,
     /// カーソル位置の括弧と対応する括弧の背景
     pub bracket_match: Color,
+    /// 空白・タブ・改行の記号
+    pub whitespace: Color,
     /// シンタックスハイライトのトークンの色（`comment`・`keyword.control` など）。
     /// 細分類（`keyword.control`）がなければ親（`keyword`）の色を使う
     pub syntax: BTreeMap<String, Color>,
@@ -197,6 +202,7 @@ impl Default for Colors {
             search_match: Color::rgb(0xFF, 0xE0, 0x8A),
             caret: Color::rgb(0x00, 0x00, 0x00),
             bracket_match: Color::rgb(0xD0, 0xE8, 0xD0),
+            whitespace: Color::rgb(0xA8, 0xB4, 0xC8),
             syntax: default_syntax_colors(),
         }
     }

@@ -110,6 +110,7 @@ struct Brushes {
     search_match: ID2D1SolidColorBrush,
     caret: ID2D1SolidColorBrush,
     bracket: ID2D1SolidColorBrush,
+    whitespace: ID2D1SolidColorBrush,
     /// トークンの色（[`Colors::syntax`] の順）
     syntax: Vec<ID2D1SolidColorBrush>,
 }
@@ -141,6 +142,7 @@ impl Target {
                 search_match: brush(c.search_match)?,
                 caret: brush(c.caret)?,
                 bracket: brush(c.bracket_match)?,
+                whitespace: brush(c.whitespace)?,
                 syntax: c
                     .syntax
                     .values()
@@ -169,6 +171,29 @@ struct RowLayout {
     /// レイアウトの左端の x 座標（長い行で先頭以外からレイアウトした場合）
     x0: f32,
     long: Option<std::rc::Rc<LongInfo>>,
+    /// 空白・タブ・改行の記号（表示しない設定なら空）
+    marks: std::rc::Rc<[Mark]>,
+}
+
+/// 空白・改行の記号の種類。
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MarkKind {
+    /// 半角スペース（中点）
+    Space,
+    /// タブ（右向きの矢印）
+    Tab,
+    /// 改行 LF（下向きの矢印）
+    Lf,
+    /// 改行 CRLF（左下へ曲がる矢印）
+    CrLf,
+}
+
+/// 空白・改行の記号 1 つ（x 座標は行の先頭から。`x0..x1` がその文字の幅）。
+#[derive(Clone, Copy, Debug)]
+struct Mark {
+    kind: MarkKind,
+    x0: f32,
+    x1: f32,
 }
 
 /// この長さ（表示テキストのバイト数）を超える行は、表示中の範囲だけをレイアウトする
@@ -266,6 +291,8 @@ pub(crate) struct Renderer {
     dpi: f32,
     /// これまでに描画した行の最大幅（水平スクロールバー用）
     pub max_text_width: f32,
+    /// 空白・タブ・改行の記号を表示する
+    show_whitespace: bool,
 }
 
 const GUTTER_PAD: f32 = 8.0;
@@ -320,6 +347,7 @@ impl Renderer {
                 long_cache: HashMap::new(),
                 dpi: dpi as f32,
                 max_text_width: 0.0,
+                show_whitespace: false,
             })
         }
     }
@@ -600,6 +628,7 @@ impl Renderer {
                 wide: wide.into(),
                 x0: 0.0,
                 long: None,
+                marks: std::rc::Rc::from([]),
             })
         }
     }
@@ -614,7 +643,8 @@ impl Renderer {
             c.used = true;
             return Ok(c.row.clone());
         }
-        let rl = self.build_layout(row, None, tokens)?;
+        let mut rl = self.build_layout(row, None, tokens)?;
+        rl.marks = self.whitespace_marks(&rl, row, 0..row.text.len());
         // 描画ターゲットがない（ブラシがない）状態で作ったレイアウトは色がないのでキャッシュしない
         if self.target.is_some() {
             self.cache.insert(
@@ -657,6 +687,7 @@ impl Renderer {
         rl.x0 = (c0 - pad) as f32 * cw;
         rl.width = li.total_cols as f32 * cw;
         rl.long = Some(li);
+        rl.marks = self.whitespace_marks(&rl, row, b0..b1);
         if self.target.is_some() {
             self.cache.insert(
                 key,
@@ -667,6 +698,61 @@ impl Renderer {
             );
         }
         Ok(rl)
+    }
+
+    /// `row.text` の `window` の範囲にある半角スペース・タブと、行末の改行の記号。
+    /// 区切り文字モードの列揃えの空白など、文書の内容でない空白には付けない。
+    fn whitespace_marks(
+        &self,
+        rl: &RowLayout,
+        row: &Row,
+        window: std::ops::Range<usize>,
+    ) -> std::rc::Rc<[Mark]> {
+        if !self.show_whitespace {
+            return std::rc::Rc::from([]);
+        }
+        let mut marks = Vec::new();
+        for sp in row.spans.iter().filter(|s| s.kind == SpanKind::Text) {
+            let (a, b) = (
+                sp.range.start.max(window.start),
+                sp.range.end.min(window.end),
+            );
+            if a >= b {
+                continue;
+            }
+            for (i, c) in row.text[a..b].char_indices() {
+                let kind = match c {
+                    ' ' => MarkKind::Space,
+                    '\t' => MarkKind::Tab,
+                    _ => continue,
+                };
+                let at = a + i;
+                marks.push(Mark {
+                    kind,
+                    x0: self.row_x(rl, row, at),
+                    x1: self.row_x(rl, row, at + 1),
+                });
+            }
+        }
+        if row.ends_line && window.end >= row.text.len() {
+            let x = self.row_x(rl, row, row.text.len());
+            marks.push(Mark {
+                kind: if row.next - row.end >= 2 {
+                    MarkKind::CrLf
+                } else {
+                    MarkKind::Lf
+                },
+                x0: x,
+                x1: x + self.metrics.char_width,
+            });
+        }
+        marks.into()
+    }
+
+    /// 空白・タブ・改行の記号を表示するか。
+    pub fn set_show_whitespace(&mut self, show: bool) {
+        self.show_whitespace = show;
+        self.clear_cache();
     }
 
     /// UTF-16 テキストの先頭 `len` 文字分の幅（ヒットテストが使えない環境向けの代替）。
@@ -1163,7 +1249,7 @@ impl Renderer {
                     });
                 }
             }
-            layouts.push((rl.layout, rl.x0));
+            layouts.push((rl.layout, rl.x0, rl.marks));
         }
         self.cache.retain(|_, c| c.used);
 
@@ -1234,7 +1320,7 @@ impl Renderer {
             for r in &sel_rects {
                 rt.FillRectangle(r, &b.selection);
             }
-            for (i, (layout, x0)) in layouts.iter().enumerate() {
+            for (i, (layout, x0, marks)) in layouts.iter().enumerate() {
                 rt.DrawTextLayout(
                     Vector2 {
                         X: text_x + x0,
@@ -1244,6 +1330,9 @@ impl Renderer {
                     &b.foreground,
                     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
                 );
+                for m in marks.iter() {
+                    draw_mark(rt, &b.whitespace, m, text_x, i as f32 * lh, lh, cw);
+                }
             }
             for r in &caret_rects {
                 rt.FillRectangle(r, &b.caret);
@@ -1260,6 +1349,63 @@ impl Renderer {
             return Err(e);
         }
         Ok(true)
+    }
+}
+
+/// 空白・改行の記号を描く（`x` は行の先頭、`y` は行の上端）。
+fn draw_mark(
+    rt: &ID2D1RenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    m: &Mark,
+    x: f32,
+    y: f32,
+    lh: f32,
+    cw: f32,
+) {
+    let p = |px: f32, py: f32| Vector2 { X: px, Y: py };
+    let stroke = (cw * 0.09).clamp(1.0, 2.0);
+    let line = |a: Vector2, b: Vector2| unsafe { rt.DrawLine(a, b, brush, stroke, None) };
+    let (x0, x1) = (x + m.x0, x + m.x1);
+    let mid = y + lh * 0.5;
+    let head = (cw * 0.3).max(2.0);
+    match m.kind {
+        MarkKind::Space => {
+            let r = (cw * 0.1).clamp(1.0, 2.5);
+            unsafe {
+                rt.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: p((x0 + x1) * 0.5, mid),
+                        radiusX: r,
+                        radiusY: r,
+                    },
+                    brush,
+                );
+            }
+        }
+        MarkKind::Tab => {
+            // 右向きの矢印（タブの幅いっぱい）
+            let (a, b) = (x0 + cw * 0.15, (x1 - cw * 0.15).max(x0 + cw * 0.5));
+            line(p(a, mid), p(b, mid));
+            line(p(b - head, mid - head), p(b, mid));
+            line(p(b - head, mid + head), p(b, mid));
+        }
+        MarkKind::Lf => {
+            // 下向きの矢印
+            let cx = x0 + cw * 0.5;
+            let (top, bottom) = (y + lh * 0.25, y + lh * 0.75);
+            line(p(cx, top), p(cx, bottom));
+            line(p(cx - head, bottom - head), p(cx, bottom));
+            line(p(cx + head, bottom - head), p(cx, bottom));
+        }
+        MarkKind::CrLf => {
+            // 下から左へ曲がる矢印（↵）
+            let (right, left) = (x0 + cw * 0.8, x0 + cw * 0.15);
+            let (top, bottom) = (y + lh * 0.25, y + lh * 0.68);
+            line(p(right, top), p(right, bottom));
+            line(p(right, bottom), p(left, bottom));
+            line(p(left + head, bottom - head), p(left, bottom));
+            line(p(left + head, bottom + head), p(left, bottom));
+        }
     }
 }
 
@@ -1495,6 +1641,54 @@ mod tests {
         if let Some(path) = std::env::var_os("YY_RENDER_DUMP") {
             std::fs::write(path, crate::util::encode_bmp(w, h, &px)).unwrap();
         }
+    }
+
+    /// 空白・タブ・改行の記号は、それがある行にだけ描かれ、表示しない設定では描かれない。
+    #[test]
+    fn renders_whitespace_marks() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let colors = Colors::default();
+        let mut r = Renderer::new("Consolas", 11.0, 4, colors.clone(), 96).unwrap();
+        // 1 行目: 半角スペースと CRLF、2 行目: タブと LF、3 行目: 空白も改行もない
+        let snap = Snapshot::from_bytes("a b\r\n\tc\nxyz");
+        let rows = rows_from(&snap, &RowConfig::default(), 0, 10);
+        assert_eq!(rows.len(), 3);
+        let frame = Frame {
+            version: 0,
+            rows: &rows,
+            first_line: 0,
+            line_exact: true,
+            line_digits: 1,
+            show_line_numbers: false,
+            scroll_x: 0.0,
+            selections: &[],
+            matches: &[],
+            carets: &[],
+            caret_visible: false,
+            overwrite: false,
+            composition: None,
+            rect: &[],
+            tokens: &[],
+            brackets: &[],
+        };
+        let (w, h) = (300, 80);
+        let plain = r.render_offscreen(w, h, &frame).unwrap();
+        r.set_show_whitespace(true);
+        let marked = r.render_offscreen(w, h, &frame).unwrap();
+        let lh = r.metrics().line_height as u32;
+        let changed = |y0: u32, y1: u32| {
+            (y0..y1)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| pixel(&plain, w, x, y) != pixel(&marked, w, x, y))
+                .count()
+        };
+        assert!(changed(0, lh) > 3, "space and CRLF marks on row 1");
+        assert!(changed(lh, lh * 2) > 3, "tab and LF marks on row 2");
+        assert_eq!(changed(lh * 2, lh * 3), 0, "no marks on row 3");
+        r.set_show_whitespace(false);
+        assert_eq!(r.render_offscreen(w, h, &frame).unwrap(), plain);
     }
 
     /// 選択範囲の背景とキャレットが指定の行にだけ描かれることを確認する。

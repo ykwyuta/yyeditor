@@ -323,6 +323,49 @@ fn converts_line_endings_as_one_undo_step() {
 }
 
 #[test]
+fn converts_line_endings_in_the_background() {
+    let pool = JobPool::new(2);
+    let mut d = Document::from_text(&"line\r\n".repeat(1000));
+    d.set_replace_sync_limit(0);
+    d.set_selections(yy_core::SelectionSet::single(yy_core::Selection::caret(12)));
+    assert_eq!(
+        d.convert_eol_with(yy_core::Eol::Lf, &pool, Arc::new(|| {}))
+            .unwrap(),
+        None
+    );
+    assert!(d.is_busy());
+    while d.replace_progress().is_some() {
+        if !d.poll_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    assert!(matches!(d.take_replace_result(), Some(Ok(1))));
+    assert_eq!(d.eol(), yy_core::Eol::Lf);
+    assert_eq!(
+        d.snapshot().read(0..d.snapshot().len()),
+        "line\n".repeat(1000).as_bytes()
+    );
+    assert_eq!(d.selections().primary().head, 10);
+    // 変更がなければ 0
+    assert_eq!(
+        d.convert_eol_with(yy_core::Eol::Lf, &pool, Arc::new(|| {}))
+            .unwrap(),
+        None
+    );
+    while d.replace_progress().is_some() {
+        if !d.poll_indexing() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    assert!(matches!(d.take_replace_result(), Some(Ok(0))));
+    assert!(d.undo());
+    assert_eq!(
+        d.snapshot().read(0..d.snapshot().len()),
+        "line\r\n".repeat(1000).as_bytes()
+    );
+}
+
+#[test]
 fn raw_open_keeps_every_byte() {
     // 16 進数編集: BOM・不正なバイトも内容として読み、そのまま書き戻す
     let dir = tempfile::tempdir().unwrap();
