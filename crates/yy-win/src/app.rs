@@ -103,6 +103,8 @@ const ID_REOPEN_BASE: u16 = 600;
 const ID_STATUS: i32 = 1000;
 const ID_TABS: i32 = 1001;
 const TIMER_BLINK: usize = 1;
+/// 保存の進捗をステータスバーに表示する
+const TIMER_PROGRESS: usize = 2;
 
 /// ワーカースレッドから行数カウントの進捗を知らせるメッセージ
 const WM_APP_INDEX: u32 = WM_APP + 1;
@@ -226,6 +228,12 @@ pub(crate) struct App {
     row_cache: RefCell<RowCache>,
     /// 終わった Grep の結果（フレームで文書として開く）
     grep_done: Option<String>,
+    /// バックグラウンドで保存中の保存の手順（完了時の後処理用）
+    save_flow: Option<SaveFlow>,
+    /// 終わった保存（フレームで結果を処理する）
+    save_done: Option<(Option<SaveFlow>, yy_core::SaveDone)>,
+    /// 作業中のタブの保存を待っている・結果を処理している（その間は裏のタブを表に出さない）
+    defer_inactive_saves: u32,
     /// 前回の Grep の条件
     grep_last: crate::grepdlg::GrepRequest,
     /// ハイライトの定義の一覧（組み込み＋利用者の定義）
@@ -251,6 +259,7 @@ struct TabState {
     rect: Option<RectSelection>,
     csv: Option<CsvState>,
     pending_record_op: Option<yy_core::csv::RecordOp>,
+    save_flow: Option<SaveFlow>,
     warned_noncanonical: bool,
     status_msg: String,
     syntax: Option<SyntaxState>,
@@ -268,6 +277,7 @@ impl TabState {
             rect: None,
             csv: None,
             pending_record_op: None,
+            save_flow: None,
             warned_noncanonical: false,
             status_msg: String::new(),
             syntax: None,
@@ -660,6 +670,9 @@ impl App {
                 grep_job: None,
                 row_cache: RefCell::new(RowCache::default()),
                 grep_done: None,
+                save_flow: None,
+                save_done: None,
+                defer_inactive_saves: 0,
                 grep_last: crate::grepdlg::GrepRequest {
                     files: "*.*".into(),
                     recursive: true,
@@ -835,7 +848,11 @@ impl App {
             let h = (rc.bottom - rc.top - sh - tab_h - bar_h).max(0);
             let _ = MoveWindow(self.view, 0, tab_h + bar_h, w, h, true);
             // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗
-            let parts = [w - 850, w - 740, w - 480, w - 310, w - 250, -1].map(|x| x.max(0));
+            // 最後の -1 は「右端まで」（0 にすると進捗の欄が見えなくなる）
+            let mut parts = [w - 850, w - 740, w - 480, w - 310, w - 250, -1];
+            for x in &mut parts[..5] {
+                *x = (*x).max(0);
+            }
             SendMessageW(
                 self.status,
                 SB_SETPARTS,
@@ -978,6 +995,10 @@ impl App {
         };
         self.set_status(4, mode);
         let progress = match (self.doc.loading_progress(), self.doc.indexing_progress()) {
+            _ if self.doc.save_progress().is_some() => format!(
+                "  保存しています（Esc で中止）… {:.0}%",
+                self.doc.save_progress().unwrap_or(0.0) * 100.0
+            ),
             (Some(p), _) => format!(
                 "  文字コードを変換しています（読み取り専用）… {:.0}%",
                 p * 100.0
@@ -2240,6 +2261,7 @@ impl App {
             rect: self.rect.take(),
             csv: self.csv.take(),
             pending_record_op: self.pending_record_op.take(),
+            save_flow: self.save_flow.take(),
             warned_noncanonical: self.warned_noncanonical,
             status_msg: std::mem::take(&mut self.status_msg),
             syntax: self.syntax.take(),
@@ -2259,6 +2281,7 @@ impl App {
         self.rect = state.rect;
         self.csv = state.csv;
         self.pending_record_op = state.pending_record_op;
+        self.save_flow = state.save_flow;
         self.warned_noncanonical = state.warned_noncanonical;
         self.status_msg = state.status_msg;
         self.syntax = state.syntax;
@@ -2279,6 +2302,12 @@ impl App {
         self.after_move();
         // 非表示中に完了した行数カウント・変換を反映する。
         let _ = self.on_index_progress();
+        if self.doc.is_saving() {
+            // 非表示中に終わった保存はフレームで処理する
+            unsafe {
+                let _ = PostMessageW(Some(self.frame), WM_APP_INDEX, WPARAM(0), LPARAM(0));
+            }
+        }
     }
 
     fn switch_tab(&mut self, index: usize) {
@@ -2296,6 +2325,7 @@ impl App {
         if self.tabs.len() == 1
             && self.doc.path().is_none()
             && !self.doc.is_modified()
+            && !self.doc.is_saving()
             && self.doc.snapshot().is_empty()
         {
             self.set_document(doc);
@@ -2429,34 +2459,65 @@ impl App {
         Ok(())
     }
 
-    /// 保存する。変換できない文字があればその情報を返す（文書は変更しない）。
-    fn save_to(&mut self, target: &SaveTarget) -> std::result::Result<(), SaveFailure> {
-        let result = unsafe {
-            let old = SetCursor(LoadCursorW(None, IDC_WAIT).ok());
-            let r = self
-                .doc
-                .save_as_with(&target.path, target.encoding, target.bom);
-            SetCursor(Some(old));
-            r
+    /// バックグラウンドで保存を始める（保存中も編集できる）。終わるとフレームが
+    /// [`App::poll_save`] で結果を受け取り、[`on_save_done`] で処理する。
+    fn start_save(&mut self, flow: SaveFlow) -> std::result::Result<(), String> {
+        let n = self.notifier();
+        let t = &flow.target;
+        self.doc
+            .start_save(&t.path, t.encoding, t.bom, &self.pool, n)
+            .map_err(|e| format!("{}\n\n{e}", t.path.display()))?;
+        self.save_flow = Some(flow);
+        self.status_msg.clear();
+        self.update_status();
+        unsafe {
+            SetTimer(Some(self.view), TIMER_PROGRESS, 200, None);
+        }
+        Ok(())
+    }
+
+    /// 終わった保存を受け取って [`App::save_done`] に置く（作業中のタブ）。結果の処理（エラーの
+    /// 表示など）はフレームで行う。
+    fn poll_save(&mut self) {
+        let Some(done) = self.doc.poll_save() else {
+            return;
         };
-        match result {
-            Ok(()) => {}
-            Err(SaveError::Unmappable { ranges, total, .. }) => {
-                return Err(SaveFailure::Unmappable { ranges, total });
-            }
-            Err(e) => {
-                return Err(SaveFailure::Other(format!(
-                    "{}\n\n{e}",
-                    target.path.display()
-                )));
+        if done.result.is_ok() {
+            let n = self.notifier();
+            self.doc.maintain_indexing(&self.pool, n);
+            self.renderer.clear_cache();
+            // 拡張子が変わっていればハイライトの定義も選び直す
+            self.syntax_for_path();
+            self.update_title();
+            self.after_move();
+        }
+        self.save_done = Some((self.save_flow.take(), done));
+    }
+
+    /// 裏のタブの終わった保存を受け取る。保存できなかったタブは表に出して結果を処理する。
+    fn poll_inactive_saves(&mut self) {
+        if self.defer_inactive_saves > 0 {
+            return;
+        }
+        let mut changed = false;
+        for i in 0..self.tabs.len() {
+            let Some(tab) = self.tabs[i].as_mut() else {
+                continue;
+            };
+            let Some(done) = tab.doc.poll_save() else {
+                continue;
+            };
+            changed = true;
+            let flow = tab.save_flow.take();
+            if done.result.is_err() {
+                self.switch_tab(i);
+                self.save_done = Some((flow, done));
+                return;
             }
         }
-        let n = self.notifier();
-        self.doc.maintain_indexing(&self.pool, n);
-        self.renderer.clear_cache();
-        self.update_title();
-        self.after_move();
-        Ok(())
+        if changed {
+            self.refresh_tabs();
+        }
     }
 
     /// 行数カウント・文字コード変換の進捗を反映する。変換に失敗したらそのエラーを返す。
@@ -2551,6 +2612,10 @@ impl App {
         }
         if self.doc.replace_progress().is_some() {
             self.doc.cancel_replace();
+            return true;
+        }
+        if self.doc.is_saving() {
+            self.doc.cancel_save();
             return true;
         }
         if self.findbar.visible {
@@ -3228,7 +3293,10 @@ fn close_tab_at(hwnd: HWND, index: usize) {
     });
 }
 
+/// 作業中のタブの文書を閉じてよいか確かめる。保存中なら終わるまで待ち、変更があれば
+/// 保存するか尋ねる（保存する場合は終わるまで待つ）。
 fn confirm_discard(hwnd: HWND) -> bool {
+    wait_save();
     let Some((modified, name)) = with_app(|a| (a.doc.is_modified(), a.doc.display_name())) else {
         return false;
     };
@@ -3244,7 +3312,13 @@ fn confirm_discard(hwnd: HWND) -> bool {
         )
     };
     match r {
-        IDYES => cmd_save(hwnd, false),
+        IDYES => {
+            if !cmd_save(hwnd, false) {
+                return false;
+            }
+            wait_save();
+            with_app(|a| !a.doc.is_modified()).unwrap_or(false)
+        }
         IDNO => true,
         _ => false,
     }
@@ -3265,12 +3339,13 @@ pub(crate) struct SaveTarget {
     eol: Option<Eol>,
 }
 
-pub(crate) enum SaveFailure {
-    Other(String),
-    Unmappable {
-        ranges: Vec<std::ops::Range<u64>>,
-        total: u64,
-    },
+/// バックグラウンドの保存の手順（変換できない文字の扱いを尋ねて保存し直すための状態）。
+pub(crate) struct SaveFlow {
+    target: SaveTarget,
+    /// 似た文字への置き換えを尋ねた
+    fold_offered: bool,
+    /// 「?」などに置き換えた
+    replaced: bool,
 }
 
 fn message_box(hwnd: HWND, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
@@ -3284,10 +3359,15 @@ fn message_box(hwnd: HWND, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RE
     }
 }
 
-/// 保存する。`as_new` または名前がなければ保存先と形式を尋ねる。保存できたら `true`。
+/// 保存する。`as_new` または名前がなければ保存先と形式を尋ねる。保存はバックグラウンドで行い
+/// （結果は [`on_save_done`] で処理する）、始められたら `true`。
 fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
     if with_app(|a| a.doc.is_read_only()) == Some(true) {
         info_box(hwnd, "読み取り専用で開いたファイルは保存できません。");
+        return false;
+    }
+    if with_app(|a| a.doc.is_saving()) == Some(true) {
+        info_box(hwnd, "保存中です。終わってから、もう一度保存してください。");
         return false;
     }
     let Some((current, encoding, bom, eol, loading, noncanonical)) = with_app(|a| {
@@ -3386,78 +3466,184 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
             return false;
         }
     }
-    // 似た文字への置き換えを尋ねたか・「?」などに置き換えたか
-    let (mut fold_offered, mut replaced) = (false, false);
-    loop {
-        match with_app(|a| a.save_to(&target)) {
-            Some(Ok(())) => {
-                // 拡張子が変わっていればハイライトの定義も選び直す
-                with_app(|a| a.syntax_for_path());
-                return true;
-            }
-            Some(Err(SaveFailure::Other(msg))) => {
-                error_box(hwnd, &format!("保存できませんでした。\n{msg}"));
-                return false;
-            }
-            Some(Err(SaveFailure::Unmappable { ranges, total })) => {
-                let first = ranges[0].clone();
-                let desc = with_app(|a| a.describe_offset(&first)).unwrap_or_default();
-                let mut msg = format!(
-                    "{} 個の文字は {} で保存できません。\n最初の文字: {desc}\n\n",
-                    group_digits(total),
-                    target.encoding.name()
-                );
-                // 互換文字・半角カナなどを似た文字に置き換えられるか（03 章 4.1）
-                if !fold_offered {
-                    fold_offered = true;
-                    let foldable =
-                        with_app(|a| a.foldable(&ranges, target.encoding)).unwrap_or_default();
-                    if !foldable.is_empty() {
-                        let text = format!(
-                            "{msg}このうち {} か所は似た文字に置き換えられます\n\
-                             （① → (1)、Ⅱ → II、ｶﾞ → ガ、全角英数 → 半角 など）。\n\n\
-                             はい: 似た文字に置き換えて保存（置き換えられない文字は続けて尋ねます）\n\
-                             いいえ: 置き換えない\n\
-                             キャンセル: 保存せずに最初の文字へ移動\n\n\
-                             置き換えは「元に戻す」で取り消せます。",
-                            group_digits(foldable.len() as u64)
-                        );
-                        match message_box(hwnd, &text, MB_YESNOCANCEL | MB_ICONWARNING) {
-                            IDYES => {
-                                with_app(|a| a.replace_folded(&foldable, target.encoding));
-                                continue;
-                            }
-                            IDNO => {}
-                            _ => {
-                                with_app(|a| a.select_range(first));
-                                return false;
-                            }
-                        }
-                    }
+    begin_save(
+        hwnd,
+        SaveFlow {
+            target,
+            fold_offered: false,
+            replaced: false,
+        },
+    )
+}
+
+/// バックグラウンドで保存を始める。始められなければエラーを表示して `false`。
+fn begin_save(hwnd: HWND, flow: SaveFlow) -> bool {
+    match with_app(|a| a.start_save(flow)) {
+        Some(Ok(())) => true,
+        Some(Err(msg)) => {
+            error_box(hwnd, &format!("保存できませんでした。\n{msg}"));
+            false
+        }
+        None => false,
+    }
+}
+
+/// 保存が終わっていれば結果を処理する（[`App::save_done`]）。
+fn on_save_done(hwnd: HWND) {
+    let Some(Some((flow, done))) = with_app(|a| a.save_done.take()) else {
+        return;
+    };
+    // 尋ねている間に裏のタブが表に出ないようにする
+    with_app(|a| a.defer_inactive_saves += 1);
+    handle_save_result(hwnd, flow, done);
+    with_app(|a| {
+        a.defer_inactive_saves -= 1;
+        unsafe {
+            let _ = PostMessageW(Some(a.frame), WM_APP_INDEX, WPARAM(0), LPARAM(0));
+        }
+    });
+}
+
+/// 保存の結果を処理する: エラーを表示し、変換できない文字があれば扱いを尋ねて保存し直す。
+fn handle_save_result(hwnd: HWND, flow: Option<SaveFlow>, done: yy_core::SaveDone) {
+    let err = match done.result {
+        Ok(()) => {
+            with_app(|a| {
+                a.status_msg = "保存しました".into();
+                a.update_status();
+            });
+            return;
+        }
+        Err(e) => e,
+    };
+    let Some(mut flow) = flow else {
+        error_box(hwnd, &format!("保存できませんでした。\n{err}"));
+        return;
+    };
+    let (ranges, total) = match err {
+        SaveError::Io(e) if yy_io::is_cancelled(&e) => {
+            with_app(|a| {
+                a.status_msg = "保存を中止しました".into();
+                a.update_status();
+            });
+            return;
+        }
+        SaveError::Unmappable { ranges, total, .. } => (ranges, total),
+        e => {
+            error_box(
+                hwnd,
+                &format!(
+                    "保存できませんでした。\n{}\n\n{e}",
+                    flow.target.path.display()
+                ),
+            );
+            return;
+        }
+    };
+    // 保存中に編集していれば、見つかった範囲は今の内容と合わないので保存し直す
+    if done.edited {
+        begin_save(hwnd, flow);
+        return;
+    }
+    let target = &flow.target;
+    let first = ranges[0].clone();
+    let desc = with_app(|a| a.describe_offset(&first)).unwrap_or_default();
+    let mut msg = format!(
+        "{} 個の文字は {} で保存できません。\n最初の文字: {desc}\n\n",
+        group_digits(total),
+        target.encoding.name()
+    );
+    // 互換文字・半角カナなどを似た文字に置き換えられるか（03 章 4.1）
+    if !flow.fold_offered {
+        flow.fold_offered = true;
+        let foldable = with_app(|a| a.foldable(&ranges, target.encoding)).unwrap_or_default();
+        if !foldable.is_empty() {
+            let text = format!(
+                "{msg}このうち {} か所は似た文字に置き換えられます\n\
+                 （① → (1)、Ⅱ → II、ｶﾞ → ガ、全角英数 → 半角 など）。\n\n\
+                 はい: 似た文字に置き換えて保存（置き換えられない文字は続けて尋ねます）\n\
+                 いいえ: 置き換えない\n\
+                 キャンセル: 保存せずに最初の文字へ移動\n\n\
+                 置き換えは「元に戻す」で取り消せます。",
+                group_digits(foldable.len() as u64)
+            );
+            match message_box(hwnd, &text, MB_YESNOCANCEL | MB_ICONWARNING) {
+                IDYES => {
+                    let enc = target.encoding;
+                    with_app(|a| a.replace_folded(&foldable, enc));
+                    begin_save(hwnd, flow);
+                    return;
                 }
-                if replaced || ranges.len() as u64 != total {
-                    msg += "保存せずに最初の文字へ移動します。";
-                    message_box(hwnd, &msg, MB_OK | MB_ICONWARNING);
+                IDNO => {}
+                _ => {
                     with_app(|a| a.select_range(first));
-                    return false;
+                    return;
                 }
-                msg += "はい: 「?」に置き換えて保存\n\
-                        いいえ: 数値文字参照（&#x….;）に置き換えて保存\n\
-                        キャンセル: 保存せずに最初の文字へ移動\n\n\
-                        置き換えは「元に戻す」で取り消せます。";
-                match message_box(hwnd, &msg, MB_YESNOCANCEL | MB_ICONWARNING) {
-                    IDYES => with_app(|a| a.replace_unmappable(&ranges, false)),
-                    IDNO => with_app(|a| a.replace_unmappable(&ranges, true)),
-                    _ => {
-                        with_app(|a| a.select_range(first));
-                        return false;
-                    }
-                };
-                replaced = true;
             }
-            None => return false,
         }
     }
+    if flow.replaced || ranges.len() as u64 != total {
+        msg += "保存せずに最初の文字へ移動します。";
+        message_box(hwnd, &msg, MB_OK | MB_ICONWARNING);
+        with_app(|a| a.select_range(first));
+        return;
+    }
+    msg += "はい: 「?」に置き換えて保存\n\
+            いいえ: 数値文字参照（&#x….;）に置き換えて保存\n\
+            キャンセル: 保存せずに最初の文字へ移動\n\n\
+            置き換えは「元に戻す」で取り消せます。";
+    match message_box(hwnd, &msg, MB_YESNOCANCEL | MB_ICONWARNING) {
+        IDYES => with_app(|a| a.replace_unmappable(&ranges, false)),
+        IDNO => with_app(|a| a.replace_unmappable(&ranges, true)),
+        _ => {
+            with_app(|a| a.select_range(first));
+            return;
+        }
+    };
+    flow.replaced = true;
+    begin_save(hwnd, flow);
+}
+
+/// 作業中のタブの保存（変換できない文字の扱いを尋ねて保存し直す場合も含む）が終わるまで待つ。
+///
+/// その間もウィンドウの描画や進捗の表示は続けるが、キーボードとマウスの操作は受け付けない
+/// （Esc で保存を中止できる）。
+fn wait_save() {
+    with_app(|a| a.defer_inactive_saves += 1);
+    let busy = || with_app(|a| a.doc.is_saving() || a.save_done.is_some()).unwrap_or(false);
+    let mut msg = MSG::default();
+    while busy() {
+        unsafe {
+            match GetMessageW(&mut msg, None, 0, 0).0 {
+                -1 => return,
+                0 => {
+                    // 終了の要求はメインのメッセージループに任せる
+                    PostQuitMessage(msg.wParam.0 as i32);
+                    return;
+                }
+                _ => {}
+            }
+            let m = msg.message;
+            let input = (WM_KEYFIRST..=WM_KEYLAST).contains(&m)
+                || (WM_MOUSEFIRST..=WM_MOUSELAST).contains(&m)
+                || (WM_NCMOUSEMOVE..=WM_NCXBUTTONDBLCLK).contains(&m);
+            if input {
+                if m == WM_KEYDOWN && msg.wParam.0 == VK_ESCAPE.0 as usize {
+                    with_app(|a| a.doc.cancel_save());
+                }
+                continue;
+            }
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    // 待っている間に終わった裏のタブの保存は、今の操作が終わってから処理する
+    with_app(|a| {
+        a.defer_inactive_saves -= 1;
+        unsafe {
+            let _ = PostMessageW(Some(a.frame), WM_APP_INDEX, WPARAM(0), LPARAM(0));
+        }
+    });
 }
 
 // 保存・開くダイアログに追加するコントロールの ID
@@ -4169,6 +4355,11 @@ pub(crate) extern "system" fn frame_proc(
             if let Some(Some(msg)) = with_app(|a| a.on_index_progress()) {
                 error_box(hwnd, &msg);
             }
+            // 終わった保存（作業中のタブ、裏のタブの順）
+            with_app(|a| a.poll_save());
+            on_save_done(hwnd);
+            with_app(|a| a.poll_inactive_saves());
+            on_save_done(hwnd);
             // Grep の結果を新しい文書として開く
             if let Some(Some(text)) = with_app(|a| a.grep_done.take()) {
                 with_app(|a| {
@@ -4299,6 +4490,17 @@ pub(crate) extern "system" fn view_proc(
                 a.focused = false;
                 a.drag = None;
                 a.invalidate();
+            });
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_PROGRESS => {
+            with_app(|a| {
+                if !a.doc.is_saving() {
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), TIMER_PROGRESS);
+                    }
+                }
+                a.update_status();
             });
             LRESULT(0)
         }
