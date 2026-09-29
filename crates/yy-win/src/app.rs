@@ -98,6 +98,8 @@ const ID_FIND_INCREMENTAL: u16 = 510;
 const ID_GREP: u16 = 511;
 const ID_TAG_JUMP: u16 = 512;
 const ID_SELECT_SEARCH_MATCHES: u16 = 513;
+/// 検索バーの置換の行の表示を切り替える
+const ID_FIND_TOGGLE_REPLACE: u16 = 515;
 /// 「文字コードを指定して開き直す」の各項目（`Encoding::all()` の順）
 const ID_REOPEN_BASE: u16 = 600;
 
@@ -4095,7 +4097,17 @@ fn on_command(hwnd: HWND, id: u16) {
             }
         }
         ID_SELECT_SEARCH_MATCHES => {
-            if let Some((n, true)) = with_app(|a| a.select_search_matches()) {
+            let result = with_app(|a| {
+                let r = a.select_search_matches();
+                // 検索バーから選んだら、続けて入力できるように本文へフォーカスを移す
+                if a.findbar.has_focus() {
+                    unsafe {
+                        let _ = SetFocus(Some(a.view));
+                    }
+                }
+                r
+            });
+            if let Some((n, true)) = result {
                 info_box(
                     hwnd,
                     &format!(
@@ -4122,6 +4134,13 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_FIND_CLOSE => {
             with_app(|a| a.close_findbar());
+        }
+        ID_FIND_TOGGLE_REPLACE => {
+            with_app(|a| {
+                a.findbar.toggle_replace();
+                a.layout_children();
+                a.invalidate();
+            });
         }
         ID_FIND_CHANGED => {
             with_app(|a| {
@@ -4304,6 +4323,9 @@ pub(crate) extern "system" fn findbar_proc(
                 findbar::ID_FIND_CLOSE_BTN => Some(ID_FIND_CLOSE),
                 findbar::ID_REPLACE_BTN => Some(ID_REPLACE_ONE),
                 findbar::ID_REPLACE_ALL_BTN => Some(ID_REPLACE_ALL),
+                findbar::ID_TOGGLE_REPLACE => Some(ID_FIND_TOGGLE_REPLACE),
+                findbar::ID_SELECT_MATCHES => Some(ID_SELECT_SEARCH_MATCHES),
+                findbar::ID_GREP_BTN => Some(ID_GREP),
                 findbar::ID_CASE | findbar::ID_WORD | findbar::ID_REGEX => Some(ID_FIND_CHANGED),
                 findbar::ID_PATTERN if code == EN_CHANGE => Some(ID_FIND_INCREMENTAL),
                 _ => None,
