@@ -582,6 +582,7 @@ impl App {
                 None,
             )
             .context("CreateWindowExW(tabs)")?;
+            crate::tabclose::install(tabbar, frame);
             let status = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 STATUSCLASSNAMEW,
@@ -888,6 +889,8 @@ impl App {
                 if label.chars().count() > 32 {
                     label = label.chars().take(29).collect::<String>() + "...";
                 }
+                // 閉じるボタンの場所
+                label += crate::tabclose::LABEL_PAD;
                 let mut wide_label = wide(&label);
                 let item = TCITEMW {
                     mask: TCIF_TEXT,
@@ -3201,6 +3204,29 @@ impl App {
 // ---- コマンド（モーダル UI を伴うため状態の借用の外で実行する） ---------------
 
 /// 変更を保存するか確認する。続行してよければ `true`。
+/// タブ `index` を閉じる（閉じるボタン・中ボタンのクリック）。変更があれば確認する。
+/// 別のタブを閉じた場合は、元のタブに戻る。
+fn close_tab_at(hwnd: HWND, index: usize) {
+    let Some((active, count)) = with_app(|a| (a.active_tab, a.tabs.len())) else {
+        return;
+    };
+    if index >= count {
+        return;
+    }
+    with_app(|a| a.switch_tab(index));
+    if !confirm_discard(hwnd) {
+        with_app(|a| a.switch_tab(active));
+        return;
+    }
+    with_app(|a| {
+        a.close_tab();
+        if active != index {
+            let back = if active > index { active - 1 } else { active };
+            a.switch_tab(back);
+        }
+    });
+}
+
 fn confirm_discard(hwnd: HWND) -> bool {
     let Some((modified, name)) = with_app(|a| (a.doc.is_modified(), a.doc.display_name())) else {
         return false;
@@ -4150,6 +4176,10 @@ pub(crate) extern "system" fn frame_proc(
                     a.update_status();
                 });
             }
+            LRESULT(0)
+        }
+        crate::tabclose::WM_APP_CLOSE_TAB => {
+            close_tab_at(hwnd, wparam.0);
             LRESULT(0)
         }
         WM_DPICHANGED => {

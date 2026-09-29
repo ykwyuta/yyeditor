@@ -25,6 +25,7 @@ mod highlight;
 mod ime;
 mod recorddlg;
 mod render;
+mod tabclose;
 mod util;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
