@@ -68,6 +68,7 @@ const ID_ZOOM_OUT: u16 = 203;
 const ID_ZOOM_RESET: u16 = 204;
 const ID_LINE_NUMBERS: u16 = 205;
 const ID_CONTROL_CHARS: u16 = 206;
+const ID_WHITESPACE: u16 = 208;
 const ID_ABOUT: u16 = 301;
 const ID_UNDO: u16 = 401;
 const ID_REDO: u16 = 402;
@@ -191,6 +192,8 @@ pub(crate) struct App {
     /// ビューのクライアント領域（ピクセル）
     view_px: (u32, u32),
     show_line_numbers: bool,
+    /// 空白・タブ・改行を記号で表示する
+    show_whitespace: bool,
     index_posted: Arc<AtomicBool>,
     caret_visible: bool,
     focused: bool,
@@ -489,6 +492,7 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             ID_LINE_NUMBERS as usize,
             w!("行番号(&L)"),
         )?;
+        item(view, ID_WHITESPACE, w!("空白・タブ・改行を表示(&W)"))?;
         item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
         item(view, ID_HEX_MODE, w!("16 進数表示(&X)\tCtrl+Shift+X"))?;
         sep(view)?;
@@ -625,6 +629,7 @@ impl App {
             )?;
             let mut renderer = renderer;
             renderer.set_ambiguous_wide(config.editor.ambiguous_wide);
+            renderer.set_show_whitespace(config.view.show_whitespace);
             let ccfg = ColumnConfig {
                 tab_width: config.editor.tab_width,
                 ambiguous_wide: config.editor.ambiguous_wide,
@@ -642,6 +647,7 @@ impl App {
                 menu_syntax,
                 rows_cfg: RowConfig::new(config.view.max_row_bytes.max(256) as u64),
                 show_line_numbers: config.view.line_numbers,
+                show_whitespace: config.view.show_whitespace,
                 config,
                 pool: JobPool::new(0),
                 doc: Document::new_empty(),
@@ -1282,6 +1288,17 @@ impl App {
                 ID_CONTROL_CHARS as u32,
                 (MF_BYCOMMAND
                     | if self.rows_cfg.show_controls {
+                        MF_CHECKED
+                    } else {
+                        MF_UNCHECKED
+                    })
+                .0,
+            );
+            CheckMenuItem(
+                self.menu_view,
+                ID_WHITESPACE as u32,
+                (MF_BYCOMMAND
+                    | if self.show_whitespace {
                         MF_CHECKED
                     } else {
                         MF_UNCHECKED
@@ -4215,6 +4232,14 @@ fn on_command(hwnd: HWND, id: u16) {
                 a.show_line_numbers = !a.show_line_numbers;
                 a.update_line_number_menu();
                 a.after_scroll();
+            });
+        }
+        ID_WHITESPACE => {
+            with_app(|a| {
+                a.show_whitespace = !a.show_whitespace;
+                a.renderer.set_show_whitespace(a.show_whitespace);
+                a.update_line_number_menu();
+                a.invalidate();
             });
         }
         ID_CONTROL_CHARS => {
