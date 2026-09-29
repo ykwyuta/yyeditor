@@ -1,0 +1,25 @@
+name = "バッチファイル"
+extensions = ["bat", "cmd"]
+aliases = ["bat", "cmd"]
+line_comment = "rem"
+
+[keywords]
+case_sensitive = false
+keyword = ["if", "else", "for", "in", "do", "goto", "call", "exit", "setlocal", "endlocal", "set", "echo", "not", "exist", "defined", "errorlevel", "equ", "neq", "lss", "leq", "gtr", "geq", "shift", "pause", "cd", "pushd", "popd", "start"]
+constant = ["on", "off", "nul", "con"]
+[[context.main]]
+match = '(?i)^\s*@?(?:rem\b|::).*$'
+token = "comment"
+[[context.main]]
+match = '^\s*:[A-Za-z_]\w*'
+token = "label"
+[[context.main]]
+begin = '"'
+end = '"|$'
+token = "string"
+[[context.main]]
+match = '%[^%\s]+%|%~?[0-9*]|![^!\s]+!|%%~?[A-Za-z]'
+token = "variable"
+[[context.main]]
+match = '^\s*@'
+token = "operator"

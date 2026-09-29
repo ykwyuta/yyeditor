@@ -40,12 +40,14 @@ use yy_layout::{
 };
 
 mod csvmode;
+mod syntaxmode;
 
 use crate::findbar::{self, FindBar};
 use crate::render::{Composition, Frame, RectPaint, Renderer};
 use crate::util::{Context, error_box, group_digits, human_size, info_box, wide};
 use crate::{FRAME_CLASS, VIEW_CLASS, clipboard, default_proc, hiword, ime, loword};
 use csvmode::*;
+use syntaxmode::*;
 
 // メニュー・アクセラレータのコマンド ID
 const ID_OPEN: u16 = 101;
@@ -172,6 +174,8 @@ pub(crate) struct App {
     menu_edit: HMENU,
     menu_view: HMENU,
     menu_csv: HMENU,
+    /// 「ハイライト」の子メニュー
+    menu_syntax: HMENU,
     config: Config,
     rows_cfg: RowConfig,
     pool: JobPool,
@@ -222,6 +226,14 @@ pub(crate) struct App {
     grep_done: Option<String>,
     /// 前回の Grep の条件
     grep_last: crate::grepdlg::GrepRequest,
+    /// ハイライトの定義の一覧（組み込み＋利用者の定義）
+    syntaxes: yy_core::syntax::Registry,
+    /// 文書のハイライト（なければ色を付けない）
+    syntax: Option<SyntaxState>,
+    /// 利用者が「なし」を選んだ（ファイル種類から選び直さない）
+    syntax_off: bool,
+    /// 括弧の対応（（表示の版, キャレット位置）, 結果）
+    bracket_cache: Option<BracketCache>,
 }
 
 /// 非表示タブの文書と表示位置。検索条件と表示設定はウィンドウ全体で共有する。
@@ -235,6 +247,8 @@ struct TabState {
     pending_record_op: Option<yy_core::csv::RecordOp>,
     warned_noncanonical: bool,
     status_msg: String,
+    syntax: Option<SyntaxState>,
+    syntax_off: bool,
 }
 
 impl TabState {
@@ -249,6 +263,8 @@ impl TabState {
             pending_record_op: None,
             warned_noncanonical: false,
             status_msg: String::new(),
+            syntax: None,
+            syntax_off: false,
         }
     }
 }
@@ -339,6 +355,9 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
             ID_CARETS_AT_LINE_ENDS,
         ),
         (ctrl, b'G' as u16, ID_GOTO),
+        (ctrl, VK_OEM_2.0, ID_TOGGLE_COMMENT),
+        (ctrl, VK_DIVIDE.0, ID_TOGGLE_COMMENT),
+        (ctrl, VK_OEM_6.0, ID_GOTO_BRACKET),
         (ctrl, b'F' as u16, ID_FIND),
         (ctrl, b'H' as u16, ID_REPLACE),
         (FVIRTKEY, VK_F3.0, ID_FIND_NEXT),
@@ -430,6 +449,8 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         sep(edit)?;
         item(edit, ID_RECT_MODE, w!("矩形選択モード(&B)"))?;
         item(edit, ID_RECT_TO_CARETS, w!("矩形選択をカーソルに変換"))?;
+        sep(edit)?;
+        item(edit, ID_TOGGLE_COMMENT, w!("コメント化 / 解除(&M)\tCtrl+/"))?;
 
         let view = CreatePopupMenu()?;
         item(view, ID_GOTO, w!("行へ移動(&G)...\tCtrl+G"))?;
@@ -461,6 +482,11 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             w!("ファイルから検索 (Grep)(&G)...\tCtrl+Shift+F"),
         )?;
         item(search, ID_TAG_JUMP, w!("タグジャンプ(&J)\tF12"))?;
+        item(
+            search,
+            ID_GOTO_BRACKET,
+            w!("対応する括弧へ移動(&B)\tCtrl+]"),
+        )?;
 
         let help = CreatePopupMenu()?;
         item(help, ID_ABOUT, w!("バージョン情報(&A)"))?;
@@ -488,11 +514,18 @@ impl App {
     ) -> Result<HWND> {
         let (config, config_error) = Config::load();
         // 外部の対応表（%APPDATA%\yyeditor\mappings\*.map）
-        let mapping_errors = yy_config::config_dir()
+        let mut mapping_errors = yy_config::config_dir()
             .map(|d| yy_encoding::load_mappings(&d.join("mappings")))
             .unwrap_or_default();
+        // ハイライトの定義（%APPDATA%\yyeditor\syntax\*.toml で追加・置き換え）
+        let mut syntaxes = yy_core::syntax::Registry::builtin();
+        if let Some(d) = yy_config::config_dir() {
+            mapping_errors.extend(syntaxes.load_dir(&d.join("syntax")));
+        }
         unsafe {
             let (menu, menu_edit, menu_view, menu_csv) = create_menu().context("create_menu")?;
+            let menu_syntax =
+                append_syntax_menu(menu_view, &syntaxes.list()).context("create_menu")?;
             let frame = CreateWindowExW(
                 WS_EX_ACCEPTFILES,
                 FRAME_CLASS,
@@ -580,6 +613,7 @@ impl App {
                 menu_edit,
                 menu_view,
                 menu_csv,
+                menu_syntax,
                 rows_cfg: RowConfig::new(config.view.max_row_bytes.max(256) as u64),
                 show_line_numbers: config.view.line_numbers,
                 config,
@@ -619,11 +653,16 @@ impl App {
                     recursive: true,
                     ..Default::default()
                 },
+                syntaxes,
+                syntax: None,
+                syntax_off: false,
+                bracket_cache: None,
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
             with_app(|a| {
                 a.refresh_tabs();
                 a.update_line_number_menu();
+                a.update_syntax_menu();
                 a.layout_children();
                 a.update_title();
                 a.update_status();
@@ -640,7 +679,7 @@ impl App {
                 error_box(
                     frame,
                     &format!(
-                        "対応表を読み込めませんでした。\n\n{}",
+                        "対応表・ハイライトの定義を読み込めませんでした。\n\n{}",
                         mapping_errors.join("\n")
                     ),
                 );
@@ -757,7 +796,7 @@ impl App {
             let h = (rc.bottom - rc.top - sh - tab_h - bar_h).max(0);
             let _ = MoveWindow(self.view, 0, tab_h + bar_h, w, h, true);
             // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗
-            let parts = [w - 800, w - 680, w - 380, w - 310, w - 250, -1].map(|x| x.max(0));
+            let parts = [w - 960, w - 840, w - 540, w - 310, w - 250, -1].map(|x| x.max(0));
             SendMessageW(
                 self.status,
                 SB_SETPARTS,
@@ -875,7 +914,13 @@ impl App {
             enc += &format!(" / {}", records.label());
         }
         self.set_status(2, &format!("  {enc}"));
-        self.set_status(3, &format!("  {}", self.doc.eol().label()));
+        let syntax = self
+            .syntax
+            .as_ref()
+            .filter(|_| self.csv.is_none())
+            .map(|s| format!("  {}", s.view.syntax().name))
+            .unwrap_or_default();
+        self.set_status(3, &format!("  {}{syntax}", self.doc.eol().label()));
         let mode = match (self.overwrite, self.rect_mode) {
             (false, false) => "  挿入",
             (true, false) => "  上書き",
@@ -1219,6 +1264,7 @@ impl App {
     fn after_edit(&mut self) {
         self.select_job = None;
         self.sync_csv();
+        self.sync_syntax();
         if !self.doc.snapshot().is_fully_indexed() {
             let n = self.notifier();
             self.doc.maintain_indexing(&self.pool, n);
@@ -1981,9 +2027,11 @@ impl App {
         unsafe {
             let mut ps = PAINTSTRUCT::default();
             BeginPaint(self.view, &mut ps);
-            let snap = self.doc.snapshot();
             let page = self.page_rows();
             let rows = self.cached_rows(self.vp.top, page + 1);
+            let tokens = self.visible_tokens(&rows);
+            let brackets = self.caret_brackets();
+            let snap = self.doc.snapshot();
             let first = snap.line_of_offset(self.vp.top);
             // 表示範囲に関係する選択・キャレットだけを渡す
             let (lo, hi) = (
@@ -2011,7 +2059,7 @@ impl App {
                 _ => Vec::new(),
             };
             let frame = Frame {
-                version: self.doc.version(),
+                version: self.paint_version(),
                 rows: &rows,
                 first_line: first.line,
                 line_exact: first.exact,
@@ -2025,6 +2073,8 @@ impl App {
                 overwrite: self.overwrite,
                 composition: self.composition.as_ref(),
                 rect: &rect_paints,
+                tokens: &tokens,
+                brackets: &brackets,
             };
             let before = self.renderer.max_text_width;
             let result = self
@@ -2074,6 +2124,10 @@ impl App {
         self.rows_cfg.cells = None;
         self.update_csv_menu();
         self.csv_mode_for_path();
+        self.syntax = None;
+        self.syntax_off = false;
+        self.bracket_cache = None;
+        self.syntax_for_path();
         let n = self.notifier();
         self.doc.start_indexing(&self.pool, n);
         self.vp = Viewport::default();
@@ -2094,6 +2148,8 @@ impl App {
             pending_record_op: self.pending_record_op.take(),
             warned_noncanonical: self.warned_noncanonical,
             status_msg: std::mem::take(&mut self.status_msg),
+            syntax: self.syntax.take(),
+            syntax_off: self.syntax_off,
         }
     }
 
@@ -2110,6 +2166,9 @@ impl App {
         self.pending_record_op = state.pending_record_op;
         self.warned_noncanonical = state.warned_noncanonical;
         self.status_msg = state.status_msg;
+        self.syntax = state.syntax;
+        self.syntax_off = state.syntax_off;
+        self.bracket_cache = None;
         self.find_job = None;
         self.select_job = None;
         self.count_job = None;
@@ -2117,6 +2176,7 @@ impl App {
         self.row_cache.borrow_mut().rows.clear();
         self.rebuild_cells();
         self.update_csv_menu();
+        self.update_syntax_menu();
         self.renderer.clear_cache();
         self.update_title();
         self.after_move();
@@ -2150,6 +2210,7 @@ impl App {
         let n = self.notifier();
         self.doc.start_indexing(&self.pool, n);
         self.csv_mode_for_path();
+        self.syntax_for_path();
         self.update_title();
     }
 
@@ -2267,6 +2328,7 @@ impl App {
         if self.csv.is_some() {
             self.poll_csv();
         }
+        self.poll_syntax();
         let was_replacing = self.doc.replace_progress().is_some();
         let was_loading = self.doc.is_loading();
         if self.doc.poll_indexing() {
@@ -2288,6 +2350,8 @@ impl App {
             if was_loading && !self.doc.is_loading() {
                 // 変換が終わって内容を差し替えた
                 self.sync_csv();
+                self.syntax_for_path();
+                self.sync_syntax();
                 self.renderer.clear_cache();
                 self.update_title();
                 if let Some(e) = self.doc.load_error() {
@@ -3165,7 +3229,11 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
     let (mut fold_offered, mut replaced) = (false, false);
     loop {
         match with_app(|a| a.save_to(&target)) {
-            Some(Ok(())) => return true,
+            Some(Ok(())) => {
+                // 拡張子が変わっていればハイライトの定義も選び直す
+                with_app(|a| a.syntax_for_path());
+                return true;
+            }
             Some(Err(SaveFailure::Other(msg))) => {
                 error_box(hwnd, &format!("保存できませんでした。\n{msg}"));
                 return false;
@@ -3478,6 +3546,15 @@ fn on_command(hwnd: HWND, id: u16) {
                 };
                 a.switch_tab(next);
             });
+        }
+        ID_TOGGLE_COMMENT => {
+            with_app(|a| a.toggle_comment());
+        }
+        ID_GOTO_BRACKET => {
+            with_app(|a| a.goto_bracket());
+        }
+        id if (ID_SYNTAX_NONE..ID_SYNTAX_BASE + 150).contains(&id) => {
+            with_app(|a| a.choose_syntax(id));
         }
         ID_DIFF => {
             let Some((count, active)) = with_app(|a| (a.tabs.len(), a.active_tab)) else {

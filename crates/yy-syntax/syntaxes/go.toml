@@ -1,0 +1,35 @@
+name = "Go"
+extensions = ["go"]
+line_comment = "//"
+block_comment = ["/*", "*/"]
+
+[keywords]
+keyword = ["break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough", "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range", "return", "select", "struct", "switch", "type", "var"]
+type = ["bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "any"]
+constant = ["nil", "true", "false", "iota"]
+builtin = ["append", "cap", "close", "complex", "copy", "delete", "imag", "len", "make", "new", "panic", "print", "println", "real", "recover", "min", "max", "clear"]
+[[context.main]]
+match = '//.*$'
+token = "comment"
+[[context.main]]
+begin = '/\*'
+end = '\*/'
+token = "comment"
+[[context.main]]
+begin = '`'
+end = '`'
+token = "string"
+[[context.main]]
+begin = '"'
+end = '"|$'
+skip = '\\.'
+token = "string"
+[[context.main]]
+match = ''''(?:\\.|[^'\\])+''''
+token = "string"
+[[context.main]]
+match = '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?)[a-zA-Z0-9]*\b'
+token = "number"
+[[context.main]]
+match = '\b([\p{L}_][\p{L}\p{N}_]*)\s*\('
+captures = { 1 = "function" }

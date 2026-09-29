@@ -1,0 +1,62 @@
+name = "JCL"
+extensions = ["jcl", "jcllib", "proc"]
+word = '[A-Za-z@#$][A-Za-z0-9@#$]*'
+sync = '^'
+
+[keywords]
+case_sensitive = false
+keyword = ["JOB", "EXEC", "DD", "PROC", "PEND", "SET", "IF", "THEN", "ELSE", "ENDIF", "INCLUDE", "JCLLIB", "OUTPUT", "CNTL", "ENDCNTL", "COMMAND", "EXPORT", "JOBGROUP", "SCHEDULE", "XMIT"]
+constant = ["SHR", "OLD", "NEW", "MOD", "CATLG", "DELETE", "KEEP", "PASS", "UNCATLG", "DUMMY", "YES", "NO"]
+
+# //* はコメント行
+[[columns]]
+range = [1, 3]
+match = '//\*'
+line_token = "comment"
+
+# /* は区切り文、// で始まらない行は入力データ
+[[columns]]
+range = [1, 2]
+match = '/\*'
+line_token = "preprocessor"
+
+[[columns]]
+range = [1, 2]
+match = '[^/]|/[^/]|.$'
+line_token = "data"
+
+[[columns]]
+range = [1, 71]
+context = "main"
+
+# 72 桁: 継続文字、73〜80 桁: 一連番号
+[[columns]]
+range = [72, 72]
+token = "operator"
+
+[[columns]]
+range = [73, 80]
+token = "comment"
+
+[[context.main]]
+match = '^//([A-Za-z@#$][A-Za-z0-9@#$.]{0,16})?'
+token = "punctuation"
+captures = { 1 = "label" }
+
+[[context.main]]
+begin = "'"
+end = "'|$"
+skip = "''"
+token = "string"
+
+[[context.main]]
+match = '\b([A-Za-z][A-Za-z0-9]*)='
+captures = { 1 = "property" }
+
+[[context.main]]
+match = '&&?[A-Za-z@#$][A-Za-z0-9@#$]*\.?'
+token = "variable"
+
+[[context.main]]
+match = '\b[0-9]+\b'
+token = "number"

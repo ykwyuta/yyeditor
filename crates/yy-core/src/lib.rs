@@ -12,6 +12,7 @@ mod indexer;
 pub mod motion;
 mod replace;
 mod selection;
+pub mod syntax;
 mod transcode;
 
 use std::collections::HashMap;

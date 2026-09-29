@@ -1,0 +1,36 @@
+name = "COBOL（自由形式）"
+extensions = ["cobf"]
+aliases = ["cobol-free-format"]
+line_comment = "*>"
+word = '[A-Za-z0-9][A-Za-z0-9-]*'
+sync = '^'
+
+[keywords]
+case_sensitive = false
+keyword = ["accept", "access", "add", "advancing", "after", "all", "alphabetic", "alphanumeric", "also", "alter", "and", "any", "are", "area", "areas", "ascending", "assign", "at", "author", "before", "binary", "blank", "block", "bottom", "by", "call", "cancel", "cd", "character", "characters", "class", "close", "code", "collating", "comma", "common", "communication", "comp", "comp-1", "comp-2", "comp-3", "comp-4", "comp-5", "computational", "compute", "configuration", "contains", "content", "continue", "control", "copy", "corr", "corresponding", "count", "currency", "data", "date-compiled", "date-written", "day", "day-of-week", "de", "debugging", "decimal-point", "declaratives", "delete", "delimited", "delimiter", "depending", "descending", "display", "divide", "division", "down", "duplicates", "dynamic", "else", "end", "end-add", "end-call", "end-compute", "end-delete", "end-divide", "end-evaluate", "end-if", "end-multiply", "end-of-page", "end-perform", "end-read", "end-return", "end-rewrite", "end-search", "end-start", "end-string", "end-subtract", "end-unstring", "end-write", "entry", "environment", "equal", "error", "evaluate", "exception", "exit", "extend", "external", "false", "fd", "file", "file-control", "filler", "first", "for", "from", "function", "giving", "global", "go", "goback", "greater", "high-value", "high-values", "i-o", "i-o-control", "identification", "if", "in", "index", "indexed", "initial", "initialize", "input", "input-output", "inspect", "installation", "into", "invalid", "is", "just", "justified", "key", "label", "leading", "less", "linkage", "local-storage", "lock", "low-value", "low-values", "memory", "merge", "mode", "move", "multiply", "native", "negative", "next", "no", "not", "numeric", "object-computer", "occurs", "of", "off", "omitted", "on", "open", "optional", "or", "order", "organization", "other", "output", "overflow", "packed-decimal", "padding", "page", "perform", "pic", "picture", "pointer", "positive", "procedure", "proceed", "program", "program-id", "quote", "quotes", "random", "read", "record", "records", "redefines", "reference", "relative", "release", "remainder", "renames", "replace", "replacing", "return", "returning", "rewrite", "rounded", "run", "same", "sd", "search", "section", "security", "select", "sentence", "separate", "sequence", "sequential", "set", "sign", "size", "sort", "sort-merge", "source-computer", "space", "spaces", "special-names", "standard", "start", "status", "stop", "string", "subtract", "sync", "synchronized", "tallying", "test", "than", "then", "through", "thru", "time", "times", "to", "top", "trailing", "true", "unstring", "until", "up", "upon", "usage", "use", "using", "value", "values", "varying", "when", "with", "working-storage", "write", "zero", "zeros", "zeroes", "exec", "end-exec", "sql", "cics"]
+
+[[context.main]]
+match = '\*>.*$'
+token = "comment"
+
+[[context.main]]
+match = '^\s*\*.*$'
+token = "comment"
+
+[[context.main]]
+begin = '"'
+end = '"|$'
+token = "string"
+
+[[context.main]]
+begin = "'"
+end = "'|$"
+token = "string"
+
+[[context.main]]
+match = '(?i)\b(pic|picture)\s+(?:is\s+)?(\S+)'
+captures = { 1 = "keyword", 2 = "type" }
+
+[[context.main]]
+match = '[+-]?\b[0-9]+(?:\.[0-9]+)?\b'
+token = "number"

@@ -1,0 +1,27 @@
+name = "Visual Basic"
+extensions = ["vb", "bas", "cls", "frm", "vbs", "vba"]
+aliases = ["vba", "vbscript"]
+line_comment = "'"
+
+[keywords]
+case_sensitive = false
+keyword = ["addhandler", "addressof", "alias", "and", "andalso", "as", "byref", "byval", "call", "case", "catch", "class", "const", "continue", "declare", "default", "delegate", "dim", "do", "each", "else", "elseif", "end", "enum", "erase", "error", "event", "exit", "finally", "for", "friend", "function", "get", "global", "gosub", "goto", "handles", "if", "implements", "imports", "in", "inherits", "interface", "is", "isnot", "let", "lib", "like", "loop", "me", "mod", "module", "mustinherit", "mustoverride", "mybase", "myclass", "namespace", "new", "next", "not", "of", "on", "option", "optional", "or", "orelse", "overloads", "overridable", "overrides", "paramarray", "partial", "private", "property", "protected", "public", "raiseevent", "readonly", "redim", "rem", "removehandler", "resume", "return", "select", "set", "shadows", "shared", "static", "step", "stop", "structure", "sub", "synclock", "then", "throw", "to", "try", "typeof", "until", "using", "when", "while", "with", "withevents", "writeonly", "xor"]
+type = ["boolean", "byte", "char", "date", "decimal", "double", "integer", "long", "object", "sbyte", "short", "single", "string", "uinteger", "ulong", "ushort", "variant"]
+constant = ["nothing", "true", "false", "empty", "null"]
+[[context.main]]
+match = ''''.*$'''
+token = "comment"
+[[context.main]]
+match = '(?i)^\s*rem\b.*$'
+token = "comment"
+[[context.main]]
+begin = '"'
+end = '"|$'
+skip = '""'
+token = "string"
+[[context.main]]
+match = '^\s*#\w+'
+token = "preprocessor"
+[[context.main]]
+match = '&[hH][0-9a-fA-F]+|\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?)[a-zA-Z0-9]*\b'
+token = "number"

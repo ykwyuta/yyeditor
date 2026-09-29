@@ -1,0 +1,41 @@
+name = "Markdown"
+extensions = ["md", "markdown", "mkd", "mdx"]
+aliases = ["md"]
+block_comment = ["<!--", "-->"]
+
+[[context.main]]
+begin = '^\s*(?:```|~~~)'
+end = '^\s*(?:```|~~~)'
+token = "code"
+line_start = true
+[[context.main]]
+begin = '<!--'
+end = '-->'
+token = "comment"
+[[context.main]]
+match = '^#{1,6}\s.*$'
+token = "heading"
+[[context.main]]
+match = '^\s*(?:[-*+]|[0-9]+\.)\s'
+token = "keyword"
+[[context.main]]
+match = '^\s*>.*$'
+token = "comment"
+[[context.main]]
+match = '^\s*(?:-{3,}|\*{3,}|_{3,})\s*$'
+token = "keyword"
+[[context.main]]
+match = '`[^`]+`'
+token = "code"
+[[context.main]]
+match = '\*\*[^*]+\*\*|__[^_]+__'
+token = "strong"
+[[context.main]]
+match = '\*[^*\s][^*]*\*|\b_[^_]+_\b'
+token = "emphasis"
+[[context.main]]
+match = '!?\[([^\]]*)\]\(([^)]*)\)'
+captures = { 1 = "link", 2 = "string" }
+[[context.main]]
+match = '<https?://[^>]+>|https?://\S+'
+token = "link"

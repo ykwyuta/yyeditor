@@ -1,0 +1,34 @@
+name = "SQL"
+extensions = ["sql", "ddl", "dml", "psql", "pls", "pks", "pkb"]
+line_comment = "--"
+block_comment = ["/*", "*/"]
+
+[keywords]
+case_sensitive = false
+keyword = ["select", "from", "where", "and", "or", "not", "in", "is", "null", "like", "between", "exists", "insert", "into", "values", "update", "set", "delete", "create", "alter", "drop", "table", "view", "index", "sequence", "trigger", "procedure", "function", "package", "body", "begin", "end", "declare", "cursor", "return", "returns", "as", "on", "join", "inner", "left", "right", "outer", "full", "cross", "natural", "using", "group", "by", "order", "having", "limit", "offset", "union", "all", "distinct", "case", "when", "then", "else", "if", "loop", "while", "for", "commit", "rollback", "savepoint", "grant", "revoke", "primary", "key", "foreign", "references", "unique", "check", "default", "constraint", "with", "recursive", "over", "partition", "merge", "matched", "exec", "execute", "truncate"]
+type = ["int", "integer", "bigint", "smallint", "tinyint", "decimal", "numeric", "number", "float", "real", "double", "varchar", "varchar2", "nvarchar", "char", "nchar", "text", "clob", "blob", "date", "time", "timestamp", "datetime", "boolean", "bit", "serial"]
+constant = ["true", "false", "current_date", "current_timestamp", "sysdate"]
+builtin = ["count", "sum", "avg", "min", "max", "coalesce", "nvl", "cast", "convert", "substr", "substring", "trim", "upper", "lower", "length", "round", "to_char", "to_date"]
+[[context.main]]
+match = '--.*$'
+token = "comment"
+[[context.main]]
+begin = '/\*'
+end = '\*/'
+token = "comment"
+[[context.main]]
+begin = ''''''''
+end = ''''''''
+skip = ''''''''
+token = "string"
+[[context.main]]
+begin = '"'
+end = '"'
+skip = '""'
+token = "variable"
+[[context.main]]
+match = '[:@][A-Za-z_]\w*'
+token = "variable"
+[[context.main]]
+match = '\b[0-9]+(?:\.[0-9]+)?\b'
+token = "number"

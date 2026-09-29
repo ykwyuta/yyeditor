@@ -21,6 +21,7 @@ mod findbar;
 mod font;
 mod goto;
 mod grepdlg;
+mod highlight;
 mod ime;
 mod recorddlg;
 mod render;
@@ -190,6 +191,32 @@ pub fn render_to_bmp(
     let page = (height as f32 / renderer.metrics().line_height).ceil() as usize;
     let rows = yy_layout::rows_from(snap, &rows_cfg, 0, page);
     let first = snap.line_of_offset(0);
+    // ファイル種類のハイライト（設定のファイル種類 → 判定）
+    let mut syntaxes = yy_syntax::Registry::builtin();
+    if let Some(d) = yy_config::config_dir() {
+        let _ = syntaxes.load_dir(&d.join("syntax"));
+    }
+    let configured = input
+        .extension()
+        .and_then(|e| config.filetype_for_extension(&e.to_string_lossy()))
+        .and_then(|(_, ft)| ft.syntax.clone());
+    let id =
+        configured.or_else(|| syntaxes.detect(Some(input), &snap.read(0..snap.len().min(4096))));
+    let tokens = match id
+        .as_deref()
+        .filter(|i| *i != "none")
+        .map(|i| syntaxes.get(i))
+    {
+        Some(Ok(s)) => {
+            let mut idx = yy_syntax::SyntaxIndex::new(s.clone());
+            idx.extend(snap, u64::MAX);
+            let until = rows.last().map_or(1, |r| r.next.max(1));
+            let (lines, _) = idx.highlight_lines(snap, 0, until);
+            let palette = highlight::token_palette(&s, &config.colors);
+            highlight::row_tokens(&rows, &lines, &palette)
+        }
+        _ => Vec::new(),
+    };
     let frame = render::Frame {
         version: 0,
         rows: &rows,
@@ -205,6 +232,8 @@ pub fn render_to_bmp(
         overwrite: false,
         composition: None,
         rect: &[],
+        tokens: &tokens,
+        brackets: &[],
     };
     let pixels = renderer
         .render_offscreen(width, height, &frame)

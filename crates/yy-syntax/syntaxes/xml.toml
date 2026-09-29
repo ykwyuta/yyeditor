@@ -1,0 +1,36 @@
+name = "XML"
+extensions = ["xml", "xsd", "xsl", "xslt", "svg", "plist", "config", "csproj", "vbproj", "props", "targets", "resx", "xaml", "wsdl", "pom"]
+first_line = '^\s*<\?xml'
+block_comment = ["<!--", "-->"]
+
+[[context.main]]
+begin = '<!--'
+end = '-->'
+token = "comment"
+[[context.main]]
+begin = '<!\[CDATA\['
+end = '\]\]>'
+token = "string"
+[[context.main]]
+match = '<\?[^?]*\?>|<![A-Z][^>]*>'
+token = "preprocessor"
+[[context.main]]
+begin = '(</?)([A-Za-z_][\w:.-]*)'
+end = '/?>'
+token = "punctuation"
+captures = { 2 = "tag" }
+contains = "attrs"
+[[context.main]]
+match = '&[A-Za-z0-9#]+;'
+token = "escape"
+[[context.attrs]]
+match = '[A-Za-z_:][\w:.-]*'
+token = "attribute"
+[[context.attrs]]
+begin = '"'
+end = '"'
+token = "string"
+[[context.attrs]]
+begin = ''''''''
+end = ''''''''
+token = "string"

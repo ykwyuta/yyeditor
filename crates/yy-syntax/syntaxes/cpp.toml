@@ -1,0 +1,38 @@
+name = "C++"
+extensions = ["cpp", "cc", "cxx", "hpp", "hh", "hxx", "ino"]
+aliases = ["c++", "cxx"]
+line_comment = "//"
+block_comment = ["/*", "*/"]
+
+[keywords]
+keyword = ["if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "goto", "sizeof", "typedef", "struct", "union", "enum", "extern", "static", "const", "volatile", "register", "inline", "class", "public", "private", "protected", "virtual", "override", "final", "friend", "template", "typename", "namespace", "using", "new", "delete", "this", "operator", "throw", "try", "catch", "noexcept", "constexpr", "consteval", "constinit", "decltype", "explicit", "mutable", "static_assert", "static_cast", "dynamic_cast", "const_cast", "reinterpret_cast", "co_await", "co_return", "co_yield", "concept", "requires", "export", "module", "import", "alignas", "alignof", "thread_local"]
+type = ["int", "char", "short", "long", "float", "double", "void", "signed", "unsigned", "bool", "auto", "wchar_t", "char8_t", "char16_t", "char32_t", "size_t", "std", "string", "vector", "map", "unique_ptr", "shared_ptr"]
+constant = ["nullptr", "NULL", "true", "false"]
+[[context.main]]
+match = '//.*$'
+token = "comment"
+[[context.main]]
+begin = '/\*'
+end = '\*/'
+token = "comment"
+[[context.main]]
+begin = 'R"\('
+end = '\)"'
+token = "string"
+[[context.main]]
+begin = '"'
+end = '"|$'
+skip = '\\.'
+token = "string"
+[[context.main]]
+match = ''''(?:\\.|[^'\\])''''
+token = "string"
+[[context.main]]
+match = '^\s*#\s*[a-zA-Z_]+'
+token = "preprocessor"
+[[context.main]]
+match = '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?)[a-zA-Z0-9]*\b'
+token = "number"
+[[context.main]]
+match = '\b([\p{L}_][\p{L}\p{N}_]*)\s*\('
+captures = { 1 = "function" }

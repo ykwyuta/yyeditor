@@ -1,0 +1,35 @@
+name = "シェルスクリプト"
+extensions = ["sh", "bash", "zsh", "ksh", "bashrc", "profile"]
+filenames = [".bashrc", ".profile", ".zshrc"]
+aliases = ["sh", "bash", "zsh"]
+first_line = '^#!.*\b(?:sh|bash|zsh|ksh|dash)\b'
+line_comment = "#"
+
+[keywords]
+keyword = ["if", "then", "else", "elif", "fi", "case", "esac", "for", "while", "until", "do", "done", "in", "function", "select", "return", "exit", "break", "continue", "local", "export", "readonly", "declare", "unset", "shift", "source", "alias", "set", "trap", "eval", "exec"]
+builtin = ["echo", "printf", "read", "cd", "pwd", "test", "true", "false"]
+[[context.main]]
+match = '(?:^|\s)#.*$'
+token = "comment"
+[[context.main]]
+begin = '"'
+end = '"'
+skip = '\\.'
+token = "string"
+contains = "vars"
+[[context.main]]
+begin = ''''''''
+end = ''''''''
+token = "string"
+[[context.main]]
+match = '\$\{[^}]*\}|\$[A-Za-z_]\w*|\$[0-9@#?$!*-]'
+token = "variable"
+[[context.main]]
+match = '^\s*([A-Za-z_]\w*)\s*\(\s*\)'
+captures = { 1 = "function" }
+[[context.main]]
+match = '\b[0-9]+\b'
+token = "number"
+[[context.vars]]
+match = '\$\{[^}]*\}|\$[A-Za-z_]\w*|\$[0-9@#?$!*-]'
+token = "variable"

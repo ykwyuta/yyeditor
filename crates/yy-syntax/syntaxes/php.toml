@@ -1,0 +1,42 @@
+name = "PHP"
+extensions = ["php", "phtml"]
+first_line = '^<\?php'
+line_comment = "//"
+block_comment = ["/*", "*/"]
+
+[keywords]
+keyword = ["abstract", "and", "array", "as", "break", "callable", "case", "catch", "class", "clone", "const", "continue", "declare", "default", "do", "echo", "else", "elseif", "empty", "enddeclare", "endfor", "endforeach", "endif", "endswitch", "endwhile", "extends", "final", "finally", "fn", "for", "foreach", "function", "global", "goto", "if", "implements", "include", "include_once", "instanceof", "insteadof", "interface", "isset", "list", "match", "namespace", "new", "or", "print", "private", "protected", "public", "readonly", "require", "require_once", "return", "static", "switch", "throw", "trait", "try", "unset", "use", "var", "while", "xor", "yield"]
+constant = ["null", "true", "false", "NULL", "TRUE", "FALSE"]
+case_sensitive = true
+[[context.main]]
+match = '//.*$'
+token = "comment"
+[[context.main]]
+begin = '/\*'
+end = '\*/'
+token = "comment"
+[[context.main]]
+begin = '"'
+end = '"'
+skip = '\\.'
+token = "string"
+[[context.main]]
+begin = ''''''''
+end = ''''''''
+skip = '\\.'
+token = "string"
+[[context.main]]
+match = '#.*$'
+token = "comment"
+[[context.main]]
+match = '\$[A-Za-z_]\w*'
+token = "variable"
+[[context.main]]
+match = '<\?php|\?>'
+token = "preprocessor"
+[[context.main]]
+match = '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?)[a-zA-Z0-9]*\b'
+token = "number"
+[[context.main]]
+match = '\b([\p{L}_][\p{L}\p{N}_]*)\s*\('
+captures = { 1 = "function" }

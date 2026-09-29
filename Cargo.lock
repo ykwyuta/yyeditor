@@ -1215,6 +1215,7 @@ dependencies = [
  "yy-io",
  "yy-jobs",
  "yy-search",
+ "yy-syntax",
 ]
 
 [[package]]
@@ -1276,6 +1277,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-syntax"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "regex-automata",
+ "serde",
+ "toml",
+ "unicode-width",
+ "yy-buffer",
+]
+
+[[package]]
 name = "yy-win"
 version = "0.1.0"
 dependencies = [
@@ -1290,6 +1303,7 @@ dependencies = [
  "yy-io",
  "yy-jobs",
  "yy-layout",
+ "yy-syntax",
 ]
 
 [[package]]

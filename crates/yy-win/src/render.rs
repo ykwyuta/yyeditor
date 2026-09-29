@@ -50,7 +50,15 @@ pub(crate) struct Frame<'a> {
     pub composition: Option<&'a Composition>,
     /// 矩形選択の表示中の行
     pub rect: &'a [RectPaint],
+    /// シンタックスハイライト: `rows` と同じ順の、行ごとの（`Row::text` 内の範囲, 色の番号）。
+    /// 色の番号は [`Colors::syntax`] の順。空なら色を付けない
+    pub tokens: &'a [RowTokens],
+    /// 対応する括弧の範囲
+    pub brackets: &'a [std::ops::Range<u64>],
 }
+
+/// 1 行分のトークンの色（`Row::text` 内のバイト範囲, 色の番号）。
+pub(crate) type RowTokens = Vec<(std::ops::Range<usize>, u16)>;
 
 /// 矩形選択の 1 行分の表示情報。
 pub(crate) struct RectPaint {
@@ -79,6 +87,9 @@ struct Brushes {
     selection: ID2D1SolidColorBrush,
     search_match: ID2D1SolidColorBrush,
     caret: ID2D1SolidColorBrush,
+    bracket: ID2D1SolidColorBrush,
+    /// トークンの色（[`Colors::syntax`] の順）
+    syntax: Vec<ID2D1SolidColorBrush>,
 }
 
 struct Target {
@@ -107,6 +118,12 @@ impl Target {
                 selection: brush(c.selection)?,
                 search_match: brush(c.search_match)?,
                 caret: brush(c.caret)?,
+                bracket: brush(c.bracket_match)?,
+                syntax: c
+                    .syntax
+                    .values()
+                    .map(|&c| brush(c))
+                    .collect::<Result<_>>()?,
             };
             Ok(Target {
                 rt,
@@ -427,8 +444,13 @@ impl Renderer {
 
     /// 行のレイアウトを作る。`insert` があれば、その位置（`row.text` 内のバイト位置）に
     /// 文字列を差し込んで下線を引く（IME の変換中文字列）。
-    fn build_layout(&self, row: &Row, insert: Option<(usize, &str)>) -> Result<RowLayout> {
-        self.build_layout_window(row, insert, None)
+    fn build_layout(
+        &self,
+        row: &Row,
+        insert: Option<(usize, &str)>,
+        tokens: &[(std::ops::Range<usize>, u16)],
+    ) -> Result<RowLayout> {
+        self.build_layout_window(row, insert, None, tokens)
     }
 
     /// `window`（`row.text` 内のバイト範囲と、先頭に置く空白の数）だけをレイアウトする。
@@ -437,10 +459,41 @@ impl Renderer {
         row: &Row,
         insert: Option<(usize, &str)>,
         window: Option<(std::ops::Range<usize>, usize)>,
+        tokens: &[(std::ops::Range<usize>, u16)],
     ) -> Result<RowLayout> {
         let brushes = self.target.as_ref().map(|t| &t.brushes);
         let mut wide: Vec<u16> = Vec::with_capacity(row.text.len().min(1 << 16) + 16);
         let mut effects: Vec<(u32, u32, &ID2D1SolidColorBrush)> = Vec::new();
+        // トークンの色（不正バイト・制御文字の色は後から重ねて優先させる）
+        if let Some(b) = brushes {
+            let (lo, hi, pad) = match &window {
+                Some((w, p)) => (w.start, w.end, *p),
+                None => (0, row.text.len(), 0),
+            };
+            let ins_len = insert.map_or(0, |(_, t)| t.encode_utf16().count());
+            let to_wide = |byte: usize| {
+                let byte = byte.clamp(lo, hi);
+                let mut n = pad + row.text[lo..byte].encode_utf16().count();
+                if let Some((at, _)) = insert
+                    && at <= byte
+                    && byte > lo
+                {
+                    n += ins_len;
+                }
+                n as u32
+            };
+            for (range, color) in tokens {
+                if range.end <= lo || range.start >= hi {
+                    continue;
+                }
+                if let Some(brush) = b.syntax.get(*color as usize) {
+                    let (a, z) = (to_wide(range.start), to_wide(range.end));
+                    if z > a {
+                        effects.push((a, z - a, brush));
+                    }
+                }
+            }
+        }
         let mut underline = None;
         if let Some((_, pad)) = &window {
             wide.extend(std::iter::repeat_n(b' ' as u16, *pad));
@@ -529,13 +582,17 @@ impl Renderer {
         }
     }
 
-    fn row_layout(&mut self, row: &Row) -> Result<RowLayout> {
+    fn row_layout(
+        &mut self,
+        row: &Row,
+        tokens: &[(std::ops::Range<usize>, u16)],
+    ) -> Result<RowLayout> {
         let key = (row.start, row.next, u32::MAX);
         if let Some(c) = self.cache.get_mut(&key) {
             c.used = true;
             return Ok(c.row.clone());
         }
-        let rl = self.build_layout(row, None)?;
+        let rl = self.build_layout(row, None, tokens)?;
         // 描画ターゲットがない（ブラシがない）状態で作ったレイアウトは色がないのでキャッシュしない
         if self.target.is_some() {
             self.cache.insert(
@@ -550,7 +607,13 @@ impl Renderer {
     }
 
     /// 長い行の、表示中の横範囲（`scroll_x` から幅 `view_w`）を含む部分のレイアウト。
-    fn long_layout(&mut self, row: &Row, scroll_x: f32, view_w: f32) -> Result<RowLayout> {
+    fn long_layout(
+        &mut self,
+        row: &Row,
+        scroll_x: f32,
+        view_w: f32,
+        tokens: &[(std::ops::Range<usize>, u16)],
+    ) -> Result<RowLayout> {
         let li = self.long_info(row);
         let cw = self.metrics.char_width.max(0.1);
         let scroll_col = (scroll_x.max(0.0) / cw) as u32;
@@ -568,7 +631,7 @@ impl Renderer {
         let c0 = li.col_at(&row.text, b0, &self.columns);
         // タブ位置がそろうよう、タブ幅の倍数の桁から空白で埋めて始める
         let pad = c0 % self.tab_width.max(1);
-        let mut rl = self.build_layout_window(row, None, Some((b0..b1, pad as usize)))?;
+        let mut rl = self.build_layout_window(row, None, Some((b0..b1, pad as usize)), tokens)?;
         rl.x0 = (c0 - pad) as f32 * cw;
         rl.width = li.total_cols as f32 * cw;
         rl.long = Some(li);
@@ -665,6 +728,15 @@ impl Renderer {
         bounds[lo]
     }
 
+    /// 位置の計算だけに使うレイアウト（色は位置に影響しない）。描画用にキャッシュしたものが
+    /// あればそれを使い、なければ色なしで作る（色なしのものはキャッシュしない）。
+    fn geometry_layout(&mut self, row: &Row) -> Result<RowLayout> {
+        if let Some(c) = self.cache.get(&(row.start, row.next, u32::MAX)) {
+            return Ok(c.row.clone());
+        }
+        self.build_layout(row, None, &[])
+    }
+
     /// 行 `row` の中でオフセット `offset` の位置の x 座標（本文の左端からの DIP）。
     pub fn caret_x(&mut self, row: &Row, offset: u64) -> f32 {
         if row.text.len() > LONG_ROW_BYTES {
@@ -673,7 +745,7 @@ impl Renderer {
             return col as f32 * self.metrics.char_width;
         }
         let idx = utf16_index(&row.text, row.text_index(offset));
-        match self.row_layout(row) {
+        match self.geometry_layout(row) {
             Ok(rl) => self.x_at(&rl, idx),
             Err(_) => 0.0,
         }
@@ -687,7 +759,7 @@ impl Renderer {
             let b = li.byte_at_col(&row.text, col, true, &self.columns);
             return row.offset_at(b);
         }
-        let Ok(rl) = self.row_layout(row) else {
+        let Ok(rl) = self.geometry_layout(row) else {
             return row.start;
         };
         let pos16 = self.index_at(&rl, x);
@@ -765,6 +837,7 @@ impl Renderer {
         let mut layouts = Vec::with_capacity(frame.rows.len());
         let mut sel_rects: Vec<D2D_RECT_F> = Vec::new();
         let mut match_rects: Vec<D2D_RECT_F> = Vec::new();
+        let mut bracket_rects: Vec<D2D_RECT_F> = Vec::new();
         let mut caret_rects: Vec<D2D_RECT_F> = Vec::new();
         for (i, row) in frame.rows.iter().enumerate() {
             let y = i as f32 * lh;
@@ -775,13 +848,32 @@ impl Renderer {
                     .map(|&o| (row.text_index(o), o, c))
             });
             let long = row.text.len() > LONG_ROW_BYTES;
+            let tokens = frame.tokens.get(i).map_or(&[][..], |t| t.as_slice());
             let rl = match comp {
                 // 長い行では変換中の文字列を行内に表示しない（候補ウィンドウは表示される）
-                _ if long => self.long_layout(row, frame.scroll_x, size.width)?,
-                Some((at, _, c)) => self.build_layout(row, Some((at, &c.text)))?,
-                None => self.row_layout(row)?,
+                _ if long => self.long_layout(row, frame.scroll_x, size.width, tokens)?,
+                Some((at, _, c)) => self.build_layout(row, Some((at, &c.text)), tokens)?,
+                None => self.row_layout(row, tokens)?,
             };
             self.max_text_width = self.max_text_width.max(rl.width);
+
+            // 対応する括弧
+            for r in frame.brackets {
+                if r.end <= row.start || r.start >= row.end {
+                    continue;
+                }
+                let a = row.text_index(r.start.max(row.start));
+                let b = row.text_index(r.end.min(row.end));
+                if b > a {
+                    let (xa, xb) = (self.row_x(&rl, row, a), self.row_x(&rl, row, b));
+                    bracket_rects.push(D2D_RECT_F {
+                        left: text_x + xa.min(xb),
+                        top: y,
+                        right: text_x + xa.max(xb),
+                        bottom: y + lh,
+                    });
+                }
+            }
 
             // 検索に一致した範囲
             for r in frame.matches {
@@ -943,6 +1035,9 @@ impl Renderer {
                 },
                 D2D1_ANTIALIAS_MODE_ALIASED,
             );
+            for r in &bracket_rects {
+                rt.FillRectangle(r, &b.bracket);
+            }
             for r in &match_rects {
                 rt.FillRectangle(r, &b.search_match);
             }
@@ -1180,6 +1275,8 @@ mod tests {
             overwrite: false,
             composition: None,
             rect: &[],
+            tokens: &[],
+            brackets: &[],
         };
         let (w, h) = (400, 120);
         let px = r.render_offscreen(w, h, &frame).unwrap();
@@ -1212,6 +1309,58 @@ mod tests {
 
     /// 選択範囲の背景とキャレットが指定の行にだけ描かれることを確認する。
     #[test]
+    fn renders_token_colors_and_brackets() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let colors = Colors::default();
+        let mut r = Renderer::new("Consolas", 11.0, 4, colors.clone(), 96).unwrap();
+        let snap = Snapshot::from_bytes("if (x) {}\nif (x) {}\n");
+        let rows = rows_from(&snap, &RowConfig::default(), 0, 10);
+        // 1 行目の "if" をキーワードの色（青）にする
+        let keyword = colors.syntax.keys().position(|k| k == "keyword").unwrap() as u16;
+        let tokens = vec![vec![(0..2, keyword)], Vec::new()];
+        let brackets = vec![7..8, 8..9];
+        let frame = Frame {
+            version: 0,
+            rows: &rows,
+            first_line: 0,
+            line_exact: true,
+            line_digits: 1,
+            show_line_numbers: false,
+            scroll_x: 0.0,
+            selections: &[],
+            matches: &[],
+            carets: &[],
+            caret_visible: false,
+            overwrite: false,
+            composition: None,
+            rect: &[],
+            tokens: &tokens,
+            brackets: &brackets,
+        };
+        let (w, h) = (300, 60);
+        let px = r.render_offscreen(w, h, &frame).unwrap();
+        let lh = r.metrics().line_height as u32;
+        let blue = |y0: u32, y1: u32| {
+            (y0..y1)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let [pr, pg, pb] = pixel(&px, w, x, y);
+                    pb as i32 > pr as i32 + 80 && pb as i32 > pg as i32 + 80
+                })
+                .count()
+        };
+        assert!(blue(0, lh) > 5, "keyword colored on row 1");
+        assert_eq!(blue(lh, lh * 2), 0, "no token colors on row 2");
+        let c = colors.bracket_match;
+        assert!(
+            (0..lh).any(|y| (0..w).any(|x| pixel(&px, w, x, y) == [c.r, c.g, c.b])),
+            "bracket background"
+        );
+    }
+
+    #[test]
     fn renders_selection_and_caret() {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -1240,6 +1389,8 @@ mod tests {
             overwrite: false,
             composition: None,
             rect: &[],
+            tokens: &[],
+            brackets: &[],
         };
         let (w, h) = (300, 60);
         let px = r.render_offscreen(w, h, &frame).unwrap();

@@ -1,0 +1,34 @@
+name = "Swift"
+extensions = ["swift"]
+line_comment = "//"
+block_comment = ["/*", "*/"]
+
+[keywords]
+keyword = ["associatedtype", "class", "deinit", "enum", "extension", "fileprivate", "func", "import", "init", "inout", "internal", "let", "open", "operator", "private", "protocol", "public", "rethrows", "static", "struct", "subscript", "typealias", "var", "break", "case", "continue", "default", "defer", "do", "else", "fallthrough", "for", "guard", "if", "in", "repeat", "return", "switch", "where", "while", "as", "catch", "is", "super", "self", "Self", "throw", "throws", "try", "async", "await", "some", "any"]
+type = ["Int", "Int8", "Int16", "Int32", "Int64", "UInt", "Double", "Float", "Bool", "String", "Character", "Void", "Array", "Dictionary", "Set", "Optional"]
+constant = ["nil", "true", "false"]
+[[context.main]]
+match = '//.*$'
+token = "comment"
+[[context.main]]
+begin = '/\*'
+end = '\*/'
+token = "comment"
+[[context.main]]
+begin = '"""'
+end = '"""'
+token = "string"
+[[context.main]]
+begin = '"'
+end = '"|$'
+skip = '\\.'
+token = "string"
+[[context.main]]
+match = '@[A-Za-z_]\w*'
+token = "attribute"
+[[context.main]]
+match = '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?)[a-zA-Z0-9]*\b'
+token = "number"
+[[context.main]]
+match = '\b([\p{L}_][\p{L}\p{N}_]*)\s*\('
+captures = { 1 = "function" }

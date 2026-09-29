@@ -1,0 +1,34 @@
+name = "Perl"
+extensions = ["pl", "pm", "t"]
+first_line = '^#!.*\bperl\b'
+line_comment = "#"
+
+[keywords]
+keyword = ["my", "our", "local", "sub", "if", "elsif", "else", "unless", "while", "until", "for", "foreach", "last", "next", "redo", "return", "use", "no", "package", "require", "do", "eval", "die", "warn", "print", "printf", "say", "and", "or", "not"]
+constant = ["undef", "__FILE__", "__LINE__", "__PACKAGE__"]
+[[context.main]]
+match = '#.*$'
+token = "comment"
+[[context.main]]
+begin = '^=[a-zA-Z]'
+end = '^=cut'
+token = "comment"
+[[context.main]]
+begin = '"'
+end = '"'
+skip = '\\.'
+token = "string"
+[[context.main]]
+begin = ''''''''
+end = ''''''''
+skip = '\\.'
+token = "string"
+[[context.main]]
+match = '[$@%][A-Za-z_]\w*|\$[0-9_&]'
+token = "variable"
+[[context.main]]
+match = '\b(sub)\s+([A-Za-z_]\w*)'
+captures = { 1 = "keyword", 2 = "function" }
+[[context.main]]
+match = '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?)[a-zA-Z0-9]*\b'
+token = "number"

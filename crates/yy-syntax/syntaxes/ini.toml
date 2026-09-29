@@ -1,0 +1,21 @@
+name = "INI"
+extensions = ["ini", "cfg", "conf", "inf", "properties", "reg", "editorconfig", "gitconfig"]
+filenames = [".editorconfig", ".gitconfig"]
+line_comment = ";"
+
+[[context.main]]
+match = '^\s*[;#].*$'
+token = "comment"
+[[context.main]]
+match = '^\s*\[[^\]]*\]'
+token = "section"
+[[context.main]]
+match = '^\s*([^=:\s][^=:]*?)\s*[=:]'
+captures = { 1 = "property" }
+[[context.main]]
+begin = '"'
+end = '"|$'
+token = "string"
+[[context.main]]
+match = '\b[0-9]+(?:\.[0-9]+)?\b'
+token = "number"

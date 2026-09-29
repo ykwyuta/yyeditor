@@ -1,0 +1,51 @@
+name = "RPG（固定桁）"
+extensions = ["rpg", "rpgle", "sqlrpgle", "rpgleinc"]
+aliases = ["rpgle"]
+word = '[A-Za-z@#$%][A-Za-z0-9@#$_]*'
+sync = '^'
+
+[keywords]
+case_sensitive = false
+keyword = ["eval", "evalr", "if", "else", "elseif", "endif", "dow", "dou", "enddo", "for", "endfor", "select", "when", "other", "endsl", "iter", "leave", "leavesr", "begsr", "endsr", "exsr", "return", "callp", "callb", "call", "parm", "plist", "chain", "read", "reade", "readp", "readpe", "setll", "setgt", "write", "update", "delete", "open", "close", "exfmt", "dsply", "clear", "reset", "monitor", "on-error", "endmon", "dcl-s", "dcl-c", "dcl-ds", "end-ds", "dcl-f", "dcl-pr", "end-pr", "dcl-pi", "end-pi", "dcl-proc", "end-proc", "ctl-opt", "move", "movel", "z-add", "add", "sub", "mult", "div", "comp", "cabeq", "goto", "tag", "exec", "sql", "and", "or", "not", "inz", "like", "likeds", "const", "value", "options", "dim", "qualified", "export", "import"]
+type = ["char", "varchar", "packed", "zoned", "int", "uns", "float", "date", "time", "timestamp", "ind", "pointer", "object"]
+constant = ["*on", "*off", "*blank", "*blanks", "*zero", "*zeros", "*hival", "*loval", "*null", "*inlr"]
+
+# 1〜5 桁: 一連番号、6 桁: 仕様書の種類（H F D I C O P）、7 桁の * はコメント行
+[[columns]]
+range = [7, 7]
+match = '\*'
+line_token = "comment"
+
+[[columns]]
+range = [1, 5]
+token = "line-number"
+
+[[columns]]
+range = [6, 6]
+token = "keyword"
+
+[[columns]]
+range = [7, 100]
+context = "main"
+
+[[context.main]]
+match = '//.*$'
+token = "comment"
+
+[[context.main]]
+begin = "'"
+end = "'|$"
+skip = "''"
+token = "string"
+
+[[context.main]]
+match = '%[A-Za-z]+'
+token = "function"
+
+[[context.main]]
+match = '\*[A-Za-z]+'
+token = "constant"
+
+[[context.main]]
+match = '\b[0-9]+(?:\.[0-9]+)?\b'
+token = "number"
