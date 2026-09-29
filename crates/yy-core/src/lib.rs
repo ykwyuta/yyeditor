@@ -7,6 +7,7 @@ pub mod csv;
 pub mod diff;
 pub mod edit;
 pub mod grep;
+pub mod hex;
 mod history;
 mod indexer;
 pub mod motion;
@@ -102,6 +103,8 @@ pub struct OpenOptions {
     pub sync_limit: u64,
     /// 自動判別に EBCDIC を含める
     pub detect_ebcdic: bool,
+    /// ファイルのバイト列をそのまま読む（16 進数編集用。BOM も内容として扱い、保存時もそのまま書く）
+    pub raw: bool,
 }
 
 impl Default for OpenOptions {
@@ -110,12 +113,16 @@ impl Default for OpenOptions {
             encoding: None,
             sync_limit: 32 << 20,
             detect_ebcdic: false,
+            raw: false,
         }
     }
 }
 
 /// 文字コードを自動判別する（先頭の BOM のバイト数も返す）。
 fn detect_encoding(bytes: &[u8], opts: &OpenOptions) -> (Encoding, usize) {
+    if opts.raw {
+        return (Encoding::Utf8, 0);
+    }
     let n = bytes.len().min(DETECT_SAMPLE);
     let d = yy_encoding::detect(&bytes[..n], n == bytes.len());
     // UTF-8 として正しければ EBCDIC ではない（EBCDIC の英数字は 0x80 以上）
@@ -260,7 +267,7 @@ impl Document {
     pub fn open_with(path: &Path, opts: &OpenOptions) -> io::Result<Document> {
         let f = yy_io::open_file(path)?;
         let bytes = f.bytes();
-        let (encoding, bom_len) = match opts.encoding {
+        let (encoding, bom_len) = match opts.encoding.filter(|_| !opts.raw) {
             Some(e) => {
                 let bom = e.bom();
                 let n = if !bom.is_empty() && bytes.starts_with(bom) {
@@ -302,7 +309,7 @@ impl Document {
     pub fn open_shared_read_only(path: &Path, opts: &OpenOptions) -> io::Result<Document> {
         let f = yy_io::open_shared_snapshot(path)?;
         let bytes = f.bytes();
-        let (encoding, bom_len) = match opts.encoding {
+        let (encoding, bom_len) = match opts.encoding.filter(|_| !opts.raw) {
             Some(e) => {
                 let bom = e.bom();
                 (

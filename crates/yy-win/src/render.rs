@@ -57,6 +57,28 @@ pub(crate) struct Frame<'a> {
     pub brackets: &'a [std::ops::Range<u64>],
 }
 
+/// 16 進数表示の 1 画面分（行は 16 バイト）。
+pub(crate) struct HexFrame<'a> {
+    pub layout: yy_core::hex::HexLayout,
+    /// 先頭の行のオフセット（16 の倍数）
+    pub first: u64,
+    /// `first` からの内容（表示する行の分）
+    pub data: &'a [u8],
+    /// 文書の長さ
+    pub len: u64,
+    /// 表示する行数
+    pub rows: usize,
+    pub caret: u64,
+    /// カーソルのある 16 進の桁（0 = 上位, 1 = 下位）
+    pub nibble: u8,
+    pub pane: yy_core::hex::Pane,
+    pub caret_visible: bool,
+    pub overwrite: bool,
+    pub selection: std::ops::Range<u64>,
+    pub matches: &'a [std::ops::Range<u64>],
+    pub scroll_x: f32,
+}
+
 /// 1 行分のトークンの色（`Row::text` 内のバイト範囲, 色の番号）。
 pub(crate) type RowTokens = Vec<(std::ops::Range<usize>, u16)>;
 
@@ -773,6 +795,174 @@ impl Renderer {
     pub fn draw(&mut self, hwnd: HWND, width: u32, height: u32, frame: &Frame) -> Result<bool> {
         self.ensure_target(hwnd, width, height)?;
         self.draw_frame(frame)
+    }
+
+    /// 16 進数表示を描画する（等幅フォントの桁で位置を決める）。
+    pub fn draw_hex(&mut self, hwnd: HWND, width: u32, height: u32, f: &HexFrame) -> Result<bool> {
+        self.ensure_target(hwnd, width, height)?;
+        self.draw_hex_frame(f)
+    }
+
+    /// 16 進数表示の本文の左端から `x` の桁（ヒットテスト用）。
+    pub fn hex_col_at(&self, x: f32, scroll_x: f32) -> usize {
+        let cw = self.metrics.char_width.max(0.1);
+        ((x + scroll_x - TEXT_PAD) / cw).max(0.0) as usize
+    }
+
+    fn draw_hex_frame(&mut self, f: &HexFrame) -> Result<bool> {
+        use yy_core::hex::{Pane, printable};
+        let lh = self.metrics.line_height;
+        let cw = self.metrics.char_width;
+        let l = f.layout;
+        let x = |col: usize| TEXT_PAD + col as f32 * cw - f.scroll_x;
+        let rect = |c0: usize, c1: usize, row: usize| D2D_RECT_F {
+            left: x(c0),
+            top: row as f32 * lh,
+            right: x(c1),
+            bottom: (row + 1) as f32 * lh,
+        };
+        // 表示する行（最後の行が 16 バイトちょうどなら、追加用の空の行も出す）
+        let mut rows: Vec<(u64, &[u8])> = Vec::new();
+        for r in 0..f.rows {
+            let off = f.first + r as u64 * 16;
+            if off > f.len || (off == f.len && f.len % 16 != 0 && off != 0) {
+                break;
+            }
+            let a = (r * 16).min(f.data.len());
+            let b = (a + 16).min(f.data.len());
+            rows.push((off, &f.data[a..b]));
+        }
+        // 範囲 `range` の各行の矩形（16 進の欄と文字の欄）
+        let byte_rects = |range: &std::ops::Range<u64>, out: &mut Vec<D2D_RECT_F>| {
+            for (ri, (off, bytes)) in rows.iter().enumerate() {
+                let n = bytes.len() as u64;
+                let (a, b) = (range.start.max(*off), range.end.min(off + n));
+                if a >= b {
+                    continue;
+                }
+                let (i0, i1) = ((a - off) as usize, (b - off) as usize);
+                // 8 バイトごとの区切りをまたぐ場合は 2 つに分ける
+                for (s, e) in [(i0, i1.min(8)), (i0.max(8), i1)] {
+                    if s < e {
+                        out.push(rect(l.hex_col(s), l.hex_col(e - 1) + 2, ri));
+                    }
+                }
+                out.push(rect(l.ascii_col(i0), l.ascii_col(i1 - 1) + 1, ri));
+            }
+        };
+        let mut sel_rects = Vec::new();
+        byte_rects(&f.selection, &mut sel_rects);
+        let mut match_rects = Vec::new();
+        for m in f.matches {
+            byte_rects(m, &mut match_rects);
+        }
+        let brushes = self.target.as_ref().map(|t| &t.brushes);
+        let mut layouts = Vec::with_capacity(rows.len());
+        for (off, bytes) in &rows {
+            let text = l.format_row(*off, bytes);
+            let wide: Vec<u16> = text.encode_utf16().collect();
+            let layout = unsafe {
+                self.dwrite
+                    .CreateTextLayout(&wide, &self.text_format, LAYOUT_MAX_WIDTH, lh)?
+            };
+            if let Some(b) = brushes {
+                let effect = |brush: &ID2D1SolidColorBrush, start: usize, len: usize| unsafe {
+                    layout.SetDrawingEffect(
+                        &brush.cast::<windows::core::IUnknown>()?,
+                        DWRITE_TEXT_RANGE {
+                            startPosition: start as u32,
+                            length: len as u32,
+                        },
+                    )
+                };
+                effect(&b.line_number, 0, l.digits)?;
+                for (i, &byte) in bytes.iter().enumerate() {
+                    if printable(byte) == '.' && byte != b'.' {
+                        effect(&b.control, l.ascii_col(i), 1)?;
+                    }
+                }
+            }
+            layouts.push(layout);
+        }
+        let result = unsafe {
+            let t = self.target.as_ref().unwrap();
+            let (rt, b) = (&t.rt, &t.brushes);
+            rt.BeginDraw();
+            rt.SetTransform(&windows_numerics::Matrix3x2::identity());
+            rt.Clear(Some(&color_f(self.colors.background)));
+            let size = rt.GetSize();
+            rt.FillRectangle(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: x(l.digits) + cw,
+                    bottom: size.height,
+                },
+                &b.gutter_background,
+            );
+            for r in &match_rects {
+                rt.FillRectangle(r, &b.search_match);
+            }
+            for r in &sel_rects {
+                rt.FillRectangle(r, &b.selection);
+            }
+            for (i, layout) in layouts.iter().enumerate() {
+                rt.DrawTextLayout(
+                    Vector2 {
+                        X: x(0),
+                        Y: i as f32 * lh,
+                    },
+                    layout,
+                    &b.foreground,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+            // カーソル: 入力する欄は桁の位置に（上書きは枠、挿入は縦線）、もう一方の欄は下線
+            if f.caret >= f.first && f.caret_visible {
+                let rel = f.caret - f.first;
+                let (ri, i) = ((rel / 16) as usize, (rel % 16) as usize);
+                if ri < rows.len() {
+                    let (active, other) = match f.pane {
+                        Pane::Hex => (l.hex_col(i) + f.nibble as usize, (l.ascii_col(i), 1)),
+                        Pane::Ascii => (l.ascii_col(i), (l.hex_col(i), 2)),
+                    };
+                    let y = ri as f32 * lh;
+                    if f.overwrite {
+                        let r = rect(active, active + 1, ri);
+                        rt.DrawRectangle(&r, &b.caret, 1.5, None);
+                    } else {
+                        rt.FillRectangle(
+                            &D2D_RECT_F {
+                                left: x(active),
+                                top: y,
+                                right: x(active) + 2.0,
+                                bottom: y + lh,
+                            },
+                            &b.caret,
+                        );
+                    }
+                    rt.FillRectangle(
+                        &D2D_RECT_F {
+                            left: x(other.0),
+                            top: y + lh - 2.0,
+                            right: x(other.0 + other.1),
+                            bottom: y + lh,
+                        },
+                        &b.caret,
+                    );
+                }
+            }
+            rt.EndDraw(None, None)
+        };
+        if let Err(e) = result {
+            if e.code() == D2DERR_RECREATE_TARGET {
+                self.target = None;
+                self.cache.clear();
+                return Ok(false);
+            }
+            return Err(e);
+        }
+        Ok(true)
     }
 
     /// 画面外のビットマップに描画し、BGRA（premultiplied）の画素列を返す。

@@ -104,10 +104,14 @@ pub(crate) const CLASS_EDIT: u16 = 0x0081;
 pub(crate) const CLASS_STATIC: u16 = 0x0082;
 
 fn build_template() -> Template {
-    let mut t = Template::dialog("行へ移動", 4, 200, 64);
+    build_template_with("行へ移動", true)
+}
+
+fn build_template_with(title: &str, numeric: bool) -> Template {
+    let mut t = Template::dialog(title, 4, 200, 64);
     t.item(0, 7, 7, 186, 10, ID_LABEL, CLASS_STATIC, "");
     t.item(
-        (WS_BORDER | WS_TABSTOP).0 | (ES_NUMBER | ES_AUTOHSCROLL) as u32,
+        (WS_BORDER | WS_TABSTOP).0 | (if numeric { ES_NUMBER } else { 0 } | ES_AUTOHSCROLL) as u32,
         7,
         20,
         186,
@@ -137,6 +141,25 @@ fn build_template() -> Template {
         "キャンセル",
     );
     t
+}
+
+/// 文字列の入力を求める。キャンセルされたら `None`。
+pub(crate) fn prompt_text(owner: HWND, title: &str, prompt: &str, initial: &str) -> Option<String> {
+    let aligned = build_template_with(title, false).aligned();
+    let mut state = State {
+        prompt: prompt.to_owned(),
+        text: initial.to_owned(),
+    };
+    let r = unsafe {
+        DialogBoxIndirectParamW(
+            None,
+            aligned.as_ptr() as *const DLGTEMPLATE,
+            Some(owner),
+            Some(dialog_proc),
+            LPARAM(&mut state as *mut State as isize),
+        )
+    };
+    (r == IDOK_ as isize).then_some(state.text)
 }
 
 /// 行番号（1 始まり）の入力を求める。キャンセルされたら `None`。

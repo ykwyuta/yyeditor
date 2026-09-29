@@ -321,3 +321,33 @@ fn converts_line_endings_as_one_undo_step() {
     assert!(d.undo());
     assert_eq!(d.snapshot().read(0..d.snapshot().len()), b"a\nb\nc\rd\n");
 }
+
+#[test]
+fn raw_open_keeps_every_byte() {
+    // 16 進数編集: BOM・不正なバイトも内容として読み、そのまま書き戻す
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bin.dat");
+    let bytes = b"\xEF\xBB\xBFtext\x00\xFF\xFE\r\n\x80".to_vec();
+    std::fs::write(&path, &bytes).unwrap();
+    let mut d = Document::open_with(
+        &path,
+        &OpenOptions {
+            raw: true,
+            encoding: Some(Encoding::Cp932),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(d.encoding(), Encoding::Utf8);
+    assert!(!d.has_bom());
+    assert_eq!(d.snapshot().read(0..d.snapshot().len()), bytes);
+    assert!(d.apply_changes(
+        vec![yy_core::edit::Change::replace_bytes(3..4, b"T".to_vec())],
+        yy_core::EditKind::Typing,
+        |_| yy_core::SelectionSet::single(yy_core::Selection::caret(4)),
+    ));
+    d.save().unwrap();
+    let mut expect = bytes.clone();
+    expect[3] = b'T';
+    assert_eq!(std::fs::read(&path).unwrap(), expect);
+}
