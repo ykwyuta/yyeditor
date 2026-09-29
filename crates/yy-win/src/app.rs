@@ -3745,7 +3745,7 @@ pub(crate) extern "system" fn frame_proc(
         WM_NOTIFY => {
             if lparam.0 != 0 {
                 let hdr = unsafe { &*(lparam.0 as *const NMHDR) };
-                if hdr.code as u32 == TCN_SELCHANGE {
+                if hdr.code == TCN_SELCHANGE {
                     let view = with_app(|a| {
                         if hdr.hwndFrom == a.tabbar {
                             let index =
