@@ -121,14 +121,20 @@ pub fn open_file(path: &Path) -> io::Result<OpenedFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use yy_buffer::LineLookup;
+
+    /// 書き込んだ後にハンドルを閉じたファイルを作る。
+    /// `open_file` は書き込み共有を拒否するため、書き込みハンドルが残っていると開けない。
+    fn temp_file(dir: &tempfile::TempDir, data: &[u8]) -> PathBuf {
+        let p = dir.path().join("test.txt");
+        std::fs::write(&p, data).unwrap();
+        p
+    }
 
     #[test]
     fn opens_and_strips_utf8_bom() {
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(b"\xEF\xBB\xBFhello\nworld\n").unwrap();
-        let o = open_file(f.path()).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let o = open_file(&temp_file(&d, b"\xEF\xBB\xBFhello\nworld\n")).unwrap();
         assert_eq!(o.bom, Bom::Utf8);
         assert_eq!(o.file_len, 15);
         assert_eq!(o.snapshot.read(0..o.snapshot.len()), b"hello\nworld\n");
@@ -138,10 +144,20 @@ mod tests {
 
     #[test]
     fn opens_empty_file() {
-        let f = tempfile::NamedTempFile::new().unwrap();
-        let o = open_file(f.path()).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let o = open_file(&temp_file(&d, b"")).unwrap();
         assert!(o.snapshot.is_empty());
         assert_eq!(o.snapshot.line_count(), Some(1));
+    }
+
+    /// 他のプロセス（ここでは自分）が書き込み用に開いているファイルは開けない。
+    #[cfg(windows)]
+    #[test]
+    fn denies_write_sharing() {
+        let d = tempfile::tempdir().unwrap();
+        let p = temp_file(&d, b"x");
+        let _writer = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        assert!(open_file(&p).is_err());
     }
 
     #[test]
@@ -153,14 +169,13 @@ mod tests {
 
     #[test]
     fn large_file_is_split_into_pieces() {
-        let mut f = tempfile::NamedTempFile::new().unwrap();
+        let d = tempfile::tempdir().unwrap();
         let line = b"0123456789abcdef0123456789abcdef0123456789abcdef012345678\n";
         let mut data = Vec::new();
         while data.len() < 5 << 20 {
             data.extend_from_slice(line);
         }
-        f.write_all(&data).unwrap();
-        let o = open_file(f.path()).unwrap();
+        let o = open_file(&temp_file(&d, &data)).unwrap();
         assert!(o.snapshot.summary().pieces >= 5);
         assert_eq!(o.snapshot.read(0..o.snapshot.len()), data);
     }

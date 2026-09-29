@@ -160,16 +160,18 @@ mod tests {
 
     #[test]
     fn indexes_file_in_background() {
-        let mut f = tempfile::NamedTempFile::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
         let mut data = Vec::new();
         let mut i = 0u64;
         while data.len() < 6 << 20 {
             writeln!(data, "line {i} あいうえお").unwrap();
             i += 1;
         }
-        f.write_all(&data).unwrap();
+        // 書き込みハンドルを閉じてから開く（Document::open は書き込み共有を拒否する）
+        std::fs::write(&path, &data).unwrap();
 
-        let mut doc = Document::open(f.path()).unwrap();
+        let mut doc = Document::open(&path).unwrap();
         assert_eq!(doc.snapshot().line_count(), None);
         let pool = JobPool::new(3);
         let calls = Arc::new(AtomicUsize::new(0));
