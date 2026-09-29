@@ -467,7 +467,7 @@ impl Renderer {
                             effects.push((start, len, &b.invalid))
                         }
                         // 列揃えの空白には続きの行の区切りの縦線も含まれる
-                        SpanKind::Control | SpanKind::Delim | SpanKind::Pad => {
+                        SpanKind::Control | SpanKind::Break | SpanKind::Delim | SpanKind::Pad => {
                             effects.push((start, len, &b.control))
                         }
                     }

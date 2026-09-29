@@ -99,6 +99,8 @@ pub struct OpenOptions {
     /// UTF-8 以外のファイルをその場でデコードする大きさの上限。
     /// これより大きいファイルはバックグラウンドで一時ファイルに変換する
     pub sync_limit: u64,
+    /// 自動判別に EBCDIC を含める
+    pub detect_ebcdic: bool,
 }
 
 impl Default for OpenOptions {
@@ -106,8 +108,24 @@ impl Default for OpenOptions {
         OpenOptions {
             encoding: None,
             sync_limit: 32 << 20,
+            detect_ebcdic: false,
         }
     }
+}
+
+/// 文字コードを自動判別する（先頭の BOM のバイト数も返す）。
+fn detect_encoding(bytes: &[u8], opts: &OpenOptions) -> (Encoding, usize) {
+    let n = bytes.len().min(DETECT_SAMPLE);
+    let d = yy_encoding::detect(&bytes[..n], n == bytes.len());
+    // UTF-8 として正しければ EBCDIC ではない（EBCDIC の英数字は 0x80 以上）
+    if d.bom_len == 0
+        && d.encoding != Encoding::Utf8
+        && opts.detect_ebcdic
+        && let Some(e) = yy_encoding::detect_ebcdic(&bytes[..n], bytes.len() as u64)
+    {
+        return (e, 0);
+    }
+    (d.encoding, d.bom_len)
 }
 
 /// 自動判別に使う先頭部分の大きさ
@@ -251,11 +269,7 @@ impl Document {
                 };
                 (e, n)
             }
-            None => {
-                let n = bytes.len().min(DETECT_SAMPLE);
-                let d = yy_encoding::detect(&bytes[..n], n == bytes.len());
-                (d.encoding, d.bom_len)
-            }
+            None => detect_encoding(bytes, opts),
         };
         let body = bom_len..bytes.len();
         let mut doc = Document::new_empty();
@@ -295,11 +309,7 @@ impl Document {
                     usize::from(!bom.is_empty() && bytes.starts_with(bom)) * bom.len(),
                 )
             }
-            None => {
-                let n = bytes.len().min(DETECT_SAMPLE);
-                let d = yy_encoding::detect(&bytes[..n], n == bytes.len());
-                (d.encoding, d.bom_len)
-            }
+            None => detect_encoding(bytes, opts),
         };
         let mut doc = Document::new_empty();
         doc.file_len = f.file_len;
@@ -1006,7 +1016,8 @@ impl Document {
     /// 保存するときの形式。開いたときと別の文字コードで保存する場合、読み込み時に
     /// 不正だったバイト（エスケープ文字）は変換できない文字になる。
     pub fn save_format(&self, encoding: Encoding, bom: bool) -> SaveFormat {
-        let escapes = if encoding == self.encoding {
+        // EBCDIC のレコードの区切り方だけを変える場合も不正だったバイトは元のバイトに戻せる
+        let escapes = if encoding.same_charset(&self.encoding) {
             self.escapes
         } else if self.escapes == EscapeMode::Restore {
             EscapeMode::Reject
@@ -1048,7 +1059,7 @@ impl Document {
             self._guard = o.guard;
             self.file_len = o.file_len;
         }
-        if encoding != self.encoding {
+        if !encoding.same_charset(&self.encoding) {
             self.escapes = if encoding == Encoding::Utf8 {
                 EscapeMode::Literal
             } else {

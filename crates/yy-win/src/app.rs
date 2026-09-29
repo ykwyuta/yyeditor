@@ -744,7 +744,7 @@ impl App {
             let h = (rc.bottom - rc.top - sh - tab_h - bar_h).max(0);
             let _ = MoveWindow(self.view, 0, tab_h + bar_h, w, h, true);
             // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗
-            let parts = [w - 640, w - 520, w - 380, w - 310, w - 250, -1].map(|x| x.max(0));
+            let parts = [w - 800, w - 680, w - 380, w - 310, w - 250, -1].map(|x| x.max(0));
             SendMessageW(
                 self.status,
                 SB_SETPARTS,
@@ -857,6 +857,9 @@ impl App {
         let stats = self.doc.decode_stats();
         if stats.invalid > 0 {
             enc += &format!("  不正バイト {}", group_digits(stats.invalid));
+        }
+        if let Some(records) = self.doc.encoding().records() {
+            enc += &format!(" / {}", records.label());
         }
         self.set_status(2, &format!("  {enc}"));
         self.set_status(3, &format!("  {}", self.doc.eol().label()));
@@ -2162,8 +2165,15 @@ impl App {
         encoding: Option<Encoding>,
         shared_read_only: bool,
     ) -> std::result::Result<(), String> {
+        // 文字コードの指定がなければファイル種類の設定（拡張子）の文字コード
+        let configured = encoding.or_else(|| {
+            let ext = path.extension()?.to_string_lossy().into_owned();
+            let (_, ft) = self.config.filetype_for_extension(&ext)?;
+            Encoding::from_name(ft.encoding.as_deref()?)
+        });
         let opts = OpenOptions {
-            encoding,
+            encoding: configured,
+            detect_ebcdic: self.config.editor.detect_ebcdic,
             ..OpenOptions::default()
         };
         // 既に開いているパスなら、そのタブへ移動する（明示的な開き直しは別処理）。
@@ -3152,7 +3162,7 @@ fn add_encoding_combo(c: &IFileDialogCustomize, selected: Option<Encoding>, auto
             let _ = c.AddControlItem(CTL_ENCODING, i as u32 + offset, &HSTRING::from(e.label()));
         }
         let sel = selected
-            .and_then(|s| all.iter().position(|e| *e == s))
+            .and_then(|s| all.iter().position(|e| e.same_charset(&s)))
             .map_or(0, |i| i as u32 + offset);
         let _ = c.SetSelectedControlItem(CTL_ENCODING, sel);
         let _ = c.EndVisualGroup();
@@ -3257,7 +3267,14 @@ fn show_save_dialog(
             eol: None,
         };
         if let Some(c) = &custom {
-            target.encoding = selected_encoding(c, false).unwrap_or(encoding);
+            target.encoding = match selected_encoding(c, false) {
+                // EBCDIC のレコードの区切り方は今のものを初期値にして尋ねる
+                Some(e) if e.same_charset(&encoding) && encoding.records().is_some() => {
+                    crate::recorddlg::ask_records(owner, encoding, "保存する")?
+                }
+                Some(e) => crate::recorddlg::confirm(owner, e, "保存する")?,
+                None => encoding,
+            };
             target.bom = c.GetCheckButtonState(CTL_BOM).map_or(bom, |b| b.as_bool());
             target.eol = match c.GetSelectedControlItem(CTL_EOL) {
                 Ok(1) => Some(Eol::CrLf),
@@ -3302,6 +3319,11 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_OPEN => {
             if let Some((paths, enc)) = show_open_dialog(hwnd) {
+                let enc = match enc.map(|e| crate::recorddlg::confirm(hwnd, e, "開く")) {
+                    Some(None) => return,
+                    Some(e) => e,
+                    None => None,
+                };
                 for p in paths {
                     open_path(hwnd, p, enc, false);
                 }
@@ -3309,6 +3331,11 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_OPEN_SHARED => {
             if let Some((paths, enc)) = show_open_dialog(hwnd) {
+                let enc = match enc.map(|e| crate::recorddlg::confirm(hwnd, e, "開く")) {
+                    Some(None) => return,
+                    Some(e) => e,
+                    None => None,
+                };
                 for p in paths {
                     open_path(hwnd, p, enc, true);
                 }
@@ -3316,8 +3343,22 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         id if id >= ID_REOPEN_BASE && ((id - ID_REOPEN_BASE) as usize) < Encoding::all().len() => {
             let enc = Encoding::all()[(id - ID_REOPEN_BASE) as usize];
-            let Some(Some(path)) = with_app(|a| a.doc.path().map(|p| p.to_owned())) else {
+            let Some((path, current)) =
+                with_app(|a| (a.doc.path().map(|p| p.to_owned()), a.doc.encoding()))
+            else {
+                return;
+            };
+            let Some(path) = path else {
                 info_box(hwnd, "ファイルを開いていません。");
+                return;
+            };
+            // EBCDIC はレコードの区切り方も尋ねる（同じ文字コードなら今の区切り方を初期値にする）
+            let enc = if enc.same_charset(&current) {
+                current
+            } else {
+                enc
+            };
+            let Some(enc) = crate::recorddlg::confirm(hwnd, enc, "開き直す") else {
                 return;
             };
             if confirm_discard(hwnd) {

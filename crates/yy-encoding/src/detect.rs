@@ -209,3 +209,120 @@ fn japanese_score(enc: Encoding, s: &[u8]) -> Score {
         points,
     }
 }
+
+/// EBCDIC らしければその文字コードを推定する（03 章 3.3）。既定の自動判別には含めず、
+/// 設定で有効にした場合だけ使う。`file_len` はファイル全体の大きさ（固定長レコードの推定用）。
+///
+/// EBCDIC の空白（0x40）が ASCII の空白（0x20）より十分に多く、SO…SI の外がほぼすべて
+/// EBCDIC の英数字・記号・空白ならその文字コードとする。
+pub fn detect_ebcdic(sample: &[u8], file_len: u64) -> Option<Encoding> {
+    use crate::{Ccsid, Records};
+    if sample.len() < 16 {
+        return None;
+    }
+    let (mut single, mut plausible, mut spaces, mut shifts) = (0usize, 0usize, 0usize, 0usize);
+    let mut double = false;
+    for &b in sample {
+        match b {
+            0x0E if !double => {
+                double = true;
+                shifts += 1;
+                continue;
+            }
+            0x0F if double => {
+                double = false;
+                continue;
+            }
+            _ if double => continue,
+            _ => {}
+        }
+        single += 1;
+        if b == 0x40 {
+            spaces += 1;
+        }
+        // 英小文字系（939）・カタカナ系（930）のどちらかで表示できる文字か、改行・タブ
+        if matches!(b, 0x05 | 0x0D | 0x15 | 0x25)
+            || Ccsid::Ibm939.table().is_printable(b)
+            || Ccsid::Ibm930.table().is_printable(b)
+        {
+            plausible += 1;
+        }
+    }
+    let ascii_spaces = sample.iter().filter(|&&b| b == 0x20).count();
+    if single == 0
+        || plausible * 100 < single * 90
+        || spaces * 100 < single * 3
+        || spaces < ascii_spaces * 4
+    {
+        return None;
+    }
+    let records = if sample.contains(&0x15) {
+        Records::Nl
+    } else if sample.contains(&0x25) {
+        Records::Lf
+    } else {
+        const LENGTHS: [u64; 9] = [80, 72, 120, 128, 132, 133, 256, 512, 1024];
+        Records::Fixed(
+            LENGTHS
+                .into_iter()
+                .find(|n| file_len % n == 0)
+                .unwrap_or(80) as u32,
+        )
+    };
+    let candidates: &[Ccsid] = if shifts > 0 {
+        &[Ccsid::Ibm939, Ccsid::Ibm930, Ccsid::Ibm1399, Ccsid::Ibm1390]
+    } else {
+        &[
+            Ccsid::Ibm037,
+            Ccsid::Ibm1047,
+            Ccsid::Ibm500,
+            Ccsid::Ibm1027,
+            Ccsid::Ibm290,
+        ]
+    };
+    // 不正なバイトが最も少ないもの。同じなら英小文字・半角カナの並びが自然なもの
+    // （930 と 939 は英小文字と半角カナの位置が入れ替わっている）、それも同じなら先に挙げたもの
+    let best = candidates
+        .iter()
+        .map(|&c| {
+            let enc = Encoding::Ebcdic(c, records);
+            let (text, stats) = decode_all(enc, sample, true);
+            let points = kana_latin_score(&String::from_utf8_lossy(&text));
+            ((stats.invalid, std::cmp::Reverse(points)), enc)
+        })
+        .min_by_key(|(score, _)| *score)?;
+    Some(best.1)
+}
+
+/// 英小文字・半角カナの並びの自然さ。濁点・半濁点（どちらの表でも同じ位置）がカナ以外の後に
+/// 来たり、英小文字とカナが隣り合ったりするのは、別の表で読んでいるしるし。
+fn kana_latin_score(text: &str) -> i64 {
+    #[derive(PartialEq)]
+    enum Class {
+        Lower,
+        Kana,
+        Other,
+    }
+    let mut points = 0i64;
+    let mut prev = Class::Other;
+    for c in text.chars() {
+        let class = match c {
+            'a'..='z' => Class::Lower,
+            '\u{FF66}'..='\u{FF9D}' => Class::Kana,
+            _ => Class::Other,
+        };
+        points += match (&class, &prev, c) {
+            (Class::Lower, Class::Kana, _) | (Class::Kana, Class::Lower, _) => -3,
+            (Class::Lower, _, _) => 2,
+            (Class::Kana, _, _) => 1,
+            (_, Class::Kana, '\u{FF9E}' | '\u{FF9F}') => 1,
+            (_, _, '\u{FF9E}' | '\u{FF9F}') => -5,
+            _ => 0,
+        };
+        // 濁点はカナの一部として扱う
+        if !matches!(c, '\u{FF9E}' | '\u{FF9F}') || prev != Class::Kana {
+            prev = class;
+        }
+    }
+    points
+}

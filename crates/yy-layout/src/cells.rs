@@ -106,6 +106,7 @@ fn spans_width(text: &str, spans: &[Span], ccfg: &ColumnConfig, start_col: u32) 
                 }
             }
             SpanKind::Control => col += sp.src.len() as u32,
+            SpanKind::Break => col += 1,
             SpanKind::Invalid => col += 4 * sp.src.len() as u32,
             SpanKind::Escape => col += 4 * (sp.src.len() / 4) as u32,
             SpanKind::Delim | SpanKind::Pad => col += ccfg.text_width(&text[sp.range.clone()], col),

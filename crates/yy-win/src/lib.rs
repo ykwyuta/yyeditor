@@ -22,6 +22,7 @@ mod font;
 mod goto;
 mod grepdlg;
 mod ime;
+mod recorddlg;
 mod render;
 mod util;
 

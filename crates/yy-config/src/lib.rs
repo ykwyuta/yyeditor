@@ -56,6 +56,8 @@ pub struct EditorConfig {
     pub tab_width: u32,
     /// 東アジアの曖昧幅文字（①、○ など）を全角（2 桁）として数えるか。矩形選択の桁計算に使う
     pub ambiguous_wide: bool,
+    /// 文字コードの自動判別に EBCDIC を含める（03 章 3.3）
+    pub detect_ebcdic: bool,
 }
 
 impl Default for EditorConfig {
@@ -65,6 +67,7 @@ impl Default for EditorConfig {
             font_size: 11.0,
             tab_width: 4,
             ambiguous_wide: true,
+            detect_ebcdic: false,
         }
     }
 }
@@ -200,6 +203,7 @@ pub struct FileType {
     pub delimiter: Option<String>,
     pub quote: Option<char>,
     pub rfc4180: Option<bool>,
+    /// 開くときの文字コード（`IBM-930/fixed:80` など。省略すると自動判別）
     pub encoding: Option<String>,
     pub syntax: Option<String>,
 }
