@@ -28,7 +28,10 @@ fn main() -> ExitCode {
     };
     let snap = doc.snapshot().clone();
     let len = snap.len();
-    println!("file size          : {:.2} GB", len as f64 / (1u64 << 30) as f64);
+    println!(
+        "file size          : {:.2} GB",
+        len as f64 / (1u64 << 30) as f64
+    );
     let d = Dialect::csv();
 
     // 開いた直後（インデックスなし）の最初の画面
@@ -37,10 +40,20 @@ fn main() -> ExitCode {
     let cl = CellLayout::new(d, Vec::new(), ColumnConfig::default(), index.clone());
     let mut widths = Vec::new();
     measure_widths(&snap, &cl, 0, 1000, 8192, 60, &mut widths);
-    let cl = Arc::new(CellLayout::new(d, widths.clone(), ColumnConfig::default(), index.clone()));
+    let cl = Arc::new(CellLayout::new(
+        d,
+        widths.clone(),
+        ColumnConfig::default(),
+        index.clone(),
+    ));
     let cfg = RowConfig::default().with_cells(cl);
     let rows = rows_from(&snap, &cfg, 0, 60);
-    println!("first screen       : {:?} ({} rows, {} columns)", t.elapsed(), rows.len(), widths.len());
+    println!(
+        "first screen       : {:?} ({} rows, {} columns)",
+        t.elapsed(),
+        rows.len(),
+        widths.len()
+    );
 
     // バックグラウンドで行うインデックスの作成
     let t = Instant::now();
@@ -56,12 +69,21 @@ fn main() -> ExitCode {
     );
 
     // 中央へジャンプして 1 画面を表示
-    let cl = Arc::new(CellLayout::new(d, widths, ColumnConfig::default(), index.clone()));
+    let cl = Arc::new(CellLayout::new(
+        d,
+        widths,
+        ColumnConfig::default(),
+        index.clone(),
+    ));
     let cfg = RowConfig::default().with_cells(cl);
     let mut vp = Viewport::default();
     let t = Instant::now();
     vp.scroll_to_fraction(&snap, &cfg, 0.5, 60);
     let rows = rows_from(&snap, &cfg, vp.top, 60);
-    println!("jump to 50% + draw : {:?} ({} rows)", t.elapsed(), rows.len());
+    println!(
+        "jump to 50% + draw : {:?} ({} rows)",
+        t.elapsed(),
+        rows.len()
+    );
     ExitCode::SUCCESS
 }
