@@ -13,7 +13,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | R5 | UTF-8 だけでなく、EBCDIC を含む日本で使われる幅広い文字コードへの対応 | [03-encoding](03-encoding.md) |
 | R6 | 正規表現による検索と置換 | [05-search-replace](05-search-replace.md) |
 | R7 | Undo / Redo | [06-undo-backup-save](06-undo-backup-save.md) |
-| R8 | 自動バックアップ（クラッシュ時の復元） | [06-undo-backup-save](06-undo-backup-save.md) |
+| ~~R8~~ | ~~自動バックアップ（クラッシュ時の復元）~~ **（2026-09-29 要件から取り下げ）** | [06-undo-backup-save](06-undo-backup-save.md) |
 | R9 | 保存時の拡張子変更と文字コード変換 | [06-undo-backup-save](06-undo-backup-save.md) |
 | R10 | 矩形選択、マルチカーソルによる複数行同時編集 | [09-multi-cursor-rectangle](09-multi-cursor-rectangle.md) |
 | R11 | ファイル種類別のシンタックスハイライト | [10-syntax-highlight](10-syntax-highlight.md) |
@@ -58,7 +58,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | [03-encoding.md](03-encoding.md) | 文字コード対応範囲、自動判別、コーデック設計、EBCDIC |
 | [04-delimited-csv.md](04-delimited-csv.md) | 区切り文字編集モード、RFC 4180 CSV、列揃え表示 |
 | [05-search-replace.md](05-search-replace.md) | 正規表現検索・置換エンジン |
-| [06-undo-backup-save.md](06-undo-backup-save.md) | Undo/Redo、自動バックアップと復元、保存パイプライン（拡張子・文字コード変換） |
+| [06-undo-backup-save.md](06-undo-backup-save.md) | Undo/Redo、自動バックアップと復元（取り下げ）、保存パイプライン（拡張子・文字コード変換） |
 | [07-ui-rendering.md](07-ui-rendering.md) | Win32 UI、DirectWrite 描画、IME、長大行対策 |
 | [08-roadmap-testing.md](08-roadmap-testing.md) | 開発ロードマップ、テスト・性能目標、リスクと対策 |
 | [09-multi-cursor-rectangle.md](09-multi-cursor-rectangle.md) | 矩形選択、マルチカーソル・複数行同時編集、CSV のセル範囲選択 |
