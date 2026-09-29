@@ -582,6 +582,135 @@ impl Document {
         self.delete_with(EditKind::Other, |s, p| p..motion::next_word(s, p))
     }
 
+    /// 任意の変更の列を 1 つの Undo 単位として適用する（矩形編集などで使う）。
+    ///
+    /// `changes` は開始位置の昇順で重ならないこと。`make_sels` は適用結果から新しい選択を作る。
+    pub fn apply_changes(
+        &mut self,
+        changes: Vec<Change>,
+        kind: EditKind,
+        make_sels: impl FnOnce(&edit::Applied) -> SelectionSet,
+    ) -> bool {
+        self.typing = None;
+        let changes: Vec<Change> = changes
+            .into_iter()
+            .filter(|c| !c.range.is_empty() || c.insert_len > 0)
+            .collect();
+        if changes.is_empty() {
+            return false;
+        }
+        let applied = edit::apply(&self.snapshot, changes);
+        let mut sels = make_sels(&applied);
+        sels.clamp(applied.snapshot.len());
+        self.commit(applied.snapshot, sels, kind);
+        true
+    }
+
+    /// 主選択の文字列（空なら主カーソル位置の単語を選択して `None`）。
+    fn occurrence_needle(&mut self) -> Option<Vec<u8>> {
+        let p = *self.sels.primary();
+        if p.is_empty() {
+            let r = motion::word_range(&self.snapshot, p.head);
+            if !r.is_empty() {
+                self.set_selections(SelectionSet::single(Selection::new(r.start, r.end)));
+            }
+            return None;
+        }
+        let len = p.end() - p.start();
+        (len <= 64 << 10).then(|| self.snapshot.read(p.range()))
+    }
+
+    /// 主選択と同じ文字列の次の出現箇所を選択に加える（Ctrl+D）。
+    /// 何も選択していなければカーソル位置の単語を選択する。加えたら `true`。
+    pub fn select_next_occurrence(&mut self) -> bool {
+        let Some(needle) = self.occurrence_needle() else {
+            return !self.sels.primary().is_empty();
+        };
+        let len = self.snapshot.len();
+        let from = self.sels.iter().map(|s| s.end()).max().unwrap_or(0);
+        let n = needle.len() as u64;
+        let found = self
+            .snapshot
+            .find_bytes(from..len, &needle)
+            .or_else(|| self.snapshot.find_bytes(0..from, &needle))
+            .filter(|&pos| {
+                !self
+                    .sels
+                    .iter()
+                    .any(|s| s.start() == pos && s.end() == pos + n)
+            });
+        match found {
+            Some(pos) => {
+                let mut sels = self.sels.clone();
+                sels.add(Selection::new(pos, pos + n));
+                self.set_selections(sels);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 主選択と同じ文字列のすべての出現箇所を選択する（Ctrl+Shift+L）。
+    /// 選択した数と、`limit` で打ち切ったかを返す。
+    pub fn select_all_occurrences(&mut self, limit: usize) -> (usize, bool) {
+        let Some(needle) = self.occurrence_needle() else {
+            let n = usize::from(!self.sels.primary().is_empty());
+            return (n, false);
+        };
+        let len = self.snapshot.len();
+        let n = needle.len() as u64;
+        let primary_start = self.sels.primary().start();
+        let mut found = Vec::new();
+        let mut pos = 0;
+        let mut truncated = false;
+        while let Some(p) = self.snapshot.find_bytes(pos..len, &needle) {
+            if found.len() >= limit {
+                truncated = true;
+                break;
+            }
+            found.push(Selection::new(p, p + n));
+            pos = p + n;
+        }
+        if found.is_empty() {
+            return (0, false);
+        }
+        let primary = found
+            .iter()
+            .position(|s| s.start() == primary_start)
+            .unwrap_or(0);
+        let count = found.len();
+        self.set_selections(SelectionSet::from_vec(found, primary));
+        (count, truncated)
+    }
+
+    /// 選択範囲に含まれる各行の行末にカーソルを置く（Alt+Shift+I）。
+    pub fn carets_at_line_ends(&mut self, limit: usize) -> (usize, bool) {
+        let snap = self.snapshot.clone();
+        let len = snap.len();
+        let mut carets = Vec::new();
+        let mut truncated = false;
+        'outer: for s in self.sels.iter() {
+            let mut ls = motion::line_start(&snap, s.start());
+            loop {
+                if carets.len() >= limit {
+                    truncated = true;
+                    break 'outer;
+                }
+                carets.push(Selection::caret(motion::line_end(&snap, ls)));
+                match snap.find_next(ls..len, b'\n') {
+                    Some(nl) if !s.is_empty() && nl + 1 < s.end() => {
+                        ls = nl + 1;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let count = carets.len();
+        let primary = count - 1;
+        self.set_selections(SelectionSet::from_vec(carets, primary));
+        (count, truncated)
+    }
+
     // ---- Undo / Redo -----------------------------------------------------
 
     pub fn undo(&mut self) -> bool {
@@ -826,6 +955,62 @@ mod tests {
         // 退避した元ファイルはすべて削除されている
         let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn select_next_and_all_occurrences() {
+        let mut d = Document::from_text("foo bar foo baz foo");
+        d.set_selections(SelectionSet::single(Selection::caret(1)));
+        // 何も選択していなければ単語を選択するだけ
+        assert!(d.select_next_occurrence());
+        assert_eq!(d.selections().primary().range(), 0..3);
+        assert!(d.select_next_occurrence());
+        assert!(d.select_next_occurrence());
+        let ranges: Vec<_> = d.selections().iter().map(Selection::range).collect();
+        assert_eq!(ranges, vec![0..3, 8..11, 16..19]);
+        // すべて選択済みなら増えない
+        assert!(!d.select_next_occurrence());
+        d.insert_text("X", false);
+        assert_eq!(text(&d), "X bar X baz X");
+
+        let mut d = Document::from_text("ab ab ab ab");
+        d.set_selections(SelectionSet::single(Selection::new(3, 5)));
+        assert_eq!(d.select_all_occurrences(3), (3, true));
+        assert_eq!(d.selections().primary().range(), 3..5);
+        assert_eq!(d.select_all_occurrences(10), (4, false));
+    }
+
+    #[test]
+    fn carets_at_line_ends_of_selection() {
+        let mut d = Document::from_text("one\ntwo\r\nthree\nfour");
+        d.set_selections(SelectionSet::single(Selection::new(1, 11)));
+        assert_eq!(d.carets_at_line_ends(100), (3, false));
+        assert_eq!(carets(&d), vec![3, 7, 14]);
+        d.insert_text(";", false);
+        assert_eq!(text(&d), "one;\ntwo;\r\nthree;\nfour");
+    }
+
+    /// 1 万カーソルでの同時入力（一括適用の経路）と、1 回の Undo での復元。
+    #[test]
+    fn ten_thousand_carets() {
+        let text_in: String = (0..10_000).map(|i| format!("row {i}\n")).collect();
+        let mut d = Document::from_text(&text_in);
+        let sels: Vec<_> = text_in
+            .match_indices('\n')
+            .map(|(i, _)| Selection::caret(i as u64))
+            .collect();
+        d.set_selections(SelectionSet::from_vec(sels, 0));
+        let t = std::time::Instant::now();
+        d.insert_text(";", false);
+        let elapsed = t.elapsed();
+        eprintln!("10,000 carets: insert took {elapsed:?}");
+        assert!(text(&d).starts_with("row 0;\nrow 1;\n"));
+        assert_eq!(d.selections().len(), 10_000);
+        d.snapshot().check_invariants();
+        // 最適化なしのテストビルドでも十分速いこと（リリースビルドでは数 ms）
+        assert!(elapsed.as_millis() < 2000, "took {elapsed:?}");
+        d.undo();
+        assert_eq!(text(&d), text_in);
     }
 
     #[test]

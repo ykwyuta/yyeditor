@@ -151,6 +151,7 @@ pub fn render_to_bmp(
         caret_visible: false,
         overwrite: false,
         composition: None,
+        rect: &[],
     };
     let pixels = renderer
         .render_offscreen(width, height, &frame)

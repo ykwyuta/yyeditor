@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 yy-buffer.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

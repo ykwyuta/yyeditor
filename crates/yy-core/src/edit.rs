@@ -73,15 +73,37 @@ pub fn apply(snap: &Snapshot, changes: Vec<Change>) -> Applied {
         new_ends.push(start + c.insert_len);
         shift += c.delta();
     }
-    let mut s = snap.clone();
-    for c in changes.into_iter().rev() {
-        s = s.edit(c.range, c.insert);
-    }
+    let s = if changes.len() > BULK_THRESHOLD {
+        apply_bulk(snap, changes)
+    } else {
+        let mut s = snap.clone();
+        for c in changes.into_iter().rev() {
+            s = s.edit(c.range, c.insert);
+        }
+        s
+    };
     Applied {
         snapshot: s,
         new_ends,
         new_starts,
     }
+}
+
+/// これより変更が多い場合は、木を 1 本ずつ編集せずにピース列から組み直す
+/// （1 回の編集は O(log n) だが、数十万箇所の矩形編集などでは組み直す方が速い）。
+const BULK_THRESHOLD: usize = 64;
+
+/// 変更をすべて適用したピース列を作り、そこから木を組み直す。O(ピース数 + 変更数)。
+fn apply_bulk(snap: &Snapshot, changes: Vec<Change>) -> Snapshot {
+    let mut pieces = Vec::with_capacity(snap.summary().pieces as usize + changes.len() * 2);
+    let mut pos = 0u64;
+    for c in changes {
+        pieces.extend(snap.pieces_in(pos..c.range.start));
+        pieces.extend(c.insert);
+        pos = c.range.end;
+    }
+    pieces.extend(snap.pieces_in(pos..snap.len()));
+    Snapshot::from_pieces(pieces)
 }
 
 /// 変更の前の位置 `pos` を変更後の位置に写す。変更範囲の内部の位置は挿入テキストの末尾に写す。
@@ -118,6 +140,36 @@ mod tests {
         assert_eq!(a.snapshot.read(0..a.snapshot.len()), b"X  ccc!!");
         assert_eq!(a.new_starts, vec![0, 2, 6]);
         assert_eq!(a.new_ends, vec![1, 2, 8]);
+    }
+
+    /// 変更が多いとき（組み直し）と少ないとき（木の編集）で結果が同じ。
+    #[test]
+    fn bulk_application_matches_sequential() {
+        let text: String = (0..500).map(|i| format!("line {i}\n")).collect();
+        let s = Snapshot::from_bytes(text.clone());
+        let mut changes = Vec::new();
+        let mut expected = String::new();
+        let mut last = 0usize;
+        for (i, (pos, _)) in text.match_indices('\n').enumerate() {
+            if i % 3 == 0 {
+                expected.push_str(&text[last..pos]);
+                expected.push_str("<>");
+                changes.push(Change::replace_bytes(
+                    pos as u64..pos as u64 + 1,
+                    b"<>".to_vec(),
+                ));
+                last = pos + 1;
+            }
+        }
+        expected.push_str(&text[last..]);
+        assert!(changes.len() > BULK_THRESHOLD);
+        let a = apply(&s, changes);
+        a.snapshot.check_invariants();
+        assert_eq!(
+            String::from_utf8(a.snapshot.read(0..a.snapshot.len())).unwrap(),
+            expected
+        );
+        assert_eq!(a.snapshot.line_count(), Some(1 + 500 - 167));
     }
 
     #[test]

@@ -23,13 +23,16 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, Result, w};
 use yy_buffer::{LineLookup, Snapshot};
 use yy_config::Config;
+use yy_core::edit::Change;
 use yy_core::{Document, EditKind, Selection, SelectionSet, motion};
 use yy_jobs::{JobPool, Notifier};
+use yy_layout::rect::{self, RectEdit, RectRow};
 use yy_layout::{
-    Row, RowConfig, Viewport, next_row_start, prev_row_start, row_at, row_containing, rows_from,
+    ColumnConfig, RectSelection, Row, RowConfig, Viewport, next_row_start, prev_row_start, row_at,
+    row_containing, rows_from,
 };
 
-use crate::render::{Composition, Frame, Renderer};
+use crate::render::{Composition, Frame, RectPaint, Renderer};
 use crate::util::{Context, error_box, group_digits, human_size, info_box, wide};
 use crate::{FRAME_CLASS, VIEW_CLASS, clipboard, default_proc, hiword, ime, loword};
 
@@ -53,6 +56,11 @@ const ID_COPY: u16 = 404;
 const ID_PASTE: u16 = 405;
 const ID_SELECT_ALL: u16 = 406;
 const ID_DELETE: u16 = 407;
+const ID_RECT_MODE: u16 = 408;
+const ID_RECT_TO_CARETS: u16 = 409;
+const ID_SELECT_NEXT: u16 = 410;
+const ID_SELECT_ALL_OCCURRENCES: u16 = 411;
+const ID_CARETS_AT_LINE_ENDS: u16 = 412;
 
 const ID_STATUS: i32 = 1000;
 const TIMER_BLINK: usize = 1;
@@ -68,6 +76,10 @@ const WM_APP_RESIZE: u32 = WM_APP + 5;
 const SCROLL_RANGE: i32 = 1 << 16;
 /// クリップボードにコピーできる最大サイズ
 const MAX_CLIPBOARD_BYTES: u64 = 256 << 20;
+/// 矩形選択で一度に編集できる最大行数
+const RECT_EDIT_LIMIT: usize = 1_000_000;
+/// 「すべての出現箇所を選択」「各行末にカーソル」で作るカーソルの上限
+const CARET_LIMIT: usize = 100_000;
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -103,6 +115,8 @@ struct Drag {
     anchor: u64,
     /// Ctrl+クリックで追加中なら、追加前の選択
     base: Option<SelectionSet>,
+    /// 矩形選択のドラッグか
+    rect: bool,
 }
 
 pub(crate) struct App {
@@ -130,6 +144,13 @@ pub(crate) struct App {
     drag: Option<Drag>,
     /// WM_CHAR で届いたサロゲートペアの前半
     high_surrogate: Option<u16>,
+    /// 矩形選択中ならその範囲（文書の選択は矩形の先端のカーソル 1 つにしておく）
+    rect: Option<RectSelection>,
+    /// 矩形選択モード（Shift+移動やドラッグを矩形選択として扱う）
+    rect_mode: bool,
+    ccfg: ColumnConfig,
+    /// Alt+ドラッグの後の Alt キーの解放でメニューが開かないようにする
+    suppress_alt_up: bool,
 }
 
 pub(crate) fn create_accelerators() -> Result<HACCEL> {
@@ -148,6 +169,13 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
         (ctrl, b'C' as u16, ID_COPY),
         (ctrl, b'V' as u16, ID_PASTE),
         (ctrl, b'A' as u16, ID_SELECT_ALL),
+        (ctrl, b'D' as u16, ID_SELECT_NEXT),
+        (ctrl_shift, b'L' as u16, ID_SELECT_ALL_OCCURRENCES),
+        (
+            FVIRTKEY | FALT | FSHIFT,
+            b'I' as u16,
+            ID_CARETS_AT_LINE_ENDS,
+        ),
         (ctrl, b'G' as u16, ID_GOTO),
         (ctrl, VK_ADD.0, ID_ZOOM_IN),
         (ctrl, VK_OEM_PLUS.0, ID_ZOOM_IN),
@@ -195,6 +223,20 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU)> {
         item(edit, ID_DELETE, w!("削除(&D)\tDel"))?;
         sep(edit)?;
         item(edit, ID_SELECT_ALL, w!("すべて選択(&A)\tCtrl+A"))?;
+        item(edit, ID_SELECT_NEXT, w!("次の出現箇所を選択に追加\tCtrl+D"))?;
+        item(
+            edit,
+            ID_SELECT_ALL_OCCURRENCES,
+            w!("すべての出現箇所を選択\tCtrl+Shift+L"),
+        )?;
+        item(
+            edit,
+            ID_CARETS_AT_LINE_ENDS,
+            w!("選択した各行の行末にカーソル\tAlt+Shift+I"),
+        )?;
+        sep(edit)?;
+        item(edit, ID_RECT_MODE, w!("矩形選択モード(&B)"))?;
+        item(edit, ID_RECT_TO_CARETS, w!("矩形選択をカーソルに変換"))?;
 
         let view = CreatePopupMenu()?;
         item(view, ID_GOTO, w!("行へ移動(&G)...\tCtrl+G"))?;
@@ -285,6 +327,10 @@ impl App {
                 config.colors.clone(),
                 dpi,
             )?;
+            let ccfg = ColumnConfig {
+                tab_width: config.editor.tab_width,
+                ambiguous_wide: config.editor.ambiguous_wide,
+            };
             let app = App {
                 frame,
                 view,
@@ -308,6 +354,10 @@ impl App {
                 composition: None,
                 drag: None,
                 high_surrogate: None,
+                rect: None,
+                rect_mode: false,
+                ccfg,
+                suppress_alt_up: false,
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
             with_app(|a| {
@@ -432,7 +482,15 @@ impl App {
             .unwrap_or_else(|| "-".into());
         let mut text = format!("  {approx}{} 行, {col} 列", group_digits(pos.line + 1));
         let selected: u64 = sels.iter().map(|s| s.end() - s.start()).sum();
-        if sels.len() > 1 {
+        if let Some(r) = self.rect {
+            let lines =
+                snap.line_of_offset(r.bottom()).line - snap.line_of_offset(r.top()).line + 1;
+            text += &format!(
+                "  (矩形 {} 行 × {} 桁)",
+                group_digits(lines),
+                r.right() - r.left()
+            );
+        } else if sels.len() > 1 {
             text += &format!("  (カーソル {} 個)", sels.len());
         }
         if selected > 0 {
@@ -446,14 +504,13 @@ impl App {
         };
         self.set_status(2, &format!("  {enc}"));
         self.set_status(3, &format!("  {}", self.doc.eol().label()));
-        self.set_status(
-            4,
-            if self.overwrite {
-                "  上書き"
-            } else {
-                "  挿入"
-            },
-        );
+        let mode = match (self.overwrite, self.rect_mode) {
+            (false, false) => "  挿入",
+            (true, false) => "  上書き",
+            (false, true) => "  挿入 / 矩形",
+            (true, true) => "  上書き / 矩形",
+        };
+        self.set_status(4, mode);
         let progress = match self.doc.indexing_progress() {
             Some(p) => format!("  行数を数えています… {:.0}%", p * 100.0),
             None => String::new(),
@@ -515,9 +572,19 @@ impl App {
         let has_sel = !self.doc.selections().all_empty();
         set(ID_UNDO, self.doc.can_undo());
         set(ID_REDO, self.doc.can_redo());
+        let has_sel = has_sel || self.rect.is_some_and(|r| !r.is_zero_width());
         set(ID_CUT, has_sel);
         set(ID_COPY, has_sel);
         set(ID_DELETE, has_sel);
+        set(ID_RECT_TO_CARETS, self.rect.is_some());
+        let flag = if self.rect_mode {
+            MF_CHECKED
+        } else {
+            MF_UNCHECKED
+        };
+        unsafe {
+            CheckMenuItem(self.menu_edit, ID_RECT_MODE as u32, (MF_BYCOMMAND | flag).0);
+        }
     }
 
     // ---- スクロール ------------------------------------------------------
@@ -817,11 +884,57 @@ impl App {
 
     // ---- キーボード -------------------------------------------------------
 
+    /// Alt を押しながらのキー（WM_SYSKEYDOWN）。Alt+Shift+矢印で矩形選択する。
+    fn on_syskey(&mut self, vk: VIRTUAL_KEY) -> bool {
+        if !key_down(VK_SHIFT) || key_down(VK_CONTROL) {
+            return false;
+        }
+        match vk {
+            VK_LEFT => self.rect_extend(0, -1),
+            VK_RIGHT => self.rect_extend(0, 1),
+            VK_UP => self.rect_extend(-1, 0),
+            VK_DOWN => self.rect_extend(1, 0),
+            _ => return false,
+        }
+        true
+    }
+
     fn on_key(&mut self, vk: VIRTUAL_KEY) -> bool {
         let ctrl = key_down(VK_CONTROL);
         let shift = key_down(VK_SHIFT);
         let alt = key_down(VK_MENU);
         let page = self.page_rows() as i64;
+        // 矩形選択モードでは Shift+矢印で矩形を広げる
+        if self.rect_mode && shift && !ctrl {
+            let d = match vk {
+                VK_LEFT => Some((0, -1)),
+                VK_RIGHT => Some((0, 1)),
+                VK_UP => Some((-1, 0)),
+                VK_DOWN => Some((1, 0)),
+                _ => None,
+            };
+            if let Some((dr, dc)) = d {
+                self.rect_extend(dr, dc);
+                return true;
+            }
+        }
+        if self.rect.is_some() {
+            match vk {
+                VK_BACK => {
+                    self.rect_delete(true);
+                    return true;
+                }
+                VK_DELETE if !shift => {
+                    self.rect_delete(false);
+                    return true;
+                }
+                // 移動キーでは矩形選択をやめて、先端のカーソルから通常の移動をする
+                // （文字キーは WM_CHAR で矩形に入力するので、ここでは矩形を残す）
+                VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN | VK_HOME | VK_END | VK_PRIOR | VK_NEXT
+                | VK_ESCAPE => self.clear_rect(),
+                _ => {}
+            }
+        }
         match vk {
             VK_LEFT => self.move_horizontal(-1, shift, ctrl),
             VK_RIGHT => self.move_horizontal(1, shift, ctrl),
@@ -911,6 +1024,9 @@ impl App {
         }
         let text = match code {
             0x0D => {
+                if self.rect.is_some() {
+                    self.rect_to_carets();
+                }
                 if self.doc.insert_newline(true) {
                     self.after_edit();
                 }
@@ -928,15 +1044,293 @@ impl App {
             c if c < 0x20 || c == 0x7F => return,
             c => String::from_utf16_lossy(&[c]),
         };
+        if self.rect.is_some() {
+            self.rect_type(&[&text], EditKind::Typing);
+            return;
+        }
         if self.doc.insert_text(&text, self.overwrite) {
             self.after_edit();
         }
     }
 
+    // ---- 矩形選択（09 章 3） ------------------------------------------------
+
+    /// 矩形の先端の位置（仮想空白は行末に丸める）。
+    fn rect_head_offset(&self, r: &RectSelection) -> u64 {
+        rect::offset_at(
+            self.doc.snapshot(),
+            self.rows_cfg,
+            &self.ccfg,
+            r.head_row,
+            r.head_col,
+        )
+    }
+
+    /// 文書の選択を矩形の先端のカーソルに合わせる（スクロール追従・IME・ステータス表示用）。
+    fn sync_rect_caret(&mut self) {
+        if let Some(r) = self.rect {
+            let off = self.rect_head_offset(&r);
+            self.doc
+                .set_selections(SelectionSet::single(Selection::caret(off)));
+        }
+    }
+
+    /// 矩形選択をやめて、先端の位置のカーソルにする。
+    fn clear_rect(&mut self) {
+        if self.rect.take().is_some() {
+            self.invalidate();
+        }
+    }
+
+    /// 矩形の先端を動かす（Alt+Shift+矢印）。矩形がなければ主カーソルの位置から始める。
+    fn rect_extend(&mut self, drow: i64, dcol: i64) {
+        let snap = self.doc.snapshot().clone();
+        let mut r = self.rect.unwrap_or_else(|| {
+            let (row, col) = rect::row_and_col(
+                &snap,
+                self.rows_cfg,
+                &self.ccfg,
+                self.doc.selections().primary().head,
+            );
+            RectSelection {
+                anchor_row: row,
+                anchor_col: col,
+                head_row: row,
+                head_col: col,
+            }
+        });
+        for _ in 0..drow.unsigned_abs() {
+            let n = if drow > 0 {
+                next_row_start(&snap, self.rows_cfg, r.head_row)
+            } else {
+                prev_row_start(&snap, self.rows_cfg, r.head_row)
+            };
+            match n {
+                // 文書末の「改行で終わらない最終行の次」は存在しないので止まる
+                Some(n) if n <= snap.len() => r.head_row = n,
+                _ => break,
+            }
+        }
+        r.head_col = (r.head_col as i64 + dcol).max(0) as u32;
+        self.rect = Some(r);
+        self.sync_rect_caret();
+        self.after_move();
+    }
+
+    /// 矩形の全行を展開する。行数が多すぎる場合は `None`。
+    fn rect_rows_all(&self) -> Option<Vec<RectRow>> {
+        let r = self.rect?;
+        match rect::rect_rows(
+            self.doc.snapshot(),
+            self.rows_cfg,
+            &self.ccfg,
+            &r,
+            RECT_EDIT_LIMIT,
+        ) {
+            Ok(rows) => Some(rows),
+            Err(_) => {
+                info_box(
+                    self.frame,
+                    &format!(
+                        "矩形選択の行数が多すぎるため編集できません（上限 {} 行）。",
+                        group_digits(RECT_EDIT_LIMIT as u64)
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    /// 矩形に対する編集を適用し、矩形を新しい桁の縦一列カーソルにする。
+    fn rect_apply(&mut self, edit: RectEdit, kind: EditKind) -> bool {
+        let Some(r) = self.rect else {
+            return false;
+        };
+        let changes: Vec<Change> = edit
+            .changes
+            .into_iter()
+            .map(|(range, bytes)| {
+                if bytes.is_empty() {
+                    Change::delete(range)
+                } else {
+                    Change::replace_bytes(range, bytes)
+                }
+            })
+            .collect();
+        let map_row = |row: u64| {
+            // 行頭はその行の変更より前にあるので、前の行の変更による移動だけを反映する
+            let delta: i128 = changes
+                .iter()
+                .filter(|c| c.range.end <= row)
+                .map(|c| c.insert_len as i128 - (c.range.end - c.range.start) as i128)
+                .sum();
+            (row as i128 + delta) as u64
+        };
+        let new_rect = RectSelection {
+            anchor_row: map_row(r.anchor_row),
+            head_row: map_row(r.head_row),
+            anchor_col: edit.new_col,
+            head_col: edit.new_col,
+        };
+        let edited = self.doc.apply_changes(changes, kind, |a| {
+            SelectionSet::single(Selection::caret(*a.new_ends.first().unwrap_or(&0)))
+        });
+        self.rect = Some(new_rect);
+        self.sync_rect_caret();
+        if edited {
+            self.after_edit();
+        } else {
+            self.after_move();
+        }
+        edited
+    }
+
+    /// 矩形の各行に文字列を入力する（行ごとに異なる文字列も可）。
+    fn rect_type(&mut self, texts: &[&str], kind: EditKind) {
+        if let Some(rows) = self.rect_rows_all() {
+            let edit = rect::replace_rows(&rows, texts, &self.ccfg);
+            self.rect_apply(edit, kind);
+        }
+    }
+
+    fn rect_delete(&mut self, backward: bool) {
+        let (Some(r), Some(rows)) = (self.rect, self.rect_rows_all()) else {
+            return;
+        };
+        let edit = if backward {
+            rect::delete_backward(&rows, &r)
+        } else {
+            rect::delete_forward(&rows, &r)
+        };
+        self.rect_apply(edit, EditKind::Other);
+    }
+
+    /// 矩形部分のテキスト（行ごとに改行で連結）。
+    fn rect_text(&self) -> Option<String> {
+        let rows = self.rect_rows_all()?;
+        let eol = self.doc.eol().as_bytes();
+        let mut out = Vec::new();
+        for (i, t) in rect::row_texts(self.doc.snapshot(), &rows)
+            .into_iter()
+            .enumerate()
+        {
+            if i > 0 {
+                out.extend_from_slice(eol);
+            }
+            out.extend(t);
+        }
+        Some(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// 矩形選択を各行の選択範囲（マルチカーソル）に変換する。
+    fn rect_to_carets(&mut self) {
+        let Some(rows) = self.rect_rows_all() else {
+            return;
+        };
+        let sels: Vec<Selection> = rows
+            .iter()
+            .map(|r| Selection::new(r.range.start, r.range.end))
+            .collect();
+        self.rect = None;
+        if !sels.is_empty() {
+            let primary = sels.len() - 1;
+            self.doc
+                .set_selections(SelectionSet::from_vec(sels, primary));
+        }
+        self.after_move();
+    }
+
+    /// 矩形データの貼り付け: 主カーソルの桁から下の行へ 1 行ずつ入れる（09 章 3.2）。
+    /// 行が足りなければ文書末に行を追加する。
+    fn column_paste(&mut self, lines: &[&str]) {
+        let snap = self.doc.snapshot().clone();
+        let head = self.doc.selections().primary().head;
+        let (row, col) = rect::row_and_col(&snap, self.rows_cfg, &self.ccfg, head);
+        // 貼り付ける行数分の矩形（足りない分は後で追加する）
+        let mut bottom = row;
+        let mut n = 1;
+        while n < lines.len() {
+            match next_row_start(&snap, self.rows_cfg, bottom) {
+                Some(b) if b < snap.len() || yy_layout::is_line_start(&snap, b) => {
+                    bottom = b;
+                    n += 1;
+                }
+                _ => break,
+            }
+        }
+        let r = RectSelection {
+            anchor_row: row,
+            anchor_col: col,
+            head_row: bottom,
+            head_col: col,
+        };
+        let Ok(rows) = rect::rect_rows(&snap, self.rows_cfg, &self.ccfg, &r, RECT_EDIT_LIMIT)
+        else {
+            return;
+        };
+        let mut edit = rect::replace_rows(&rows, &lines[..rows.len()], &self.ccfg);
+        // 文書末に足りない行を追加する
+        if rows.len() < lines.len() {
+            let eol = self.doc.eol().as_bytes();
+            let mut tail = Vec::new();
+            for line in &lines[rows.len()..] {
+                tail.extend_from_slice(eol);
+                tail.extend(std::iter::repeat_n(b' ', col as usize));
+                tail.extend_from_slice(line.as_bytes());
+            }
+            let len = snap.len();
+            match edit.changes.last_mut() {
+                Some((range, bytes)) if range.end == len => bytes.extend(tail),
+                _ => edit.changes.push((len..len, tail)),
+            }
+        }
+        self.rect = Some(r);
+        self.rect_apply(edit, EditKind::Paste);
+        self.rect = None;
+        self.after_move();
+    }
+
+    /// 矩形選択の表示情報（表示中の行だけ計算する）。
+    fn rect_paints(&self, rows: &[Row]) -> Vec<RectPaint> {
+        let Some(r) = self.rect else {
+            return Vec::new();
+        };
+        let (top, bottom) = (r.top(), r.bottom());
+        rows.iter()
+            .filter(|row| row.start >= top && row.start <= bottom)
+            .map(|row| {
+                let rr = rect::rect_row(
+                    self.doc.snapshot(),
+                    self.rows_cfg,
+                    &self.ccfg,
+                    &r,
+                    row.start,
+                );
+                let content = yy_layout::columns::content_cols(&rr.units);
+                // 行末より右は仮想空白として桁数だけ伸ばして描く
+                let left = (rr.range.start, r.left().saturating_sub(content));
+                let right = (rr.range.end, r.right().saturating_sub(content));
+                let caret = if r.is_zero_width() {
+                    Some(left)
+                } else if row.start == r.head_row {
+                    Some(if r.head_col == r.left() { left } else { right })
+                } else {
+                    None
+                };
+                RectPaint {
+                    row_start: row.start,
+                    left,
+                    right,
+                    caret,
+                }
+            })
+            .collect()
+    }
+
     // ---- マウス ----------------------------------------------------------
 
-    /// ビューのクライアント座標（ピクセル）に最も近い文書の位置。
-    fn offset_at_point(&mut self, x_px: i32, y_px: i32) -> u64 {
+    /// ビューのクライアント座標（ピクセル）の表示行と、本文の左端からの x 座標（DIP）。
+    fn row_at_point(&mut self, x_px: i32, y_px: i32) -> Option<(Row, f32)> {
         self.sync_renderer();
         let x = self.renderer.px_to_dip(x_px as f32);
         let y = self.renderer.px_to_dip(y_px as f32);
@@ -948,20 +1342,69 @@ impl App {
         } else {
             let idx = (y / lh).floor() as usize;
             let rows = rows_from(&snap, cfg, self.vp.top, idx + 1);
-            match rows.last() {
-                Some(r) => r.start,
-                None => return snap.len(),
-            }
+            rows.last()?.start
         };
         let row = row_at(&snap, cfg, row_start);
-        let tx = x - self.text_origin_x() + self.scroll_x;
-        self.renderer.hit_test(&row, tx)
+        Some((row, x - self.text_origin_x() + self.scroll_x))
+    }
+
+    /// ビューのクライアント座標（ピクセル）に最も近い文書の位置。
+    fn offset_at_point(&mut self, x_px: i32, y_px: i32) -> u64 {
+        match self.row_at_point(x_px, y_px) {
+            Some((row, tx)) => self.renderer.hit_test(&row, tx),
+            None => self.doc.snapshot().len(),
+        }
+    }
+
+    /// ビューのクライアント座標（ピクセル）の表示行と表示桁（行末より右は仮想空白の桁）。
+    fn row_col_at_point(&mut self, x_px: i32, y_px: i32) -> (u64, u32) {
+        let Some((row, tx)) = self.row_at_point(x_px, y_px) else {
+            let len = self.doc.snapshot().len();
+            return rect::row_and_col(self.doc.snapshot(), self.rows_cfg, &self.ccfg, len);
+        };
+        let us = yy_layout::columns::units(&row, &self.ccfg);
+        let end_x = self.renderer.caret_x(&row, row.end);
+        let cw = self.renderer.metrics().char_width.max(1.0);
+        if tx > end_x {
+            let extra = ((tx - end_x) / cw).round() as u32;
+            return (row.start, yy_layout::columns::content_cols(&us) + extra);
+        }
+        let off = self.renderer.hit_test(&row, tx);
+        (row.start, yy_layout::columns::col_of(&us, &row, off))
     }
 
     fn on_lbutton_down(&mut self, x: i32, y: i32, double: bool) {
-        let pos = self.offset_at_point(x, y);
         let shift = key_down(VK_SHIFT);
         let ctrl = key_down(VK_CONTROL);
+        if !double && !ctrl && (key_down(VK_MENU) || self.rect_mode) {
+            // Alt+ドラッグ（または矩形選択モード）で矩形選択
+            let (row, col) = self.row_col_at_point(x, y);
+            let r = match (shift, self.rect) {
+                (true, Some(mut r)) => {
+                    r.head_row = row;
+                    r.head_col = col;
+                    r
+                }
+                _ => RectSelection {
+                    anchor_row: row,
+                    anchor_col: col,
+                    head_row: row,
+                    head_col: col,
+                },
+            };
+            self.rect = Some(r);
+            self.suppress_alt_up = key_down(VK_MENU);
+            self.drag = Some(Drag {
+                anchor: 0,
+                base: None,
+                rect: true,
+            });
+            self.sync_rect_caret();
+            self.after_move();
+            return;
+        }
+        self.rect = None;
+        let pos = self.offset_at_point(x, y);
         let mut sels = self.doc.selections().clone();
         if double {
             let r = motion::word_range(self.doc.snapshot(), pos);
@@ -972,7 +1415,11 @@ impl App {
             let anchor = sels.primary().anchor;
             self.doc
                 .set_selections(SelectionSet::single(Selection::new(anchor, pos)));
-            self.drag = Some(Drag { anchor, base: None });
+            self.drag = Some(Drag {
+                anchor,
+                base: None,
+                rect: false,
+            });
         } else if ctrl {
             let base = sels.clone();
             sels.add(Selection::caret(pos));
@@ -980,6 +1427,7 @@ impl App {
             self.drag = Some(Drag {
                 anchor: pos,
                 base: Some(base),
+                rect: false,
             });
         } else {
             self.doc
@@ -987,6 +1435,7 @@ impl App {
             self.drag = Some(Drag {
                 anchor: pos,
                 base: None,
+                rect: false,
             });
         }
         self.after_move();
@@ -996,13 +1445,26 @@ impl App {
         let Some(drag) = &self.drag else {
             return;
         };
-        let (anchor, base) = (drag.anchor, drag.base.clone());
+        let (anchor, base, is_rect) = (drag.anchor, drag.base.clone(), drag.rect);
         // ビューの外に出たら 1 行ずつスクロールする
         let h = self.view_px.1 as i32;
         if y < 0 {
             self.scroll_rows(-1);
         } else if y > h {
             self.scroll_rows(1);
+        }
+        if is_rect {
+            let (row, col) = self.row_col_at_point(x, y);
+            if let Some(mut r) = self.rect
+                && (r.head_row != row || r.head_col != col)
+            {
+                r.head_row = row;
+                r.head_col = col;
+                self.rect = Some(r);
+                self.sync_rect_caret();
+                self.after_move();
+            }
+            return;
         }
         let pos = self.offset_at_point(x, y);
         let sel = Selection::new(anchor, pos);
@@ -1041,7 +1503,11 @@ impl App {
         let mut edited = false;
         if let Some(result) = update.result {
             self.composition = None;
-            edited |= self.doc.insert_text(&result, self.overwrite);
+            if self.rect.is_some() {
+                self.rect_type(&[&result], EditKind::Typing);
+            } else {
+                edited |= self.doc.insert_text(&result, self.overwrite);
+            }
         }
         if let Some((text, cursor)) = update.composing {
             if text.is_empty() {
@@ -1051,8 +1517,16 @@ impl App {
                 if self.composition.is_none() && !self.doc.selections().all_empty() {
                     edited |= self.doc.delete_selection(EditKind::Other);
                 }
+                // 変換中の文字列は主カーソルを先頭に、すべてのカーソル位置にプレビューする
+                let sels = self.doc.selections();
+                let mut offsets = vec![sels.primary().head];
+                offsets.extend(
+                    sels.iter()
+                        .map(|s| s.head)
+                        .filter(|&h| h != sels.primary().head),
+                );
                 self.composition = Some(Composition {
-                    offset: self.doc.selections().primary().head,
+                    offsets,
                     text,
                     cursor,
                 });
@@ -1086,11 +1560,16 @@ impl App {
                 .filter(|s| !s.is_empty() && s.end() >= lo && s.start() <= hi)
                 .map(|s| s.range())
                 .collect();
-            let carets: Vec<u64> = sels
-                .iter()
-                .map(|s| s.head)
-                .filter(|h| (lo..=hi).contains(h))
-                .collect();
+            // 矩形選択中は矩形側でキャレットを描く
+            let carets: Vec<u64> = if self.rect.is_some() {
+                Vec::new()
+            } else {
+                sels.iter()
+                    .map(|s| s.head)
+                    .filter(|h| (lo..=hi).contains(h))
+                    .collect()
+            };
+            let rect_paints = self.rect_paints(&rows);
             let frame = Frame {
                 version: self.doc.version(),
                 rows: &rows,
@@ -1104,6 +1583,7 @@ impl App {
                 caret_visible: self.focused && self.caret_visible,
                 overwrite: self.overwrite,
                 composition: self.composition.as_ref(),
+                rect: &rect_paints,
             };
             let before = self.renderer.max_text_width;
             let result = self
@@ -1138,6 +1618,7 @@ impl App {
         ime::cancel(self.view);
         self.composition = None;
         self.drag = None;
+        self.rect = None;
         self.doc = doc;
         let n = self.notifier();
         self.doc.start_indexing(&self.pool, n);
@@ -1218,8 +1699,67 @@ impl App {
         }
     }
 
-    fn copy_selection(&self) -> std::result::Result<Option<String>, u64> {
-        self.doc.selected_text(MAX_CLIPBOARD_BYTES)
+    /// コピーする文字列と、それが矩形選択のデータか。
+    fn copy_selection(&self) -> std::result::Result<Option<(String, bool)>, u64> {
+        if self.rect.is_some() {
+            return Ok(self.rect_text().map(|t| (t, true)));
+        }
+        Ok(self
+            .doc
+            .selected_text(MAX_CLIPBOARD_BYTES)?
+            .map(|t| (t, false)))
+    }
+
+    /// 選択範囲（矩形を含む）を削除する。
+    fn delete_selection(&mut self, kind: EditKind) -> bool {
+        if let Some(r) = self.rect {
+            if r.is_zero_width() {
+                return false;
+            }
+            self.rect_delete(true);
+            return true;
+        }
+        if self.doc.delete_selection(kind) {
+            self.after_edit();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn paste(&mut self, text: &str, column: bool) {
+        let lines: Vec<&str> = text
+            .strip_suffix("\r\n")
+            .or(text.strip_suffix('\n'))
+            .unwrap_or(text)
+            .split('\n')
+            .map(|l| l.trim_end_matches('\r'))
+            .collect();
+        if let Some(rows) = self.rect_rows_all() {
+            // 矩形への貼り付け: 行数が一致すれば 1 行ずつ、1 行なら全行に同じ文字列
+            if lines.len() == rows.len() || lines.len() == 1 {
+                let edit = rect::replace_rows(&rows, &lines, &self.ccfg);
+                self.rect_apply(edit, EditKind::Paste);
+                return;
+            }
+            // 行数が合わなければ矩形の左上から矩形データとして貼り付ける
+            let top_left = rows[0].range.start;
+            self.rect = None;
+            self.doc
+                .set_selections(SelectionSet::single(Selection::caret(top_left)));
+            self.column_paste(&lines);
+            return;
+        }
+        if column && lines.len() > 1 && self.doc.selections().len() == 1 {
+            if self.doc.delete_selection(EditKind::Paste) {
+                self.after_edit();
+            }
+            self.column_paste(&lines);
+            return;
+        }
+        if self.doc.paste(text) {
+            self.after_edit();
+        }
     }
 }
 
@@ -1324,17 +1864,13 @@ fn cmd_copy(hwnd: HWND, cut: bool) {
         return;
     };
     match sel {
-        Ok(Some(text)) => {
-            if !clipboard::set_text(hwnd, &text) {
+        Ok(Some((text, column))) => {
+            if !clipboard::set_text(hwnd, &text, column) {
                 error_box(hwnd, "クリップボードにコピーできませんでした。");
                 return;
             }
             if cut {
-                with_app(|a| {
-                    if a.doc.delete_selection(EditKind::Cut) {
-                        a.after_edit();
-                    }
-                });
+                with_app(|a| a.delete_selection(EditKind::Cut));
             }
         }
         Ok(None) => {}
@@ -1378,6 +1914,7 @@ fn on_command(hwnd: HWND, id: u16) {
         },
         ID_UNDO => {
             with_app(|a| {
+                a.rect = None;
                 if a.doc.undo() {
                     a.composition = None;
                     a.after_edit();
@@ -1386,6 +1923,7 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_REDO => {
             with_app(|a| {
+                a.rect = None;
                 if a.doc.redo() {
                     a.composition = None;
                     a.after_edit();
@@ -1395,26 +1933,63 @@ fn on_command(hwnd: HWND, id: u16) {
         ID_CUT => cmd_copy(hwnd, true),
         ID_COPY => cmd_copy(hwnd, false),
         ID_PASTE => {
-            if let Some(text) = clipboard::get_text(hwnd) {
-                with_app(|a| {
-                    if a.doc.paste(&text) {
-                        a.after_edit();
-                    }
-                });
+            if let Some((text, column)) = clipboard::get_text(hwnd) {
+                with_app(|a| a.paste(&text, column));
             }
         }
         ID_DELETE => {
             with_app(|a| {
-                if a.doc.delete_selection(EditKind::Other) || a.doc.delete_forward() {
+                if !a.delete_selection(EditKind::Other)
+                    && a.rect.is_none()
+                    && a.doc.delete_forward()
+                {
                     a.after_edit();
                 }
             });
         }
         ID_SELECT_ALL => {
             with_app(|a| {
+                a.rect = None;
                 a.doc.select_all();
                 a.after_move();
             });
+        }
+        ID_SELECT_NEXT => {
+            with_app(|a| {
+                a.rect = None;
+                a.doc.select_next_occurrence();
+                a.after_move();
+            });
+        }
+        ID_SELECT_ALL_OCCURRENCES | ID_CARETS_AT_LINE_ENDS => {
+            let result = with_app(|a| {
+                a.rect = None;
+                let r = if id == ID_SELECT_ALL_OCCURRENCES {
+                    a.doc.select_all_occurrences(CARET_LIMIT)
+                } else {
+                    a.doc.carets_at_line_ends(CARET_LIMIT)
+                };
+                a.after_move();
+                r
+            });
+            if let Some((n, true)) = result {
+                info_box(
+                    hwnd,
+                    &format!(
+                        "カーソルが多すぎるため、先頭から {} 個までにしました。",
+                        group_digits(n as u64)
+                    ),
+                );
+            }
+        }
+        ID_RECT_MODE => {
+            with_app(|a| {
+                a.rect_mode = !a.rect_mode;
+                a.update_status();
+            });
+        }
+        ID_RECT_TO_CARETS => {
+            with_app(|a| a.rect_to_carets());
         }
         ID_GOTO => {
             let Some((current, total)) = with_app(|a| {
@@ -1672,6 +2247,22 @@ pub(crate) extern "system" fn view_proc(
                     }
                     None => default_proc(hwnd, msg, wparam, lparam),
                 }
+            }
+        }
+        WM_SYSKEYUP if VIRTUAL_KEY(wparam.0 as u16) == VK_MENU => {
+            let suppress = with_app(|a| std::mem::take(&mut a.suppress_alt_up)).unwrap_or(false);
+            if suppress {
+                LRESULT(0)
+            } else {
+                default_proc(hwnd, msg, wparam, lparam)
+            }
+        }
+        WM_SYSKEYDOWN => {
+            let handled = with_app(|a| a.on_syskey(VIRTUAL_KEY(wparam.0 as u16))).unwrap_or(false);
+            if handled {
+                LRESULT(0)
+            } else {
+                default_proc(hwnd, msg, wparam, lparam)
             }
         }
         WM_CHAR => {

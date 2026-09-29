@@ -53,6 +53,8 @@ pub struct EditorConfig {
     /// フォントサイズ（ポイント）
     pub font_size: f32,
     pub tab_width: u32,
+    /// 東アジアの曖昧幅文字（①、○ など）を全角（2 桁）として数えるか。矩形選択の桁計算に使う
+    pub ambiguous_wide: bool,
 }
 
 impl Default for EditorConfig {
@@ -61,6 +63,7 @@ impl Default for EditorConfig {
             font_family: "Consolas".into(),
             font_size: 11.0,
             tab_width: 4,
+            ambiguous_wide: true,
         }
     }
 }

@@ -16,9 +16,13 @@
 //! 隣の表示行の開始位置が決まり、スクロールのコストがファイルサイズや行の長さに依存しない。
 //! 長さ `S` 以下の行は分割されない。
 
+pub mod columns;
+pub mod rect;
 mod row;
 mod viewport;
 
+pub use columns::ColumnConfig;
+pub use rect::RectSelection;
 pub use row::{Row, Span, SpanKind, decode_row};
 pub use viewport::Viewport;
 

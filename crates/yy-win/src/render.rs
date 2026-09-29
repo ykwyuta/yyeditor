@@ -18,8 +18,8 @@ use crate::util::Context;
 
 /// IME で変換中の文字列（キャレット位置にインライン表示する）。
 pub(crate) struct Composition {
-    /// 挿入位置（文書のオフセット）
-    pub offset: u64,
+    /// 挿入位置（文書のオフセット）。先頭が主カーソルで、複数カーソルでは全位置にプレビューする
+    pub offsets: Vec<u64>,
     pub text: String,
     /// 変換中の文字列内のカーソル位置（UTF-16 単位）
     pub cursor: usize,
@@ -46,6 +46,19 @@ pub(crate) struct Frame<'a> {
     /// 上書きモード（キャレットを太く表示する）
     pub overwrite: bool,
     pub composition: Option<&'a Composition>,
+    /// 矩形選択の表示中の行
+    pub rect: &'a [RectPaint],
+}
+
+/// 矩形選択の 1 行分の表示情報。
+pub(crate) struct RectPaint {
+    pub row_start: u64,
+    /// 左端の位置と、そこから右の仮想空白の桁数
+    pub left: (u64, u32),
+    /// 右端の位置と、そこから右の仮想空白の桁数
+    pub right: (u64, u32),
+    /// この行に表示するキャレット（位置と仮想空白の桁数）
+    pub caret: Option<(u64, u32)>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -546,12 +559,14 @@ impl Renderer {
         let mut caret_rects: Vec<D2D_RECT_F> = Vec::new();
         for (i, row) in frame.rows.iter().enumerate() {
             let y = i as f32 * lh;
-            let comp = frame
-                .composition
-                .filter(|c| row.shows_caret(c.offset))
-                .map(|c| (row.text_index(c.offset), c));
+            let comp = frame.composition.and_then(|c| {
+                c.offsets
+                    .iter()
+                    .find(|&&o| row.shows_caret(o))
+                    .map(|&o| (row.text_index(o), o, c))
+            });
             let rl = match comp {
-                Some((at, c)) => self.build_layout(row, Some((at, &c.text)))?,
+                Some((at, _, c)) => self.build_layout(row, Some((at, &c.text)))?,
                 None => self.row_layout(row)?,
             };
             self.max_text_width = self.max_text_width.max(rl.width);
@@ -594,7 +609,7 @@ impl Renderer {
                         continue;
                     }
                     let mut idx = utf16_index(&row.text, row.text_index(c));
-                    if let Some((_, comp)) = comp.filter(|(_, comp)| comp.offset == c) {
+                    if let Some((_, _, comp)) = comp.filter(|(_, o, _)| *o == c) {
                         idx += comp.cursor;
                     }
                     let x = text_x + self.x_at(&rl, idx);
@@ -602,6 +617,34 @@ impl Renderer {
                         left: x - 0.5,
                         top: y + 1.0,
                         right: x - 0.5 + width,
+                        bottom: y + lh - 1.0,
+                    });
+                }
+            }
+            // 矩形選択（行末より右の仮想空白を含む）
+            for rp in frame.rect.iter().filter(|rp| rp.row_start == row.start) {
+                let x_of = |(o, v): (u64, u32)| {
+                    text_x
+                        + self.x_at(&rl, utf16_index(&row.text, row.text_index(o)))
+                        + v as f32 * cw
+                };
+                let (l, r) = (x_of(rp.left), x_of(rp.right));
+                if r > l {
+                    sel_rects.push(D2D_RECT_F {
+                        left: l,
+                        top: y,
+                        right: r,
+                        bottom: y + lh,
+                    });
+                }
+                if let Some(c) = rp.caret
+                    && frame.caret_visible
+                {
+                    let x = x_of(c);
+                    caret_rects.push(D2D_RECT_F {
+                        left: x - 0.5,
+                        top: y + 1.0,
+                        right: x + 1.5,
                         bottom: y + lh - 1.0,
                     });
                 }
@@ -871,6 +914,7 @@ mod tests {
             caret_visible: false,
             overwrite: false,
             composition: None,
+            rect: &[],
         };
         let (w, h) = (400, 120);
         let px = r.render_offscreen(w, h, &frame).unwrap();
@@ -929,6 +973,7 @@ mod tests {
             caret_visible: true,
             overwrite: false,
             composition: None,
+            rect: &[],
         };
         let (w, h) = (300, 60);
         let px = r.render_offscreen(w, h, &frame).unwrap();

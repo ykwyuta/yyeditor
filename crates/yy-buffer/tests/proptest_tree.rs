@@ -210,3 +210,41 @@ fn piece_split_respects_utf8_boundaries() {
     let snap = Snapshot::from_source_with_chunk(src, 0..len, 16, true);
     assert_eq!(snap.read(0..len), text.as_bytes());
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// ピースの境界をまたぐ一致も含めて、素朴な検索と同じ位置を返す。
+    #[test]
+    fn find_bytes_matches_naive_search(
+        data in prop::collection::vec(prop_oneof![Just(b'a'), Just(b'b'), Just(b'c')], 0..400),
+        needle in prop::collection::vec(prop_oneof![Just(b'a'), Just(b'b')], 1..6),
+        chunk in 5u32..20,
+        from in 0.0..=1.0f64,
+    ) {
+        let len = data.len() as u64;
+        let snap = Snapshot::from_source_with_chunk(Arc::new(data.clone()), 0..len, chunk, true);
+        let start = (from * len as f64) as usize;
+        let naive = data[start..]
+            .windows(needle.len())
+            .position(|w| w == needle.as_slice())
+            .map(|i| (start + i) as u64);
+        prop_assert_eq!(snap.find_bytes(start as u64..len, &needle), naive);
+    }
+
+    /// 切り出したピース列を並べると元の範囲の内容になる。
+    #[test]
+    fn pieces_in_reproduces_range(
+        data in prop::collection::vec(any::<u8>(), 0..400),
+        chunk in 5u32..20,
+        a in 0.0..=1.0f64,
+        b in 0.0..=1.0f64,
+    ) {
+        let len = data.len() as u64;
+        let snap = Snapshot::from_source_with_chunk(Arc::new(data.clone()), 0..len, chunk, false);
+        let (x, y) = ((a * len as f64) as u64, (b * len as f64) as u64);
+        let (lo, hi) = (x.min(y), x.max(y));
+        let bytes: Vec<u8> = snap.pieces_in(lo..hi).iter().flat_map(|p| p.bytes().to_vec()).collect();
+        prop_assert_eq!(bytes, data[lo as usize..hi as usize].to_vec());
+    }
+}

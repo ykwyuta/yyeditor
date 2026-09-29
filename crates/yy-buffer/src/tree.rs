@@ -110,12 +110,11 @@ fn group<T>(items: Vec<T>, make: impl Fn(Vec<T>) -> Arc<Node>) -> Vec<Arc<Node>>
     let base = n / k;
     let rem = n % k;
     let mut out = Vec::with_capacity(k);
-    let mut rest = items;
+    // split_off で末尾を切り出すと残り全体を毎回コピーして O(n^2) になるため、先頭から順に取り出す
+    let mut it = items.into_iter();
     for i in 0..k {
         let size = base + usize::from(i < rem);
-        let tail = rest.split_off(size);
-        out.push(make(rest));
-        rest = tail;
+        out.push(make(it.by_ref().take(size).collect()));
     }
     out
 }
@@ -532,6 +531,46 @@ impl Snapshot {
             .find_map(|s| memchr::memrchr(byte, s.bytes).map(|i| s.offset + i as u64))
     }
 
+    /// `range` 内で最初に現れるバイト列 `needle` の位置（ピースの境界をまたぐ一致も見つける）。
+    pub fn find_bytes(&self, range: Range<u64>, needle: &[u8]) -> Option<u64> {
+        if needle.is_empty() {
+            return (range.start <= range.end.min(self.len())).then_some(range.start);
+        }
+        let finder = memchr::memmem::Finder::new(needle);
+        let keep = needle.len() - 1;
+        // 直前の片の末尾（最大 needle.len() - 1 バイト）
+        let mut carry: Vec<u8> = Vec::new();
+        let mut carry_start = 0u64;
+        for s in self.slices(range) {
+            if !carry.is_empty() {
+                let mut w = carry.clone();
+                w.extend_from_slice(&s.bytes[..keep.min(s.bytes.len())]);
+                if let Some(i) = finder.find(&w) {
+                    return Some(carry_start + i as u64);
+                }
+            }
+            if let Some(i) = finder.find(s.bytes) {
+                return Some(s.offset + i as u64);
+            }
+            let mut w = std::mem::take(&mut carry);
+            w.extend_from_slice(&s.bytes[s.bytes.len().saturating_sub(keep)..]);
+            let n = w.len().min(keep);
+            carry = w[w.len() - n..].to_vec();
+            carry_start = s.offset + s.bytes.len() as u64 - n as u64;
+        }
+        None
+    }
+
+    /// `range` を覆うピースの列（両端は切り出したもの）。一括編集で木を組み直すときに使う。
+    pub fn pieces_in(&self, range: Range<u64>) -> Vec<Piece> {
+        let range = range.start.min(self.len())..range.end.min(self.len());
+        let mut out = Vec::new();
+        if !range.is_empty() {
+            collect_pieces(&self.root, 0, &range, &mut out);
+        }
+        out
+    }
+
     /// 行 `line`（0 始まり）の先頭オフセット。
     ///
     /// `count_unknown` が真なら、未確定のピースもその場で数える（結果は記録しない）。
@@ -713,6 +752,43 @@ fn collect_slices<'a>(node: &'a Node, base: u64, range: &Range<u64>, out: &mut V
                         offset: ps + lo,
                         bytes: &p.bytes()[lo as usize..hi as usize],
                     });
+                }
+                if pe >= range.end {
+                    break;
+                }
+                ps = pe;
+            }
+        }
+    }
+}
+
+fn collect_pieces(node: &Node, base: u64, range: &Range<u64>, out: &mut Vec<Piece>) {
+    match node {
+        Node::Internal { children, .. } => {
+            let mut cs = base;
+            for c in children {
+                let ce = cs + c.summary().bytes;
+                if ce > range.start && cs < range.end {
+                    collect_pieces(c, cs, range, out);
+                }
+                if ce >= range.end {
+                    break;
+                }
+                cs = ce;
+            }
+        }
+        Node::Leaf { pieces, .. } => {
+            let mut ps = base;
+            for p in pieces {
+                let pe = ps + p.len() as u64;
+                if pe > range.start && ps < range.end {
+                    let lo = (range.start.max(ps) - ps) as u32;
+                    let hi = (range.end.min(pe) - ps) as u32;
+                    if lo == 0 && hi == p.len() {
+                        out.push(p.clone());
+                    } else {
+                        out.push(p.slice(lo, hi));
+                    }
                 }
                 if pe >= range.end {
                     break;
