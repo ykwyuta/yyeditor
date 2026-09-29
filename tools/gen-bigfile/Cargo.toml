@@ -19,12 +19,17 @@ path = "src/open_bench.rs"
 name = "replace-bench"
 path = "src/replace_bench.rs"
 
+[[bin]]
+name = "csv-bench"
+path = "src/csv_bench.rs"
+
 [dependencies]
 yy-buffer.workspace = true
 yy-encoding.workspace = true
 yy-core.workspace = true
 yy-jobs.workspace = true
 yy-layout.workspace = true
+yy-delimited.workspace = true
 
 [lints]
 workspace = true

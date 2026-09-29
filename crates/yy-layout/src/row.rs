@@ -10,6 +10,10 @@ pub enum SpanKind {
     Control,
     /// 読み込んだ文字コードで不正だったバイトを表すエスケープ文字（`\xNN` と表示。03 章 2.4）
     Escape,
+    /// 区切り文字モードの区切り文字（` │ ` と表示。04 章 4.2）。1 つのスパンが 1 単位
+    Delim,
+    /// 区切り文字モードで列を揃えるための空白（元のバイト列には対応しない）
+    Pad,
 }
 
 /// 表示テキスト `Row::text` 内のバイト範囲と種類。
@@ -22,14 +26,16 @@ pub struct Span {
     pub src: Range<usize>,
 }
 
-impl SpanKind {
+impl Span {
     /// 1 単位の（元のバイト数, 表示テキストのバイト数）。置き換え表示は単位の途中で区切らない。
-    fn unit(self) -> (usize, usize) {
-        match self {
+    fn unit(&self) -> (usize, usize) {
+        match self.kind {
             SpanKind::Text => (1, 1),
             SpanKind::Invalid => (1, 4),
             SpanKind::Control => (1, 3),
             SpanKind::Escape => (4, 4),
+            SpanKind::Delim => (self.src.len().max(1), self.range.len().max(1)),
+            SpanKind::Pad => (0, 1),
         }
     }
 }
@@ -76,8 +82,12 @@ impl Row {
     pub fn text_index(&self, offset: u64) -> usize {
         let rel = (offset.clamp(self.start, self.end) - self.start) as usize;
         for sp in &self.spans {
+            // フィールドの終わりのカーソルは、列を揃える空白の手前に表示する
+            if sp.kind == SpanKind::Pad && sp.src.start == rel && sp.range.start > 0 {
+                return sp.range.start;
+            }
             if sp.src.start <= rel && rel < sp.src.end {
-                let (us, ut) = sp.kind.unit();
+                let (us, ut) = sp.unit();
                 return sp.range.start + (rel - sp.src.start) / us * ut;
             }
         }
@@ -89,7 +99,7 @@ impl Row {
     pub fn offset_at(&self, text_index: usize) -> u64 {
         for sp in &self.spans {
             if sp.range.start <= text_index && text_index < sp.range.end {
-                let (us, ut) = sp.kind.unit();
+                let (us, ut) = sp.unit();
                 let rel = sp.src.start + (text_index - sp.range.start) / ut * us;
                 return self.start + rel as u64;
             }
@@ -109,6 +119,33 @@ impl Row {
     }
 }
 
+/// `bytes`（行の内容の `base` バイト目から）を表示用テキストにして追加する。
+pub(crate) fn append_decoded(text: &mut String, spans: &mut Vec<Span>, bytes: &[u8], base: usize) {
+    let (t, sp) = decode_row(bytes);
+    let off = text.len();
+    for s in sp {
+        push(
+            text,
+            spans,
+            &t[s.range.clone()],
+            s.kind,
+            s.src.start + base..s.src.end + base,
+        );
+    }
+    debug_assert_eq!(text.len(), off + t.len());
+}
+
+/// 表示用のスパン（区切り文字・空白など）を追加する。
+pub(crate) fn push_span(
+    text: &mut String,
+    spans: &mut Vec<Span>,
+    s: &str,
+    kind: SpanKind,
+    src: Range<usize>,
+) {
+    push(text, spans, s, kind, src);
+}
+
 fn push(text: &mut String, spans: &mut Vec<Span>, s: &str, kind: SpanKind, src: Range<usize>) {
     if s.is_empty() {
         return;
@@ -116,7 +153,12 @@ fn push(text: &mut String, spans: &mut Vec<Span>, s: &str, kind: SpanKind, src: 
     let start = text.len();
     text.push_str(s);
     match spans.last_mut() {
-        Some(last) if last.kind == kind && last.range.end == start && last.src.end == src.start => {
+        Some(last)
+            if last.kind == kind
+                && !matches!(kind, SpanKind::Delim | SpanKind::Pad)
+                && last.range.end == start
+                && last.src.end == src.start =>
+        {
             last.range.end = text.len();
             last.src.end = src.end;
         }

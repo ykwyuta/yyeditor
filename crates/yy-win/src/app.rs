@@ -36,10 +36,13 @@ use yy_layout::{
     row_containing, rows_from,
 };
 
+mod csvmode;
+
 use crate::findbar::{self, FindBar};
 use crate::render::{Composition, Frame, RectPaint, Renderer};
 use crate::util::{Context, error_box, group_digits, human_size, info_box, wide};
 use crate::{FRAME_CLASS, VIEW_CLASS, clipboard, default_proc, hiword, ime, loword};
+use csvmode::*;
 
 // メニュー・アクセラレータのコマンド ID
 const ID_OPEN: u16 = 101;
@@ -155,6 +158,7 @@ pub(crate) struct App {
     status: HWND,
     menu_edit: HMENU,
     menu_view: HMENU,
+    menu_csv: HMENU,
     config: Config,
     rows_cfg: RowConfig,
     pool: JobPool,
@@ -193,6 +197,10 @@ pub(crate) struct App {
     match_count: Option<(u64, u64)>,
     /// ステータスバーに出す検索・置換の結果
     status_msg: String,
+    /// 区切り文字モード
+    csv: Option<CsvState>,
+    /// バックグラウンドで実行中のレコードの書き直し（完了時の後処理用）
+    pending_record_op: Option<yy_core::csv::RecordOp>,
     grep_job: Option<GrepJob>,
     /// 終わった Grep の結果（フレームで文書として開く）
     grep_done: Option<String>,
@@ -284,7 +292,7 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
     unsafe { CreateAcceleratorTableW(&accels) }
 }
 
-fn create_menu() -> Result<(HMENU, HMENU, HMENU)> {
+fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
     unsafe {
         let item = |menu: HMENU, id: u16, text: windows::core::PCWSTR| {
             AppendMenuW(menu, MF_STRING, id as usize, text)
@@ -379,8 +387,10 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU)> {
         AppendMenuW(bar, MF_POPUP, edit.0 as usize, w!("編集(&E)"))?;
         AppendMenuW(bar, MF_POPUP, search.0 as usize, w!("検索(&S)"))?;
         AppendMenuW(bar, MF_POPUP, view.0 as usize, w!("表示(&V)"))?;
+        let csv = create_csv_menu()?;
+        AppendMenuW(bar, MF_POPUP, csv.0 as usize, w!("CSV(&C)"))?;
         AppendMenuW(bar, MF_POPUP, help.0 as usize, w!("ヘルプ(&H)"))?;
-        Ok((bar, edit, view))
+        Ok((bar, edit, view, csv))
     }
 }
 
@@ -397,7 +407,7 @@ impl App {
     ) -> Result<HWND> {
         let (config, config_error) = Config::load();
         unsafe {
-            let (menu, menu_edit, menu_view) = create_menu().context("create_menu")?;
+            let (menu, menu_edit, menu_view, menu_csv) = create_menu().context("create_menu")?;
             let frame = CreateWindowExW(
                 WS_EX_ACCEPTFILES,
                 FRAME_CLASS,
@@ -464,6 +474,7 @@ impl App {
                 status,
                 menu_edit,
                 menu_view,
+                menu_csv,
                 rows_cfg: RowConfig::new(config.view.max_row_bytes.max(256) as u64),
                 show_line_numbers: config.view.line_numbers,
                 config,
@@ -492,6 +503,8 @@ impl App {
                 count_job: None,
                 match_count: None,
                 status_msg: String::new(),
+                csv: None,
+                pending_record_op: None,
                 grep_job: None,
                 grep_done: None,
                 grep_last: crate::grepdlg::GrepRequest {
@@ -627,6 +640,9 @@ impl App {
             .map(|c| group_digits(c + 1))
             .unwrap_or_else(|| "-".into());
         let mut text = format!("  {approx}{} 行, {col} 列", group_digits(pos.line + 1));
+        if let Some(p) = self.csv_position() {
+            text += &p;
+        }
         let selected: u64 = sels.iter().map(|s| s.end() - s.start()).sum();
         if let Some(r) = self.rect {
             let lines =
@@ -667,7 +683,7 @@ impl App {
                 p * 100.0
             ),
             _ if self.doc.replace_progress().is_some() => format!(
-                "  置換しています（Esc で中止）… {:.0}%",
+                "  書き換えています（Esc で中止）… {:.0}%",
                 self.doc.replace_progress().unwrap_or(0.0) * 100.0
             ),
             _ if self.grep_job.is_some() => format!(
@@ -684,6 +700,10 @@ impl App {
                     * 100.0
             ),
             (None, Some(p)) => format!("  行数を数えています… {:.0}%", p * 100.0),
+            _ if self.csv.as_ref().is_some_and(|c| !c.view.is_complete()) => format!(
+                "  CSV を解析しています… {:.0}%",
+                self.csv.as_ref().map_or(0.0, |c| c.view.progress()) * 100.0
+            ),
             _ => {
                 let mut m = format!("  {}", self.status_msg);
                 if self.findbar.visible
@@ -717,7 +737,7 @@ impl App {
             _ => {
                 self.scroll_mode = ScrollMode::Bytes;
                 let len = snap.len().max(1);
-                let rows = rows_from(snap, self.rows_cfg, self.vp.top, page);
+                let rows = rows_from(snap, &self.rows_cfg, self.vp.top, page);
                 let visible = rows.last().map(|r| r.next - self.vp.top).unwrap_or(0);
                 si.nMin = 0;
                 si.nMax = SCROLL_RANGE - 1;
@@ -779,7 +799,7 @@ impl App {
         let page = self.page_rows();
         if self
             .vp
-            .scroll_rows(self.doc.snapshot(), self.rows_cfg, delta, page)
+            .scroll_rows(self.doc.snapshot(), &self.rows_cfg, delta, page)
         {
             self.after_scroll();
         }
@@ -788,7 +808,7 @@ impl App {
     fn scroll_to_offset(&mut self, offset: u64) {
         let page = self.page_rows();
         self.vp
-            .scroll_to_offset(self.doc.snapshot(), self.rows_cfg, offset, page);
+            .scroll_to_offset(self.doc.snapshot(), &self.rows_cfg, offset, page);
         self.after_scroll();
     }
 
@@ -836,7 +856,7 @@ impl App {
                     ScrollMode::Bytes => {
                         let f = si.nTrackPos as f64 / SCROLL_RANGE as f64;
                         let rows = self.page_rows();
-                        self.vp.scroll_to_fraction(&snap, self.rows_cfg, f, rows);
+                        self.vp.scroll_to_fraction(&snap, &self.rows_cfg, f, rows);
                         // ドラッグ中はつまみ位置を動かさない（位置の再計算で揺れるため）
                         self.update_status();
                         self.invalidate();
@@ -895,7 +915,7 @@ impl App {
             return;
         }
         let page = self.page_rows();
-        self.vp.clamp(self.doc.snapshot(), self.rows_cfg, page);
+        self.vp.clamp(self.doc.snapshot(), &self.rows_cfg, page);
         self.after_scroll();
     }
 
@@ -925,8 +945,8 @@ impl App {
         let snap = self.doc.snapshot();
         row_at(
             snap,
-            self.rows_cfg,
-            row_containing(snap, self.rows_cfg, offset),
+            &self.rows_cfg,
+            row_containing(snap, &self.rows_cfg, offset),
         )
     }
 
@@ -949,7 +969,7 @@ impl App {
         let head = self.doc.selections().primary().head;
         let page = self.page_rows();
         self.vp
-            .ensure_visible(self.doc.snapshot(), self.rows_cfg, head, page);
+            .ensure_visible(self.doc.snapshot(), &self.rows_cfg, head, page);
         let row = self.row_of(head);
         let x = self.renderer.caret_x(&row, head);
         let area = self.text_area_width();
@@ -973,6 +993,7 @@ impl App {
 
     /// 内容を変更した後の共通処理。
     fn after_edit(&mut self) {
+        self.sync_csv();
         if !self.doc.snapshot().is_fully_indexed() {
             let n = self.notifier();
             self.doc.maintain_indexing(&self.pool, n);
@@ -989,28 +1010,28 @@ impl App {
         goal_x: Option<f32>,
         rows: i64,
     ) -> (u64, f32) {
-        let cfg = self.rows_cfg;
-        let start = row_containing(snap, cfg, offset);
+        let cfg = self.rows_cfg.clone();
+        let start = row_containing(snap, &cfg, offset);
         let x = match goal_x {
             Some(x) => x,
             None => {
-                let row = row_at(snap, cfg, start);
+                let row = row_at(snap, &cfg, start);
                 self.renderer.caret_x(&row, offset)
             }
         };
         let mut r = start;
         for _ in 0..rows.unsigned_abs() {
             let n = if rows > 0 {
-                next_row_start(snap, cfg, r)
+                next_row_start(snap, &cfg, r)
             } else {
-                prev_row_start(snap, cfg, r)
+                prev_row_start(snap, &cfg, r)
             };
             match n {
                 Some(n) => r = n,
                 None => return (if rows > 0 { snap.len() } else { 0 }, x),
             }
         }
-        let target = row_at(snap, cfg, r);
+        let target = row_at(snap, &cfg, r);
         (self.renderer.hit_test(&target, x), x)
     }
 
@@ -1135,7 +1156,7 @@ impl App {
                 };
                 let size = self.page_rows();
                 self.vp
-                    .scroll_rows(self.doc.snapshot(), self.rows_cfg, d, size);
+                    .scroll_rows(self.doc.snapshot(), &self.rows_cfg, d, size);
                 self.move_vertical(d, shift);
             }
             VK_HOME => {
@@ -1215,6 +1236,11 @@ impl App {
                 }
                 return;
             }
+            0x09 if self.csv.is_some() && self.rect.is_none() => {
+                // 区切り文字モードでは Tab / Shift+Tab でセルを移動する
+                self.move_cell(!key_down(VK_SHIFT));
+                return;
+            }
             0x09 => "\t".to_owned(),
             0xD800..=0xDBFF => {
                 self.high_surrogate = Some(code);
@@ -1231,7 +1257,7 @@ impl App {
             self.rect_type(&[&text], EditKind::Typing);
             return;
         }
-        if self.doc.insert_text(&text, self.overwrite) {
+        if self.insert_typed(&text) {
             self.after_edit();
         }
     }
@@ -1242,7 +1268,7 @@ impl App {
     fn rect_head_offset(&self, r: &RectSelection) -> u64 {
         rect::offset_at(
             self.doc.snapshot(),
-            self.rows_cfg,
+            &self.rows_cfg,
             &self.ccfg,
             r.head_row,
             r.head_col,
@@ -1271,7 +1297,7 @@ impl App {
         let mut r = self.rect.unwrap_or_else(|| {
             let (row, col) = rect::row_and_col(
                 &snap,
-                self.rows_cfg,
+                &self.rows_cfg,
                 &self.ccfg,
                 self.doc.selections().primary().head,
             );
@@ -1284,9 +1310,9 @@ impl App {
         });
         for _ in 0..drow.unsigned_abs() {
             let n = if drow > 0 {
-                next_row_start(&snap, self.rows_cfg, r.head_row)
+                next_row_start(&snap, &self.rows_cfg, r.head_row)
             } else {
-                prev_row_start(&snap, self.rows_cfg, r.head_row)
+                prev_row_start(&snap, &self.rows_cfg, r.head_row)
             };
             match n {
                 // 文書末の「改行で終わらない最終行の次」は存在しないので止まる
@@ -1305,7 +1331,7 @@ impl App {
         let r = self.rect?;
         match rect::rect_rows(
             self.doc.snapshot(),
-            self.rows_cfg,
+            &self.rows_cfg,
             &self.ccfg,
             &r,
             RECT_EDIT_LIMIT,
@@ -1428,12 +1454,12 @@ impl App {
     fn column_paste(&mut self, lines: &[&str]) {
         let snap = self.doc.snapshot().clone();
         let head = self.doc.selections().primary().head;
-        let (row, col) = rect::row_and_col(&snap, self.rows_cfg, &self.ccfg, head);
+        let (row, col) = rect::row_and_col(&snap, &self.rows_cfg, &self.ccfg, head);
         // 貼り付ける行数分の矩形（足りない分は後で追加する）
         let mut bottom = row;
         let mut n = 1;
         while n < lines.len() {
-            match next_row_start(&snap, self.rows_cfg, bottom) {
+            match next_row_start(&snap, &self.rows_cfg, bottom) {
                 Some(b) if b < snap.len() || yy_layout::is_line_start(&snap, b) => {
                     bottom = b;
                     n += 1;
@@ -1447,7 +1473,7 @@ impl App {
             head_row: bottom,
             head_col: col,
         };
-        let Ok(rows) = rect::rect_rows(&snap, self.rows_cfg, &self.ccfg, &r, RECT_EDIT_LIMIT)
+        let Ok(rows) = rect::rect_rows(&snap, &self.rows_cfg, &self.ccfg, &r, RECT_EDIT_LIMIT)
         else {
             return;
         };
@@ -1484,7 +1510,7 @@ impl App {
             .map(|row| {
                 let rr = rect::rect_row(
                     self.doc.snapshot(),
-                    self.rows_cfg,
+                    &self.rows_cfg,
                     &self.ccfg,
                     &r,
                     row.start,
@@ -1519,15 +1545,15 @@ impl App {
         let y = self.renderer.px_to_dip(y_px as f32);
         let lh = self.renderer.metrics().line_height.max(1.0);
         let snap = self.doc.snapshot().clone();
-        let cfg = self.rows_cfg;
+        let cfg = self.rows_cfg.clone();
         let row_start = if y < 0.0 {
-            prev_row_start(&snap, cfg, self.vp.top).unwrap_or(0)
+            prev_row_start(&snap, &cfg, self.vp.top).unwrap_or(0)
         } else {
             let idx = (y / lh).floor() as usize;
-            let rows = rows_from(&snap, cfg, self.vp.top, idx + 1);
+            let rows = rows_from(&snap, &cfg, self.vp.top, idx + 1);
             rows.last()?.start
         };
-        let row = row_at(&snap, cfg, row_start);
+        let row = row_at(&snap, &cfg, row_start);
         Some((row, x - self.text_origin_x() + self.scroll_x))
     }
 
@@ -1543,7 +1569,7 @@ impl App {
     fn row_col_at_point(&mut self, x_px: i32, y_px: i32) -> (u64, u32) {
         let Some((row, tx)) = self.row_at_point(x_px, y_px) else {
             let len = self.doc.snapshot().len();
-            return rect::row_and_col(self.doc.snapshot(), self.rows_cfg, &self.ccfg, len);
+            return rect::row_and_col(self.doc.snapshot(), &self.rows_cfg, &self.ccfg, len);
         };
         let us = yy_layout::columns::units(&row, &self.ccfg);
         let end_x = self.renderer.caret_x(&row, row.end);
@@ -1671,7 +1697,7 @@ impl App {
         self.sync_renderer();
         let head = self.doc.selections().primary().head;
         let page = self.page_rows();
-        let rows = rows_from(self.doc.snapshot(), self.rows_cfg, self.vp.top, page + 1);
+        let rows = rows_from(self.doc.snapshot(), &self.rows_cfg, self.vp.top, page + 1);
         let Some(i) = rows.iter().position(|r| r.shows_caret(head)) else {
             return;
         };
@@ -1689,7 +1715,7 @@ impl App {
             if self.rect.is_some() {
                 self.rect_type(&[&result], EditKind::Typing);
             } else {
-                edited |= self.doc.insert_text(&result, self.overwrite);
+                edited |= self.insert_typed(&result);
             }
         }
         if let Some((text, cursor)) = update.composing {
@@ -1725,12 +1751,14 @@ impl App {
     // ---- 描画 ------------------------------------------------------------
 
     fn paint(&mut self) {
+        // 区切り文字モード: 表示する行の列幅を先に測る（広がったら表示を作り直す）
+        self.measure_visible();
         unsafe {
             let mut ps = PAINTSTRUCT::default();
             BeginPaint(self.view, &mut ps);
             let snap = self.doc.snapshot();
             let page = self.page_rows();
-            let rows = rows_from(snap, self.rows_cfg, self.vp.top, page + 1);
+            let rows = rows_from(snap, &self.rows_cfg, self.vp.top, page + 1);
             let first = snap.line_of_offset(self.vp.top);
             // 表示範囲に関係する選択・キャレットだけを渡す
             let (lo, hi) = (
@@ -1795,7 +1823,7 @@ impl App {
         self.view_px = (w, h);
         self.renderer.resize(w, h);
         let page = self.page_rows();
-        self.vp.clamp(self.doc.snapshot(), self.rows_cfg, page);
+        self.vp.clamp(self.doc.snapshot(), &self.rows_cfg, page);
         self.update_scrollbars();
         self.invalidate();
     }
@@ -1813,6 +1841,7 @@ impl App {
         self.count_job = None;
         self.match_count = None;
         self.status_msg.clear();
+        self.csv_mode_for_path();
         let n = self.notifier();
         self.doc.start_indexing(&self.pool, n);
         self.vp = Viewport::default();
@@ -1871,21 +1900,30 @@ impl App {
     fn on_index_progress(&mut self) -> Option<String> {
         self.index_posted.store(false, Ordering::Release);
         self.poll_search_jobs();
+        if self.csv.is_some() {
+            self.poll_csv();
+        }
         let was_replacing = self.doc.replace_progress().is_some();
         let was_loading = self.doc.is_loading();
         if self.doc.poll_indexing() {
             if was_replacing && self.doc.replace_progress().is_none() {
-                match self.doc.take_replace_result() {
-                    Some(Ok(n)) => {
+                let op = self.pending_record_op.take();
+                match (self.doc.take_replace_result(), op) {
+                    (Some(Ok(n)), Some(op)) => {
+                        self.status_msg = format!("{} レコードを書き換えました", group_digits(n));
+                        self.after_record_op(op);
+                    }
+                    (Some(Ok(n)), None) => {
                         self.status_msg = format!("{} 個置換しました", group_digits(n));
                     }
-                    Some(Err(e)) => self.status_msg = format!("置換できませんでした: {e}"),
-                    None => {}
+                    (Some(Err(e)), _) => self.status_msg = format!("処理できませんでした: {e}"),
+                    (None, _) => {}
                 }
                 self.after_edit();
             }
             if was_loading && !self.doc.is_loading() {
                 // 変換が終わって内容を差し替えた
+                self.sync_csv();
                 self.renderer.clear_cache();
                 self.update_title();
                 if let Some(e) = self.doc.load_error() {
@@ -2572,6 +2610,39 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
             None => return false,
         },
     };
+    // 区切り文字モードで拡張子を .csv ⇔ .tsv に変える場合は区切り文字の変換を勧める（04 章 5）
+    let current_dialect = with_app(|a| a.csv.as_ref().map(|c| c.view.dialect)).flatten();
+    let new_dialect = target
+        .path
+        .extension()
+        .and_then(|e| yy_delimited::Dialect::for_extension(&e.to_string_lossy()));
+    if let (Some(cur), Some(new)) = (current_dialect, new_dialect)
+        && cur.delimiter() != new.delimiter()
+    {
+        let msg = format!(
+            "拡張子に合わせて、区切り文字を「{}」から「{}」に変換しますか？\n\n\
+             はい: 変換して保存（「元に戻す」で取り消せます）\nいいえ: そのまま保存",
+            cur.name(),
+            new.name()
+        );
+        match message_box(hwnd, &msg, MB_YESNOCANCEL | MB_ICONQUESTION) {
+            IDYES => {
+                let busy = with_app(|a| {
+                    a.csv_record_op(yy_core::csv::RecordOp::Convert(new));
+                    a.doc.is_busy()
+                });
+                if busy == Some(true) {
+                    info_box(
+                        hwnd,
+                        "区切り文字を変換しています。終わってから、もう一度保存してください。",
+                    );
+                    return false;
+                }
+            }
+            IDNO => {}
+            _ => return false,
+        }
+    }
     if target.encoding == encoding && noncanonical > 0 {
         let msg = format!(
             "このファイルには、保存すると符号が変わる文字が {} 個あります\n\
@@ -2947,6 +3018,47 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_REPLACE_ALL => {
             with_app(|a| a.replace_all());
+        }
+        ID_CSV_OFF => {
+            with_app(|a| a.set_csv_mode(None));
+        }
+        ID_CSV_AUTO => {
+            if let Some(Some(msg)) = with_app(|a| a.csv_auto()) {
+                info_box(hwnd, &msg);
+            }
+        }
+        ID_CSV_COMMA | ID_CSV_TAB | ID_CSV_SEMICOLON | ID_CSV_PIPE => {
+            let delim: &[u8] = match id {
+                ID_CSV_COMMA => b",",
+                ID_CSV_TAB => b"\t",
+                ID_CSV_SEMICOLON => b";",
+                _ => b"|",
+            };
+            with_app(|a| a.set_csv_mode(yy_delimited::Dialect::new(delim, Some(b'"'))));
+        }
+        ID_CSV_NEXT_CELL | ID_CSV_PREV_CELL => {
+            with_app(|a| a.move_cell(id == ID_CSV_NEXT_CELL));
+        }
+        ID_CSV_INSERT_COL | ID_CSV_DELETE_COL => {
+            with_app(|a| match a.caret_field() {
+                Some(f) => a.csv_record_op(if id == ID_CSV_INSERT_COL {
+                    yy_core::csv::RecordOp::InsertField(f)
+                } else {
+                    yy_core::csv::RecordOp::DeleteField(f)
+                }),
+                None => {
+                    a.status_msg = "区切り文字モードではありません".into();
+                    a.update_status();
+                }
+            });
+        }
+        ID_CSV_TO_COMMA | ID_CSV_TO_TAB => {
+            let to = if id == ID_CSV_TO_COMMA {
+                yy_delimited::Dialect::csv()
+            } else {
+                yy_delimited::Dialect::tsv()
+            };
+            with_app(|a| a.csv_record_op(yy_core::csv::RecordOp::Convert(to)));
         }
         ID_RECT_MODE => {
             with_app(|a| {

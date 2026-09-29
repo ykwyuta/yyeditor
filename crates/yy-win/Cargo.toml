@@ -14,6 +14,7 @@ yy-encoding.workspace = true
 yy-io.workspace = true
 yy-jobs.workspace = true
 yy-layout.workspace = true
+yy-delimited.workspace = true
 crossbeam-channel.workspace = true
 windows-numerics.workspace = true
 

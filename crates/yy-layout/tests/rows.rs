@@ -11,7 +11,7 @@ fn snapshot(data: &[u8], chunk: u32) -> Snapshot {
     Snapshot::from_source_with_chunk(Arc::new(data.to_vec()), 0..len, chunk, true)
 }
 
-fn forward_rows(snap: &Snapshot, cfg: RowConfig) -> Vec<u64> {
+fn forward_rows(snap: &Snapshot, cfg: &RowConfig) -> Vec<u64> {
     let mut rows = vec![0];
     while let Some(n) = next_row_start(snap, cfg, *rows.last().unwrap()) {
         assert!(n > *rows.last().unwrap());
@@ -20,7 +20,7 @@ fn forward_rows(snap: &Snapshot, cfg: RowConfig) -> Vec<u64> {
     rows
 }
 
-fn backward_rows(snap: &Snapshot, cfg: RowConfig) -> Vec<u64> {
+fn backward_rows(snap: &Snapshot, cfg: &RowConfig) -> Vec<u64> {
     let len = snap.len();
     let mut rows = vec![row_containing(snap, cfg, len)];
     while let Some(p) = prev_row_start(snap, cfg, *rows.last().unwrap()) {
@@ -62,8 +62,8 @@ proptest! {
     fn forward_and_backward_agree(data in text(), s in 8u64..40, chunk in 5u32..50) {
         let snap = snapshot(&data, chunk);
         let cfg = RowConfig::new(s);
-        let fwd = forward_rows(&snap, cfg);
-        let bwd = backward_rows(&snap, cfg);
+        let fwd = forward_rows(&snap, &cfg);
+        let bwd = backward_rows(&snap, &cfg);
         prop_assert_eq!(&fwd, &bwd);
 
         let len = data.len() as u64;
@@ -75,7 +75,7 @@ proptest! {
             prop_assert!(std::str::from_utf8(&data[r as usize..next as usize]).is_ok());
             // row_containing はその行を返す
             for off in r..next {
-                prop_assert_eq!(row_containing(&snap, cfg, off), r);
+                prop_assert_eq!(row_containing(&snap, &cfg, off), r);
             }
         }
         // すべての論理行の先頭は表示行の先頭
@@ -95,7 +95,7 @@ proptest! {
             }
         }
         // rows_from で取り出した行数が一致する
-        let rows = rows_from(&snap, cfg, 0, usize::MAX);
+        let rows = rows_from(&snap, &cfg, 0, usize::MAX);
         prop_assert_eq!(rows.len(), fwd.len());
     }
 }
@@ -105,12 +105,12 @@ fn very_long_single_line_is_segmented() {
     let data = vec![b'x'; 100_000];
     let snap = snapshot(&data, 4096);
     let cfg = RowConfig::new(1000);
-    let rows = forward_rows(&snap, cfg);
+    let rows = forward_rows(&snap, &cfg);
     // 論理行の先頭から S 以上離れた格子点ごとに分割される
     assert_eq!(&rows[..3], &[0, 1000, 2000]);
     assert_eq!(rows.len(), 100);
     // 末尾付近からでも後方に辿れる
-    assert_eq!(prev_row_start(&snap, cfg, 55_500), Some(55_000));
+    assert_eq!(prev_row_start(&snap, &cfg, 55_500), Some(55_000));
 }
 
 #[test]
@@ -122,25 +122,25 @@ fn viewport_scrolls_and_clamps() {
     let snap = snapshot(&data, 64);
     let cfg = RowConfig::new(64);
     let mut vp = Viewport::default();
-    assert!(vp.scroll_rows(&snap, cfg, 10, 20));
+    assert!(vp.scroll_rows(&snap, &cfg, 10, 20));
     assert_eq!(snap.line_of_offset(vp.top).line, 10);
-    vp.scroll_rows(&snap, cfg, 1000, 20);
+    vp.scroll_rows(&snap, &cfg, 1000, 20);
     // 最終行（空行 = 行 100）が最下段に来る位置で止まる
     assert_eq!(snap.line_of_offset(vp.top).line, 81);
-    vp.scroll_rows(&snap, cfg, -5, 20);
+    vp.scroll_rows(&snap, &cfg, -5, 20);
     assert_eq!(snap.line_of_offset(vp.top).line, 76);
-    vp.scroll_to_fraction(&snap, cfg, 0.0, 20);
+    vp.scroll_to_fraction(&snap, &cfg, 0.0, 20);
     assert_eq!(vp.top, 0);
-    vp.scroll_to_fraction(&snap, cfg, 0.5, 20);
+    vp.scroll_to_fraction(&snap, &cfg, 0.5, 20);
     assert!(is_line_start(&snap, vp.top));
-    assert!(!vp.scroll_rows(&snap, cfg, -1000, 20) || vp.top == 0);
+    assert!(!vp.scroll_rows(&snap, &cfg, -1000, 20) || vp.top == 0);
     assert_eq!(vp.top, 0);
 }
 
 #[test]
 fn rows_have_decoded_text() {
     let snap = snapshot(b"abc\r\n\xFFdef\n", 64);
-    let rows = rows_from(&snap, RowConfig::default(), 0, 10);
+    let rows = rows_from(&snap, &RowConfig::default(), 0, 10);
     let texts: Vec<_> = rows.iter().map(|r| r.text.as_str()).collect();
     assert_eq!(texts, vec!["abc", "\\xFFdef", ""]);
     assert!(rows[0].line_start && rows[1].line_start && rows[2].line_start);
@@ -159,11 +159,11 @@ fn ensure_visible_scrolls_minimally() {
         other => panic!("{other:?}"),
     };
     let mut vp = Viewport::default();
-    assert!(!vp.ensure_visible(&snap, cfg, line(9), 10));
-    assert!(vp.ensure_visible(&snap, cfg, line(10), 10));
+    assert!(!vp.ensure_visible(&snap, &cfg, line(9), 10));
+    assert!(vp.ensure_visible(&snap, &cfg, line(10), 10));
     assert_eq!(vp.top, line(1));
-    assert!(vp.ensure_visible(&snap, cfg, line(50) + 2, 10));
+    assert!(vp.ensure_visible(&snap, &cfg, line(50) + 2, 10));
     assert_eq!(vp.top, line(41));
-    assert!(vp.ensure_visible(&snap, cfg, line(5), 10));
+    assert!(vp.ensure_visible(&snap, &cfg, line(5), 10));
     assert_eq!(vp.top, line(5));
 }

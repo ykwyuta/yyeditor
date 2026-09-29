@@ -170,7 +170,7 @@ pub fn render_to_bmp(
     let snap = doc.snapshot();
     let rows_cfg = yy_layout::RowConfig::new(config.view.max_row_bytes.max(256) as u64);
     let page = (height as f32 / renderer.metrics().line_height).ceil() as usize;
-    let rows = yy_layout::rows_from(snap, rows_cfg, 0, page);
+    let rows = yy_layout::rows_from(snap, &rows_cfg, 0, page);
     let first = snap.line_of_offset(0);
     let frame = render::Frame {
         version: 0,

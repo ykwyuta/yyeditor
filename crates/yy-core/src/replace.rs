@@ -41,16 +41,28 @@ pub(crate) fn run(
     if let Some(edits) = collect_edits(searcher, snap, range.clone(), repl, EDIT_LIMIT, step)? {
         return Ok(Outcome::Edits(edits));
     }
-    if snap.len() <= in_memory {
-        let mut out = Vec::with_capacity(snap.len() as usize);
-        let n = rewrite(searcher, snap, range, repl, &mut out, step)?;
+    produce(snap.len(), in_memory, &mut |w| {
+        rewrite(searcher, snap, range.clone(), repl, w, step)
+    })
+}
+
+/// `write` が書き出した内容を新しい文書にする。`size_hint` が `in_memory` 以下ならメモリ上に、
+/// それより大きければ一時ファイルに書き出してマップする。`write` は処理した数を返す。
+pub(crate) fn produce(
+    size_hint: u64,
+    in_memory: u64,
+    write: &mut dyn FnMut(&mut dyn Write) -> Result<u64, ReplaceError>,
+) -> Result<Outcome, ReplaceError> {
+    if size_hint <= in_memory {
+        let mut out = Vec::with_capacity(size_hint as usize);
+        let n = write(&mut out)?;
         return Ok(Outcome::Rewritten(n, Snapshot::from_bytes(out)));
     }
-    let path = yy_io::temp_path("replace");
+    let path = yy_io::temp_path("rewrite");
     let result = (|| -> Result<Outcome, ReplaceError> {
         let file = std::fs::File::create(&path)?;
         let mut w = BufWriter::with_capacity(1 << 20, file);
-        let n = rewrite(searcher, snap, range, repl, &mut w, step)?;
+        let n = write(&mut w)?;
         w.flush()?;
         drop(w);
         let len = std::fs::metadata(&path)?.len();
@@ -69,6 +81,10 @@ pub(crate) fn run(
     result
 }
 
+/// バックグラウンドで実行する書き直し（`step(進んだ位置)` が `false` なら中止）。
+pub(crate) type Task =
+    Box<dyn FnOnce(&mut dyn FnMut(u64) -> bool) -> Result<Outcome, ReplaceError> + Send>;
+
 /// バックグラウンドのすべて置換。ドロップすると中止する。
 pub(crate) struct ReplaceJob {
     job: JobHandle,
@@ -85,6 +101,22 @@ impl ReplaceJob {
         range: Range<u64>,
         in_memory: u64,
     ) -> ReplaceJob {
+        let total = range.clone();
+        ReplaceJob::start_task(
+            pool,
+            notify,
+            total,
+            Box::new(move |step| run(&searcher, &snap, range, &repl, in_memory, step)),
+        )
+    }
+
+    /// 任意の書き直しをバックグラウンドで実行する。`range` は進捗の範囲。
+    pub fn start_task(
+        pool: &JobPool,
+        notify: Notifier,
+        range: Range<u64>,
+        task: Task,
+    ) -> ReplaceJob {
         let (tx, rx) = bounded(1);
         let job = pool.spawn(move |ctx| {
             ctx.progress.set_total(range.end - range.start);
@@ -93,7 +125,7 @@ impl ReplaceJob {
                 ctx.progress.set_done(pos.saturating_sub(start));
                 !ctx.cancel.is_cancelled()
             };
-            let r = run(&searcher, &snap, range.clone(), &repl, in_memory, &mut step);
+            let r = task(&mut step);
             let _ = tx.send(r);
             notify();
         });

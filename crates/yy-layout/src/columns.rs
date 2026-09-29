@@ -92,6 +92,20 @@ pub fn units(row: &Row, cfg: &ColumnConfig) -> Vec<Unit> {
                     col += w;
                 }
             }
+            SpanKind::Pad => {
+                // 列を揃える空白: 桁だけ進める（文書の位置には対応しない）
+                col += cfg.text_width(&row.text[span.range.clone()], col);
+            }
+            SpanKind::Delim => {
+                let w = cfg.text_width(&row.text[span.range.clone()], col);
+                out.push(Unit {
+                    start: src0,
+                    end: row.start + span.src.end as u64,
+                    col_start: col,
+                    col_end: col + w,
+                });
+                col += w;
+            }
             SpanKind::Control | SpanKind::Invalid | SpanKind::Escape => {
                 let (w, step) = match span.kind {
                     SpanKind::Control => (1, 1),

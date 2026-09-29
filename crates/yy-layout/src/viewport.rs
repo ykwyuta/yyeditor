@@ -13,7 +13,7 @@ pub struct Viewport {
 
 impl Viewport {
     /// 最後の表示行が画面の最下段に来るときの `top`。
-    pub fn last_page_top(snap: &Snapshot, cfg: RowConfig, page_rows: usize) -> u64 {
+    pub fn last_page_top(snap: &Snapshot, cfg: &RowConfig, page_rows: usize) -> u64 {
         let mut top = row_containing(snap, cfg, snap.len());
         for _ in 1..page_rows.max(1) {
             match prev_row_start(snap, cfg, top) {
@@ -25,7 +25,7 @@ impl Viewport {
     }
 
     /// `top` を有効な表示行の先頭に補正し、最終ページより後ろに行かないようにする。
-    pub fn clamp(&mut self, snap: &Snapshot, cfg: RowConfig, page_rows: usize) {
+    pub fn clamp(&mut self, snap: &Snapshot, cfg: &RowConfig, page_rows: usize) {
         self.top = row_containing(snap, cfg, self.top);
         let last = Viewport::last_page_top(snap, cfg, page_rows);
         if self.top > last {
@@ -37,7 +37,7 @@ impl Viewport {
     pub fn scroll_rows(
         &mut self,
         snap: &Snapshot,
-        cfg: RowConfig,
+        cfg: &RowConfig,
         delta: i64,
         page_rows: usize,
     ) -> bool {
@@ -68,7 +68,7 @@ impl Viewport {
     pub fn scroll_to_offset(
         &mut self,
         snap: &Snapshot,
-        cfg: RowConfig,
+        cfg: &RowConfig,
         offset: u64,
         page_rows: usize,
     ) {
@@ -81,7 +81,7 @@ impl Viewport {
     pub fn ensure_visible(
         &mut self,
         snap: &Snapshot,
-        cfg: RowConfig,
+        cfg: &RowConfig,
         offset: u64,
         page_rows: usize,
     ) -> bool {
@@ -125,7 +125,7 @@ impl Viewport {
     pub fn scroll_to_fraction(
         &mut self,
         snap: &Snapshot,
-        cfg: RowConfig,
+        cfg: &RowConfig,
         f: f64,
         page_rows: usize,
     ) {

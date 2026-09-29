@@ -16,28 +16,35 @@
 //! 隣の表示行の開始位置が決まり、スクロールのコストがファイルサイズや行の長さに依存しない。
 //! 長さ `S` 以下の行は分割されない。
 
+pub mod cells;
 pub mod columns;
 pub mod rect;
 mod row;
 mod viewport;
 
+pub use cells::CellLayout;
 pub use columns::ColumnConfig;
 pub use rect::RectSelection;
 pub use row::{Row, Span, SpanKind, decode_row};
 pub use viewport::Viewport;
 
+use std::sync::Arc;
+
 use yy_buffer::{LinePosition, Snapshot};
 
 /// 表示行の分割設定。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct RowConfig {
     pub max_row_bytes: u64,
+    /// 区切り文字モード（列揃え表示）
+    pub cells: Option<Arc<CellLayout>>,
 }
 
 impl Default for RowConfig {
     fn default() -> Self {
         RowConfig {
             max_row_bytes: 8192,
+            cells: None,
         }
     }
 }
@@ -45,7 +52,15 @@ impl Default for RowConfig {
 impl RowConfig {
     pub fn new(max_row_bytes: u64) -> RowConfig {
         assert!(max_row_bytes >= 8, "max_row_bytes too small");
-        RowConfig { max_row_bytes }
+        RowConfig {
+            max_row_bytes,
+            cells: None,
+        }
+    }
+
+    pub fn with_cells(mut self, cells: Arc<CellLayout>) -> RowConfig {
+        self.cells = Some(cells);
+        self
     }
 }
 
@@ -67,7 +82,7 @@ fn align_grid(snap: &Snapshot, g: u64) -> u64 {
 /// 表示行 `row` の次の表示行の開始位置。`row` が最後の表示行なら `None`。
 ///
 /// 文書が改行で終わる場合、文書末（`len`）は空の最終行の開始位置になる。
-pub fn next_row_start(snap: &Snapshot, cfg: RowConfig, row: u64) -> Option<u64> {
+pub fn next_row_start(snap: &Snapshot, cfg: &RowConfig, row: u64) -> Option<u64> {
     let len = snap.len();
     if row >= len {
         return None;
@@ -86,7 +101,7 @@ pub fn next_row_start(snap: &Snapshot, cfg: RowConfig, row: u64) -> Option<u64> 
 }
 
 /// 位置 `pos` より前（`pos` を含まない）で最も後ろの表示行の開始位置。
-pub fn prev_row_start(snap: &Snapshot, cfg: RowConfig, pos: u64) -> Option<u64> {
+pub fn prev_row_start(snap: &Snapshot, cfg: &RowConfig, pos: u64) -> Option<u64> {
     let pos = pos.min(snap.len() + 1);
     if pos == 0 {
         return None;
@@ -126,7 +141,7 @@ pub fn prev_row_start(snap: &Snapshot, cfg: RowConfig, pos: u64) -> Option<u64> 
 }
 
 /// `offset` を含む表示行の開始位置。
-pub fn row_containing(snap: &Snapshot, cfg: RowConfig, offset: u64) -> u64 {
+pub fn row_containing(snap: &Snapshot, cfg: &RowConfig, offset: u64) -> u64 {
     let len = snap.len();
     if offset >= len {
         if is_line_start(snap, len) {
@@ -138,15 +153,24 @@ pub fn row_containing(snap: &Snapshot, cfg: RowConfig, offset: u64) -> u64 {
 }
 
 /// 表示行 `start` の内容を取り出す。
-pub fn row_at(snap: &Snapshot, cfg: RowConfig, start: u64) -> Row {
+pub fn row_at(snap: &Snapshot, cfg: &RowConfig, start: u64) -> Row {
     let len = snap.len();
     let next = next_row_start(snap, cfg, start).unwrap_or(len);
     let bytes = snap.read(start..next);
-    Row::new(start, next, is_line_start(snap, start), &bytes)
+    let mut row = Row::new(start, next, is_line_start(snap, start), &bytes);
+    // 区切り文字モード: 論理行全体が 1 表示行に収まる行だけ列を揃える
+    if let Some(cl) = &cfg.cells
+        && row.line_start
+        && (row.ends_line || next == len)
+    {
+        let content = &bytes[..(row.end - row.start) as usize];
+        row.apply_cells(content, snap, cl);
+    }
+    row
 }
 
 /// `start` から最大 `count` 個の表示行を取り出す。
-pub fn rows_from(snap: &Snapshot, cfg: RowConfig, start: u64, count: usize) -> Vec<Row> {
+pub fn rows_from(snap: &Snapshot, cfg: &RowConfig, start: u64, count: usize) -> Vec<Row> {
     let mut rows = Vec::with_capacity(count.min(1024));
     let mut pos = Some(start);
     while rows.len() < count {

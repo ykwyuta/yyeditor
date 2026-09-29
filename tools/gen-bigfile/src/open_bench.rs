@@ -34,7 +34,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let rows = rows_from(doc.snapshot(), cfg, 0, PAGE);
+    let rows = rows_from(doc.snapshot(), &cfg, 0, PAGE);
     let first_screen = t.elapsed();
     println!(
         "file size            : {:.2} GB",
@@ -62,18 +62,18 @@ fn main() -> ExitCode {
     let snap = doc.snapshot().clone();
     let mut vp = Viewport::default();
     let t = Instant::now();
-    vp.scroll_to_fraction(&snap, cfg, 0.5, PAGE);
-    let rows = rows_from(&snap, cfg, vp.top, PAGE);
+    vp.scroll_to_fraction(&snap, &cfg, 0.5, PAGE);
+    let rows = rows_from(&snap, &cfg, vp.top, PAGE);
     println!(
         "jump to 50% (unindexed): {:?} (estimated line {})",
         t.elapsed(),
         snap.line_of_offset(vp.top).line + 1
     );
     let t = Instant::now();
-    vp.scroll_to_offset(&snap, cfg, u64::MAX, PAGE);
+    vp.scroll_to_offset(&snap, &cfg, u64::MAX, PAGE);
     println!("jump to end          : {:?}", t.elapsed());
     let t = Instant::now();
-    vp.scroll_rows(&snap, cfg, -(PAGE as i64) * 10, PAGE);
+    vp.scroll_rows(&snap, &cfg, -(PAGE as i64) * 10, PAGE);
     println!("scroll up 10 pages   : {:?}", t.elapsed());
     drop(rows);
 

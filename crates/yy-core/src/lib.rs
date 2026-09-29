@@ -3,6 +3,7 @@
 //! 文書の内容は永続ピースツリーのスナップショットで持ち、編集・Undo・保存は
 //! すべてスナップショットの差し替えとして行う（01 章 4.3、06 章）。
 
+pub mod csv;
 pub mod edit;
 pub mod grep;
 mod history;
@@ -1151,6 +1152,42 @@ impl Document {
             self.snapshot.clone(),
             range,
             limit,
+        ));
+        Ok(None)
+    }
+
+    /// 区切り文字形式の文書をレコードごとに書き直す（列の挿入・削除、区切り文字の変換）。
+    /// 1 回の Undo で戻せる。小さな文書はその場で行って書き直したレコード数を返し、
+    /// 大きな文書はバックグラウンドで始めて `Ok(None)` を返す（[`Document::replace_all`] と同じ）。
+    pub fn transform_records(
+        &mut self,
+        dialect: yy_delimited::Dialect,
+        op: csv::RecordOp,
+        pool: &JobPool,
+        notify: Notifier,
+    ) -> Result<Option<u64>, ReplaceError> {
+        if self.is_busy() {
+            return Err(ReplaceError::Io(io::Error::other("処理中です")));
+        }
+        let limit = self.replace_sync_limit;
+        let snap = self.snapshot.clone();
+        let len = snap.len();
+        if len <= limit {
+            let o = replace::produce(len, limit, &mut |w| {
+                csv::rewrite_records(&snap, dialect, op, w, &mut |_| true)
+            })?;
+            return Ok(Some(self.apply_replace(o)));
+        }
+        self.typing = None;
+        self.replacing = Some(replace::ReplaceJob::start_task(
+            pool,
+            notify,
+            0..len,
+            Box::new(move |step| {
+                replace::produce(len, limit, &mut |w| {
+                    csv::rewrite_records(&snap, dialect, op, w, step)
+                })
+            }),
         ));
         Ok(None)
     }

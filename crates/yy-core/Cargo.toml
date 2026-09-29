@@ -10,6 +10,7 @@ license.workspace = true
 yy-buffer.workspace = true
 yy-encoding.workspace = true
 yy-search.workspace = true
+yy-delimited.workspace = true
 memchr.workspace = true
 yy-io.workspace = true
 yy-jobs.workspace = true
@@ -17,6 +18,7 @@ crossbeam-channel.workspace = true
 unicode-segmentation.workspace = true
 
 [dev-dependencies]
+yy-delimited.workspace = true
 tempfile.workspace = true
 yy-encoding.workspace = true
 yy-jobs.workspace = true

@@ -315,7 +315,10 @@ impl Renderer {
                         SpanKind::Invalid | SpanKind::Escape => {
                             effects.push((start, len, &b.invalid))
                         }
-                        SpanKind::Control => effects.push((start, len, &b.control)),
+                        // 列揃えの空白には続きの行の区切りの縦線も含まれる
+                        SpanKind::Control | SpanKind::Delim | SpanKind::Pad => {
+                            effects.push((start, len, &b.control))
+                        }
                     }
                 }
             };
@@ -927,7 +930,7 @@ mod tests {
             "hello world\n日本語のテキスト\n\tタブ\nbad \u{FFFD}".replace('\u{FFFD}', "\u{1}"),
         );
         let snap = snap.insert(snap.len(), b"\xFF\xFE\n");
-        let rows = rows_from(&snap, RowConfig::default(), 0, 10);
+        let rows = rows_from(&snap, &RowConfig::default(), 0, 10);
         assert_eq!(rows.len(), 5);
         let frame = Frame {
             version: 0,
@@ -983,7 +986,7 @@ mod tests {
         let colors = Colors::default();
         let mut r = Renderer::new("Consolas", 11.0, 4, colors.clone(), 96).unwrap();
         let snap = Snapshot::from_bytes("hello world\nsecond line\n");
-        let rows = rows_from(&snap, RowConfig::default(), 0, 10);
+        let rows = rows_from(&snap, &RowConfig::default(), 0, 10);
         let selections = vec![std::ops::Range {
             start: 0u64,
             end: 5,

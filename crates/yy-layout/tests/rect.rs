@@ -20,7 +20,7 @@ fn apply(s: &Snapshot, changes: &[(std::ops::Range<u64>, Vec<u8>)]) -> String {
 #[test]
 fn columns_count_wide_tab_invalid_and_combining() {
     let s = Snapshot::from_bytes(b"a\xE3\x81\x82\tb\xFFc\xE3\x81\x8B\xE3\x82\x9A\n".to_vec());
-    let row = row_at(&s, RowConfig::default(), 0);
+    let row = row_at(&s, &RowConfig::default(), 0);
     let cfg = ColumnConfig::default();
     let us = units(&row, &cfg);
     let cols: Vec<(u64, u32, u32)> = us
@@ -56,7 +56,7 @@ fn rectangle_over_japanese_and_short_lines() {
     let s = snap(text);
     let rc = RowConfig::default();
     let cc = ColumnConfig::default();
-    let rows: Vec<u64> = rows_from(&s, rc, 0, 10).iter().map(|r| r.start).collect();
+    let rows: Vec<u64> = rows_from(&s, &rc, 0, 10).iter().map(|r| r.start).collect();
     // 桁 2〜4 の矩形（4 行）
     let r = RectSelection {
         anchor_row: rows[0],
@@ -64,7 +64,7 @@ fn rectangle_over_japanese_and_short_lines() {
         head_row: rows[3],
         head_col: 4,
     };
-    let rr = rect::rect_rows(&s, rc, &cc, &r, 100).unwrap();
+    let rr = rect::rect_rows(&s, &rc, &cc, &r, 100).unwrap();
     let texts: Vec<String> = rect::row_texts(&s, &rr)
         .into_iter()
         .map(|b| String::from_utf8(b).unwrap())
@@ -84,14 +84,14 @@ fn zero_width_rectangle_typing_pads_virtual_space() {
     let s = snap("abcdef\nxy\nあいうえ\n");
     let rc = RowConfig::default();
     let cc = ColumnConfig::default();
-    let rows: Vec<u64> = rows_from(&s, rc, 0, 10).iter().map(|r| r.start).collect();
+    let rows: Vec<u64> = rows_from(&s, &rc, 0, 10).iter().map(|r| r.start).collect();
     let r = RectSelection {
         anchor_row: rows[0],
         anchor_col: 4,
         head_row: rows[2],
         head_col: 4,
     };
-    let rr = rect::rect_rows(&s, rc, &cc, &r, 100).unwrap();
+    let rr = rect::rect_rows(&s, &rc, &cc, &r, 100).unwrap();
     assert_eq!(rr[1].pad, 2);
     let e = rect::replace_rows(&rr, &["|"], &cc);
     assert_eq!(apply(&s, &e.changes), "abcd|ef\nxy  |\nあい|うえ\n");
@@ -115,16 +115,16 @@ fn rect_rows_limit() {
     let text: String = (0..100).map(|i| format!("{i}\n")).collect();
     let s = snap(&text);
     let rc = RowConfig::default();
-    let rows: Vec<u64> = rows_from(&s, rc, 0, 200).iter().map(|r| r.start).collect();
+    let rows: Vec<u64> = rows_from(&s, &rc, 0, 200).iter().map(|r| r.start).collect();
     let r = RectSelection {
         anchor_row: rows[0],
         anchor_col: 0,
         head_row: rows[99],
         head_col: 1,
     };
-    assert!(rect::rect_rows(&s, rc, &ColumnConfig::default(), &r, 50).is_err());
+    assert!(rect::rect_rows(&s, &rc, &ColumnConfig::default(), &r, 50).is_err());
     assert_eq!(
-        rect::rect_rows(&s, rc, &ColumnConfig::default(), &r, 100)
+        rect::rect_rows(&s, &rc, &ColumnConfig::default(), &r, 100)
             .unwrap()
             .len(),
         100

@@ -71,7 +71,7 @@ pub struct TooManyRows(pub usize);
 /// 表示行 `row_start` の矩形部分を計算する。
 pub fn rect_row(
     snap: &Snapshot,
-    rcfg: RowConfig,
+    rcfg: &RowConfig,
     ccfg: &ColumnConfig,
     rect: &RectSelection,
     row_start: u64,
@@ -99,7 +99,7 @@ pub fn rect_row(
 /// 矩形のすべての行を上から順に展開する。`limit` 行を超える場合はエラー。
 pub fn rect_rows(
     snap: &Snapshot,
-    rcfg: RowConfig,
+    rcfg: &RowConfig,
     ccfg: &ColumnConfig,
     rect: &RectSelection,
     limit: usize,
@@ -207,7 +207,7 @@ pub fn row_texts(snap: &Snapshot, rows: &[RectRow]) -> Vec<Vec<u8>> {
 /// 位置 `offset` を含む表示行と、その位置の桁。
 pub fn row_and_col(
     snap: &Snapshot,
-    rcfg: RowConfig,
+    rcfg: &RowConfig,
     ccfg: &ColumnConfig,
     offset: u64,
 ) -> (u64, u32) {
@@ -220,7 +220,7 @@ pub fn row_and_col(
 /// 表示行 `row_start` の桁 `col` に最も近い位置（仮想空白は行末に丸める）。
 pub fn offset_at(
     snap: &Snapshot,
-    rcfg: RowConfig,
+    rcfg: &RowConfig,
     ccfg: &ColumnConfig,
     row_start: u64,
     col: u32,
