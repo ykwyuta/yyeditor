@@ -1,0 +1,55 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/yy-buffer",
+    "crates/yy-jobs",
+    "crates/yy-config",
+    "crates/yy-io",
+    "crates/yy-core",
+    "crates/yy-layout",
+    "crates/yy-win",
+    "apps/yyeditor",
+    "tools/gen-bigfile",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ykwyuta/yyeditor"
+
+[workspace.dependencies]
+yy-buffer = { path = "crates/yy-buffer" }
+yy-jobs = { path = "crates/yy-jobs" }
+yy-config = { path = "crates/yy-config" }
+yy-io = { path = "crates/yy-io" }
+yy-core = { path = "crates/yy-core" }
+yy-layout = { path = "crates/yy-layout" }
+yy-win = { path = "crates/yy-win" }
+
+memchr = "2.7"
+memmap2 = "0.9"
+crossbeam-channel = "0.5"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+thiserror = "2"
+proptest = "1"
+criterion = "0.8"
+tempfile = "3"
+windows = "0.62"
+windows-numerics = "0.3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# パニック時に緊急バックアップを書き出すため unwind を維持する（提案書 01 章 3.2）
+panic = "unwind"
+
+[profile.dev.package."*"]
+opt-level = 2

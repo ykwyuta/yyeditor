@@ -1,0 +1,42 @@
+[package]
+name = "yy-win"
+description = "Win32 / Direct2D / DirectWrite user interface for yyeditor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+yy-buffer.workspace = true
+yy-config.workspace = true
+yy-core.workspace = true
+yy-io.workspace = true
+yy-jobs.workspace = true
+yy-layout.workspace = true
+windows-numerics.workspace = true
+
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[target.'cfg(windows)'.dev-dependencies]
+yy-buffer.workspace = true
+
+[lints]
+workspace = true

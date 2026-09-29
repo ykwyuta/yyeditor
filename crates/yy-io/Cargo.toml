@@ -1,0 +1,17 @@
+[package]
+name = "yy-io"
+description = "File access (memory mapping, open, share modes) for yyeditor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+yy-buffer.workspace = true
+memmap2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

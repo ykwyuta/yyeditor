@@ -1,0 +1,19 @@
+[package]
+name = "yy-core"
+description = "Document model and editing core for yyeditor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+yy-buffer.workspace = true
+yy-io.workspace = true
+yy-jobs.workspace = true
+crossbeam-channel.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
