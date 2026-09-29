@@ -25,6 +25,7 @@ mod highlight;
 mod ime;
 mod recorddlg;
 mod render;
+mod tabclose;
 mod util;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -40,6 +41,32 @@ pub(crate) const FRAME_CLASS: PCWSTR = w!("YYEditorFrame");
 pub(crate) const VIEW_CLASS: PCWSTR = w!("YYEditorView");
 pub(crate) const FINDBAR_CLASS: PCWSTR = w!("YYEditorFindBar");
 pub(crate) const DIFF_CLASS: PCWSTR = w!("YYEditorDiff");
+
+/// 実行ファイルに埋め込んだアイコンのリソース ID（apps/yyeditor/build.rs）
+const APP_ICON_ID: usize = 1;
+
+/// 埋め込んだアイコンを大小 2 つのサイズで読み込む（システムの DPI に合わせる）。
+/// 埋め込まれていなければ（テストの実行ファイルなど）標準のアイコンにする。
+fn app_icons(hinstance: windows::Win32::Foundation::HINSTANCE) -> (HICON, HICON) {
+    unsafe {
+        let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem();
+        let load = |metric| {
+            let size = windows::Win32::UI::HiDpi::GetSystemMetricsForDpi(metric, dpi);
+            LoadImageW(
+                Some(hinstance),
+                PCWSTR(APP_ICON_ID as *const u16),
+                IMAGE_ICON,
+                size,
+                size,
+                LR_DEFAULTCOLOR,
+            )
+            .map(|h| HICON(h.0))
+            .or_else(|_| LoadIconW(None, IDI_APPLICATION))
+            .unwrap_or_default()
+        };
+        (load(SM_CXICON), load(SM_CXSMICON))
+    }
+}
 
 /// エディタを起動し、ウィンドウが閉じられるまでメッセージループを回す。
 ///
@@ -71,7 +98,7 @@ fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>
 
         let hinstance = GetModuleHandleW(None)?.into();
         let cursor = LoadCursorW(None, IDC_ARROW)?;
-        let icon = LoadIconW(None, IDI_APPLICATION)?;
+        let (icon, icon_small) = app_icons(hinstance);
 
         let frame_class = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -80,6 +107,7 @@ fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>
             hInstance: hinstance,
             hCursor: cursor,
             hIcon: icon,
+            hIconSm: icon_small,
             lpszClassName: FRAME_CLASS,
             ..Default::default()
         };
@@ -120,6 +148,8 @@ fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>
             lpfnWndProc: Some(diffview::proc),
             hInstance: hinstance,
             hCursor: cursor,
+            hIcon: icon,
+            hIconSm: icon_small,
             lpszClassName: DIFF_CLASS,
             ..Default::default()
         };

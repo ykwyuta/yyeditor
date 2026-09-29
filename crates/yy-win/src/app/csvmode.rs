@@ -11,8 +11,6 @@ use yy_layout::cells::measure_widths;
 
 use super::*;
 
-/// 1 列の幅の上限（桁）。これより長いフィールドはその行だけ列がずれる
-const WIDTH_CAP: u32 = 60;
 /// 最初に幅を測るレコード数（04 章 4.1）
 const INITIAL_LINES: usize = 1000;
 
@@ -88,7 +86,7 @@ impl App {
             self.rebuild_cells();
             self.measure_widths(0, INITIAL_LINES);
         } else {
-            self.rows_cfg.cells = None;
+            self.rebuild_cells();
         }
         self.update_csv_menu();
         self.renderer.clear_cache();
@@ -147,6 +145,21 @@ impl App {
 
     /// 表示の設定（列幅・インデックス）を作り直す。内容や列幅が変わったときに呼ぶ。
     pub(crate) fn rebuild_cells(&mut self) {
+        // 区切り文字モードでは長い行も分割せずに列を揃える（テキストの表示では巨大な 1 行の
+        // ファイルを速く表示するため、既定の単位で分割する）
+        let v = &self.config.view;
+        let text_limit = v.max_row_bytes.max(256) as u64;
+        let limit = if self.csv.is_some() {
+            text_limit.max(v.csv_max_row_bytes as u64)
+        } else {
+            text_limit
+        };
+        if limit != self.rows_cfg.max_row_bytes {
+            self.rows_cfg.max_row_bytes = limit;
+            // 表示位置を新しい単位の表示行の先頭に合わせる
+            let snap = self.doc.snapshot();
+            self.vp.top = yy_layout::row_containing(snap, &self.rows_cfg, self.vp.top);
+        }
         let Some(c) = &self.csv else {
             self.rows_cfg.cells = None;
             return;
@@ -192,7 +205,7 @@ impl App {
             line_start,
             lines,
             self.rows_cfg.max_row_bytes,
-            WIDTH_CAP,
+            self.config.view.csv_max_column_width.max(1),
             &mut c.widths,
         ) {
             self.rebuild_cells();

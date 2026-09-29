@@ -115,3 +115,39 @@ pub(crate) fn encode_bmp(width: u32, height: u32, bgra: &[u8]) -> Vec<u8> {
     v.extend_from_slice(&bgra[..data_len as usize]);
     v
 }
+
+/// 画面の部品（タブ・検索バーなど）の文字のフォント。メニュー・ステータスバーと同じ
+/// Windows のメッセージのフォント（日本語の Windows では Yu Gothic UI）を `dpi` に合わせて作る。
+pub(crate) fn ui_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
+    use windows::Win32::Graphics::Gdi::{CreateFontIndirectW, LOGFONTW};
+    use windows::Win32::UI::HiDpi::SystemParametersInfoForDpi;
+    use windows::Win32::UI::WindowsAndMessaging::{NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS};
+    unsafe {
+        let mut ncm = NONCLIENTMETRICSW {
+            cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
+            ..Default::default()
+        };
+        let lf = if SystemParametersInfoForDpi(
+            SPI_GETNONCLIENTMETRICS.0,
+            ncm.cbSize,
+            Some(&mut ncm as *mut _ as *mut _),
+            0,
+            dpi,
+        )
+        .is_ok()
+        {
+            ncm.lfMessageFont
+        } else {
+            // 取得できなければ 9 ポイントの Yu Gothic UI
+            let mut lf = LOGFONTW {
+                lfHeight: -(12 * dpi as i32 / 96),
+                ..Default::default()
+            };
+            for (d, s) in lf.lfFaceName.iter_mut().zip("Yu Gothic UI".encode_utf16()) {
+                *d = s;
+            }
+            lf
+        };
+        CreateFontIndirectW(&lf)
+    }
+}

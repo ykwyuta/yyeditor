@@ -264,6 +264,20 @@ fn sibling_name(target: &Path, tag: &str) -> PathBuf {
     dir.join(format!(".{name}.{tag}-{}-{n}", std::process::id()))
 }
 
+/// `target` と同じフォルダに新しい一時ファイルを作る。異常終了したプロセスが残したファイルと
+/// 名前が重なったら（プロセス ID は再利用される）、別の名前にする。
+fn create_sibling(target: &Path, tag: &str) -> io::Result<(PathBuf, File)> {
+    let mut attempts = 0;
+    loop {
+        let path = sibling_name(target, tag);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => return Ok((path, f)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && attempts < 100 => attempts += 1,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
@@ -339,11 +353,43 @@ pub fn save_snapshot(
     format: &SaveFormat,
     current: Option<&MmapSource>,
 ) -> Result<(), SaveError> {
-    let tmp = sibling_name(target, "yytmp");
+    save_snapshot_with(snap, target, format, current, &mut |_| true)
+}
+
+/// 保存を中止したときのエラー（[`save_snapshot_with`]）。
+pub fn is_cancelled(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::Interrupted
+}
+
+/// 進捗を知らせながら保存する（[`save_snapshot`]）。`step(書き出した文書内の位置)` が
+/// `false` を返したら中止し、ファイルは変更しない（[`is_cancelled`] なエラーを返す）。
+pub fn save_snapshot_with(
+    snap: &Snapshot,
+    target: &Path,
+    format: &SaveFormat,
+    current: Option<&MmapSource>,
+    step: &mut dyn FnMut(u64) -> bool,
+) -> Result<(), SaveError> {
+    let (tmp, file) = create_sibling(target, "yytmp")?;
+    // 大きなピースも進捗を知らせ、中止できるように分けて書き出す
+    const STEP: usize = 1 << 20;
+    let mut pos = 0u64;
+    let mut advance = |n: usize| -> io::Result<()> {
+        pos += n as u64;
+        if step(pos) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "保存を中止しました",
+            ))
+        }
+    };
     let mut unmappable: Vec<Range<u64>> = Vec::new();
     let mut total = 0u64;
+    let mut file = Some(file);
     let mut write = || -> io::Result<()> {
-        let file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let file = file.take().expect("written once");
         if let Ok(meta) = std::fs::metadata(target) {
             // 権限（Unix のモード等）を引き継ぐ
             let _ = file.set_permissions(meta.permissions());
@@ -354,16 +400,23 @@ pub fn save_snapshot(
         }
         if format.encoding == Encoding::Utf8 && format.escapes == EscapeMode::Literal {
             for chunk in snap.chunks(0..snap.len()) {
-                w.write_all(chunk)?;
+                for part in chunk.chunks(STEP) {
+                    w.write_all(part)?;
+                    advance(part.len())?;
+                }
             }
         } else {
             let mut enc = format.encoding.new_encoder(format.escapes);
             let mut out = Vec::new();
             let mut found = Vec::new();
-            let mut chunks = snap.chunks(0..snap.len()).peekable();
+            let mut chunks = snap
+                .chunks(0..snap.len())
+                .flat_map(|c| c.chunks(STEP))
+                .peekable();
             loop {
                 let chunk = chunks.next().unwrap_or(&[]);
                 let last = chunks.peek().is_none();
+                advance(chunk.len())?;
                 out.clear();
                 enc.encode(chunk, &mut out, last, &mut |r| found.push(r));
                 total += found.len() as u64;
@@ -608,6 +661,48 @@ mod tests {
             b"\xEF\xBB\xBF\xE3\x81\x93\xE3\x82\x93\xE3\x81\xAB\xE3\x81\xA1\xE3\x81\xAF\r\n"
         );
         assert_eq!(dir_entries(&d), vec!["new.txt"]);
+    }
+
+    #[test]
+    fn save_avoids_temp_names_left_by_crashed_process() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("a.txt");
+        // 次に使う一時ファイル名がすでにある（同じプロセス ID の以前の異常終了）
+        let next = TEMP_COUNTER.load(Ordering::Relaxed);
+        let pid = std::process::id();
+        for n in next..next + 20 {
+            std::fs::write(d.path().join(format!(".a.txt.yytmp-{pid}-{n}")), "old").unwrap();
+        }
+        save_snapshot(
+            &Snapshot::from_bytes("new"),
+            &target,
+            &SaveFormat::utf8(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        // 残っていたファイルは消さない
+        assert_eq!(dir_entries(&d).len(), 21);
+    }
+
+    #[test]
+    fn cancelled_save_leaves_target_unchanged() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("a.txt");
+        std::fs::write(&target, "old").unwrap();
+        let snap = Snapshot::from_bytes(vec![b'x'; 3 << 20]);
+        let mut calls = 0;
+        let r = save_snapshot_with(&snap, &target, &SaveFormat::utf8(), None, &mut |pos| {
+            calls += 1;
+            pos < 2 << 20
+        });
+        match r {
+            Err(SaveError::Io(e)) => assert!(is_cancelled(&e)),
+            r => panic!("{r:?}"),
+        }
+        assert_eq!(calls, 2);
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert_eq!(dir_entries(&d), vec!["a.txt"]);
     }
 
     /// 開いている（マップ中の）ファイルに上書き保存しても、古いスナップショットは

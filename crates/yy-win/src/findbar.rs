@@ -4,10 +4,7 @@
 //! （アプリ状態を借用している間にコントロールから通知が来ても再入しないように、すべて Post する）。
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DeleteObject,
-    FF_DONTCARE, FW_NORMAL, HFONT, OUT_DEFAULT_PRECIS,
-};
+use windows::Win32::Graphics::Gdi::{DeleteObject, HFONT};
 use windows::Win32::UI::Controls::EM_SETSEL;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -60,24 +57,7 @@ fn scale(v: i32, dpi: u32) -> i32 {
 }
 
 fn create_font(dpi: u32) -> HFONT {
-    unsafe {
-        CreateFontW(
-            -scale(12, dpi),
-            0,
-            0,
-            0,
-            FW_NORMAL.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            FF_DONTCARE.0 as u32,
-            w!("Yu Gothic UI"),
-        )
-    }
+    crate::util::ui_font(dpi)
 }
 
 impl FindBar {

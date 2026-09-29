@@ -159,6 +159,8 @@ pub struct Document {
     replacing: Option<replace::ReplaceJob>,
     /// 終わったすべて置換の結果（置き換えた数かエラー）
     replace_result: Option<Result<u64, String>>,
+    /// バックグラウンドで保存中
+    saving: Option<SaveJob>,
     /// すべて置換をその場で（メモリ上で）行う文書の大きさの上限
     replace_sync_limit: u64,
     eol: Eol,
@@ -176,6 +178,25 @@ pub struct Document {
     _guard: Option<FileGuard>,
     typing: Option<TypingRun>,
     load_error: Option<String>,
+}
+
+/// バックグラウンドの保存。ドロップしても保存は続く（文書を閉じても書きかけにしない）。
+struct SaveJob {
+    job: yy_jobs::JobHandle,
+    rx: crossbeam_channel::Receiver<Result<(), SaveError>>,
+    path: PathBuf,
+    encoding: Encoding,
+    format: SaveFormat,
+    /// 保存している内容の版
+    version: Version,
+}
+
+/// 終わった保存（[`Document::poll_save`]）。
+#[derive(Debug)]
+pub struct SaveDone {
+    pub result: Result<(), SaveError>,
+    /// 保存中に編集した（変換できない文字の範囲は保存した内容のもの）
+    pub edited: bool,
 }
 
 impl Default for Document {
@@ -231,6 +252,7 @@ impl Document {
             decode_stats: DecodeStats::default(),
             loading: None,
             replacing: None,
+            saving: None,
             replace_result: None,
             replace_sync_limit: replace::IN_MEMORY,
             eol: Eol::platform_default(),
@@ -1049,16 +1071,118 @@ impl Document {
         encoding: Encoding,
         bom: bool,
     ) -> Result<(), SaveError> {
+        let format = self.check_save(encoding, bom)?;
+        yy_io::save_snapshot(&self.snapshot, path, &format, self.source.as_deref())?;
+        self.apply_saved(path, encoding, &format, self.version);
+        Ok(())
+    }
+
+    /// 保存を始められるか確かめ、保存する形式を返す。
+    fn check_save(&self, encoding: Encoding, bom: bool) -> Result<SaveFormat, SaveError> {
         if self.is_busy() {
             return Err(io::Error::other("文字コードの変換中・置換中は保存できません").into());
         }
-        let format = self.save_format(encoding, bom);
-        yy_io::save_snapshot(&self.snapshot, path, &format, self.source.as_deref())?;
+        if self.saving.is_some() {
+            return Err(io::Error::other("保存中です").into());
+        }
+        Ok(self.save_format(encoding, bom))
+    }
+
+    /// バックグラウンドで保存を始める（06 章 3.3）。保存中も編集できる。
+    ///
+    /// 保存するのは始めたときの内容で、終わったら `notify` を呼ぶ。結果は
+    /// [`Document::poll_save`] で受け取る（そのときに保存したファイルを参照し直す）。
+    pub fn start_save(
+        &mut self,
+        path: &Path,
+        encoding: Encoding,
+        bom: bool,
+        pool: &JobPool,
+        notify: Notifier,
+    ) -> Result<(), SaveError> {
+        let format = self.check_save(encoding, bom)?;
+        // 保存する内容を Undo の区切りにする（保存中の入力をまとめない）
+        self.typing = None;
+        self.history.seal();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let snap = self.snapshot.clone();
+        let source = self.source.clone();
+        let target = path.to_owned();
+        let fmt = format;
+        let job = pool.spawn(move |ctx| {
+            ctx.progress.set_total(snap.len());
+            let r = yy_io::save_snapshot_with(&snap, &target, &fmt, source.as_deref(), &mut |p| {
+                ctx.progress.set_done(p);
+                !ctx.cancel.is_cancelled()
+            });
+            let _ = tx.send(r);
+            notify();
+        });
+        self.saving = Some(SaveJob {
+            job,
+            rx,
+            path: path.to_owned(),
+            encoding,
+            format,
+            version: self.version,
+        });
+        Ok(())
+    }
+
+    /// バックグラウンドで保存中か。
+    pub fn is_saving(&self) -> bool {
+        self.saving.is_some()
+    }
+
+    /// 保存の進捗率。保存中でなければ `None`。
+    pub fn save_progress(&self) -> Option<f64> {
+        self.saving.as_ref().map(|s| s.job.progress().fraction())
+    }
+
+    /// 保存を中止する（書き出し中なら、ファイルは変更しない）。結果は [`Document::poll_save`] で
+    /// 受け取る。
+    pub fn cancel_save(&self) {
+        if let Some(s) = &self.saving {
+            s.job.cancel();
+        }
+    }
+
+    /// バックグラウンドの保存が終わっていれば結果を返す。保存できていれば保存したファイルを
+    /// 参照し直す（行数を数え直すことがあるので、呼び出し側は [`Document::maintain_indexing`]
+    /// を呼ぶこと）。
+    pub fn poll_save(&mut self) -> Option<SaveDone> {
+        let s = self.saving.as_ref()?;
+        let result = match s.rx.try_recv() {
+            Ok(r) => r,
+            Err(crossbeam_channel::TryRecvError::Empty) => return None,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Err(io::Error::other("保存中に内部エラーが発生しました").into())
+            }
+        };
+        let s = self.saving.take().expect("saving");
+        let edited = self.version != s.version;
+        if result.is_ok() {
+            self.apply_saved(&s.path, s.encoding, &s.format, s.version);
+        }
+        Some(SaveDone { result, edited })
+    }
+
+    /// 保存し終えた文書の状態を更新する。`version` は保存した内容の版。
+    fn apply_saved(
+        &mut self,
+        path: &Path,
+        encoding: Encoding,
+        format: &SaveFormat,
+        version: Version,
+    ) {
+        let edited = self.version != version;
         // 保存したファイルを開き直す（書き込みを拒否するため。UTF-8 なら内容もマップし直して
-        // 追記バッファや退避した元ファイルを解放できるようにする）
+        // 追記バッファや退避した元ファイルを解放できるようにする。保存中に編集していれば
+        // 内容はそのまま）
         if let Ok(o) = yy_io::open_file(path) {
             let bom_len = if format.bom { encoding.bom().len() } else { 0 } as u64;
-            if encoding == Encoding::Utf8 && o.file_len - bom_len == self.snapshot.len() {
+            if !edited && encoding == Encoding::Utf8 && o.file_len - bom_len == self.snapshot.len()
+            {
                 self.snapshot = index_first_piece(o.snapshot(bom_len..o.file_len));
                 self.indexer = None;
                 self.index_version += 1;
@@ -1078,10 +1202,11 @@ impl Document {
         self.encoding = encoding;
         self.bom = format.bom;
         self.path = Some(path.to_owned());
-        self.saved_version = self.version;
-        self.typing = None;
-        self.history.seal();
-        Ok(())
+        self.saved_version = version;
+        if !edited {
+            self.typing = None;
+            self.history.seal();
+        }
     }
 
     /// 文書内の範囲 `ranges`（昇順・重なりなし）を `f(元の内容)` で置き換える
@@ -1670,5 +1795,104 @@ mod tests {
         assert_eq!(d.display_name(), "new.txt");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "新規");
         assert!(!d.is_modified());
+    }
+
+    fn wait_save(d: &mut Document) -> SaveDone {
+        let t = std::time::Instant::now();
+        loop {
+            if let Some(done) = d.poll_save() {
+                return done;
+            }
+            assert!(t.elapsed().as_secs() < 10, "save did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn background_save_keeps_edits_made_while_saving() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.txt");
+        std::fs::write(&path, "abc\n").unwrap();
+        let mut d = Document::open(&path).unwrap();
+        let pool = JobPool::new(2);
+        d.set_selections(SelectionSet::single(Selection::caret(3)));
+        d.insert_text("1", false);
+        d.start_save(&path, Encoding::Utf8, false, &pool, Arc::new(|| {}))
+            .unwrap();
+        assert!(d.is_saving());
+        // 保存中の 2 回目の保存は断る
+        assert!(
+            d.start_save(&path, Encoding::Utf8, false, &pool, Arc::new(|| {}))
+                .is_err()
+        );
+        // 保存中も編集できる（保存するのは始めたときの内容）
+        d.insert_text("2", false);
+        let done = wait_save(&mut d);
+        assert!(done.result.is_ok());
+        assert!(done.edited);
+        assert!(!d.is_saving());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "abc1\n");
+        assert_eq!(text(&d), "abc12\n");
+        assert!(d.is_modified());
+        // Undo で保存した内容に戻すと変更なしになる
+        assert!(d.undo());
+        assert_eq!(text(&d), "abc1\n");
+        assert!(!d.is_modified());
+        assert!(d.redo());
+        d.start_save(&path, Encoding::Utf8, false, &pool, Arc::new(|| {}))
+            .unwrap();
+        let done = wait_save(&mut d);
+        assert!(done.result.is_ok() && !done.edited);
+        assert!(!d.is_modified());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "abc12\n");
+    }
+
+    #[test]
+    fn cancelled_background_save_leaves_file_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.txt");
+        std::fs::write(&path, "old\n").unwrap();
+        let mut d = Document::open(&path).unwrap();
+        d.insert_text(&"x".repeat(8 << 20), false);
+        // ワーカーを塞いでおき、保存が始まる前に中止する
+        let pool = JobPool::new(1);
+        let (tx, rx) = crossbeam_channel::bounded::<()>(0);
+        pool.spawn(move |_| {
+            let _ = rx.recv();
+        });
+        d.start_save(&path, Encoding::Utf8, false, &pool, Arc::new(|| {}))
+            .unwrap();
+        d.cancel_save();
+        drop(tx);
+        let done = wait_save(&mut d);
+        match done.result {
+            Err(SaveError::Io(e)) => assert!(yy_io::is_cancelled(&e), "{e}"),
+            r => panic!("{r:?}"),
+        }
+        assert!(d.is_modified());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\n");
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn background_save_reports_unmappable_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.txt");
+        let mut d = Document::new_empty();
+        d.insert_text("a😀b", false);
+        let pool = JobPool::new(1);
+        d.start_save(&path, Encoding::Cp932, false, &pool, Arc::new(|| {}))
+            .unwrap();
+        match wait_save(&mut d).result {
+            Err(SaveError::Unmappable { ranges, total, .. }) => {
+                assert_eq!(total, 1);
+                assert_eq!(ranges, vec![1..5]);
+            }
+            r => panic!("{r:?}"),
+        }
+        assert!(!path.exists());
+        assert!(d.is_modified());
+        assert_eq!(d.path(), None);
     }
 }
