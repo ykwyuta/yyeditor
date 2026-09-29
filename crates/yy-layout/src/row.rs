@@ -8,6 +8,8 @@ pub enum SpanKind {
     Invalid,
     /// 制御文字（Unicode の Control Pictures で表示）
     Control,
+    /// 読み込んだ文字コードで不正だったバイトを表すエスケープ文字（`\xNN` と表示。03 章 2.4）
+    Escape,
 }
 
 /// 表示テキスト `Row::text` 内のバイト範囲と種類。
@@ -20,12 +22,14 @@ pub struct Span {
     pub src: Range<usize>,
 }
 
-impl Span {
-    /// 元の 1 バイトあたりの表示テキストのバイト数（Text は 1、制御文字は 3、不正バイトは 4）。
-    fn ratio(&self) -> usize {
-        match self.kind {
-            SpanKind::Text => 1,
-            _ => (self.range.len() / self.src.len().max(1)).max(1),
+impl SpanKind {
+    /// 1 単位の（元のバイト数, 表示テキストのバイト数）。置き換え表示は単位の途中で区切らない。
+    fn unit(self) -> (usize, usize) {
+        match self {
+            SpanKind::Text => (1, 1),
+            SpanKind::Invalid => (1, 4),
+            SpanKind::Control => (1, 3),
+            SpanKind::Escape => (4, 4),
         }
     }
 }
@@ -73,7 +77,8 @@ impl Row {
         let rel = (offset.clamp(self.start, self.end) - self.start) as usize;
         for sp in &self.spans {
             if sp.src.start <= rel && rel < sp.src.end {
-                return sp.range.start + (rel - sp.src.start) * sp.ratio();
+                let (us, ut) = sp.kind.unit();
+                return sp.range.start + (rel - sp.src.start) / us * ut;
             }
         }
         self.text.len()
@@ -84,7 +89,8 @@ impl Row {
     pub fn offset_at(&self, text_index: usize) -> u64 {
         for sp in &self.spans {
             if sp.range.start <= text_index && text_index < sp.range.end {
-                let rel = sp.src.start + (text_index - sp.range.start) / sp.ratio();
+                let (us, ut) = sp.kind.unit();
+                let rel = sp.src.start + (text_index - sp.range.start) / ut * us;
                 return self.start + rel as u64;
             }
         }
@@ -110,12 +116,7 @@ fn push(text: &mut String, spans: &mut Vec<Span>, s: &str, kind: SpanKind, src: 
     let start = text.len();
     text.push_str(s);
     match spans.last_mut() {
-        Some(last)
-            if last.kind == kind
-                && last.range.end == start
-                && last.src.end == src.start
-                && (kind == SpanKind::Text || last.ratio() == s.len() / src.len().max(1)) =>
-        {
+        Some(last) if last.kind == kind && last.range.end == start && last.src.end == src.start => {
             last.range.end = text.len();
             last.src.end = src.end;
         }
@@ -131,6 +132,7 @@ fn push(text: &mut String, spans: &mut Vec<Span>, s: &str, kind: SpanKind, src: 
 ///
 /// * 不正な UTF-8 のバイトは `\xNN` に置き換える
 /// * タブ以外の C0 制御文字と DEL は Control Pictures（`␀` `␍` など）に置き換える
+/// * エスケープ文字（`U+10FE00`〜）は元のバイトを `\xNN` で表示する
 pub fn decode_row(bytes: &[u8]) -> (String, Vec<Span>) {
     let mut text = String::with_capacity(bytes.len());
     let mut spans = Vec::new();
@@ -139,6 +141,24 @@ pub fn decode_row(bytes: &[u8]) -> (String, Vec<Span>) {
         let valid = chunk.valid();
         let mut run_start = 0;
         for (i, c) in valid.char_indices() {
+            if let Some(b) = yy_encoding::unescape_char(c) {
+                push(
+                    &mut text,
+                    &mut spans,
+                    &valid[run_start..i],
+                    SpanKind::Text,
+                    pos + run_start..pos + i,
+                );
+                push(
+                    &mut text,
+                    &mut spans,
+                    &format!("\\x{b:02X}"),
+                    SpanKind::Escape,
+                    pos + i..pos + i + 4,
+                );
+                run_start = i + 4;
+                continue;
+            }
             let pic = match c {
                 '\t' => None,
                 '\0'..='\x1F' => char::from_u32(0x2400 + c as u32),
@@ -206,6 +226,24 @@ mod tests {
                 ("\\xE3\\x81", SpanKind::Invalid),
             ]
         );
+    }
+
+    #[test]
+    fn escape_characters_are_atomic() {
+        // "a" + エスケープ文字（0x87）+ "b"
+        let mut bytes = b"a".to_vec();
+        bytes.extend_from_slice(yy_encoding::escape_char(0x87).to_string().as_bytes());
+        bytes.push(b'b');
+        let r = Row::new(10, 16, true, &bytes);
+        assert_eq!(r.text, "a\\x87b");
+        assert_eq!(r.spans[1].kind, SpanKind::Escape);
+        assert_eq!(r.text_index(11), 1);
+        assert_eq!(r.text_index(15), 5);
+        // 表示の途中は元の文字の先頭に丸める
+        for i in 1..5 {
+            assert_eq!(r.offset_at(i), 11);
+        }
+        assert_eq!(r.offset_at(5), 15);
     }
 
     #[test]

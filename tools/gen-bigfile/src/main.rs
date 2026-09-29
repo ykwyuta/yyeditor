@@ -1,9 +1,10 @@
 //! 性能試験用の巨大テキストファイルを生成する（08 章 2.3）。
 //!
 //! ```text
-//! gen-bigfile <出力パス> <サイズ> [種類]
-//!   サイズ: 1024, 512K, 100M, 10G など
-//!   種類:   log（既定, 短い行）| japanese（日本語）| long（長い行）| single（改行なし 1 行）| csv
+//! gen-bigfile <出力パス> <サイズ> [種類] [文字コード]
+//!   サイズ:   1024, 512K, 100M, 10G など（UTF-8 での大きさ）
+//!   種類:     log（既定, 短い行）| japanese（日本語）| long（長い行）| single（改行なし 1 行）| csv
+//!   文字コード: 既定は UTF-8。cp932, euc-jp, utf-16le など
 //! ```
 
 use std::fs::File;
@@ -103,7 +104,7 @@ fn make_line(kind: &str, rng: &mut Rng, i: u64, out: &mut Vec<u8>) {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: gen-bigfile <output> <size> [log|japanese|long|single|csv]");
+        eprintln!("usage: gen-bigfile <output> <size> [log|japanese|long|single|csv] [encoding]");
         return ExitCode::FAILURE;
     }
     let Some(size) = parse_size(&args[2]) else {
@@ -111,6 +112,18 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let kind = args.get(3).map(String::as_str).unwrap_or("log");
+    let encoding = match args.get(4) {
+        Some(name) => match yy_encoding::Encoding::from_name(name) {
+            Some(e) => e,
+            None => {
+                eprintln!("unknown encoding: {name}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => yy_encoding::Encoding::Utf8,
+    };
+    let mut encoder = encoding.new_encoder(yy_encoding::EscapeMode::Literal);
+    let mut encoded = Vec::new();
     let file = match File::create(&args[1]) {
         Ok(f) => f,
         Err(e) => {
@@ -135,7 +148,9 @@ fn main() -> ExitCode {
         while n > 0 && n < buf.len() && buf[n] & 0xC0 == 0x80 {
             n -= 1;
         }
-        if let Err(e) = w.write_all(&buf[..n]) {
+        encoded.clear();
+        encoder.encode(&buf[..n], &mut encoded, false, &mut |_| {});
+        if let Err(e) = w.write_all(&encoded) {
             eprintln!("write error: {e}");
             return ExitCode::FAILURE;
         }
@@ -144,13 +159,15 @@ fn main() -> ExitCode {
             break;
         }
     }
-    if let Err(e) = w.flush() {
+    encoded.clear();
+    encoder.encode(&[], &mut encoded, true, &mut |_| {});
+    if let Err(e) = w.write_all(&encoded).and_then(|_| w.flush()) {
         eprintln!("write error: {e}");
         return ExitCode::FAILURE;
     }
     let secs = start.elapsed().as_secs_f64();
     eprintln!(
-        "wrote {} bytes ({kind}) in {secs:.2}s ({:.0} MB/s)",
+        "wrote {} bytes of UTF-8 text ({kind}, saved as {encoding}) in {secs:.2}s ({:.0} MB/s)",
         written,
         written as f64 / secs / 1e6
     );

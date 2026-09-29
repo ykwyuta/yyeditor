@@ -10,6 +10,7 @@ license.workspace = true
 yy-buffer.workspace = true
 yy-config.workspace = true
 yy-core.workspace = true
+yy-encoding.workspace = true
 yy-io.workspace = true
 yy-jobs.workspace = true
 yy-layout.workspace = true

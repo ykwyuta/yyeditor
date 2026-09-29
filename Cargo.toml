@@ -4,12 +4,14 @@ members = [
     "crates/yy-buffer",
     "crates/yy-jobs",
     "crates/yy-config",
+    "crates/yy-encoding",
     "crates/yy-io",
     "crates/yy-core",
     "crates/yy-layout",
     "crates/yy-win",
     "apps/yyeditor",
     "tools/gen-bigfile",
+    "tools/gen-tables",
 ]
 
 [workspace.package]
@@ -23,11 +25,14 @@ repository = "https://github.com/ykwyuta/yyeditor"
 yy-buffer = { path = "crates/yy-buffer" }
 yy-jobs = { path = "crates/yy-jobs" }
 yy-config = { path = "crates/yy-config" }
+yy-encoding = { path = "crates/yy-encoding" }
 yy-io = { path = "crates/yy-io" }
 yy-core = { path = "crates/yy-core" }
 yy-layout = { path = "crates/yy-layout" }
 yy-win = { path = "crates/yy-win" }
 
+encoding_rs = "0.8.42"
+chardetng = "1.0.0"
 memchr = "2.7"
 memmap2 = "0.9"
 crossbeam-channel = "0.5"

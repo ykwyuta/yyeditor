@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 yy-buffer.workspace = true
+yy-encoding.workspace = true
 memmap2.workspace = true
 
 [dev-dependencies]

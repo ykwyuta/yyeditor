@@ -17,14 +17,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, FileOpenDialog, FileSaveDialog, HDROP,
-    IFileOpenDialog, IFileSaveDialog, SIGDN_FILESYSPATH,
+    IFileDialog, IFileDialogCustomize, IFileOpenDialog, IFileSaveDialog, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{HSTRING, Result, w};
+use windows::core::{HSTRING, Interface, Result, w};
 use yy_buffer::{LineLookup, Snapshot};
 use yy_config::Config;
 use yy_core::edit::Change;
-use yy_core::{Document, EditKind, Selection, SelectionSet, motion};
+use yy_core::{
+    Document, EditKind, Encoding, Eol, OpenOptions, SaveError, Selection, SelectionSet, motion,
+};
 use yy_jobs::{JobPool, Notifier};
 use yy_layout::rect::{self, RectEdit, RectRow};
 use yy_layout::{
@@ -61,6 +63,8 @@ const ID_RECT_TO_CARETS: u16 = 409;
 const ID_SELECT_NEXT: u16 = 410;
 const ID_SELECT_ALL_OCCURRENCES: u16 = 411;
 const ID_CARETS_AT_LINE_ENDS: u16 = 412;
+/// 「文字コードを指定して開き直す」の各項目（`Encoding::all()` の順）
+const ID_REOPEN_BASE: u16 = 600;
 
 const ID_STATUS: i32 = 1000;
 const TIMER_BLINK: usize = 1;
@@ -151,6 +155,8 @@ pub(crate) struct App {
     ccfg: ColumnConfig,
     /// Alt+ドラッグの後の Alt キーの解放でメニューが開かないようにする
     suppress_alt_up: bool,
+    /// 保存すると符号が変わる文字があることを警告済み
+    warned_noncanonical: bool,
 }
 
 pub(crate) fn create_accelerators() -> Result<HACCEL> {
@@ -203,6 +209,21 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU)> {
         let file = CreatePopupMenu()?;
         item(file, ID_NEW, w!("新規作成(&N)\tCtrl+N"))?;
         item(file, ID_OPEN, w!("開く(&O)...\tCtrl+O"))?;
+        let reopen = CreatePopupMenu()?;
+        for (i, e) in Encoding::all().iter().enumerate() {
+            AppendMenuW(
+                reopen,
+                MF_STRING,
+                (ID_REOPEN_BASE + i as u16) as usize,
+                &HSTRING::from(e.label()),
+            )?;
+        }
+        AppendMenuW(
+            file,
+            MF_POPUP,
+            reopen.0 as usize,
+            w!("文字コードを指定して開き直す(&R)"),
+        )?;
         item(file, ID_SAVE, w!("上書き保存(&S)\tCtrl+S"))?;
         item(
             file,
@@ -358,6 +379,7 @@ impl App {
                 rect_mode: false,
                 ccfg,
                 suppress_alt_up: false,
+                warned_noncanonical: false,
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
             with_app(|a| {
@@ -375,7 +397,7 @@ impl App {
                 error_box(frame, &e.to_string());
             }
             if let Some(path) = initial_file {
-                open_path(frame, path);
+                open_path(frame, path, None);
             }
             Ok(frame)
         }
@@ -498,10 +520,14 @@ impl App {
         }
         self.set_status(0, &text);
         self.set_status(1, &format!("  {}", human_size(snap.len())));
-        let enc = match self.doc.bom() {
-            yy_io::Bom::Utf8 => "UTF-8 (BOM 付き)",
-            yy_io::Bom::None => "UTF-8",
-        };
+        let mut enc = self.doc.encoding().name().to_owned();
+        if self.doc.has_bom() {
+            enc += " (BOM 付き)";
+        }
+        let stats = self.doc.decode_stats();
+        if stats.invalid > 0 {
+            enc += &format!("  不正バイト {}", group_digits(stats.invalid));
+        }
         self.set_status(2, &format!("  {enc}"));
         self.set_status(3, &format!("  {}", self.doc.eol().label()));
         let mode = match (self.overwrite, self.rect_mode) {
@@ -511,9 +537,13 @@ impl App {
             (true, true) => "  上書き / 矩形",
         };
         self.set_status(4, mode);
-        let progress = match self.doc.indexing_progress() {
-            Some(p) => format!("  行数を数えています… {:.0}%", p * 100.0),
-            None => String::new(),
+        let progress = match (self.doc.loading_progress(), self.doc.indexing_progress()) {
+            (Some(p), _) => format!(
+                "  文字コードを変換しています（読み取り専用）… {:.0}%",
+                p * 100.0
+            ),
+            (None, Some(p)) => format!("  行数を数えています… {:.0}%", p * 100.0),
+            _ => String::new(),
         };
         self.set_status(5, &progress);
     }
@@ -1620,6 +1650,7 @@ impl App {
         self.drag = None;
         self.rect = None;
         self.doc = doc;
+        self.warned_noncanonical = false;
         let n = self.notifier();
         self.doc.start_indexing(&self.pool, n);
         self.vp = Viewport::default();
@@ -1629,28 +1660,43 @@ impl App {
         self.after_move();
     }
 
-    fn open(&mut self, path: PathBuf) -> std::result::Result<(), String> {
-        let doc = Document::open(&path).map_err(|e| format!("{}\n\n{e}", path.display()))?;
+    fn open(
+        &mut self,
+        path: PathBuf,
+        encoding: Option<Encoding>,
+    ) -> std::result::Result<(), String> {
+        let opts = OpenOptions {
+            encoding,
+            ..OpenOptions::default()
+        };
+        let doc =
+            Document::open_with(&path, &opts).map_err(|e| format!("{}\n\n{e}", path.display()))?;
         self.set_document(doc);
         Ok(())
     }
 
-    fn save_to(&mut self, path: Option<PathBuf>) -> std::result::Result<(), String> {
+    /// 保存する。変換できない文字があればその情報を返す（文書は変更しない）。
+    fn save_to(&mut self, target: &SaveTarget) -> std::result::Result<(), SaveFailure> {
         let result = unsafe {
             let old = SetCursor(LoadCursorW(None, IDC_WAIT).ok());
-            let r = match &path {
-                Some(p) => self.doc.save_as(p),
-                None => self.doc.save(),
-            };
+            let r = self
+                .doc
+                .save_as_with(&target.path, target.encoding, target.bom);
             SetCursor(Some(old));
             r
         };
-        let shown = path
-            .as_deref()
-            .or(self.doc.path())
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        result.map_err(|e| format!("{shown}\n\n{e}"))?;
+        match result {
+            Ok(()) => {}
+            Err(SaveError::Unmappable { ranges, total, .. }) => {
+                return Err(SaveFailure::Unmappable { ranges, total });
+            }
+            Err(e) => {
+                return Err(SaveFailure::Other(format!(
+                    "{}\n\n{e}",
+                    target.path.display()
+                )));
+            }
+        }
         let n = self.notifier();
         self.doc.maintain_indexing(&self.pool, n);
         self.renderer.clear_cache();
@@ -1659,9 +1705,22 @@ impl App {
         Ok(())
     }
 
-    fn on_index_progress(&mut self) {
+    /// 行数カウント・文字コード変換の進捗を反映する。変換に失敗したらそのエラーを返す。
+    fn on_index_progress(&mut self) -> Option<String> {
         self.index_posted.store(false, Ordering::Release);
+        let was_loading = self.doc.is_loading();
         if self.doc.poll_indexing() {
+            if was_loading && !self.doc.is_loading() {
+                // 変換が終わって内容を差し替えた
+                self.renderer.clear_cache();
+                self.update_title();
+                if let Some(e) = self.doc.load_error() {
+                    let msg = e.to_owned();
+                    self.update_status();
+                    self.invalidate();
+                    return Some(msg);
+                }
+            }
             if self.doc.indexing_progress().is_none() && !self.doc.snapshot().is_fully_indexed() {
                 // 編集で分割されたピースなど、数え残しがあれば続けて数える
                 let n = self.notifier();
@@ -1671,6 +1730,52 @@ impl App {
             self.update_status();
             self.invalidate();
         }
+        None
+    }
+
+    /// 保存できない文字の範囲を置き換える（1 回の Undo で戻せる）。
+    fn replace_unmappable(&mut self, ranges: &[std::ops::Range<u64>], ncr: bool) {
+        self.rect = None;
+        let ok = self.doc.replace_ranges(ranges, |b| {
+            let c = std::str::from_utf8(b).ok().and_then(|s| s.chars().next());
+            match c {
+                Some(c) if ncr && yy_encoding::unescape_char(c).is_none() => {
+                    format!("&#x{:X};", c as u32).into_bytes()
+                }
+                _ => b"?".to_vec(),
+            }
+        });
+        if ok {
+            self.after_edit();
+        }
+    }
+
+    /// 保存できない最初の文字へ移動して選択する。
+    fn select_range(&mut self, r: std::ops::Range<u64>) {
+        self.rect = None;
+        self.doc
+            .set_selections(SelectionSet::single(Selection::new(r.start, r.end)));
+        self.scroll_to_offset(r.start);
+        self.after_move();
+    }
+
+    /// 保存できない文字の説明（行と文字）。
+    fn describe_offset(&self, r: &std::ops::Range<u64>) -> String {
+        let snap = self.doc.snapshot();
+        let line = snap.line_of_offset(r.start);
+        let bytes = snap.read(r.clone());
+        let what = match std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|s| s.chars().next())
+        {
+            Some(c) => match yy_encoding::unescape_char(c) {
+                Some(b) => format!("読み込み時に不正だったバイト 0x{b:02X}"),
+                None => format!("「{c}」(U+{:04X})", c as u32),
+            },
+            None => format!("不正なバイト 0x{:02X}", bytes.first().copied().unwrap_or(0)),
+        };
+        let approx = if line.exact { "" } else { "約 " };
+        format!("{approx}{} 行目の {what}", group_digits(line.line + 1))
     }
 
     /// 行へ移動。行数が未確定の範囲はその場で数える。
@@ -1788,40 +1893,183 @@ fn confirm_discard(hwnd: HWND) -> bool {
     }
 }
 
-fn open_path(hwnd: HWND, path: PathBuf) {
-    if let Some(Err(msg)) = with_app(|a| a.open(path)) {
+fn open_path(hwnd: HWND, path: PathBuf, encoding: Option<Encoding>) {
+    if let Some(Err(msg)) = with_app(|a| a.open(path, encoding)) {
         error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
     }
 }
 
-/// 保存する。`as_new` または名前がなければ保存先を尋ねる。保存できたら `true`。
-fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
-    let Some(current) = with_app(|a| a.doc.path().map(|p| p.to_owned())) else {
-        return false;
-    };
-    let target = if as_new || current.is_none() {
-        match show_save_dialog(hwnd, current.as_deref()) {
-            Some(p) => Some(p),
-            None => return false,
-        }
-    } else {
-        None
-    };
-    match with_app(|a| a.save_to(target)) {
-        Some(Ok(())) => true,
-        Some(Err(msg)) => {
-            error_box(hwnd, &format!("保存できませんでした。\n{msg}"));
-            false
-        }
-        None => false,
+/// 保存先と形式。
+pub(crate) struct SaveTarget {
+    path: PathBuf,
+    encoding: Encoding,
+    bom: bool,
+    /// 保存前に揃える改行コード（`None` なら変更しない）
+    eol: Option<Eol>,
+}
+
+pub(crate) enum SaveFailure {
+    Other(String),
+    Unmappable {
+        ranges: Vec<std::ops::Range<u64>>,
+        total: u64,
+    },
+}
+
+fn message_box(hwnd: HWND, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
+    unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            &HSTRING::from(text),
+            &HSTRING::from("yyeditor"),
+            style,
+        )
     }
 }
 
-fn show_open_dialog(owner: HWND) -> Option<PathBuf> {
+/// 保存する。`as_new` または名前がなければ保存先と形式を尋ねる。保存できたら `true`。
+fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
+    let Some((current, encoding, bom, eol, loading, noncanonical)) = with_app(|a| {
+        let nc = if a.warned_noncanonical {
+            0
+        } else {
+            a.doc.decode_stats().noncanonical
+        };
+        (
+            a.doc.path().map(|p| p.to_owned()),
+            a.doc.encoding(),
+            a.doc.has_bom(),
+            a.doc.eol(),
+            a.doc.is_loading(),
+            nc,
+        )
+    }) else {
+        return false;
+    };
+    if loading {
+        info_box(hwnd, "文字コードの変換が終わるまで保存できません。");
+        return false;
+    }
+    let target = match current {
+        Some(path) if !as_new => SaveTarget {
+            path,
+            encoding,
+            bom,
+            eol: None,
+        },
+        current => match show_save_dialog(hwnd, current.as_deref(), encoding, bom, eol) {
+            Some(t) => t,
+            None => return false,
+        },
+    };
+    if target.encoding == encoding && noncanonical > 0 {
+        let msg = format!(
+            "このファイルには、保存すると符号が変わる文字が {} 個あります\n\
+             （CP932 の NEC 選定 IBM 拡張文字など、同じ文字に複数の符号があるもの）。\n\
+             保存すると Windows 標準の符号になります。\n\n保存しますか？",
+            group_digits(noncanonical)
+        );
+        if message_box(hwnd, &msg, MB_OKCANCEL | MB_ICONWARNING) != IDOK {
+            return false;
+        }
+        with_app(|a| a.warned_noncanonical = true);
+    }
+    if let Some(eol) = target.eol {
+        let r = with_app(|a| {
+            let r = unsafe {
+                let old = SetCursor(LoadCursorW(None, IDC_WAIT).ok());
+                let r = a.doc.convert_eol(eol);
+                SetCursor(Some(old));
+                r
+            };
+            if matches!(r, Ok(true)) {
+                a.after_edit();
+            }
+            r.map_err(|e| e.to_string())
+        });
+        if let Some(Err(msg)) = r {
+            error_box(hwnd, &format!("改行コードを変換できませんでした。\n{msg}"));
+            return false;
+        }
+    }
+    for attempt in 0..2 {
+        match with_app(|a| a.save_to(&target)) {
+            Some(Ok(())) => return true,
+            Some(Err(SaveFailure::Other(msg))) => {
+                error_box(hwnd, &format!("保存できませんでした。\n{msg}"));
+                return false;
+            }
+            Some(Err(SaveFailure::Unmappable { ranges, total })) => {
+                let first = ranges[0].clone();
+                let desc = with_app(|a| a.describe_offset(&first)).unwrap_or_default();
+                let mut msg = format!(
+                    "{} 個の文字は {} で保存できません。\n最初の文字: {desc}\n\n",
+                    group_digits(total),
+                    target.encoding.name()
+                );
+                if attempt > 0 || ranges.len() as u64 != total {
+                    msg += "保存せずに最初の文字へ移動します。";
+                    message_box(hwnd, &msg, MB_OK | MB_ICONWARNING);
+                    with_app(|a| a.select_range(first));
+                    return false;
+                }
+                msg += "はい: 「?」に置き換えて保存\n\
+                        いいえ: 数値文字参照（&#x….;）に置き換えて保存\n\
+                        キャンセル: 保存せずに最初の文字へ移動\n\n\
+                        置き換えは「元に戻す」で取り消せます。";
+                match message_box(hwnd, &msg, MB_YESNOCANCEL | MB_ICONWARNING) {
+                    IDYES => with_app(|a| a.replace_unmappable(&ranges, false)),
+                    IDNO => with_app(|a| a.replace_unmappable(&ranges, true)),
+                    _ => {
+                        with_app(|a| a.select_range(first));
+                        return false;
+                    }
+                };
+            }
+            None => return false,
+        }
+    }
+    false
+}
+
+// 保存・開くダイアログに追加するコントロールの ID
+const CTL_ENCODING: u32 = 1;
+const CTL_BOM: u32 = 2;
+const CTL_EOL: u32 = 3;
+const CTL_GROUP_ENCODING: u32 = 4;
+const CTL_GROUP_EOL: u32 = 5;
+
+/// ダイアログに文字コードの選択欄を追加する。`auto` なら先頭に「自動判別」を置く。
+fn add_encoding_combo(c: &IFileDialogCustomize, selected: Option<Encoding>, auto: bool) {
     unsafe {
-        let dialog: IFileOpenDialog =
-            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
-        dialog.Show(Some(owner)).ok()?;
+        let _ = c.StartVisualGroup(CTL_GROUP_ENCODING, w!("文字コード:"));
+        let _ = c.AddComboBox(CTL_ENCODING);
+        let offset = u32::from(auto);
+        if auto {
+            let _ = c.AddControlItem(CTL_ENCODING, 0, w!("自動判別"));
+        }
+        let all = Encoding::all();
+        for (i, e) in all.iter().enumerate() {
+            let _ = c.AddControlItem(CTL_ENCODING, i as u32 + offset, &HSTRING::from(e.label()));
+        }
+        let sel = selected
+            .and_then(|s| all.iter().position(|e| *e == s))
+            .map_or(0, |i| i as u32 + offset);
+        let _ = c.SetSelectedControlItem(CTL_ENCODING, sel);
+        let _ = c.EndVisualGroup();
+    }
+}
+
+/// 選択された文字コード（「自動判別」なら `None`）。
+fn selected_encoding(c: &IFileDialogCustomize, auto: bool) -> Option<Encoding> {
+    let i = unsafe { c.GetSelectedControlItem(CTL_ENCODING) }.ok()?;
+    let i = i.checked_sub(u32::from(auto))?;
+    Encoding::all().get(i as usize).copied()
+}
+
+/// ダイアログで選ばれたファイルのパス。
+fn dialog_result(dialog: &IFileDialog) -> Option<PathBuf> {
+    unsafe {
         let item = dialog.GetResult().ok()?;
         let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
         let path = name.to_string().ok();
@@ -1830,7 +2078,30 @@ fn show_open_dialog(owner: HWND) -> Option<PathBuf> {
     }
 }
 
-fn show_save_dialog(owner: HWND, current: Option<&std::path::Path>) -> Option<PathBuf> {
+/// 開くファイルと文字コード（`None` なら自動判別）を尋ねる。
+fn show_open_dialog(owner: HWND) -> Option<(PathBuf, Option<Encoding>)> {
+    unsafe {
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let custom = dialog.cast::<IFileDialogCustomize>().ok();
+        if let Some(c) = &custom {
+            add_encoding_combo(c, None, true);
+        }
+        dialog.Show(Some(owner)).ok()?;
+        let path = dialog_result(&dialog.cast().ok()?)?;
+        let enc = custom.as_ref().and_then(|c| selected_encoding(c, true));
+        Some((path, enc))
+    }
+}
+
+/// 保存先と形式（文字コード・BOM・改行コード）を尋ねる。
+fn show_save_dialog(
+    owner: HWND,
+    current: Option<&std::path::Path>,
+    encoding: Encoding,
+    bom: bool,
+    eol: Eol,
+) -> Option<SaveTarget> {
     unsafe {
         let dialog: IFileSaveDialog =
             CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
@@ -1850,12 +2121,41 @@ fn show_save_dialog(owner: HWND, current: Option<&std::path::Path>) -> Option<Pa
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "無題.txt".to_owned());
         let _ = dialog.SetFileName(&HSTRING::from(name));
+        let custom = dialog.cast::<IFileDialogCustomize>().ok();
+        if let Some(c) = &custom {
+            add_encoding_combo(c, Some(encoding), false);
+            let _ = c.AddCheckButton(CTL_BOM, w!("BOM を付ける（Unicode のみ）"), bom);
+            let _ = c.StartVisualGroup(CTL_GROUP_EOL, w!("改行コード:"));
+            let _ = c.AddComboBox(CTL_EOL);
+            let _ = c.AddControlItem(
+                CTL_EOL,
+                0,
+                &HSTRING::from(format!("変更しない（{}）", eol.label())),
+            );
+            let _ = c.AddControlItem(CTL_EOL, 1, w!("CRLF (Windows)"));
+            let _ = c.AddControlItem(CTL_EOL, 2, w!("LF (Unix)"));
+            let _ = c.SetSelectedControlItem(CTL_EOL, 0);
+            let _ = c.EndVisualGroup();
+        }
         dialog.Show(Some(owner)).ok()?;
-        let item = dialog.GetResult().ok()?;
-        let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
-        let path = name.to_string().ok();
-        CoTaskMemFree(Some(name.0 as *const _));
-        path.map(PathBuf::from)
+        let path = dialog_result(&dialog.cast().ok()?)?;
+        let mut target = SaveTarget {
+            path,
+            encoding,
+            bom,
+            eol: None,
+        };
+        if let Some(c) = &custom {
+            target.encoding = selected_encoding(c, false).unwrap_or(encoding);
+            target.bom = c.GetCheckButtonState(CTL_BOM).map_or(bom, |b| b.as_bool());
+            target.eol = match c.GetSelectedControlItem(CTL_EOL) {
+                Ok(1) => Some(Eol::CrLf),
+                Ok(2) => Some(Eol::Lf),
+                _ => None,
+            }
+            .filter(|e| *e != eol);
+        }
+        Some(target)
     }
 }
 
@@ -1893,9 +2193,19 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_OPEN => {
             if confirm_discard(hwnd)
-                && let Some(p) = show_open_dialog(hwnd)
+                && let Some((p, enc)) = show_open_dialog(hwnd)
             {
-                open_path(hwnd, p);
+                open_path(hwnd, p, enc);
+            }
+        }
+        id if id >= ID_REOPEN_BASE && ((id - ID_REOPEN_BASE) as usize) < Encoding::all().len() => {
+            let enc = Encoding::all()[(id - ID_REOPEN_BASE) as usize];
+            let Some(Some(path)) = with_app(|a| a.doc.path().map(|p| p.to_owned())) else {
+                info_box(hwnd, "ファイルを開いていません。");
+                return;
+            };
+            if confirm_discard(hwnd) {
+                open_path(hwnd, path, Some(enc));
             }
         }
         ID_SAVE => {
@@ -2091,12 +2401,14 @@ pub(crate) extern "system" fn frame_proc(
             if let Some(p) = dropped_file(HDROP(wparam.0 as *mut _))
                 && confirm_discard(hwnd)
             {
-                open_path(hwnd, p);
+                open_path(hwnd, p, None);
             }
             LRESULT(0)
         }
         WM_APP_INDEX => {
-            with_app(|a| a.on_index_progress());
+            if let Some(Some(msg)) = with_app(|a| a.on_index_progress()) {
+                error_box(hwnd, &format!("文字コードを変換できませんでした。\n{msg}"));
+            }
             LRESULT(0)
         }
         WM_DPICHANGED => {

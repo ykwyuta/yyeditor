@@ -1,0 +1,13 @@
+[package]
+name = "gen-tables"
+description = "Generates character mapping tables for yy-encoding from published mapping files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

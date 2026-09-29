@@ -92,13 +92,17 @@ pub fn units(row: &Row, cfg: &ColumnConfig) -> Vec<Unit> {
                     col += w;
                 }
             }
-            SpanKind::Control | SpanKind::Invalid => {
-                let w = if span.kind == SpanKind::Invalid { 4 } else { 1 };
-                for b in span.src.clone() {
+            SpanKind::Control | SpanKind::Invalid | SpanKind::Escape => {
+                let (w, step) = match span.kind {
+                    SpanKind::Control => (1, 1),
+                    SpanKind::Invalid => (4, 1),
+                    _ => (4, 4),
+                };
+                for b in span.src.clone().step_by(step) {
                     let start = row.start + b as u64;
                     out.push(Unit {
                         start,
-                        end: start + 1,
+                        end: start + step as u64,
                         col_start: col,
                         col_end: col + w,
                     });

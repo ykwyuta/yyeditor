@@ -8,6 +8,7 @@ mod history;
 mod indexer;
 pub mod motion;
 mod selection;
+mod transcode;
 
 use std::collections::HashMap;
 use std::io;
@@ -19,7 +20,9 @@ pub use history::{EditKind, Version};
 pub use indexer::{IndexBatch, Indexer};
 pub use selection::{Selection, SelectionSet};
 use yy_buffer::{Snapshot, SourceRef};
-use yy_io::{Bom, FileGuard, MmapSource};
+pub use yy_encoding::{DecodeStats, Encoding, EscapeMode};
+pub use yy_io::SaveError;
+use yy_io::{FileGuard, MmapSource, SaveFormat};
 use yy_jobs::{JobPool, Notifier};
 
 use edit::Change;
@@ -83,10 +86,42 @@ enum Ins {
     Own(Vec<u8>),
 }
 
+/// ファイルを開くときの指定。
+#[derive(Clone, Copy, Debug)]
+pub struct OpenOptions {
+    /// 文字コード（`None` なら自動判別）
+    pub encoding: Option<Encoding>,
+    /// UTF-8 以外のファイルをその場でデコードする大きさの上限。
+    /// これより大きいファイルはバックグラウンドで一時ファイルに変換する
+    pub sync_limit: u64,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        OpenOptions {
+            encoding: None,
+            sync_limit: 32 << 20,
+        }
+    }
+}
+
+/// 自動判別に使う先頭部分の大きさ
+const DETECT_SAMPLE: usize = 64 << 10;
+/// バックグラウンドで変換する間に表示する先頭部分の大きさ
+const PREVIEW_BYTES: usize = 1 << 20;
+/// 改行コードの変換をメモリ上で行う大きさの上限
+const EOL_IN_MEMORY: u64 = 64 << 20;
+
 pub struct Document {
     path: Option<PathBuf>,
     file_len: u64,
-    bom: Bom,
+    encoding: Encoding,
+    bom: bool,
+    /// 同じ文字コードで保存するときのエスケープ文字の扱い
+    escapes: EscapeMode,
+    decode_stats: DecodeStats,
+    /// バックグラウンドで変換中（その間は読み取り専用）
+    loading: Option<transcode::Loader>,
     eol: Eol,
     snapshot: Snapshot,
     sels: SelectionSet,
@@ -101,6 +136,7 @@ pub struct Document {
     source: Option<Arc<MmapSource>>,
     _guard: Option<FileGuard>,
     typing: Option<TypingRun>,
+    load_error: Option<String>,
 }
 
 impl Default for Document {
@@ -149,7 +185,11 @@ impl Document {
         Document {
             path: None,
             file_len: 0,
-            bom: Bom::None,
+            encoding: Encoding::Utf8,
+            bom: false,
+            escapes: EscapeMode::Literal,
+            decode_stats: DecodeStats::default(),
+            loading: None,
             eol: Eol::platform_default(),
             snapshot: Snapshot::empty(),
             sels: SelectionSet::default(),
@@ -162,6 +202,7 @@ impl Document {
             source: None,
             _guard: None,
             typing: None,
+            load_error: None,
         }
     }
 
@@ -173,28 +214,55 @@ impl Document {
         d
     }
 
-    /// ファイルを開く。行数のカウントは [`Document::start_indexing`] で別途開始する。
+    /// ファイルを開く（文字コードは自動判別）。行数のカウントは
+    /// [`Document::start_indexing`] で別途開始する。
     pub fn open(path: &Path) -> io::Result<Document> {
-        let o = yy_io::open_file(path)?;
-        let snapshot = index_first_piece(o.snapshot);
-        let eol = Eol::detect(&snapshot).unwrap_or_else(Eol::platform_default);
-        Ok(Document {
-            path: Some(o.path),
-            file_len: o.file_len,
-            bom: o.bom,
-            eol,
-            snapshot,
-            sels: SelectionSet::default(),
-            history: History::default(),
-            version: 0,
-            next_version: 0,
-            saved_version: 0,
-            index_version: 0,
-            indexer: None,
-            source: o.source,
-            _guard: o.guard,
-            typing: None,
-        })
+        Document::open_with(path, &OpenOptions::default())
+    }
+
+    /// 文字コードなどを指定してファイルを開く。
+    pub fn open_with(path: &Path, opts: &OpenOptions) -> io::Result<Document> {
+        let f = yy_io::open_file(path)?;
+        let bytes = f.bytes();
+        let (encoding, bom_len) = match opts.encoding {
+            Some(e) => {
+                let bom = e.bom();
+                let n = if !bom.is_empty() && bytes.starts_with(bom) {
+                    bom.len()
+                } else {
+                    0
+                };
+                (e, n)
+            }
+            None => {
+                let n = bytes.len().min(DETECT_SAMPLE);
+                let d = yy_encoding::detect(&bytes[..n], n == bytes.len());
+                (d.encoding, d.bom_len)
+            }
+        };
+        let body = bom_len..bytes.len();
+        let mut doc = Document::new_empty();
+        doc.encoding = encoding;
+        doc.bom = bom_len > 0;
+        let snapshot = if encoding == Encoding::Utf8 {
+            f.snapshot(body.start as u64..body.end as u64)
+        } else if (body.len() as u64) <= opts.sync_limit {
+            let d = transcode::decode_in_memory(encoding, &bytes[body]);
+            doc.decode_stats = d.stats;
+            doc.escapes = d.escapes;
+            d.snapshot
+        } else {
+            let source = f.source.clone().expect("non-empty file is mapped");
+            doc.loading = Some(transcode::Loader::new(source, body.clone(), encoding));
+            transcode::preview(encoding, &bytes[body], PREVIEW_BYTES)
+        };
+        doc.snapshot = index_first_piece(snapshot);
+        doc.eol = Eol::detect(&doc.snapshot).unwrap_or_else(Eol::platform_default);
+        doc.path = Some(f.path);
+        doc.file_len = f.file_len;
+        doc.source = f.source;
+        doc._guard = f.guard;
+        Ok(doc)
     }
 
     pub fn snapshot(&self) -> &Snapshot {
@@ -218,8 +286,28 @@ impl Document {
         self.file_len
     }
 
-    pub fn bom(&self) -> Bom {
+    pub fn encoding(&self) -> Encoding {
+        self.encoding
+    }
+
+    /// ファイルに BOM が付いているか（保存時に付けるか）。
+    pub fn has_bom(&self) -> bool {
         self.bom
+    }
+
+    /// 開いたときのデコードの統計（不正なバイト・重複符号の数）。
+    pub fn decode_stats(&self) -> DecodeStats {
+        self.decode_stats
+    }
+
+    /// バックグラウンドで文字コードを変換中か（その間は編集できない）。
+    pub fn is_loading(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    /// 文字コードの変換の進捗率。変換中でなければ `None`。
+    pub fn loading_progress(&self) -> Option<f64> {
+        self.loading.as_ref().map(|l| l.progress())
     }
 
     pub fn eol(&self) -> Eol {
@@ -256,6 +344,11 @@ impl Document {
 
     /// 改行数のバックグラウンドカウントを開始する。
     pub fn start_indexing(&mut self, pool: &JobPool, notify: Notifier) {
+        if let Some(l) = &mut self.loading {
+            // 先に文字コードを変換する（終わったら poll_indexing で差し替える）
+            l.start(pool, notify);
+            return;
+        }
         if self.snapshot.is_fully_indexed() {
             return;
         }
@@ -266,13 +359,43 @@ impl Document {
     ///
     /// 編集で未確定のピースが分割されたり、Undo で古い内容に戻ったりした場合に使う。
     pub fn maintain_indexing(&mut self, pool: &JobPool, notify: Notifier) {
-        if self.indexer.is_none() {
+        if self.indexer.is_none() && self.loading.is_none() {
             self.start_indexing(pool, notify);
         }
     }
 
     /// 届いたカウント結果を文書（と Undo 履歴）に反映する。反映したら `true`。
+    ///
+    /// 文字コードの変換中は、変換が終わったら内容を差し替えて `true` を返す
+    /// （呼び出し側は続けて [`Document::maintain_indexing`] で行数のカウントを始めること）。
+    /// 変換に失敗した場合は `Err`（先頭部分だけの読み取り専用の表示が残る）。
     pub fn poll_indexing(&mut self) -> bool {
+        if let Some(l) = &mut self.loading {
+            let Some(result) = l.poll() else {
+                return false;
+            };
+            self.loading = None;
+            match result {
+                Ok(d) => {
+                    self.snapshot = index_first_piece(d.snapshot);
+                    self.decode_stats = d.stats;
+                    self.escapes = d.escapes;
+                    let mut sels = self.sels.clone();
+                    sels.clamp(self.snapshot.len());
+                    self.sels = sels;
+                }
+                Err(e) => {
+                    self.load_error = Some(e.to_string());
+                    // 保存すると先頭部分だけになってしまうので、別名保存以外はできないようにする
+                    self.path = None;
+                }
+            }
+            self.next_version += 1;
+            self.version = self.next_version;
+            self.saved_version = self.version;
+            self.index_version += 1;
+            return true;
+        }
         let Some(indexer) = &self.indexer else {
             return false;
         };
@@ -295,6 +418,20 @@ impl Document {
     /// 行数カウントの進捗率。カウント中でなければ `None`。
     pub fn indexing_progress(&self) -> Option<f64> {
         self.indexer.as_ref().map(|i| i.progress())
+    }
+
+    /// 文字コードの変換に失敗した場合のエラー。
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
+    }
+
+    /// 文字コードの変換が終わるまで待つ（テスト・ベンチマーク用）。
+    pub fn wait_loading(&mut self) {
+        while self.loading.is_some() {
+            if !self.poll_indexing() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
     }
 
     /// 行数を数え終わるまで待つ（テスト・ベンチマーク用）。
@@ -385,6 +522,9 @@ impl Document {
         shared: &[u8],
         mut f: impl FnMut(&Snapshot, &Selection) -> Option<(Range<u64>, Ins)>,
     ) -> bool {
+        if self.is_loading() {
+            return false;
+        }
         let snap = self.snapshot.clone();
         let shared_src: SourceRef = Arc::new(shared.to_vec());
         let mut changes: Vec<Change> = Vec::new();
@@ -435,7 +575,7 @@ impl Document {
 
     /// 文字列を入力する（選択範囲は置き換える）。`overwrite` なら上書きモード。
     pub fn insert_text(&mut self, text: &str, overwrite: bool) -> bool {
-        if text.is_empty() {
+        if text.is_empty() || self.is_loading() {
             return false;
         }
         let bytes = normalize_eol(text, self.eol);
@@ -591,6 +731,9 @@ impl Document {
         kind: EditKind,
         make_sels: impl FnOnce(&edit::Applied) -> SelectionSet,
     ) -> bool {
+        if self.is_loading() {
+            return false;
+        }
         self.typing = None;
         let changes: Vec<Change> = changes
             .into_iter()
@@ -714,6 +857,9 @@ impl Document {
     // ---- Undo / Redo -----------------------------------------------------
 
     pub fn undo(&mut self) -> bool {
+        if self.is_loading() {
+            return false;
+        }
         let Some(e) = self.history.undo() else {
             return false;
         };
@@ -725,6 +871,9 @@ impl Document {
     }
 
     pub fn redo(&mut self) -> bool {
+        if self.is_loading() {
+            return false;
+        }
         let Some(e) = self.history.redo() else {
             return false;
         };
@@ -737,8 +886,9 @@ impl Document {
 
     // ---- 保存 ------------------------------------------------------------
 
-    /// 上書き保存。ファイル名がなければエラー（UI は「名前を付けて保存」を使う）。
-    pub fn save(&mut self) -> io::Result<()> {
+    /// 上書き保存（開いたときの文字コード・BOM で）。ファイル名がなければエラー
+    /// （UI は「名前を付けて保存」を使う）。
+    pub fn save(&mut self) -> Result<(), SaveError> {
         let path = self
             .path
             .clone()
@@ -746,27 +896,235 @@ impl Document {
         self.save_as(&path)
     }
 
-    /// 名前を付けて保存する。保存後は保存したファイルを参照し直す（06 章 3.4）。
+    /// 名前を付けて保存する（文字コード・BOM は現在のまま）。
+    pub fn save_as(&mut self, path: &Path) -> Result<(), SaveError> {
+        self.save_as_with(path, self.encoding, self.bom)
+    }
+
+    /// 保存するときの形式。開いたときと別の文字コードで保存する場合、読み込み時に
+    /// 不正だったバイト（エスケープ文字）は変換できない文字になる。
+    pub fn save_format(&self, encoding: Encoding, bom: bool) -> SaveFormat {
+        let escapes = if encoding == self.encoding {
+            self.escapes
+        } else if self.escapes == EscapeMode::Restore {
+            EscapeMode::Reject
+        } else {
+            EscapeMode::Literal
+        };
+        SaveFormat {
+            encoding,
+            bom: bom && encoding.supports_bom(),
+            escapes,
+        }
+    }
+
+    /// 文字コードと BOM を指定して保存する。保存後は保存したファイルを参照し直す（06 章 3.4）。
     ///
+    /// 変換できない文字があれば [`SaveError::Unmappable`] を返し、ファイルは変更しない。
     /// 行数は数え直しになるため、呼び出し側は [`Document::maintain_indexing`] を呼ぶこと。
-    pub fn save_as(&mut self, path: &Path) -> io::Result<()> {
-        yy_io::save_snapshot(&self.snapshot, path, self.bom, self.source.as_deref())?;
-        // 保存したファイルをマップし直す（追記バッファや退避した元ファイルを解放できるように）
-        if let Ok(o) = yy_io::open_file(path)
-            && o.snapshot.len() == self.snapshot.len()
-        {
-            self.snapshot = index_first_piece(o.snapshot);
+    pub fn save_as_with(
+        &mut self,
+        path: &Path,
+        encoding: Encoding,
+        bom: bool,
+    ) -> Result<(), SaveError> {
+        if self.is_loading() {
+            return Err(io::Error::other("文字コードの変換中は保存できません").into());
+        }
+        let format = self.save_format(encoding, bom);
+        yy_io::save_snapshot(&self.snapshot, path, &format, self.source.as_deref())?;
+        // 保存したファイルを開き直す（書き込みを拒否するため。UTF-8 なら内容もマップし直して
+        // 追記バッファや退避した元ファイルを解放できるようにする）
+        if let Ok(o) = yy_io::open_file(path) {
+            let bom_len = if format.bom { encoding.bom().len() } else { 0 } as u64;
+            if encoding == Encoding::Utf8 && o.file_len - bom_len == self.snapshot.len() {
+                self.snapshot = index_first_piece(o.snapshot(bom_len..o.file_len));
+                self.indexer = None;
+                self.index_version += 1;
+            }
             self.source = o.source;
             self._guard = o.guard;
             self.file_len = o.file_len;
-            self.indexer = None;
-            self.index_version += 1;
         }
+        if encoding != self.encoding {
+            self.escapes = if encoding == Encoding::Utf8 {
+                EscapeMode::Literal
+            } else {
+                EscapeMode::Restore
+            };
+            self.decode_stats = DecodeStats::default();
+        }
+        self.encoding = encoding;
+        self.bom = format.bom;
         self.path = Some(path.to_owned());
         self.saved_version = self.version;
         self.typing = None;
         self.history.seal();
         Ok(())
+    }
+
+    /// 文書内の範囲 `ranges`（昇順・重なりなし）を `f(元の内容)` で置き換える
+    /// （保存できない文字の置き換えなど）。1 つの Undo 単位になる。
+    pub fn replace_ranges(&mut self, ranges: &[Range<u64>], f: impl Fn(&[u8]) -> Vec<u8>) -> bool {
+        let changes: Vec<Change> = ranges
+            .iter()
+            .map(|r| Change::replace_bytes(r.clone(), f(&self.snapshot.read(r.clone()))))
+            .collect();
+        let primary = self.sels.primary().head;
+        self.apply_changes(changes.clone(), EditKind::Other, |a| {
+            let _ = a;
+            SelectionSet::single(Selection::caret(edit::map_offset(&changes, primary)))
+        })
+    }
+
+    /// 改行コードを `eol` に揃える（CRLF と LF。単独の CR はそのまま）。1 つの Undo 単位になる。
+    /// 以後の入力もこの改行コードになる。変更があれば `true`。
+    ///
+    /// 大きな文書は一時ファイルに書き出してマップする。
+    pub fn convert_eol(&mut self, eol: Eol) -> io::Result<bool> {
+        if self.is_loading() {
+            return Ok(false);
+        }
+        self.eol = eol;
+        let snap = self.snapshot.clone();
+        let caret = self.sels.primary().head;
+        let mut conv = EolConverter::new(eol, caret);
+        let snapshot = if snap.len() <= EOL_IN_MEMORY {
+            let mut out = Vec::with_capacity(snap.len() as usize);
+            for c in snap.chunks(0..snap.len()) {
+                conv.feed(c, &mut |b| out.extend_from_slice(b));
+            }
+            conv.finish(&mut |b| out.extend_from_slice(b));
+            if !conv.changed {
+                return Ok(false);
+            }
+            Snapshot::from_bytes(out)
+        } else {
+            let path = yy_io::temp_path("eol");
+            let write = |conv: &mut EolConverter| -> io::Result<u64> {
+                let file = std::fs::File::create(&path)?;
+                let mut w = io::BufWriter::with_capacity(1 << 20, file);
+                let mut err = Ok(());
+                let mut n = 0u64;
+                let mut emit = |b: &[u8]| {
+                    n += b.len() as u64;
+                    if err.is_ok() {
+                        err = io::Write::write_all(&mut w, b);
+                    }
+                };
+                for c in snap.chunks(0..snap.len()) {
+                    conv.feed(c, &mut emit);
+                }
+                conv.finish(&mut emit);
+                err?;
+                // 一時ファイルなので永続化（sync）は不要
+                io::Write::flush(&mut w)?;
+                Ok(n)
+            };
+            let len = match write(&mut conv) {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(e);
+                }
+            };
+            if !conv.changed {
+                let _ = std::fs::remove_file(&path);
+                return Ok(false);
+            }
+            let map: SourceRef = yy_io::map_temp(&path)?;
+            index_first_piece(Snapshot::from_source(map, 0..len, false))
+        };
+        let caret = conv.mapped_caret();
+        self.typing = None;
+        self.commit(
+            snapshot,
+            SelectionSet::single(Selection::caret(caret)),
+            EditKind::Other,
+        );
+        Ok(true)
+    }
+}
+
+/// 改行コードを揃えるストリーム変換。
+struct EolConverter {
+    eol: Eol,
+    /// 前のチャンクが CR で終わっていた
+    held_cr: bool,
+    changed: bool,
+    /// 入力位置
+    pos: u64,
+    caret: u64,
+    /// カーソルより前の改行の長さの増減
+    caret_delta: i64,
+}
+
+impl EolConverter {
+    fn new(eol: Eol, caret: u64) -> EolConverter {
+        EolConverter {
+            eol,
+            held_cr: false,
+            changed: false,
+            pos: 0,
+            caret,
+            caret_delta: 0,
+        }
+    }
+
+    /// 入力位置 `at` から始まる改行（CRLF なら `crlf`）を出力する。
+    fn line_end(&mut self, at: u64, crlf: bool, emit: &mut dyn FnMut(&[u8])) {
+        emit(self.eol.as_bytes());
+        let old = if crlf { 2 } else { 1 };
+        let new = self.eol.as_bytes().len() as i64;
+        if old != new {
+            self.changed = true;
+            if at < self.caret {
+                self.caret_delta += new - old;
+            }
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8], emit: &mut dyn FnMut(&[u8])) {
+        if chunk.is_empty() {
+            return;
+        }
+        let mut start = 0;
+        if self.held_cr {
+            self.held_cr = false;
+            if chunk.first() == Some(&b'\n') {
+                self.line_end(self.pos - 1, true, emit);
+                start = 1;
+            } else {
+                emit(b"\r");
+            }
+        }
+        while let Some(k) = memchr::memchr(b'\n', &chunk[start..]) {
+            let p = start + k;
+            let crlf = p > start && chunk[p - 1] == b'\r';
+            let end = if crlf { p - 1 } else { p };
+            emit(&chunk[start..end]);
+            self.line_end(self.pos + end as u64, crlf, emit);
+            start = p + 1;
+        }
+        let tail = &chunk[start..];
+        if tail.last() == Some(&b'\r') {
+            emit(&tail[..tail.len() - 1]);
+            self.held_cr = true;
+        } else {
+            emit(tail);
+        }
+        self.pos += chunk.len() as u64;
+    }
+
+    fn finish(&mut self, emit: &mut dyn FnMut(&[u8])) {
+        if self.held_cr {
+            self.held_cr = false;
+            emit(b"\r");
+        }
+    }
+
+    fn mapped_caret(&self) -> u64 {
+        (self.caret as i64 + self.caret_delta).max(0) as u64
     }
 }
 
@@ -925,13 +1283,41 @@ mod tests {
         assert_eq!(text(&d), "");
     }
 
+    /// チャンクの区切りが CR と LF の間にあっても正しく変換する。
+    #[test]
+    fn eol_converter_handles_chunk_boundaries() {
+        let input = b"a\r\nb\nc\rd\r\n\r";
+        for eol in [Eol::Lf, Eol::CrLf] {
+            let expect: Vec<u8> = match eol {
+                Eol::Lf => b"a\nb\nc\rd\n\r".to_vec(),
+                Eol::CrLf => b"a\r\nb\r\nc\rd\r\n\r".to_vec(),
+            };
+            for cut in 0..=input.len() {
+                for cut2 in cut..=input.len() {
+                    let mut c = EolConverter::new(eol, 10);
+                    let mut out = Vec::new();
+                    let mut emit = |b: &[u8]| out.extend_from_slice(b);
+                    c.feed(&input[..cut], &mut emit);
+                    c.feed(&input[cut..cut2], &mut emit);
+                    c.feed(&input[cut2..], &mut emit);
+                    c.finish(&mut emit);
+                    assert_eq!(out, expect, "{eol:?} {cut} {cut2}");
+                    // 位置 10（"d" の後の改行の後）: LF なら CRLF 2 つ分前へ、CRLF なら LF 1 つ分後へ
+                    let caret = if eol == Eol::Lf { 8 } else { 11 };
+                    assert_eq!(c.mapped_caret(), caret);
+                }
+            }
+        }
+    }
+
     #[test]
     fn save_then_undo_and_save_again() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.txt");
         std::fs::write(&path, "\u{FEFF}first line\n".as_bytes()).unwrap();
         let mut d = Document::open(&path).unwrap();
-        assert_eq!(d.bom(), Bom::Utf8);
+        assert!(d.has_bom());
+        assert_eq!(d.encoding(), Encoding::Utf8);
         d.set_selections(SelectionSet::single(Selection::caret(10)));
         d.insert_text("!", false);
         d.save().unwrap();

@@ -308,7 +308,9 @@ impl Renderer {
                 if let Some(b) = brushes {
                     match span.kind {
                         SpanKind::Text => {}
-                        SpanKind::Invalid => effects.push((start, len, &b.invalid)),
+                        SpanKind::Invalid | SpanKind::Escape => {
+                            effects.push((start, len, &b.invalid))
+                        }
                         SpanKind::Control => effects.push((start, len, &b.control)),
                     }
                 }

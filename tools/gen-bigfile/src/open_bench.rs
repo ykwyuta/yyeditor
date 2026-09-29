@@ -40,6 +40,18 @@ fn main() -> ExitCode {
         "file size            : {:.2} GB",
         doc.file_len() as f64 / (1u64 << 30) as f64
     );
+    println!("encoding             : {}", doc.encoding());
+    if doc.is_loading() {
+        // UTF-8 以外の大きなファイルは先に一時ファイルへ変換する
+        let t = Instant::now();
+        doc.start_indexing(&pool, Arc::new(|| {}));
+        doc.wait_loading();
+        let secs = t.elapsed().as_secs_f64();
+        println!(
+            "transcode to UTF-8   : {secs:.2}s ({:.0} MB/s)",
+            doc.file_len() as f64 / secs / 1e6
+        );
+    }
     println!("pieces               : {}", doc.snapshot().summary().pieces);
     println!(
         "open + first screen  : {first_screen:?} ({} rows)",

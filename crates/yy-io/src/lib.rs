@@ -7,15 +7,18 @@
 // mmap の作成は unsafe を必要とする（ファイルが外部で変更されないことを共有モードで保証する）
 #![allow(unsafe_code)]
 
+use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::mem::ManuallyDrop;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use memmap2::Mmap;
 use yy_buffer::{ByteSource, Snapshot, SourceRef};
+pub use yy_encoding::{Encoding, EscapeMode};
 
 /// 読み取り専用でメモリマップしたファイル。
 ///
@@ -61,29 +64,6 @@ impl Drop for MmapSource {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Bom {
-    None,
-    Utf8,
-}
-
-impl Bom {
-    pub fn len(self) -> u64 {
-        self.bytes().len() as u64
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn bytes(self) -> &'static [u8] {
-        match self {
-            Bom::None => b"",
-            Bom::Utf8 => b"\xEF\xBB\xBF",
-        }
-    }
-}
-
 /// 開いたファイルのハンドル。保持している間、他プロセスからの書き込みを拒否する。
 pub struct FileGuard(#[allow(dead_code)] File);
 
@@ -91,13 +71,28 @@ pub struct FileGuard(#[allow(dead_code)] File);
 pub struct OpenedFile {
     pub path: PathBuf,
     pub file_len: u64,
-    pub bom: Bom,
-    /// 内容（BOM を除く）。改行数は未確定の状態で返す
-    pub snapshot: Snapshot,
     /// メモリマップ（空のファイルでは `None`）
     pub source: Option<Arc<MmapSource>>,
     /// 空のファイルを開いた場合のハンドル
     pub guard: Option<FileGuard>,
+}
+
+impl OpenedFile {
+    /// ファイルの内容（BOM を含む）。
+    pub fn bytes(&self) -> &[u8] {
+        self.source.as_deref().map_or(&[], |s| s.bytes())
+    }
+
+    /// `range` の内容を参照するスナップショット（改行数は未確定）。
+    pub fn snapshot(&self, range: std::ops::Range<u64>) -> Snapshot {
+        match &self.source {
+            Some(s) if !range.is_empty() => {
+                let r: SourceRef = s.clone();
+                Snapshot::from_source(r, range, false)
+            }
+            _ => Snapshot::empty(),
+        }
+    }
 }
 
 /// 書き込みを拒否する共有モードでファイルを開く。
@@ -118,10 +113,7 @@ fn open_locked(path: &Path) -> io::Result<File> {
     opts.open(path)
 }
 
-/// ファイルを開いてメモリマップし、改行数未確定のスナップショットを作る。
-///
-/// ファイルサイズに依存せず短時間で終わる（ピース分割のみ）。改行数は
-/// バックグラウンドで数えて [`Snapshot::fill_line_counts`] で埋める。
+/// ファイルを開いてメモリマップする。ファイルサイズに依存せず短時間で終わる。
 pub fn open_file(path: &Path) -> io::Result<OpenedFile> {
     let file = open_locked(path)?;
     let meta = file.metadata()?;
@@ -136,8 +128,6 @@ pub fn open_file(path: &Path) -> io::Result<OpenedFile> {
         return Ok(OpenedFile {
             path: path.to_owned(),
             file_len,
-            bom: Bom::None,
-            snapshot: Snapshot::empty(),
             source: None,
             guard: Some(FileGuard(file)),
         });
@@ -145,28 +135,68 @@ pub fn open_file(path: &Path) -> io::Result<OpenedFile> {
     // SAFETY: 書き込み共有を拒否してファイルを開いているため、マップ中に内容は変化しない。
     // （Windows 以外では他プロセスによる変更を防げないが、Windows 以外は開発・テスト用途）
     let map = unsafe { Mmap::map(&file)? };
-    let bom = if map.starts_with(Bom::Utf8.bytes()) {
-        Bom::Utf8
-    } else {
-        Bom::None
-    };
-    let len = map.len() as u64;
     let source = Arc::new(MmapSource {
         map: ManuallyDrop::new(map),
         file: ManuallyDrop::new(file),
         path: path.to_owned(),
         delete_on_drop: Mutex::new(None),
     });
-    let source_ref: SourceRef = source.clone();
-    let snapshot = Snapshot::from_source(source_ref, bom.len()..len, false);
     Ok(OpenedFile {
         path: path.to_owned(),
         file_len,
-        bom,
-        snapshot,
         source: Some(source),
         guard: None,
     })
+}
+
+/// 作業用の一時ファイルの名前（OS の一時フォルダ内）。
+pub fn temp_path(tag: &str) -> PathBuf {
+    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("{TEMP_PREFIX}{tag}-{}-{n}.tmp", std::process::id()))
+}
+
+const TEMP_PREFIX: &str = "yyeditor-";
+
+/// 書き終えた一時ファイルをメモリマップする。ファイルの名前はすぐに（消せなければ
+/// マップが使われなくなったときに）消すので、異常終了しても残りにくい。
+pub fn map_temp(path: &Path) -> io::Result<Arc<MmapSource>> {
+    let file = open_locked(path)?;
+    // SAFETY: この一時ファイルは自分だけが作って書き終えたもので、書き込み共有も拒否している。
+    let map = unsafe { Mmap::map(&file)? };
+    let source = Arc::new(MmapSource {
+        map: ManuallyDrop::new(map),
+        file: ManuallyDrop::new(file),
+        path: path.to_owned(),
+        delete_on_drop: Mutex::new(None),
+    });
+    if std::fs::remove_file(path).is_err() {
+        source.delete_when_dropped(path.to_owned());
+    }
+    Ok(source)
+}
+
+/// 以前の異常終了で残った一時ファイルのうち、1 日以上前のものを消す。
+pub fn remove_stale_temps() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let day = std::time::Duration::from_secs(24 * 60 * 60);
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with(TEMP_PREFIX) && name.ends_with(".tmp")) {
+            continue;
+        }
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > day);
+        if old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -192,6 +222,59 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// 保存するファイルの形式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveFormat {
+    pub encoding: Encoding,
+    pub bom: bool,
+    /// 文書内のエスケープ文字の扱い
+    pub escapes: EscapeMode,
+}
+
+impl SaveFormat {
+    pub fn utf8() -> SaveFormat {
+        SaveFormat {
+            encoding: Encoding::Utf8,
+            bom: false,
+            escapes: EscapeMode::Literal,
+        }
+    }
+}
+
+/// 変換できない文字の範囲を記録する上限。
+pub const UNMAPPABLE_LIMIT: usize = 1_000_000;
+
+#[derive(Debug)]
+pub enum SaveError {
+    Io(io::Error),
+    /// 保存先の文字コードに変換できない文字がある（ファイルは変更していない）。
+    /// `ranges` は文書内の範囲（最大 [`UNMAPPABLE_LIMIT`] 個）、`total` は総数
+    Unmappable {
+        encoding: Encoding,
+        ranges: Vec<Range<u64>>,
+        total: u64,
+    },
+}
+
+impl fmt::Display for SaveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SaveError::Io(e) => e.fmt(f),
+            SaveError::Unmappable {
+                encoding, total, ..
+            } => write!(f, "{encoding} に変換できない文字が {total} 個あります"),
+        }
+    }
+}
+
+impl std::error::Error for SaveError {}
+
+impl From<io::Error> for SaveError {
+    fn from(e: io::Error) -> Self {
+        SaveError::Io(e)
+    }
+}
+
 /// 文書の内容を `target` に保存する（06 章 3.3〜3.4）。
 ///
 /// 1. 同じフォルダの一時ファイルに書き出して永続化する
@@ -204,27 +287,65 @@ fn same_file(a: &Path, b: &Path) -> bool {
 pub fn save_snapshot(
     snap: &Snapshot,
     target: &Path,
-    bom: Bom,
+    format: &SaveFormat,
     current: Option<&MmapSource>,
-) -> io::Result<()> {
+) -> Result<(), SaveError> {
     let tmp = sibling_name(target, "yytmp");
-    let write = || -> io::Result<()> {
+    let mut unmappable: Vec<Range<u64>> = Vec::new();
+    let mut total = 0u64;
+    let mut write = || -> io::Result<()> {
         let file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         if let Ok(meta) = std::fs::metadata(target) {
             // 権限（Unix のモード等）を引き継ぐ
             let _ = file.set_permissions(meta.permissions());
         }
         let mut w = BufWriter::with_capacity(1 << 20, file);
-        w.write_all(bom.bytes())?;
-        for chunk in snap.chunks(0..snap.len()) {
-            w.write_all(chunk)?;
+        if format.bom {
+            w.write_all(format.encoding.bom())?;
+        }
+        if format.encoding == Encoding::Utf8 && format.escapes == EscapeMode::Literal {
+            for chunk in snap.chunks(0..snap.len()) {
+                w.write_all(chunk)?;
+            }
+        } else {
+            let mut enc = format.encoding.new_encoder(format.escapes);
+            let mut out = Vec::new();
+            let mut found = Vec::new();
+            let mut chunks = snap.chunks(0..snap.len()).peekable();
+            loop {
+                let chunk = chunks.next().unwrap_or(&[]);
+                let last = chunks.peek().is_none();
+                out.clear();
+                enc.encode(chunk, &mut out, last, &mut |r| found.push(r));
+                total += found.len() as u64;
+                let room = UNMAPPABLE_LIMIT - unmappable.len();
+                unmappable.extend(found.drain(..).take(room));
+                // 変換できない文字が見つかったら以降は数えるだけ
+                if unmappable.is_empty() {
+                    w.write_all(&out)?;
+                }
+                if last {
+                    break;
+                }
+            }
+            if !unmappable.is_empty() {
+                return Ok(());
+            }
         }
         let file = w.into_inner().map_err(|e| e.into_error())?;
         file.sync_all()
     };
     if let Err(e) = write() {
         let _ = std::fs::remove_file(&tmp);
-        return Err(e);
+        return Err(e.into());
+    }
+    if !unmappable.is_empty() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(SaveError::Unmappable {
+            encoding: format.encoding,
+            ranges: unmappable,
+            total,
+        });
     }
 
     let retreat = match current {
@@ -232,7 +353,7 @@ pub fn save_snapshot(
             let r = sibling_name(target, "yyorig");
             if let Err(e) = std::fs::rename(target, &r) {
                 let _ = std::fs::remove_file(&tmp);
-                return Err(e);
+                return Err(e.into());
             }
             Some((c, r))
         }
@@ -243,7 +364,7 @@ pub fn save_snapshot(
             let _ = std::fs::rename(r, target);
         }
         let _ = std::fs::remove_file(&tmp);
-        return Err(e);
+        return Err(e.into());
     }
     if let Some((c, r)) = retreat {
         // マップ中のファイルでも名前は消せる（Unix の unlink / Windows の削除保留）。
@@ -292,22 +413,85 @@ mod tests {
     }
 
     #[test]
-    fn opens_and_strips_utf8_bom() {
+    fn opens_and_maps_file() {
         let d = tempfile::tempdir().unwrap();
         let o = open_file(&temp_file(&d, b"\xEF\xBB\xBFhello\nworld\n")).unwrap();
-        assert_eq!(o.bom, Bom::Utf8);
         assert_eq!(o.file_len, 15);
-        assert_eq!(o.snapshot.read(0..o.snapshot.len()), b"hello\nworld\n");
-        assert!(!o.snapshot.is_fully_indexed());
-        assert_eq!(o.snapshot.line_start(1, true), LineLookup::Found(6));
+        assert_eq!(o.bytes().len(), 15);
+        let snap = o.snapshot(3..15);
+        assert_eq!(snap.read(0..snap.len()), b"hello\nworld\n");
+        assert!(!snap.is_fully_indexed());
+        assert_eq!(snap.line_start(1, true), LineLookup::Found(6));
     }
 
     #[test]
     fn opens_empty_file() {
         let d = tempfile::tempdir().unwrap();
         let o = open_file(&temp_file(&d, b"")).unwrap();
-        assert!(o.snapshot.is_empty());
-        assert_eq!(o.snapshot.line_count(), Some(1));
+        let snap = o.snapshot(0..0);
+        assert!(snap.is_empty());
+        assert_eq!(snap.line_count(), Some(1));
+    }
+
+    #[test]
+    fn saves_in_other_encodings() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("sjis.txt");
+        let snap = Snapshot::from_bytes("日本語\r\n");
+        let fmt = SaveFormat {
+            encoding: Encoding::Cp932,
+            bom: false,
+            escapes: EscapeMode::Literal,
+        };
+        save_snapshot(&snap, &target, &fmt, None).unwrap();
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"\x93\xFA\x96\x7B\x8C\xEA\r\n"
+        );
+        let fmt = SaveFormat {
+            encoding: Encoding::Utf16Le,
+            bom: true,
+            escapes: EscapeMode::Literal,
+        };
+        save_snapshot(&snap, &target, &fmt, None).unwrap();
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"\xFF\xFE\xE5\x65\x2C\x67\x9E\x8A\r\0\n\0"
+        );
+    }
+
+    #[test]
+    fn unmappable_characters_abort_save() {
+        let d = tempfile::tempdir().unwrap();
+        let p = temp_file(&d, b"keep");
+        let snap = Snapshot::from_bytes("a\u{1F600}b\u{1F600}");
+        let fmt = SaveFormat {
+            encoding: Encoding::Cp932,
+            bom: false,
+            escapes: EscapeMode::Literal,
+        };
+        match save_snapshot(&snap, &p, &fmt, None) {
+            Err(SaveError::Unmappable { ranges, total, .. }) => {
+                assert_eq!(ranges, vec![1..5, 6..10]);
+                assert_eq!(total, 2);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read(&p).unwrap(), b"keep");
+        assert_eq!(dir_entries(&d), vec!["test.txt"]);
+    }
+
+    #[test]
+    fn temp_files_are_unlinked_after_mapping() {
+        let p = temp_path("test");
+        std::fs::write(&p, b"data").unwrap();
+        let m = map_temp(&p).unwrap();
+        assert_eq!(m.bytes(), b"data");
+        if !cfg!(windows) {
+            assert!(!p.exists());
+        }
+        drop(m);
+        assert!(!p.exists());
     }
 
     /// 他のプロセス（ここでは自分）が書き込み用に開いているファイルは開けない。
@@ -336,8 +520,9 @@ mod tests {
             data.extend_from_slice(line);
         }
         let o = open_file(&temp_file(&d, &data)).unwrap();
-        assert!(o.snapshot.summary().pieces >= 5);
-        assert_eq!(o.snapshot.read(0..o.snapshot.len()), data);
+        let snap = o.snapshot(0..o.file_len);
+        assert!(snap.summary().pieces >= 5);
+        assert_eq!(snap.read(0..snap.len()), data);
     }
 
     fn dir_entries(d: &tempfile::TempDir) -> Vec<String> {
@@ -354,7 +539,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let target = d.path().join("new.txt");
         let snap = Snapshot::from_bytes("こんにちは\r\n");
-        save_snapshot(&snap, &target, Bom::Utf8, None).unwrap();
+        let fmt = SaveFormat {
+            bom: true,
+            ..SaveFormat::utf8()
+        };
+        save_snapshot(&snap, &target, &fmt, None).unwrap();
         assert_eq!(
             std::fs::read(&target).unwrap(),
             b"\xEF\xBB\xBF\xE3\x81\x93\xE3\x82\x93\xE3\x81\xAB\xE3\x81\xA1\xE3\x81\xAF\r\n"
@@ -369,9 +558,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = temp_file(&d, b"original content\n");
         let o = open_file(&p).unwrap();
-        let old = o.snapshot.clone();
+        let old = o.snapshot(0..o.file_len);
         let edited = old.insert(0, b"edited: ");
-        save_snapshot(&edited, &p, o.bom, o.source.as_deref()).unwrap();
+        save_snapshot(&edited, &p, &SaveFormat::utf8(), o.source.as_deref()).unwrap();
 
         assert_eq!(std::fs::read(&p).unwrap(), b"edited: original content\n");
         // 古い内容は退避ファイルから読める
@@ -389,10 +578,7 @@ mod tests {
 
         // 保存したファイルを開き直せる
         let o2 = open_file(&p).unwrap();
-        assert_eq!(
-            o2.snapshot.read(0..o2.snapshot.len()),
-            b"edited: original content\n"
-        );
+        assert_eq!(o2.bytes(), b"edited: original content\n");
     }
 
     #[test]
@@ -401,7 +587,7 @@ mod tests {
         let p = temp_file(&d, b"x");
         std::fs::write(d.path().join(".test.txt.yyorig-1-0"), b"old").unwrap();
         std::fs::write(d.path().join(".other.txt.yyorig-1-0"), b"keep").unwrap();
-        save_snapshot(&Snapshot::from_bytes("y"), &p, Bom::None, None).unwrap();
+        save_snapshot(&Snapshot::from_bytes("y"), &p, &SaveFormat::utf8(), None).unwrap();
         assert_eq!(dir_entries(&d), vec![".other.txt.yyorig-1-0", "test.txt"]);
     }
 
@@ -410,7 +596,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let target = d.path().join("missing-dir").join("x.txt");
         let snap = Snapshot::from_bytes("x");
-        assert!(save_snapshot(&snap, &target, Bom::None, None).is_err());
+        assert!(save_snapshot(&snap, &target, &SaveFormat::utf8(), None).is_err());
         assert!(dir_entries(&d).is_empty());
     }
 }

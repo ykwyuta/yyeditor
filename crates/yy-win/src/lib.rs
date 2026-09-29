@@ -47,6 +47,8 @@ pub fn run(initial_file: Option<std::path::PathBuf>) -> Result<()> {
 }
 
 fn run_inner(initial_file: Option<std::path::PathBuf>) -> Result<()> {
+    // 以前の異常終了で残った作業用の一時ファイルを片付ける
+    std::thread::spawn(yy_io::remove_stale_temps);
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
             .ok()
@@ -124,6 +126,10 @@ pub fn render_to_bmp(
         yy_core::Document::open(input).map_err(|e| format!("{}: {e}", input.display()))?;
     let pool = yy_jobs::JobPool::new(2);
     doc.start_indexing(&pool, std::sync::Arc::new(|| {}));
+    if doc.is_loading() {
+        doc.wait_loading();
+        doc.start_indexing(&pool, std::sync::Arc::new(|| {}));
+    }
     doc.wait_indexing();
     let mut renderer = render::Renderer::new(
         &config.editor.font_family,
