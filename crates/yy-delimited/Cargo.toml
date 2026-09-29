@@ -1,0 +1,19 @@
+[package]
+name = "yy-delimited"
+description = "Delimiter-separated values (CSV/TSV) parsing, record index and dialect sniffing for yyeditor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+yy-buffer.workspace = true
+memchr.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+csv.workspace = true
+
+[lints]
+workspace = true

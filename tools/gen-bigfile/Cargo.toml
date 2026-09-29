@@ -1,0 +1,35 @@
+[package]
+name = "gen-bigfile"
+description = "Generates huge test files and measures open/index performance for yyeditor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "gen-bigfile"
+path = "src/main.rs"
+
+[[bin]]
+name = "open-bench"
+path = "src/open_bench.rs"
+
+[[bin]]
+name = "replace-bench"
+path = "src/replace_bench.rs"
+
+[[bin]]
+name = "csv-bench"
+path = "src/csv_bench.rs"
+
+[dependencies]
+yy-buffer.workspace = true
+yy-encoding.workspace = true
+yy-core.workspace = true
+yy-jobs.workspace = true
+yy-layout.workspace = true
+yy-delimited.workspace = true
+
+[lints]
+workspace = true

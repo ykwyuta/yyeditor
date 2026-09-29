@@ -1,0 +1,18 @@
+[package]
+name = "yy-encoding"
+description = "Character encodings for yyeditor: lossless transcoding, JIS family, detection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+encoding_rs.workspace = true
+chardetng.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
