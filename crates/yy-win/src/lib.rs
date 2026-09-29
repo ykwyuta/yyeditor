@@ -15,7 +15,9 @@
 
 mod app;
 mod clipboard;
+mod findbar;
 mod goto;
+mod grepdlg;
 mod ime;
 mod render;
 mod util;
@@ -31,12 +33,14 @@ use crate::util::Context;
 
 pub(crate) const FRAME_CLASS: PCWSTR = w!("YYEditorFrame");
 pub(crate) const VIEW_CLASS: PCWSTR = w!("YYEditorView");
+pub(crate) const FINDBAR_CLASS: PCWSTR = w!("YYEditorFindBar");
 
 /// エディタを起動し、ウィンドウが閉じられるまでメッセージループを回す。
 ///
 /// 起動に失敗した場合は、その内容をメッセージボックスで表示してからエラーを返す。
-pub fn run(initial_file: Option<std::path::PathBuf>) -> Result<()> {
-    let r = run_inner(initial_file);
+/// `initial_line` を指定すると、開いたファイルのその行（1 始まり）へ移動する。
+pub fn run(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>) -> Result<()> {
+    let r = run_inner(initial_file, initial_line);
     if let Err(e) = &r {
         util::error_box(
             HWND::default(),
@@ -46,7 +50,7 @@ pub fn run(initial_file: Option<std::path::PathBuf>) -> Result<()> {
     r
 }
 
-fn run_inner(initial_file: Option<std::path::PathBuf>) -> Result<()> {
+fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>) -> Result<()> {
     // 以前の異常終了で残った作業用の一時ファイルを片付ける
     std::thread::spawn(yy_io::remove_stale_temps);
     unsafe {
@@ -89,12 +93,36 @@ fn run_inner(initial_file: Option<std::path::PathBuf>) -> Result<()> {
             return Err(windows::core::Error::from_thread());
         }
 
+        let bar_class = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(app::findbar_proc),
+            hInstance: hinstance,
+            hCursor: cursor,
+            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
+                (windows::Win32::Graphics::Gdi::COLOR_BTNFACE.0 + 1) as usize as *mut _,
+            ),
+            lpszClassName: FINDBAR_CLASS,
+            ..Default::default()
+        };
+        if RegisterClassExW(&bar_class) == 0 {
+            return Err(windows::core::Error::from_thread());
+        }
+
         let accel = app::create_accelerators().context("CreateAcceleratorTableW")?;
-        let frame = app::App::create(hinstance, initial_file)?;
+        let frame = app::App::create(hinstance, initial_file, initial_line)?;
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            if TranslateAcceleratorW(frame, accel, &msg) != 0 {
+            // 検索バーの入力欄では、編集用のショートカット（Ctrl+C など）を入力欄に任せる
+            let bar = app::findbar_with_focus();
+            let use_accel = bar.is_none() || app::is_global_shortcut(&msg);
+            if use_accel && TranslateAcceleratorW(frame, accel, &msg) != 0 {
+                continue;
+            }
+            // Tab での移動、Enter（IDOK）・Esc（IDCANCEL）
+            if let Some(bar) = bar
+                && IsDialogMessageW(bar, &msg).as_bool()
+            {
                 continue;
             }
             let _ = TranslateMessage(&msg);
@@ -153,6 +181,7 @@ pub fn render_to_bmp(
         show_line_numbers: config.view.line_numbers,
         scroll_x: 0.0,
         selections: &[],
+        matches: &[],
         carets: &[],
         caret_visible: false,
         overwrite: false,

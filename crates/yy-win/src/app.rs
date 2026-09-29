@@ -25,8 +25,10 @@ use yy_buffer::{LineLookup, Snapshot};
 use yy_config::Config;
 use yy_core::edit::Change;
 use yy_core::{
-    Document, EditKind, Encoding, Eol, OpenOptions, SaveError, Selection, SelectionSet, motion,
+    Document, EditKind, Encoding, Eol, OpenOptions, Replacement, SaveError, Searcher, Selection,
+    SelectionSet, motion,
 };
+use yy_jobs::JobHandle;
 use yy_jobs::{JobPool, Notifier};
 use yy_layout::rect::{self, RectEdit, RectRow};
 use yy_layout::{
@@ -34,6 +36,7 @@ use yy_layout::{
     row_containing, rows_from,
 };
 
+use crate::findbar::{self, FindBar};
 use crate::render::{Composition, Frame, RectPaint, Renderer};
 use crate::util::{Context, error_box, group_digits, human_size, info_box, wide};
 use crate::{FRAME_CLASS, VIEW_CLASS, clipboard, default_proc, hiword, ime, loword};
@@ -63,6 +66,21 @@ const ID_RECT_TO_CARETS: u16 = 409;
 const ID_SELECT_NEXT: u16 = 410;
 const ID_SELECT_ALL_OCCURRENCES: u16 = 411;
 const ID_CARETS_AT_LINE_ENDS: u16 = 412;
+const ID_FIND: u16 = 501;
+const ID_REPLACE: u16 = 502;
+const ID_FIND_NEXT: u16 = 503;
+const ID_FIND_PREV: u16 = 504;
+const ID_FIND_CLOSE: u16 = 505;
+const ID_REPLACE_ONE: u16 = 506;
+const ID_REPLACE_ALL: u16 = 507;
+/// 検索条件（文字列・オプション）が変わった
+const ID_FIND_CHANGED: u16 = 508;
+/// 検索欄で Enter（Shift なら前を検索、置換欄なら置換）
+const ID_FIND_OK: u16 = 509;
+/// 検索欄に入力した（インクリメンタル検索）
+const ID_FIND_INCREMENTAL: u16 = 510;
+const ID_GREP: u16 = 511;
+const ID_TAG_JUMP: u16 = 512;
 /// 「文字コードを指定して開き直す」の各項目（`Encoding::all()` の順）
 const ID_REOPEN_BASE: u16 = 600;
 
@@ -80,6 +98,14 @@ const WM_APP_RESIZE: u32 = WM_APP + 5;
 const SCROLL_RANGE: i32 = 1 << 16;
 /// クリップボードにコピーできる最大サイズ
 const MAX_CLIPBOARD_BYTES: u64 = 256 << 20;
+/// この大きさ以下の文書はその場で検索する（それより大きければバックグラウンドで）
+const SYNC_SEARCH_BYTES: u64 = 32 << 20;
+/// インクリメンタル検索でその場で探す範囲
+const INCREMENTAL_BYTES: u64 = 4 << 20;
+/// ハイライトする一致箇所の上限（表示範囲内）
+const HIGHLIGHT_LIMIT: usize = 5000;
+/// 件数を数える上限
+const COUNT_LIMIT: u64 = 100_000_000;
 /// 矩形選択で一度に編集できる最大行数
 const RECT_EDIT_LIMIT: usize = 1_000_000;
 /// 「すべての出現箇所を選択」「各行末にカーソル」で作るカーソルの上限
@@ -157,6 +183,60 @@ pub(crate) struct App {
     suppress_alt_up: bool,
     /// 保存すると符号が変わる文字があることを警告済み
     warned_noncanonical: bool,
+    findbar: FindBar,
+    /// 検索バーの条件をコンパイルしたもの（誤りがあれば `None`）
+    searcher: Option<Arc<Searcher>>,
+    /// バックグラウンドの「次を検索」と件数カウント
+    find_job: Option<FindJob>,
+    count_job: Option<CountJob>,
+    /// 件数と、数えたときの文書の版
+    match_count: Option<(u64, u64)>,
+    /// ステータスバーに出す検索・置換の結果
+    status_msg: String,
+    grep_job: Option<GrepJob>,
+    /// 終わった Grep の結果（フレームで文書として開く）
+    grep_done: Option<String>,
+    /// 前回の Grep の条件
+    grep_last: crate::grepdlg::GrepRequest,
+}
+
+/// バックグラウンドの Grep。
+struct GrepJob {
+    job: JobHandle,
+    rx: crossbeam_channel::Receiver<String>,
+}
+
+// 使わなくなったバックグラウンドの処理は止める
+impl Drop for FindJob {
+    fn drop(&mut self) {
+        self.job.cancel();
+    }
+}
+
+impl Drop for CountJob {
+    fn drop(&mut self) {
+        self.job.cancel();
+    }
+}
+
+impl Drop for GrepJob {
+    fn drop(&mut self) {
+        self.job.cancel();
+    }
+}
+
+/// バックグラウンドの「次を検索」。
+struct FindJob {
+    job: JobHandle,
+    rx: crossbeam_channel::Receiver<Option<(std::ops::Range<u64>, bool)>>,
+    version: u64,
+}
+
+/// バックグラウンドの件数カウント。
+struct CountJob {
+    job: JobHandle,
+    rx: crossbeam_channel::Receiver<u64>,
+    version: u64,
 }
 
 pub(crate) fn create_accelerators() -> Result<HACCEL> {
@@ -183,6 +263,12 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
             ID_CARETS_AT_LINE_ENDS,
         ),
         (ctrl, b'G' as u16, ID_GOTO),
+        (ctrl, b'F' as u16, ID_FIND),
+        (ctrl, b'H' as u16, ID_REPLACE),
+        (FVIRTKEY, VK_F3.0, ID_FIND_NEXT),
+        (FVIRTKEY | FSHIFT, VK_F3.0, ID_FIND_PREV),
+        (ctrl_shift, b'F' as u16, ID_GREP),
+        (FVIRTKEY, VK_F12.0, ID_TAG_JUMP),
         (ctrl, VK_ADD.0, ID_ZOOM_IN),
         (ctrl, VK_OEM_PLUS.0, ID_ZOOM_IN),
         (ctrl, VK_SUBTRACT.0, ID_ZOOM_OUT),
@@ -273,10 +359,25 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU)> {
             w!("行番号(&L)"),
         )?;
 
+        let search = CreatePopupMenu()?;
+        item(search, ID_FIND, w!("検索(&F)...\tCtrl+F"))?;
+        item(search, ID_REPLACE, w!("置換(&R)...\tCtrl+H"))?;
+        sep(search)?;
+        item(search, ID_FIND_NEXT, w!("次を検索(&N)\tF3"))?;
+        item(search, ID_FIND_PREV, w!("前を検索(&P)\tShift+F3"))?;
+        sep(search)?;
+        item(
+            search,
+            ID_GREP,
+            w!("ファイルから検索 (Grep)(&G)...\tCtrl+Shift+F"),
+        )?;
+        item(search, ID_TAG_JUMP, w!("タグジャンプ(&J)\tF12"))?;
+
         let help = CreatePopupMenu()?;
         item(help, ID_ABOUT, w!("バージョン情報(&A)"))?;
         AppendMenuW(bar, MF_POPUP, file.0 as usize, w!("ファイル(&F)"))?;
         AppendMenuW(bar, MF_POPUP, edit.0 as usize, w!("編集(&E)"))?;
+        AppendMenuW(bar, MF_POPUP, search.0 as usize, w!("検索(&S)"))?;
         AppendMenuW(bar, MF_POPUP, view.0 as usize, w!("表示(&V)"))?;
         AppendMenuW(bar, MF_POPUP, help.0 as usize, w!("ヘルプ(&H)"))?;
         Ok((bar, edit, view))
@@ -289,7 +390,11 @@ fn key_down(vk: VIRTUAL_KEY) -> bool {
 
 impl App {
     /// ウィンドウを作成してアプリ状態を初期化する。フレームウィンドウを返す。
-    pub(crate) fn create(hinstance: HINSTANCE, initial_file: Option<PathBuf>) -> Result<HWND> {
+    pub(crate) fn create(
+        hinstance: HINSTANCE,
+        initial_file: Option<PathBuf>,
+        initial_line: Option<u64>,
+    ) -> Result<HWND> {
         let (config, config_error) = Config::load();
         unsafe {
             let (menu, menu_edit, menu_view) = create_menu().context("create_menu")?;
@@ -341,6 +446,7 @@ impl App {
             DragAcceptFiles(frame, true);
 
             let dpi = GetDpiForWindow(view).max(96);
+            let findbar = FindBar::create(frame, dpi)?;
             let renderer = Renderer::new(
                 &config.editor.font_family,
                 config.editor.font_size,
@@ -380,6 +486,19 @@ impl App {
                 ccfg,
                 suppress_alt_up: false,
                 warned_noncanonical: false,
+                findbar,
+                searcher: None,
+                find_job: None,
+                count_job: None,
+                match_count: None,
+                status_msg: String::new(),
+                grep_job: None,
+                grep_done: None,
+                grep_last: crate::grepdlg::GrepRequest {
+                    files: "*.*".into(),
+                    recursive: true,
+                    ..Default::default()
+                },
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
             with_app(|a| {
@@ -398,6 +517,9 @@ impl App {
             }
             if let Some(path) = initial_file {
                 open_path(frame, path, None);
+                if let Some(line) = initial_line.filter(|n| *n >= 1) {
+                    with_app(|a| a.goto_line(line));
+                }
             }
             Ok(frame)
         }
@@ -460,8 +582,10 @@ impl App {
             let _ = GetWindowRect(self.status, &mut src);
             let sh = src.bottom - src.top;
             let w = rc.right - rc.left;
-            let h = (rc.bottom - rc.top - sh).max(0);
-            let _ = MoveWindow(self.view, 0, 0, w, h, true);
+            let bar_h = self.findbar.height();
+            self.findbar.layout(w);
+            let h = (rc.bottom - rc.top - sh - bar_h).max(0);
+            let _ = MoveWindow(self.view, 0, bar_h, w, h, true);
             // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗
             let parts = [w - 640, w - 520, w - 380, w - 310, w - 250, -1].map(|x| x.max(0));
             SendMessageW(
@@ -542,8 +666,34 @@ impl App {
                 "  文字コードを変換しています（読み取り専用）… {:.0}%",
                 p * 100.0
             ),
+            _ if self.doc.replace_progress().is_some() => format!(
+                "  置換しています（Esc で中止）… {:.0}%",
+                self.doc.replace_progress().unwrap_or(0.0) * 100.0
+            ),
+            _ if self.grep_job.is_some() => format!(
+                "  Grep: {} ファイル目を検索しています（Esc で中止）…",
+                self.grep_job
+                    .as_ref()
+                    .map_or(0, |j| j.job.progress().done())
+            ),
+            _ if self.find_job.is_some() => format!(
+                "  検索しています（Esc で中止）… {:.0}%",
+                self.find_job
+                    .as_ref()
+                    .map_or(0.0, |j| j.job.progress().fraction())
+                    * 100.0
+            ),
             (None, Some(p)) => format!("  行数を数えています… {:.0}%", p * 100.0),
-            _ => String::new(),
+            _ => {
+                let mut m = format!("  {}", self.status_msg);
+                if self.findbar.visible
+                    && let Some((n, v)) = self.match_count
+                    && v == self.doc.version()
+                {
+                    m += &format!("  （{} 件）", group_digits(n));
+                }
+                m
+            }
         };
         self.set_status(5, &progress);
     }
@@ -930,6 +1080,9 @@ impl App {
     }
 
     fn on_key(&mut self, vk: VIRTUAL_KEY) -> bool {
+        if vk == VK_ESCAPE && self.escape_search() {
+            return true;
+        }
         let ctrl = key_down(VK_CONTROL);
         let shift = key_down(VK_SHIFT);
         let alt = key_down(VK_MENU);
@@ -1600,6 +1753,10 @@ impl App {
                     .collect()
             };
             let rect_paints = self.rect_paints(&rows);
+            let matches = match (&self.searcher, self.findbar.visible) {
+                (Some(s), true) => s.matches_in(snap, lo.saturating_sub(4096)..hi, HIGHLIGHT_LIMIT),
+                _ => Vec::new(),
+            };
             let frame = Frame {
                 version: self.doc.version(),
                 rows: &rows,
@@ -1609,6 +1766,7 @@ impl App {
                 show_line_numbers: self.show_line_numbers,
                 scroll_x: self.scroll_x,
                 selections: &selections,
+                matches: &matches,
                 carets: &carets,
                 caret_visible: self.focused && self.caret_visible,
                 overwrite: self.overwrite,
@@ -1651,6 +1809,10 @@ impl App {
         self.rect = None;
         self.doc = doc;
         self.warned_noncanonical = false;
+        self.find_job = None;
+        self.count_job = None;
+        self.match_count = None;
+        self.status_msg.clear();
         let n = self.notifier();
         self.doc.start_indexing(&self.pool, n);
         self.vp = Viewport::default();
@@ -1708,14 +1870,26 @@ impl App {
     /// 行数カウント・文字コード変換の進捗を反映する。変換に失敗したらそのエラーを返す。
     fn on_index_progress(&mut self) -> Option<String> {
         self.index_posted.store(false, Ordering::Release);
+        self.poll_search_jobs();
+        let was_replacing = self.doc.replace_progress().is_some();
         let was_loading = self.doc.is_loading();
         if self.doc.poll_indexing() {
+            if was_replacing && self.doc.replace_progress().is_none() {
+                match self.doc.take_replace_result() {
+                    Some(Ok(n)) => {
+                        self.status_msg = format!("{} 個置換しました", group_digits(n));
+                    }
+                    Some(Err(e)) => self.status_msg = format!("置換できませんでした: {e}"),
+                    None => {}
+                }
+                self.after_edit();
+            }
             if was_loading && !self.doc.is_loading() {
                 // 変換が終わって内容を差し替えた
                 self.renderer.clear_cache();
                 self.update_title();
                 if let Some(e) = self.doc.load_error() {
-                    let msg = e.to_owned();
+                    let msg = format!("文字コードを変換できませんでした。\n{e}");
                     self.update_status();
                     self.invalidate();
                     return Some(msg);
@@ -1731,6 +1905,442 @@ impl App {
             self.invalidate();
         }
         None
+    }
+
+    // ---- 検索・置換 --------------------------------------------------------
+
+    /// 検索バーを開く。1 行の短い選択があれば検索文字列にする。
+    fn open_findbar(&mut self, replace_mode: bool) {
+        let sel = *self.doc.selections().primary();
+        let initial = (!sel.is_empty() && sel.end() - sel.start() <= 256)
+            .then(|| self.doc.snapshot().read(sel.range()))
+            .and_then(|b| String::from_utf8(b).ok())
+            .filter(|t| !t.contains('\n'));
+        self.findbar.show(replace_mode, initial.as_deref());
+        self.layout_children();
+        self.compile_search();
+        self.invalidate();
+    }
+
+    fn close_findbar(&mut self) {
+        self.find_job = None;
+        self.count_job = None;
+        self.findbar.hide();
+        self.status_msg.clear();
+        self.layout_children();
+        self.update_status();
+        self.invalidate();
+        unsafe {
+            let _ = SetFocus(Some(self.view));
+        }
+    }
+
+    /// Esc: 実行中の検索・置換を中止するか、検索バーを閉じる。何かしたら `true`。
+    fn escape_search(&mut self) -> bool {
+        if self.find_job.take().is_some() || self.grep_job.take().is_some() {
+            self.status_msg = "検索を中止しました".into();
+            self.update_status();
+            return true;
+        }
+        if self.doc.replace_progress().is_some() {
+            self.doc.cancel_replace();
+            return true;
+        }
+        if self.findbar.visible {
+            self.close_findbar();
+            return true;
+        }
+        false
+    }
+
+    /// 検索バーの条件をコンパイルする。誤りがあればステータスバーに表示して `false`。
+    fn compile_search(&mut self) -> bool {
+        let q = self.findbar.query();
+        self.match_count = None;
+        self.count_job = None;
+        if q.pattern.is_empty() {
+            self.searcher = None;
+            self.status_msg.clear();
+            self.update_status();
+            return false;
+        }
+        match Searcher::new(&q) {
+            Ok(s) => {
+                self.searcher = Some(Arc::new(s));
+                self.status_msg.clear();
+                self.update_status();
+                true
+            }
+            Err(e) => {
+                self.searcher = None;
+                self.status_msg = e.to_string().replace('\n', " ");
+                self.update_status();
+                false
+            }
+        }
+    }
+
+    /// 見つけた範囲を選択して表示する。
+    fn select_match(&mut self, m: std::ops::Range<u64>, wrapped: bool) {
+        self.rect = None;
+        self.doc
+            .set_selections(SelectionSet::single(Selection::new(m.start, m.end)));
+        self.scroll_to_offset(m.start);
+        self.status_msg = if wrapped {
+            "文書の端を越えて検索しました".into()
+        } else {
+            String::new()
+        };
+        self.after_move();
+    }
+
+    fn not_found(&mut self) {
+        self.status_msg = "見つかりません".into();
+        self.update_status();
+    }
+
+    /// 次（`forward`）・前を検索する。大きな文書はバックグラウンドで探す。
+    fn find(&mut self, forward: bool) {
+        if self.searcher.is_none() && !self.compile_search() {
+            if !self.findbar.visible {
+                self.open_findbar(false);
+            }
+            return;
+        }
+        let Some(s) = self.searcher.clone() else {
+            return;
+        };
+        self.find_job = None;
+        let snap = self.doc.snapshot().clone();
+        let sel = *self.doc.selections().primary();
+        let from = if forward {
+            // 空の一致（^ など）が同じ位置で見つかり続けないように 1 文字進める
+            if sel.is_empty() && self.last_found_empty(&s, sel.head) {
+                motion::next_grapheme(&snap, sel.head)
+            } else {
+                sel.end()
+            }
+        } else {
+            sel.start()
+        };
+        self.start_count(&s);
+        if snap.len() <= SYNC_SEARCH_BYTES {
+            match s.find_wrapping(&snap, from, forward, &mut |_| true) {
+                Ok(Some((m, wrapped))) => self.select_match(m, wrapped),
+                _ => self.not_found(),
+            }
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let notify = self.notifier();
+        let job = self.pool.spawn(move |ctx| {
+            ctx.progress.set_total(snap.len());
+            let mut done = 0u64;
+            let r = s.find_wrapping(&snap, from, forward, &mut |pos| {
+                done = done.max(pos.abs_diff(from));
+                ctx.progress.set_done(done);
+                !ctx.cancel.is_cancelled()
+            });
+            if let Ok(r) = r {
+                let _ = tx.send(r);
+                notify();
+            }
+        });
+        self.find_job = Some(FindJob {
+            job,
+            rx,
+            version: self.doc.version(),
+        });
+        self.update_status();
+    }
+
+    /// カーソル位置に空の一致があるか（そこで止まり続けないようにするため）。
+    fn last_found_empty(&self, s: &Searcher, at: u64) -> bool {
+        let snap = self.doc.snapshot();
+        let end = (at + s.max_match_len()).min(snap.len());
+        matches!(
+            s.find_next(snap, at..end, at, &mut |_| true),
+            Ok(Some(m)) if m.start == at && m.is_empty()
+        )
+    }
+
+    /// 入力中の検索文字列で、選択の先頭から近くを探す（インクリメンタル検索）。
+    fn find_incremental(&mut self) {
+        if !self.compile_search() {
+            self.invalidate();
+            return;
+        }
+        let Some(s) = self.searcher.clone() else {
+            return;
+        };
+        let snap = self.doc.snapshot().clone();
+        let from = self.doc.selections().primary().start();
+        let end = (from + INCREMENTAL_BYTES).min(snap.len());
+        match s.find_next(&snap, 0..end, from, &mut |_| true) {
+            Ok(Some(m)) => {
+                self.rect = None;
+                self.doc
+                    .set_selections(SelectionSet::single(Selection::new(m.start, m.end)));
+                self.scroll_to_offset(m.start);
+                self.after_move();
+            }
+            _ => self.invalidate(),
+        }
+    }
+
+    /// 件数をバックグラウンドで数える（同じ条件・同じ内容なら数え直さない）。
+    fn start_count(&mut self, s: &Arc<Searcher>) {
+        let version = self.doc.version();
+        if self.match_count.is_some_and(|(_, v)| v == version)
+            || self
+                .count_job
+                .as_ref()
+                .is_some_and(|j| j.version == version)
+        {
+            return;
+        }
+        let snap = self.doc.snapshot().clone();
+        let s = s.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let notify = self.notifier();
+        let job = self.pool.spawn(move |ctx| {
+            let len = snap.len();
+            if let Ok(n) = s.count(&snap, 0..len, COUNT_LIMIT, &mut |_| {
+                !ctx.cancel.is_cancelled()
+            }) {
+                let _ = tx.send(n);
+                notify();
+            }
+        });
+        self.count_job = Some(CountJob { job, rx, version });
+    }
+
+    /// バックグラウンドの検索・件数の結果を反映する。
+    fn poll_search_jobs(&mut self) {
+        if let Some(j) = &self.find_job
+            && let Ok(r) = j.rx.try_recv()
+        {
+            let current = j.version == self.doc.version();
+            self.find_job = None;
+            match r {
+                Some((m, wrapped)) if current => self.select_match(m, wrapped),
+                Some(_) => {}
+                None => self.not_found(),
+            }
+        }
+        if let Some(j) = &self.count_job
+            && let Ok(n) = j.rx.try_recv()
+        {
+            self.match_count = Some((n, j.version));
+            self.count_job = None;
+            self.update_status();
+        }
+        if let Some(j) = &self.grep_job
+            && let Ok(text) = j.rx.try_recv()
+        {
+            self.grep_job = None;
+            self.grep_done = Some(text);
+        }
+        if self.find_job.is_some() || self.grep_job.is_some() {
+            self.update_status();
+        }
+    }
+
+    /// 置換文字列（正規表現なら `$1` などを解釈する）。
+    fn replacement(&mut self, s: &Searcher) -> Option<Replacement> {
+        let text = self.findbar.replacement_text();
+        if !self.findbar.query().regex {
+            return Some(Replacement::literal(&text));
+        }
+        match Replacement::parse(&text, s) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                self.status_msg = e.to_string();
+                self.update_status();
+                None
+            }
+        }
+    }
+
+    /// 選択が一致していれば置き換えて、次を検索する。
+    fn replace_one(&mut self) {
+        if self.searcher.is_none() && !self.compile_search() {
+            return;
+        }
+        let Some(s) = self.searcher.clone() else {
+            return;
+        };
+        let Some(r) = self.replacement(&s) else {
+            return;
+        };
+        if self.doc.replace_selection(&s, &r) {
+            self.after_edit();
+        }
+        self.find(true);
+    }
+
+    /// すべて置換する（「選択範囲のみ置換」なら主選択の範囲内）。
+    fn replace_all(&mut self) {
+        if self.searcher.is_none() && !self.compile_search() {
+            return;
+        }
+        let Some(s) = self.searcher.clone() else {
+            return;
+        };
+        let Some(r) = self.replacement(&s) else {
+            return;
+        };
+        let sel = *self.doc.selections().primary();
+        let range = if self.findbar.selection_only() && !sel.is_empty() {
+            sel.range()
+        } else {
+            0..self.doc.snapshot().len()
+        };
+        self.rect = None;
+        let notify = self.notifier();
+        let result = unsafe {
+            let old = SetCursor(LoadCursorW(None, IDC_WAIT).ok());
+            let r = self.doc.replace_all(s, r, range, &self.pool, notify);
+            SetCursor(Some(old));
+            r
+        };
+        match result {
+            Ok(Some(n)) => {
+                self.status_msg = if n == 0 {
+                    "見つかりません".into()
+                } else {
+                    format!("{} 個置換しました", group_digits(n))
+                };
+                self.after_edit();
+            }
+            Ok(None) => self.update_status(),
+            Err(e) => {
+                self.status_msg = format!("置換できませんでした: {e}");
+                self.update_status();
+            }
+        }
+    }
+
+    /// Grep ダイアログの初期値（検索バーの文字列・現在のファイルのフォルダ）。
+    fn grep_defaults(&self) -> crate::grepdlg::GrepRequest {
+        let mut r = self.grep_last.clone();
+        let q = self.findbar.query();
+        if !q.pattern.is_empty() {
+            r.pattern = q.pattern;
+            r.regex = q.regex;
+            r.case_sensitive = q.case_sensitive;
+            r.whole_word = q.whole_word;
+        }
+        if r.dir.is_empty()
+            && let Some(dir) = self.doc.path().and_then(|p| p.parent())
+        {
+            r.dir = dir.display().to_string();
+        }
+        r
+    }
+
+    /// Grep をバックグラウンドで始める。
+    fn start_grep(&mut self, req: crate::grepdlg::GrepRequest) {
+        let q = yy_core::Query {
+            pattern: req.pattern.clone(),
+            regex: req.regex,
+            case_sensitive: req.case_sensitive,
+            whole_word: req.whole_word,
+        };
+        let searcher = match Searcher::new(&q) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status_msg = e.to_string().replace('\n', " ");
+                self.update_status();
+                return;
+            }
+        };
+        let opts = yy_core::grep::GrepOptions {
+            dir: PathBuf::from(req.dir.trim()),
+            files: req.files.clone(),
+            recursive: req.recursive,
+        };
+        self.grep_last = req.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let notify = self.notifier();
+        let job = self.pool.spawn(move |ctx| {
+            const MAX_HITS: u64 = 100_000;
+            let mut out = String::new();
+            let mut n = 0u64;
+            let r = yy_core::grep::grep(
+                &searcher,
+                &opts,
+                &mut |_| {
+                    ctx.progress.add_done(1);
+                    !ctx.cancel.is_cancelled()
+                },
+                &mut |h| {
+                    out.push_str(&yy_core::grep::format_hit(&h));
+                    out.push_str("\r\n");
+                    n += 1;
+                    n < MAX_HITS
+                },
+            );
+            if ctx.cancel.is_cancelled() {
+                return;
+            }
+            let summary = match r {
+                Ok(st) => {
+                    let mut s = format!(
+                        "検索: {}  フォルダ: {}  ファイル: {}\r\n{} 件（{} ファイル中 {} ファイル）",
+                        req.pattern,
+                        opts.dir.display(),
+                        req.files,
+                        n,
+                        st.files,
+                        st.matched_files
+                    );
+                    if n >= MAX_HITS {
+                        s += "  ※ 件数が多いため途中までです";
+                    }
+                    if st.skipped > 0 {
+                        s += &format!("  バイナリなどで飛ばしたファイル: {}", st.skipped);
+                    }
+                    s
+                }
+                Err(e) => format!("Grep できませんでした: {}: {e}", opts.dir.display()),
+            };
+            let _ = tx.send(format!(
+                "{summary}\r\n（行を選んで F12 でファイルを開きます）\r\n\r\n{out}"
+            ));
+            notify();
+        });
+        self.grep_job = Some(GrepJob { job, rx });
+        self.update_status();
+    }
+
+    /// カーソル行の「パス(行番号)」のファイルを開く。別のファイルは新しいウィンドウで開く。
+    fn tag_jump(&mut self) -> Option<String> {
+        let snap = self.doc.snapshot();
+        let head = self.doc.selections().primary().head;
+        let start = motion::line_start(snap, head);
+        let end = motion::line_end(snap, start).min(start + 8192);
+        let line = String::from_utf8_lossy(&snap.read(start..end)).into_owned();
+        let Some((path, n)) = yy_core::grep::parse_tag_line(&line) else {
+            return Some("この行にはファイル名と行番号がありません。".into());
+        };
+        if self.doc.path().is_some_and(|p| p == path) {
+            self.goto_line(n);
+            return None;
+        }
+        if !path.is_file() {
+            return Some(format!("ファイルが見つかりません。\n{}", path.display()));
+        }
+        let exe = std::env::current_exe().ok()?;
+        match std::process::Command::new(exe)
+            .arg(&path)
+            .arg("--line")
+            .arg(n.to_string())
+            .spawn()
+        {
+            Ok(_) => None,
+            Err(e) => Some(format!("開けませんでした。\n{e}")),
+        }
     }
 
     /// 保存できない文字の範囲を置き換える（1 回の Undo で戻せる）。
@@ -2292,6 +2902,52 @@ fn on_command(hwnd: HWND, id: u16) {
                 );
             }
         }
+        ID_FIND | ID_REPLACE => {
+            with_app(|a| a.open_findbar(id == ID_REPLACE));
+        }
+        ID_FIND_NEXT | ID_FIND_PREV => {
+            with_app(|a| a.find(id == ID_FIND_NEXT));
+        }
+        ID_FIND_OK => {
+            with_app(|a| {
+                if a.findbar.replacement_focused() {
+                    a.replace_one();
+                } else {
+                    a.find(!key_down(VK_SHIFT));
+                }
+            });
+        }
+        ID_FIND_CLOSE => {
+            with_app(|a| a.close_findbar());
+        }
+        ID_FIND_CHANGED => {
+            with_app(|a| {
+                a.compile_search();
+                a.invalidate();
+            });
+        }
+        ID_FIND_INCREMENTAL => {
+            with_app(|a| a.find_incremental());
+        }
+        ID_REPLACE_ONE => {
+            with_app(|a| a.replace_one());
+        }
+        ID_GREP => {
+            let Some(initial) = with_app(|a| a.grep_defaults()) else {
+                return;
+            };
+            if let Some(req) = crate::grepdlg::prompt(hwnd, &initial) {
+                with_app(|a| a.start_grep(req));
+            }
+        }
+        ID_TAG_JUMP => {
+            if let Some(Some(msg)) = with_app(|a| a.tag_jump()) {
+                info_box(hwnd, &msg);
+            }
+        }
+        ID_REPLACE_ALL => {
+            with_app(|a| a.replace_all());
+        }
         ID_RECT_MODE => {
             with_app(|a| {
                 a.rect_mode = !a.rect_mode;
@@ -2342,6 +2998,69 @@ fn on_command(hwnd: HWND, id: u16) {
             ),
         ),
         _ => {}
+    }
+}
+
+/// フォーカスが検索バーにあればバーのウィンドウ。
+pub(crate) fn findbar_with_focus() -> Option<HWND> {
+    with_app(|a| a.findbar.has_focus().then_some(a.findbar.hwnd)).flatten()
+}
+
+/// 検索バーにフォーカスがあってもアクセラレータとして扱うキー（それ以外は入力欄に渡す）。
+pub(crate) fn is_global_shortcut(msg: &MSG) -> bool {
+    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+        return false;
+    }
+    let vk = VIRTUAL_KEY(msg.wParam.0 as u16);
+    if vk == VK_F3 {
+        return true;
+    }
+    key_down(VK_CONTROL) && matches!(vk.0 as u8, b'F' | b'H' | b'S' | b'O' | b'N' | b'G' | b'W')
+}
+
+/// 検索バーのウィンドウプロシージャ。コントロールの通知をフレームへのコマンドにする。
+pub(crate) extern "system" fn findbar_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_COMMAND => {
+            let id = loword(wparam.0) as u16;
+            let code = hiword(wparam.0);
+            let cmd = match id {
+                // IsDialogMessage が送る Enter / Esc
+                1 => Some(ID_FIND_OK),
+                2 => Some(ID_FIND_CLOSE),
+                findbar::ID_FIND_NEXT_BTN => Some(ID_FIND_NEXT),
+                findbar::ID_FIND_PREV_BTN => Some(ID_FIND_PREV),
+                findbar::ID_FIND_CLOSE_BTN => Some(ID_FIND_CLOSE),
+                findbar::ID_REPLACE_BTN => Some(ID_REPLACE_ONE),
+                findbar::ID_REPLACE_ALL_BTN => Some(ID_REPLACE_ALL),
+                findbar::ID_CASE | findbar::ID_WORD | findbar::ID_REGEX => Some(ID_FIND_CHANGED),
+                findbar::ID_PATTERN if code == EN_CHANGE => Some(ID_FIND_INCREMENTAL),
+                _ => None,
+            };
+            if let Some(cmd) = cmd {
+                unsafe {
+                    if let Ok(parent) = GetParent(hwnd) {
+                        let _ =
+                            PostMessageW(Some(parent), WM_COMMAND, WPARAM(cmd as usize), LPARAM(0));
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_CTLCOLORSTATIC => unsafe {
+            use windows::Win32::Graphics::Gdi::{
+                COLOR_BTNFACE, GetSysColorBrush, HDC, SetBkMode, TRANSPARENT,
+            };
+            // ラベル・チェックボックスの背景をバーと同じ色にする
+            SetBkMode(HDC(wparam.0 as *mut _), TRANSPARENT);
+            LRESULT(GetSysColorBrush(COLOR_BTNFACE).0 as isize)
+        },
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
@@ -2407,7 +3126,17 @@ pub(crate) extern "system" fn frame_proc(
         }
         WM_APP_INDEX => {
             if let Some(Some(msg)) = with_app(|a| a.on_index_progress()) {
-                error_box(hwnd, &format!("文字コードを変換できませんでした。\n{msg}"));
+                error_box(hwnd, &msg);
+            }
+            // Grep の結果を新しい文書として開く
+            if let Some(Some(text)) = with_app(|a| a.grep_done.take())
+                && confirm_discard(hwnd)
+            {
+                with_app(|a| {
+                    a.set_document(Document::from_text(&text));
+                    a.status_msg = "Grep の結果（F12 でファイルを開く）".into();
+                    a.update_status();
+                });
             }
             LRESULT(0)
         }
@@ -2428,6 +3157,8 @@ pub(crate) extern "system" fn frame_proc(
             with_app(|a| {
                 a.renderer.set_dpi(dpi);
                 a.renderer.clear_cache();
+                a.findbar.set_dpi(dpi);
+                a.layout_children();
                 a.after_scroll();
             });
             LRESULT(0)

@@ -6,6 +6,7 @@ members = [
     "crates/yy-config",
     "crates/yy-encoding",
     "crates/yy-io",
+    "crates/yy-search",
     "crates/yy-core",
     "crates/yy-layout",
     "crates/yy-win",
@@ -27,6 +28,7 @@ yy-jobs = { path = "crates/yy-jobs" }
 yy-config = { path = "crates/yy-config" }
 yy-encoding = { path = "crates/yy-encoding" }
 yy-io = { path = "crates/yy-io" }
+yy-search = { path = "crates/yy-search" }
 yy-core = { path = "crates/yy-core" }
 yy-layout = { path = "crates/yy-layout" }
 yy-win = { path = "crates/yy-win" }
@@ -34,6 +36,10 @@ yy-win = { path = "crates/yy-win" }
 encoding_rs = "0.8.42"
 chardetng = "1.0.0"
 memchr = "2.7"
+regex-automata = "0.4"
+regex-syntax = "0.8"
+regex = "1.11"
+ignore = "0.4"
 memmap2 = "0.9"
 crossbeam-channel = "0.5"
 unicode-segmentation = "1.12"

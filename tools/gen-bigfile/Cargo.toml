@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "open-bench"
 path = "src/open_bench.rs"
 
+[[bin]]
+name = "replace-bench"
+path = "src/replace_bench.rs"
+
 [dependencies]
 yy-buffer.workspace = true
 yy-encoding.workspace = true

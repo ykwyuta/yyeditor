@@ -21,9 +21,42 @@ struct State {
 }
 
 /// DLGTEMPLATE / DLGITEMTEMPLATE をバイト列として組み立てる。
-struct Template(Vec<u16>);
+pub(crate) struct Template(pub(crate) Vec<u16>);
 
 impl Template {
+    /// ダイアログの見出し（`count` 個のコントロール、大きさはダイアログ単位）。
+    pub(crate) fn dialog(title: &str, count: u16, cx: i16, cy: i16) -> Template {
+        let mut t = Template(Vec::with_capacity(512));
+        let style = WS_POPUP.0
+            | WS_CAPTION.0
+            | WS_SYSMENU.0
+            | DS_MODALFRAME as u32
+            | DS_SETFONT as u32
+            | DS_CENTER as u32;
+        t.dword(style);
+        t.dword(0);
+        t.0.push(count);
+        for v in [0i16, 0, cx, cy] {
+            t.0.push(v as u16);
+        }
+        t.0.push(0); // メニューなし
+        t.0.push(0); // 既定のクラス
+        t.string(title);
+        t.0.push(9); // フォントサイズ
+        t.string("MS Shell Dlg");
+        t
+    }
+
+    /// DWORD 境界に置いたテンプレート（`DialogBoxIndirectParamW` に渡す）。
+    pub(crate) fn aligned(&self) -> Vec<u32> {
+        let words = &self.0;
+        let mut aligned = vec![0u32; words.len().div_ceil(2)];
+        for (i, w) in words.iter().enumerate() {
+            aligned[i / 2] |= (*w as u32) << ((i % 2) * 16);
+        }
+        aligned
+    }
+
     fn dword(&mut self, v: u32) {
         self.0.push(v as u16);
         self.0.push((v >> 16) as u16);
@@ -41,7 +74,7 @@ impl Template {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn item(
+    pub(crate) fn item(
         &mut self,
         style: u32,
         x: i16,
@@ -66,29 +99,12 @@ impl Template {
     }
 }
 
-const CLASS_BUTTON: u16 = 0x0080;
-const CLASS_EDIT: u16 = 0x0081;
-const CLASS_STATIC: u16 = 0x0082;
+pub(crate) const CLASS_BUTTON: u16 = 0x0080;
+pub(crate) const CLASS_EDIT: u16 = 0x0081;
+pub(crate) const CLASS_STATIC: u16 = 0x0082;
 
 fn build_template() -> Template {
-    let mut t = Template(Vec::with_capacity(256));
-    let style = WS_POPUP.0
-        | WS_CAPTION.0
-        | WS_SYSMENU.0
-        | DS_MODALFRAME as u32
-        | DS_SETFONT as u32
-        | DS_CENTER as u32;
-    t.dword(style);
-    t.dword(0);
-    t.0.push(4); // コントロール数
-    for v in [0i16, 0, 200, 64] {
-        t.0.push(v as u16);
-    }
-    t.0.push(0); // メニューなし
-    t.0.push(0); // 既定のクラス
-    t.string("行へ移動");
-    t.0.push(9); // フォントサイズ
-    t.string("MS Shell Dlg");
+    let mut t = Template::dialog("行へ移動", 4, 200, 64);
     t.item(0, 7, 7, 186, 10, ID_LABEL, CLASS_STATIC, "");
     t.item(
         (WS_BORDER | WS_TABSTOP).0 | (ES_NUMBER | ES_AUTOHSCROLL) as u32,
@@ -126,11 +142,7 @@ fn build_template() -> Template {
 /// 行番号（1 始まり）の入力を求める。キャンセルされたら `None`。
 pub(crate) fn prompt_line(owner: HWND, prompt: &str, initial: u64) -> Option<u64> {
     // テンプレートは DWORD 境界に置く必要があるため u32 の領域にコピーする
-    let words = build_template().0;
-    let mut aligned = vec![0u32; words.len().div_ceil(2)];
-    for (i, w) in words.iter().enumerate() {
-        aligned[i / 2] |= (*w as u32) << ((i % 2) * 16);
-    }
+    let aligned = build_template().aligned();
     let mut state = State {
         prompt: prompt.to_owned(),
         text: initial.to_string(),

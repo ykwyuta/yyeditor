@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 yy-buffer.workspace = true
 yy-encoding.workspace = true
+yy-search.workspace = true
 memchr.workspace = true
 yy-io.workspace = true
 yy-jobs.workspace = true

@@ -40,6 +40,8 @@ pub(crate) struct Frame<'a> {
     pub scroll_x: f32,
     /// 空でない選択範囲（昇順）
     pub selections: &'a [std::ops::Range<u64>],
+    /// 検索に一致した範囲（昇順）
+    pub matches: &'a [std::ops::Range<u64>],
     /// キャレット位置（昇順）
     pub carets: &'a [u64],
     pub caret_visible: bool,
@@ -75,6 +77,7 @@ struct Brushes {
     invalid: ID2D1SolidColorBrush,
     control: ID2D1SolidColorBrush,
     selection: ID2D1SolidColorBrush,
+    search_match: ID2D1SolidColorBrush,
     caret: ID2D1SolidColorBrush,
 }
 
@@ -102,6 +105,7 @@ impl Target {
                 invalid: brush(c.invalid_byte)?,
                 control: brush(c.control)?,
                 selection: brush(c.selection)?,
+                search_match: brush(c.search_match)?,
                 caret: brush(c.caret)?,
             };
             Ok(Target {
@@ -558,6 +562,7 @@ impl Renderer {
         // 先にレイアウトと装飾（選択範囲の矩形・キャレット位置）を計算する
         let mut layouts = Vec::with_capacity(frame.rows.len());
         let mut sel_rects: Vec<D2D_RECT_F> = Vec::new();
+        let mut match_rects: Vec<D2D_RECT_F> = Vec::new();
         let mut caret_rects: Vec<D2D_RECT_F> = Vec::new();
         for (i, row) in frame.rows.iter().enumerate() {
             let y = i as f32 * lh;
@@ -572,6 +577,24 @@ impl Renderer {
                 None => self.row_layout(row)?,
             };
             self.max_text_width = self.max_text_width.max(rl.width);
+
+            // 検索に一致した範囲
+            for r in frame.matches {
+                if r.end <= row.start || r.start >= row.end {
+                    continue;
+                }
+                let a = utf16_index(&row.text, row.text_index(r.start.max(row.start)));
+                let b = utf16_index(&row.text, row.text_index(r.end.min(row.end)));
+                if b > a {
+                    let (xa, xb) = (self.x_at(&rl, a), self.x_at(&rl, b));
+                    match_rects.push(D2D_RECT_F {
+                        left: text_x + xa.min(xb),
+                        top: y,
+                        right: text_x + xa.max(xb),
+                        bottom: y + lh,
+                    });
+                }
+            }
 
             // 選択範囲
             for r in frame.selections {
@@ -713,6 +736,9 @@ impl Renderer {
                 },
                 D2D1_ANTIALIAS_MODE_ALIASED,
             );
+            for r in &match_rects {
+                rt.FillRectangle(r, &b.search_match);
+            }
             for r in &sel_rects {
                 rt.FillRectangle(r, &b.selection);
             }
@@ -912,6 +938,7 @@ mod tests {
             show_line_numbers: true,
             scroll_x: 0.0,
             selections: &[],
+            matches: &[],
             carets: &[],
             caret_visible: false,
             overwrite: false,
@@ -971,6 +998,7 @@ mod tests {
             show_line_numbers: false,
             scroll_x: 0.0,
             selections: &selections,
+            matches: &[],
             carets: &carets,
             caret_visible: true,
             overwrite: false,

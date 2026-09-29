@@ -13,8 +13,18 @@ fn main() {
         }
         return;
     }
-    let initial = args.first().map(std::path::PathBuf::from);
-    if let Err(e) = yy_win::run(initial) {
+    // yyeditor [--line <行番号>] [ファイル]
+    let mut initial = None;
+    let mut line = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--line" {
+            line = it.next().and_then(|n| n.to_str()?.parse::<u64>().ok());
+        } else if initial.is_none() {
+            initial = Some(std::path::PathBuf::from(a));
+        }
+    }
+    if let Err(e) = yy_win::run(initial, line) {
         // GUI の初期化に失敗した場合はコンソールがないため、ここでは終了コードのみ返す
         eprintln!("yyeditor: {e}");
         std::process::exit(1);

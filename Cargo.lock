@@ -1170,6 +1170,7 @@ dependencies = [
  "yy-encoding",
  "yy-io",
  "yy-jobs",
+ "yy-search",
 ]
 
 [[package]]
@@ -1209,9 +1210,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-search"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "regex-automata",
+ "regex-syntax",
+ "yy-buffer",
+]
+
+[[package]]
 name = "yy-win"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "windows",
  "windows-numerics",
  "yy-buffer",

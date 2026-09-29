@@ -106,6 +106,8 @@ pub struct Colors {
     pub control: Color,
     /// 選択範囲の背景
     pub selection: Color,
+    /// 検索に一致した箇所の背景
+    pub search_match: Color,
     pub caret: Color,
 }
 
@@ -120,6 +122,7 @@ impl Default for Colors {
             invalid_byte: Color::rgb(0xC0, 0x30, 0x30),
             control: Color::rgb(0x80, 0x80, 0xC0),
             selection: Color::rgb(0xAD, 0xD6, 0xFF),
+            search_match: Color::rgb(0xFF, 0xE0, 0x8A),
             caret: Color::rgb(0x00, 0x00, 0x00),
         }
     }

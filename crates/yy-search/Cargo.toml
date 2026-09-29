@@ -1,0 +1,20 @@
+[package]
+name = "yy-search"
+description = "Regex search and replace over yyeditor snapshots (window search, streaming replace)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+yy-buffer.workspace = true
+regex-automata.workspace = true
+regex-syntax.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+regex-syntax.workspace = true
+
+[lints]
+workspace = true

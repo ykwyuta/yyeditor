@@ -4,9 +4,11 @@
 //! すべてスナップショットの差し替えとして行う（01 章 4.3、06 章）。
 
 pub mod edit;
+pub mod grep;
 mod history;
 mod indexer;
 pub mod motion;
+mod replace;
 mod selection;
 mod transcode;
 
@@ -24,6 +26,7 @@ pub use yy_encoding::{DecodeStats, Encoding, EscapeMode};
 pub use yy_io::SaveError;
 use yy_io::{FileGuard, MmapSource, SaveFormat};
 use yy_jobs::{JobPool, Notifier};
+pub use yy_search::{Query, QueryError, ReplaceError, Replacement, Searcher};
 
 use edit::Change;
 use history::{History, Record};
@@ -122,6 +125,12 @@ pub struct Document {
     decode_stats: DecodeStats,
     /// バックグラウンドで変換中（その間は読み取り専用）
     loading: Option<transcode::Loader>,
+    /// バックグラウンドですべて置換中（その間は読み取り専用）
+    replacing: Option<replace::ReplaceJob>,
+    /// 終わったすべて置換の結果（置き換えた数かエラー）
+    replace_result: Option<Result<u64, String>>,
+    /// すべて置換をその場で（メモリ上で）行う文書の大きさの上限
+    replace_sync_limit: u64,
     eol: Eol,
     snapshot: Snapshot,
     sels: SelectionSet,
@@ -190,6 +199,9 @@ impl Document {
             escapes: EscapeMode::Literal,
             decode_stats: DecodeStats::default(),
             loading: None,
+            replacing: None,
+            replace_result: None,
+            replace_sync_limit: replace::IN_MEMORY,
             eol: Eol::platform_default(),
             snapshot: Snapshot::empty(),
             sels: SelectionSet::default(),
@@ -305,6 +317,28 @@ impl Document {
         self.loading.is_some()
     }
 
+    /// バックグラウンドの処理（文字コードの変換・すべて置換）中で編集できないか。
+    pub fn is_busy(&self) -> bool {
+        self.loading.is_some() || self.replacing.is_some()
+    }
+
+    /// すべて置換の進捗率。実行中でなければ `None`。
+    pub fn replace_progress(&self) -> Option<f64> {
+        self.replacing.as_ref().map(|r| r.progress())
+    }
+
+    /// 実行中のすべて置換を中止する（結果は「中止しました」になる）。
+    pub fn cancel_replace(&mut self) {
+        if let Some(r) = &self.replacing {
+            r.cancel();
+        }
+    }
+
+    /// 終わったすべて置換の結果を取り出す（置き換えた数、またはエラーの説明）。
+    pub fn take_replace_result(&mut self) -> Option<Result<u64, String>> {
+        self.replace_result.take()
+    }
+
     /// 文字コードの変換の進捗率。変換中でなければ `None`。
     pub fn loading_progress(&self) -> Option<f64> {
         self.loading.as_ref().map(|l| l.progress())
@@ -370,6 +404,15 @@ impl Document {
     /// （呼び出し側は続けて [`Document::maintain_indexing`] で行数のカウントを始めること）。
     /// 変換に失敗した場合は `Err`（先頭部分だけの読み取り専用の表示が残る）。
     pub fn poll_indexing(&mut self) -> bool {
+        if let Some(r) = self.replacing.as_ref().and_then(|j| j.poll()) {
+            self.replacing = None;
+            self.replace_result = Some(match r {
+                Ok(o) => Ok(self.apply_replace(o)),
+                Err(e) => Err(e.to_string()),
+            });
+            self.index_version += 1;
+            return true;
+        }
         if let Some(l) = &mut self.loading {
             let Some(result) = l.poll() else {
                 return false;
@@ -522,7 +565,7 @@ impl Document {
         shared: &[u8],
         mut f: impl FnMut(&Snapshot, &Selection) -> Option<(Range<u64>, Ins)>,
     ) -> bool {
-        if self.is_loading() {
+        if self.is_busy() {
             return false;
         }
         let snap = self.snapshot.clone();
@@ -575,7 +618,7 @@ impl Document {
 
     /// 文字列を入力する（選択範囲は置き換える）。`overwrite` なら上書きモード。
     pub fn insert_text(&mut self, text: &str, overwrite: bool) -> bool {
-        if text.is_empty() || self.is_loading() {
+        if text.is_empty() || self.is_busy() {
             return false;
         }
         let bytes = normalize_eol(text, self.eol);
@@ -731,7 +774,7 @@ impl Document {
         kind: EditKind,
         make_sels: impl FnOnce(&edit::Applied) -> SelectionSet,
     ) -> bool {
-        if self.is_loading() {
+        if self.is_busy() {
             return false;
         }
         self.typing = None;
@@ -857,7 +900,7 @@ impl Document {
     // ---- Undo / Redo -----------------------------------------------------
 
     pub fn undo(&mut self) -> bool {
-        if self.is_loading() {
+        if self.is_busy() {
             return false;
         }
         let Some(e) = self.history.undo() else {
@@ -871,7 +914,7 @@ impl Document {
     }
 
     pub fn redo(&mut self) -> bool {
-        if self.is_loading() {
+        if self.is_busy() {
             return false;
         }
         let Some(e) = self.history.redo() else {
@@ -928,8 +971,8 @@ impl Document {
         encoding: Encoding,
         bom: bool,
     ) -> Result<(), SaveError> {
-        if self.is_loading() {
-            return Err(io::Error::other("文字コードの変換中は保存できません").into());
+        if self.is_busy() {
+            return Err(io::Error::other("文字コードの変換中・置換中は保存できません").into());
         }
         let format = self.save_format(encoding, bom);
         yy_io::save_snapshot(&self.snapshot, path, &format, self.source.as_deref())?;
@@ -982,7 +1025,7 @@ impl Document {
     ///
     /// 大きな文書は一時ファイルに書き出してマップする。
     pub fn convert_eol(&mut self, eol: Eol) -> io::Result<bool> {
-        if self.is_loading() {
+        if self.is_busy() {
             return Ok(false);
         }
         self.eol = eol;
@@ -1043,6 +1086,110 @@ impl Document {
             EditKind::Other,
         );
         Ok(true)
+    }
+}
+
+impl Document {
+    // ---- 置換 ------------------------------------------------------------
+
+    /// 主選択がちょうど検索条件に一致していれば置き換える（1 つの Undo 単位）。
+    pub fn replace_selection(&mut self, searcher: &Searcher, repl: &Replacement) -> bool {
+        if self.is_busy() {
+            return false;
+        }
+        let sel = *self.sels.primary();
+        let r = sel.range();
+        let hit = searcher
+            .find_next(&self.snapshot, r.clone(), r.start, &mut |_| true)
+            .ok()
+            .flatten();
+        if hit != Some(r.clone()) {
+            return false;
+        }
+        let Ok(Some(edits)) =
+            yy_search::collect_edits(searcher, &self.snapshot, r.clone(), repl, 1, &mut |_| true)
+        else {
+            return false;
+        };
+        let Some((range, bytes)) = edits.into_iter().next() else {
+            return false;
+        };
+        let len = bytes.len() as u64;
+        let change = Change::replace_bytes(range.clone(), bytes);
+        self.apply_changes(vec![change], EditKind::Other, |_| {
+            SelectionSet::single(Selection::caret(range.start + len))
+        })
+    }
+
+    /// `range` 内をすべて置換する。小さな文書はその場で行って置き換えた数を返し、
+    /// 大きな文書はバックグラウンドで始めて `Ok(None)` を返す（終わると [`Document::poll_indexing`]
+    /// が `true` を返し、[`Document::take_replace_result`] で結果が分かる。その間は読み取り専用）。
+    pub fn replace_all(
+        &mut self,
+        searcher: Arc<Searcher>,
+        repl: Replacement,
+        range: Range<u64>,
+        pool: &JobPool,
+        notify: Notifier,
+    ) -> Result<Option<u64>, ReplaceError> {
+        if self.is_busy() {
+            return Err(ReplaceError::Io(io::Error::other("処理中です")));
+        }
+        let limit = self.replace_sync_limit;
+        if self.snapshot.len() <= limit {
+            let o = replace::run(&searcher, &self.snapshot, range, &repl, limit, &mut |_| {
+                true
+            })?;
+            return Ok(Some(self.apply_replace(o)));
+        }
+        self.typing = None;
+        self.replacing = Some(replace::ReplaceJob::start(
+            pool,
+            notify,
+            searcher,
+            repl,
+            self.snapshot.clone(),
+            range,
+            limit,
+        ));
+        Ok(None)
+    }
+
+    /// すべて置換をその場で行う文書の大きさの上限を変える（テスト用）。
+    pub fn set_replace_sync_limit(&mut self, bytes: u64) {
+        self.replace_sync_limit = bytes;
+    }
+
+    /// すべて置換の結果を文書に反映し、置き換えた数を返す。
+    fn apply_replace(&mut self, o: replace::Outcome) -> u64 {
+        let primary = self.sels.primary().head;
+        match o {
+            replace::Outcome::Edits(edits) => {
+                let n = edits.len() as u64;
+                let changes: Vec<Change> = edits
+                    .into_iter()
+                    .map(|(r, b)| Change::replace_bytes(r, b))
+                    .collect();
+                let caret = edit::map_offset(&changes, primary);
+                self.apply_changes(changes, EditKind::Other, |_| {
+                    SelectionSet::single(Selection::caret(caret))
+                });
+                n
+            }
+            replace::Outcome::Rewritten(n, snap) => {
+                if n > 0 {
+                    let snap = index_first_piece(snap);
+                    let caret = primary.min(snap.len());
+                    self.typing = None;
+                    self.commit(
+                        snap,
+                        SelectionSet::single(Selection::caret(caret)),
+                        EditKind::Other,
+                    );
+                }
+                n
+            }
+        }
     }
 }
 
