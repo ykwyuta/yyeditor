@@ -23,6 +23,7 @@ mod goto;
 mod grepdlg;
 mod highlight;
 mod ime;
+mod preview;
 mod recorddlg;
 mod render;
 mod tabclose;
@@ -40,6 +41,7 @@ use crate::util::Context;
 pub(crate) const FRAME_CLASS: PCWSTR = w!("YYEditorFrame");
 pub(crate) const VIEW_CLASS: PCWSTR = w!("YYEditorView");
 pub(crate) const FINDBAR_CLASS: PCWSTR = w!("YYEditorFindBar");
+pub(crate) const PREVIEW_CLASS: PCWSTR = w!("YYEditorPreview");
 pub(crate) const DIFF_CLASS: PCWSTR = w!("YYEditorDiff");
 
 /// 実行ファイルに埋め込んだアイコンのリソース ID（apps/yyeditor/build.rs）
@@ -106,6 +108,10 @@ fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>
             lpfnWndProc: Some(app::frame_proc),
             hInstance: hinstance,
             hCursor: cursor,
+            // 子ウィンドウの隙間（エディタとプレビューの境界）の色
+            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
+                (windows::Win32::Graphics::Gdi::COLOR_BTNFACE.0 + 1) as usize as *mut _,
+            ),
             hIcon: icon,
             hIconSm: icon_small,
             lpszClassName: FRAME_CLASS,
@@ -139,6 +145,18 @@ fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>
             ..Default::default()
         };
         if RegisterClassExW(&bar_class) == 0 {
+            return Err(windows::core::Error::from_thread());
+        }
+
+        let preview_class = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(preview::preview_proc),
+            hInstance: hinstance,
+            hCursor: cursor,
+            lpszClassName: PREVIEW_CLASS,
+            ..Default::default()
+        };
+        if RegisterClassExW(&preview_class) == 0 {
             return Err(windows::core::Error::from_thread());
         }
 

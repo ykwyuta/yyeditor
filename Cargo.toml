@@ -11,6 +11,7 @@ members = [
     "crates/yy-core",
     "crates/yy-layout",
     "crates/yy-syntax",
+    "crates/yy-preview",
     "crates/yy-win",
     "apps/yyeditor",
     "tools/gen-bigfile",
@@ -35,6 +36,7 @@ yy-delimited = { path = "crates/yy-delimited" }
 yy-core = { path = "crates/yy-core" }
 yy-layout = { path = "crates/yy-layout" }
 yy-syntax = { path = "crates/yy-syntax" }
+yy-preview = { path = "crates/yy-preview" }
 yy-win = { path = "crates/yy-win" }
 
 encoding_rs = "0.8.42"
@@ -50,6 +52,9 @@ unicode-width = "0.2"
 unicode-normalization = "0.1"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+miniz_oxide = "0.9.1"
+webview2-com = "0.39.1"
 thiserror = "2"
 proptest = "1"
 criterion = "0.8"

@@ -1,0 +1,19 @@
+[package]
+name = "yy-preview"
+description = "Markdown / HTML preview for yyeditor: Markdown to HTML, page template, bundled mermaid and KaTeX"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+yy-syntax.workspace = true
+pulldown-cmark.workspace = true
+miniz_oxide.workspace = true
+
+[dev-dependencies]
+yy-syntax.workspace = true
+
+[lints]
+workspace = true

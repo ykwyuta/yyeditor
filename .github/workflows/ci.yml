@@ -23,6 +23,17 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: WebView2 runtime
+        shell: pwsh
+        run: |
+          $key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          if (-not (Test-Path $key)) {
+            Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile webview2-setup.exe
+            Start-Process -FilePath .\webview2-setup.exe -ArgumentList '/silent','/install' -Wait
+          }
+          Get-ItemProperty $key -ErrorAction SilentlyContinue | Select-Object pv
+          # プレビューのテストで WebView2 を必須にする
+          "YY_REQUIRE_WEBVIEW2=1" >> $env:GITHUB_ENV
       - name: test
         run: cargo test --workspace
       - name: build release

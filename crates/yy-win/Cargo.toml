@@ -16,6 +16,8 @@ yy-jobs.workspace = true
 yy-layout.workspace = true
 yy-delimited.workspace = true
 yy-syntax.workspace = true
+yy-preview.workspace = true
+webview2-com.workspace = true
 crossbeam-channel.workspace = true
 windows-numerics.workspace = true
 

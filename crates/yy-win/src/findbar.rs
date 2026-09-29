@@ -26,6 +26,9 @@ pub(crate) const ID_REGEX: u16 = 527;
 pub(crate) const ID_IN_SELECTION: u16 = 528;
 pub(crate) const ID_PATTERN: u16 = 529;
 pub(crate) const ID_REPLACEMENT: u16 = 530;
+pub(crate) const ID_TOGGLE_REPLACE: u16 = 531;
+pub(crate) const ID_SELECT_MATCHES: u16 = 532;
+pub(crate) const ID_GREP_BTN: u16 = 533;
 
 /// 1 行の高さ・余白などの基準（96 DPI でのピクセル）
 const ROW: i32 = 26;
@@ -46,6 +49,10 @@ pub(crate) struct FindBar {
     close: HWND,
     replace: HWND,
     replace_all: HWND,
+    /// 下の行: メニューの中にある検索の機能のボタン
+    toggle_replace: HWND,
+    select_matches: HWND,
+    grep: HWND,
     font: HFONT,
     dpi: u32,
     pub visible: bool,
@@ -127,6 +134,27 @@ impl FindBar {
                     none,
                     ID_REPLACE_ALL_BTN,
                 )?,
+                toggle_replace: child(
+                    w!("BUTTON"),
+                    w!("置換を表示 ▼"),
+                    button,
+                    none,
+                    ID_TOGGLE_REPLACE,
+                )?,
+                select_matches: child(
+                    w!("BUTTON"),
+                    w!("一致箇所をすべて選択"),
+                    button,
+                    none,
+                    ID_SELECT_MATCHES,
+                )?,
+                grep: child(
+                    w!("BUTTON"),
+                    w!("フォルダ内を検索 (Grep)..."),
+                    button,
+                    none,
+                    ID_GREP_BTN,
+                )?,
                 font: create_font(dpi),
                 dpi,
                 visible: false,
@@ -137,7 +165,7 @@ impl FindBar {
         }
     }
 
-    fn controls(&self) -> [HWND; 13] {
+    fn controls(&self) -> [HWND; 16] {
         [
             self.label_find,
             self.pattern,
@@ -152,6 +180,9 @@ impl FindBar {
             self.replacement,
             self.replace,
             self.replace_all,
+            self.toggle_replace,
+            self.select_matches,
+            self.grep,
         ]
     }
 
@@ -186,7 +217,8 @@ impl FindBar {
         if !self.visible {
             return 0;
         }
-        let rows = if self.replace_mode { 2 } else { 1 };
+        // 検索の行、置換の行（置換のときだけ）、ボタンの行
+        let rows = if self.replace_mode { 3 } else { 2 };
         scale(ROW * rows + PAD * 2, self.dpi)
     }
 
@@ -224,6 +256,22 @@ impl FindBar {
             let mut x = buttons_x;
             place(self.replace, &mut x, y2, s(64));
             place(self.replace_all, &mut x, y2, s(90));
+            // ボタンの行（検索欄の下にそろえる）
+            let y3 = if self.replace_mode {
+                s(PAD + ROW * 2)
+            } else {
+                y2
+            };
+            let mut x = s(PAD) + label_w;
+            place(self.toggle_replace, &mut x, y3, s(110));
+            place(self.select_matches, &mut x, y3, s(150));
+            place(self.grep, &mut x, y3, s(180));
+            let label = if self.replace_mode {
+                w!("置換を隠す ▲")
+            } else {
+                w!("置換を表示 ▼")
+            };
+            let _ = SetWindowTextW(self.toggle_replace, label);
             let show = if self.replace_mode { SW_SHOW } else { SW_HIDE };
             for c in [
                 self.label_replace,
@@ -248,6 +296,19 @@ impl FindBar {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             let _ = SetFocus(Some(self.pattern));
             SendMessageW(self.pattern, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+        }
+    }
+
+    /// 置換の行の表示を切り替える。表示したら置換欄にフォーカスを移す。
+    pub(crate) fn toggle_replace(&mut self) {
+        self.replace_mode = !self.replace_mode;
+        unsafe {
+            let target = if self.replace_mode {
+                self.replacement
+            } else {
+                self.pattern
+            };
+            let _ = SetFocus(Some(target));
         }
     }
 

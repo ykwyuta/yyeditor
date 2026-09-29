@@ -41,7 +41,11 @@ use yy_layout::{
 
 mod csvmode;
 mod hexmode;
+mod previewmode;
 mod syntaxmode;
+
+use previewmode::ID_PREVIEW;
+pub(crate) use previewmode::translate_preview_shortcut;
 
 use crate::findbar::{self, FindBar};
 use crate::render::{Composition, Frame, RectPaint, Renderer};
@@ -98,6 +102,8 @@ const ID_FIND_INCREMENTAL: u16 = 510;
 const ID_GREP: u16 = 511;
 const ID_TAG_JUMP: u16 = 512;
 const ID_SELECT_SEARCH_MATCHES: u16 = 513;
+/// 検索バーの置換の行の表示を切り替える
+const ID_FIND_TOGGLE_REPLACE: u16 = 515;
 /// 「文字コードを指定して開き直す」の各項目（`Encoding::all()` の順）
 const ID_REOPEN_BASE: u16 = 600;
 
@@ -106,6 +112,8 @@ const ID_TABS: i32 = 1001;
 const TIMER_BLINK: usize = 1;
 /// 保存の進捗をステータスバーに表示する
 const TIMER_PROGRESS: usize = 2;
+/// 編集後にプレビューを更新する
+const TIMER_PREVIEW: usize = 3;
 
 /// ワーカースレッドから行数カウントの進捗を知らせるメッセージ
 const WM_APP_INDEX: u32 = WM_APP + 1;
@@ -253,6 +261,8 @@ pub(crate) struct App {
     hex: Option<HexState>,
     /// タブ・ステータスバーの文字のフォント（メニューと同じ Windows のフォント）
     ui_font: windows::Win32::Graphics::Gdi::HFONT,
+    /// Markdown・HTML のプレビュー（右側）
+    preview: previewmode::PreviewPane,
 }
 
 /// 非表示タブの文書と表示位置。検索条件と表示設定はウィンドウ全体で共有する。
@@ -370,6 +380,7 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
         (ctrl, b'X' as u16, ID_CUT),
         (ctrl, b'C' as u16, ID_COPY),
         (ctrl, b'V' as u16, ID_PASTE),
+        (ctrl_shift, b'V' as u16, ID_PREVIEW),
         (ctrl, b'A' as u16, ID_SELECT_ALL),
         (ctrl, b'D' as u16, ID_SELECT_NEXT),
         (ctrl_shift, b'L' as u16, ID_SELECT_ALL_OCCURRENCES),
@@ -492,6 +503,7 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             ID_LINE_NUMBERS as usize,
             w!("行番号(&L)"),
         )?;
+        item(view, ID_PREVIEW, w!("プレビュー(&P)\tCtrl+Shift+V"))?;
         item(view, ID_WHITESPACE, w!("空白・タブ・改行を表示(&W)"))?;
         item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
         item(view, ID_HEX_MODE, w!("16 進数表示(&X)\tCtrl+Shift+X"))?;
@@ -695,6 +707,7 @@ impl App {
                 bracket_cache: None,
                 hex: None,
                 ui_font: crate::util::ui_font(dpi),
+                preview: Default::default(),
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
             with_app(|a| {
@@ -853,11 +866,14 @@ impl App {
             let w = rc.right - rc.left;
             let tab_h = (32 * GetDpiForWindow(self.frame) as i32 / 96).max(24);
             let _ = MoveWindow(self.tabbar, 0, 0, w, tab_h, true);
+            // プレビューを表示していれば右側に置き、エディタ（検索バーを含む）はその左
+            let body_h = (rc.bottom - rc.top - sh - tab_h).max(0);
+            let ew = self.layout_preview(w, tab_h, body_h);
             let bar_h = self.findbar.height();
-            self.findbar.layout(w);
-            let _ = MoveWindow(self.findbar.hwnd, 0, tab_h, w, bar_h, true);
-            let h = (rc.bottom - rc.top - sh - tab_h - bar_h).max(0);
-            let _ = MoveWindow(self.view, 0, tab_h + bar_h, w, h, true);
+            self.findbar.layout(ew);
+            let _ = MoveWindow(self.findbar.hwnd, 0, tab_h, ew, bar_h, true);
+            let h = (body_h - bar_h).max(0);
+            let _ = MoveWindow(self.view, 0, tab_h + bar_h, ew, h, true);
             // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗
             // 最後の -1 は「右端まで」（0 にすると進捗の欄が見えなくなる）
             let mut parts = [w - 850, w - 740, w - 480, w - 310, w - 250, -1];
@@ -1133,6 +1149,7 @@ impl App {
         self.update_scrollbars();
         self.update_status();
         self.invalidate();
+        self.sync_preview_scroll();
     }
 
     fn scroll_rows(&mut self, delta: i64) {
@@ -1380,6 +1397,7 @@ impl App {
         }
         self.after_move();
         self.update_title();
+        self.schedule_preview();
     }
 
     /// 行 `rows` 行分上下に移動した位置と、その水平位置。
@@ -2269,6 +2287,7 @@ impl App {
         self.renderer.clear_cache();
         self.update_title();
         self.after_move();
+        self.refresh_preview();
     }
 
     fn take_active_tab(&mut self) -> TabState {
@@ -2329,6 +2348,7 @@ impl App {
                 let _ = PostMessageW(Some(self.frame), WM_APP_INDEX, WPARAM(0), LPARAM(0));
             }
         }
+        self.refresh_preview();
     }
 
     fn switch_tab(&mut self, index: usize) {
@@ -2511,6 +2531,7 @@ impl App {
             self.syntax_for_path();
             self.update_title();
             self.after_move();
+            self.refresh_preview();
         }
         self.save_done = Some((self.save_flow.take(), done));
     }
@@ -3952,7 +3973,10 @@ fn on_command(hwnd: HWND, id: u16) {
             with_app(|a| a.goto_bracket());
         }
         id if (ID_SYNTAX_NONE..ID_SYNTAX_BASE + 150).contains(&id) => {
-            with_app(|a| a.choose_syntax(id));
+            with_app(|a| {
+                a.choose_syntax(id);
+                a.refresh_preview();
+            });
         }
         ID_DIFF => {
             let Some((count, active)) = with_app(|a| (a.tabs.len(), a.active_tab)) else {
@@ -4095,7 +4119,17 @@ fn on_command(hwnd: HWND, id: u16) {
             }
         }
         ID_SELECT_SEARCH_MATCHES => {
-            if let Some((n, true)) = with_app(|a| a.select_search_matches()) {
+            let result = with_app(|a| {
+                let r = a.select_search_matches();
+                // 検索バーから選んだら、続けて入力できるように本文へフォーカスを移す
+                if a.findbar.has_focus() {
+                    unsafe {
+                        let _ = SetFocus(Some(a.view));
+                    }
+                }
+                r
+            });
+            if let Some((n, true)) = result {
                 info_box(
                     hwnd,
                     &format!(
@@ -4122,6 +4156,13 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_FIND_CLOSE => {
             with_app(|a| a.close_findbar());
+        }
+        ID_FIND_TOGGLE_REPLACE => {
+            with_app(|a| {
+                a.findbar.toggle_replace();
+                a.layout_children();
+                a.invalidate();
+            });
         }
         ID_FIND_CHANGED => {
             with_app(|a| {
@@ -4234,6 +4275,11 @@ fn on_command(hwnd: HWND, id: u16) {
                 a.after_scroll();
             });
         }
+        ID_PREVIEW => {
+            if let Some(Err(msg)) = with_app(|a| a.toggle_preview()) {
+                error_box(hwnd, &format!("プレビューを表示できません。\n{msg}"));
+            }
+        }
         ID_WHITESPACE => {
             with_app(|a| {
                 a.show_whitespace = !a.show_whitespace;
@@ -4304,6 +4350,9 @@ pub(crate) extern "system" fn findbar_proc(
                 findbar::ID_FIND_CLOSE_BTN => Some(ID_FIND_CLOSE),
                 findbar::ID_REPLACE_BTN => Some(ID_REPLACE_ONE),
                 findbar::ID_REPLACE_ALL_BTN => Some(ID_REPLACE_ALL),
+                findbar::ID_TOGGLE_REPLACE => Some(ID_FIND_TOGGLE_REPLACE),
+                findbar::ID_SELECT_MATCHES => Some(ID_SELECT_SEARCH_MATCHES),
+                findbar::ID_GREP_BTN => Some(ID_GREP),
                 findbar::ID_CASE | findbar::ID_WORD | findbar::ID_REGEX => Some(ID_FIND_CHANGED),
                 findbar::ID_PATTERN if code == EN_CHANGE => Some(ID_FIND_INCREMENTAL),
                 _ => None,
@@ -4407,6 +4456,57 @@ pub(crate) extern "system" fn frame_proc(
         WM_DROPFILES => {
             for p in dropped_files(HDROP(wparam.0 as *mut _)) {
                 open_path(hwnd, p, None, false);
+            }
+            LRESULT(0)
+        }
+        crate::preview::WM_APP_PREVIEW_OPEN => {
+            // プレビューのリンクから文書を開く
+            let path = unsafe { Box::from_raw(lparam.0 as *mut PathBuf) };
+            open_path(hwnd, *path, None, false);
+            LRESULT(0)
+        }
+        WM_SETCURSOR if loword(lparam.0 as usize) == HTCLIENT => {
+            let on = unsafe {
+                let mut pt = windows::Win32::Foundation::POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt);
+                with_app(|a| a.on_preview_splitter(pt.x, pt.y)).unwrap_or(false)
+            };
+            if on {
+                unsafe {
+                    SetCursor(LoadCursorW(None, IDC_SIZEWE).ok());
+                }
+                LRESULT(1)
+            } else {
+                default_proc(hwnd, msg, wparam, lparam)
+            }
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = point_of(lparam);
+            if with_app(|a| a.on_preview_splitter(x, y)) == Some(true) {
+                with_app(|a| a.preview.dragging = true);
+                unsafe {
+                    SetCapture(hwnd);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let (x, _) = point_of(lparam);
+            with_app(|a| {
+                if a.preview.dragging {
+                    a.drag_preview_splitter(x);
+                }
+            });
+            LRESULT(0)
+        }
+        WM_LBUTTONUP | WM_CAPTURECHANGED => {
+            if with_app(|a| std::mem::take(&mut a.preview.dragging)) == Some(true)
+                && msg == WM_LBUTTONUP
+            {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
             }
             LRESULT(0)
         }
@@ -4550,6 +4650,10 @@ pub(crate) extern "system" fn view_proc(
                 a.drag = None;
                 a.invalidate();
             });
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_PREVIEW => {
+            with_app(|a| a.refresh_preview());
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_PROGRESS => {
