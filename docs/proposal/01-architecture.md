@@ -57,7 +57,6 @@ yyeditor/
 │  │  └─ src/{lib.rs, document.rs, selection.rs, rect.rs, edit.rs, history.rs, commands/...}
 │  ├─ yy-search/              # 正規表現検索・置換（チャンク検索、全置換ストリーミング）
 │  ├─ yy-delimited/           # 区切り文字/CSV 解析、レコードインデックス、列幅計算、列操作
-│  ├─ yy-backup/              # 自動バックアップ（ジャーナル）、クラッシュ復元
 │  ├─ yy-syntax/              # シンタックスハイライト（定義ファイル、状態機械、状態チェックポイント）
 │  │  └─ syntax/              # 組み込みのハイライト定義（TOML、exe に埋め込み）
 │  ├─ yy-layout/              # 表示用レイアウト計算（折り返し、表示列、仮想行）。描画 API 非依存
@@ -110,7 +109,7 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-panic = "unwind"   # パニック時に緊急バックアップを書き出すため unwind を維持
+panic = "unwind"   # パニック時にも Drop（一時ファイルの削除など）が走るよう unwind を維持
 ```
 
 - ターゲット: `x86_64-pc-windows-msvc`（主）、`aarch64-pc-windows-msvc`（副）。
@@ -177,7 +176,6 @@ pub struct Document {
 | Undo/Redo | 編集前のスナップショットを保存するだけ |
 | バックグラウンド保存 | 保存開始時点のスナップショットを書き出す（保存中も編集可能） |
 | 検索・全置換 | 検索開始時点のスナップショットを走査 |
-| 自動バックアップ | 任意時点のスナップショットをジャーナル化 |
 | CSV 再解析 | 解析対象スナップショットと generation を紐付け |
 
 ### 4.4 設定とファイルタイプ

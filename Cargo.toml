@@ -62,7 +62,7 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-# パニック時に緊急バックアップを書き出すため unwind を維持する（提案書 01 章 3.2）
+# パニック時にも Drop（一時ファイルの削除など）が走るよう unwind を維持する
 panic = "unwind"
 
 [profile.dev.package."*"]
