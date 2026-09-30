@@ -39,6 +39,7 @@ use yy_layout::{
     row_containing, rows_from,
 };
 
+mod codemode;
 mod csvmode;
 mod hexmode;
 mod previewmode;
@@ -51,6 +52,7 @@ use crate::findbar::{self, FindBar};
 use crate::render::{Composition, Frame, RectPaint, Renderer};
 use crate::util::{Context, error_box, group_digits, human_size, info_box, wide};
 use crate::{FRAME_CLASS, VIEW_CLASS, clipboard, default_proc, hiword, ime, loword};
+use codemode::*;
 use csvmode::*;
 use hexmode::*;
 use syntaxmode::*;
@@ -89,6 +91,15 @@ const ID_RECT_TO_CARETS: u16 = 409;
 const ID_SELECT_NEXT: u16 = 410;
 const ID_SELECT_ALL_OCCURRENCES: u16 = 411;
 const ID_CARETS_AT_LINE_ENDS: u16 = 412;
+// 選択範囲の変換（編集メニューの「変換」）と重複行の削除
+const ID_TO_UPPER: u16 = 420;
+const ID_TO_LOWER: u16 = 421;
+const ID_TO_FULL_KANA: u16 = 422;
+const ID_TO_HALF_KANA: u16 = 423;
+const ID_TO_CAMEL: u16 = 424;
+const ID_TO_SNAKE: u16 = 425;
+const ID_TO_KEBAB: u16 = 426;
+const ID_DEDUP_LINES: u16 = 427;
 const ID_FIND: u16 = 501;
 const ID_REPLACE: u16 = 502;
 const ID_FIND_NEXT: u16 = 503;
@@ -237,6 +248,8 @@ pub(crate) struct App {
     csv: Option<CsvState>,
     /// バックグラウンドで実行中のレコードの書き直し（完了時の後処理用）
     pending_record_op: Option<yy_core::csv::RecordOp>,
+    /// バックグラウンドで重複行を削除中（完了時のメッセージ用）
+    pending_dedup: bool,
     grep_job: Option<GrepJob>,
     /// 表示行のキャッシュ（長い行の表示テキストを作り直さないように）
     row_cache: RefCell<RowCache>,
@@ -262,6 +275,8 @@ pub(crate) struct App {
     bracket_cache: Option<BracketCache>,
     /// 16 進数（バイナリ）表示
     hex: Option<HexState>,
+    /// コード値表示
+    code: Option<CodeState>,
     /// タブ・ステータスバーの文字のフォント（メニューと同じ Windows のフォント）
     ui_font: windows::Win32::Graphics::Gdi::HFONT,
     /// Markdown・HTML のプレビュー（右側）
@@ -277,6 +292,7 @@ struct TabState {
     rect: Option<RectSelection>,
     csv: Option<CsvState>,
     pending_record_op: Option<yy_core::csv::RecordOp>,
+    pending_dedup: bool,
     save_flow: Option<SaveFlow>,
     save_after_convert: Option<SaveFlow>,
     warned_noncanonical: bool,
@@ -284,6 +300,7 @@ struct TabState {
     syntax: Option<SyntaxState>,
     syntax_off: bool,
     hex: Option<HexState>,
+    code: Option<CodeState>,
 }
 
 impl TabState {
@@ -296,6 +313,7 @@ impl TabState {
             rect: None,
             csv: None,
             pending_record_op: None,
+            pending_dedup: false,
             save_flow: None,
             save_after_convert: None,
             warned_noncanonical: false,
@@ -303,6 +321,7 @@ impl TabState {
             syntax: None,
             syntax_off: false,
             hex: None,
+            code: None,
         }
     }
 }
@@ -385,6 +404,8 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
         (ctrl, b'V' as u16, ID_PASTE),
         (ctrl_shift, b'V' as u16, ID_PREVIEW),
         (ctrl, b'A' as u16, ID_SELECT_ALL),
+        (ctrl_shift, b'U' as u16, ID_TO_UPPER),
+        (ctrl, b'U' as u16, ID_TO_LOWER),
         (ctrl, b'D' as u16, ID_SELECT_NEXT),
         (ctrl_shift, b'L' as u16, ID_SELECT_ALL_OCCURRENCES),
         (ctrl_shift, b'M' as u16, ID_SELECT_SEARCH_MATCHES),
@@ -395,6 +416,7 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
         ),
         (ctrl, b'G' as u16, ID_GOTO),
         (ctrl_shift, b'X' as u16, ID_HEX_MODE),
+        (ctrl_shift, b'K' as u16, ID_CODE_MODE),
         (ctrl, VK_OEM_2.0, ID_TOGGLE_COMMENT),
         (ctrl, VK_DIVIDE.0, ID_TOGGLE_COMMENT),
         (ctrl, VK_OEM_6.0, ID_GOTO_BRACKET),
@@ -493,6 +515,26 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         item(edit, ID_RECT_TO_CARETS, w!("矩形選択をカーソルに変換"))?;
         sep(edit)?;
         item(edit, ID_TOGGLE_COMMENT, w!("コメント化 / 解除(&M)\tCtrl+/"))?;
+        let convert = CreatePopupMenu()?;
+        item(convert, ID_TO_UPPER, w!("大文字に(&U)\tCtrl+Shift+U"))?;
+        item(convert, ID_TO_LOWER, w!("小文字に(&L)\tCtrl+U"))?;
+        sep(convert)?;
+        item(convert, ID_TO_FULL_KANA, w!("全角カタカナに(&Z)"))?;
+        item(convert, ID_TO_HALF_KANA, w!("半角カタカナに(&H)"))?;
+        sep(convert)?;
+        item(
+            convert,
+            ID_TO_CAMEL,
+            w!("キャメルケースに（camelCase）(&C)"),
+        )?;
+        item(
+            convert,
+            ID_TO_SNAKE,
+            w!("スネークケースに（snake_case）(&S)"),
+        )?;
+        item(convert, ID_TO_KEBAB, w!("ケバブケースに（kebab-case）(&K)"))?;
+        AppendMenuW(edit, MF_POPUP, convert.0 as usize, w!("変換(&V)"))?;
+        item(edit, ID_DEDUP_LINES, w!("重複行を削除(&L)"))?;
 
         let view = CreatePopupMenu()?;
         item(view, ID_GOTO, w!("行へ移動(&G)...\tCtrl+G"))?;
@@ -511,6 +553,13 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         item(view, ID_WHITESPACE, w!("空白・タブ・改行を表示(&W)"))?;
         item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
         item(view, ID_HEX_MODE, w!("16 進数表示(&X)\tCtrl+Shift+X"))?;
+        item(view, ID_CODE_MODE, w!("コード値表示(&K)\tCtrl+Shift+K"))?;
+        AppendMenuW(
+            view,
+            MF_POPUP,
+            hexmode::create_charset_menu()?.0 as usize,
+            w!("16 進数表示の文字の欄の文字コード(&E)"),
+        )?;
         sep(view)?;
         item(view, ID_DIFF, w!("開いているファイルを比較..."))?;
 
@@ -697,6 +746,7 @@ impl App {
                 status_msg: String::new(),
                 csv: None,
                 pending_record_op: None,
+                pending_dedup: false,
                 grep_job: None,
                 row_cache: RefCell::new(RowCache::default()),
                 grep_done: None,
@@ -714,6 +764,7 @@ impl App {
                 syntax_off: false,
                 bracket_cache: None,
                 hex: None,
+                code: None,
                 ui_font: crate::util::ui_font(dpi),
                 preview: Default::default(),
             };
@@ -882,11 +933,21 @@ impl App {
             let _ = MoveWindow(self.findbar.hwnd, 0, tab_h, ew, bar_h, true);
             let h = (body_h - bar_h).max(0);
             let _ = MoveWindow(self.view, 0, tab_h + bar_h, ew, h, true);
-            // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗
+            // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗・メッセージ・コード値
             // 最後の -1 は「右端まで」（0 にすると進捗の欄が見えなくなる）
-            let mut parts = [w - 850, w - 740, w - 480, w - 310, w - 250, -1];
-            for x in &mut parts[..5] {
-                *x = (*x).max(0);
+            let dpi = GetDpiForWindow(self.frame).max(96) as i32;
+            let px = |v: i32| v * dpi / 96;
+            let fixed = [px(100), px(210), px(150), px(90)];
+            // 最後の欄はコード値（10 文字）が入る幅を優先し、位置の欄は 170 以上
+            let rest = w - fixed.iter().sum::<i32>();
+            let last = px(420).min((rest - px(170)).max(px(160)));
+            let pos = (rest - last).max(0);
+            let mut parts = [0, 0, 0, 0, 0, -1];
+            let mut x = pos;
+            parts[0] = x;
+            for (i, f) in fixed.iter().enumerate() {
+                x += f;
+                parts[i + 1] = x.max(0);
             }
             SendMessageW(
                 self.status,
@@ -995,6 +1056,8 @@ impl App {
         }
         if self.hex.is_some() {
             text = self.hex_status();
+        } else if self.code.is_some() {
+            text += &self.code_status();
         }
         self.set_status(0, &text);
         self.set_status(1, &format!("  {}", human_size(snap.len())));
@@ -1018,11 +1081,18 @@ impl App {
             .unwrap_or_default();
         if self.hex.is_some() {
             self.set_status(3, "  16 進数");
+        } else if self.code.is_some() {
+            self.set_status(3, &format!("  {}  コード値", self.doc.eol().label()));
         } else {
             self.set_status(3, &format!("  {}{syntax}", self.doc.eol().label()));
         }
-        let overwrite = self.hex.map_or(self.overwrite, |h| h.overwrite);
-        let mode = match (overwrite, self.rect_mode && self.hex.is_none()) {
+        let overwrite = match (self.hex, self.code) {
+            (Some(h), _) => h.overwrite,
+            (_, Some(c)) => c.overwrite,
+            _ => self.overwrite,
+        };
+        let special = self.hex.is_some() || self.code.is_some();
+        let mode = match (overwrite, self.rect_mode && !special) {
             (false, false) => "  挿入",
             (true, false) => "  上書き",
             (false, true) => "  挿入 / 矩形",
@@ -1066,6 +1136,9 @@ impl App {
             ),
             _ => {
                 let mut m = format!("  {}", self.status_msg);
+                if self.status_msg.is_empty() && self.hex.is_none() {
+                    m += &self.code_values();
+                }
                 if self.findbar.visible
                     && let Some((n, v)) = self.match_count
                     && v == self.doc.version()
@@ -1078,9 +1151,127 @@ impl App {
         self.set_status(5, &progress);
     }
 
+    /// 選択した文字列のコード値（先頭 10 文字まで）。Unicode の文字コードの文書では符号位置、
+    /// それ以外ではその文字コードでの値。選択がなければ空。
+    fn code_values(&self) -> String {
+        const MAX_CHARS: usize = 10;
+        let sel = self.doc.selections().primary();
+        if sel.is_empty() || self.rect.is_some() {
+            return String::new();
+        }
+        let r = sel.range();
+        let bytes = self
+            .doc
+            .snapshot()
+            .read(r.start..r.end.min(r.start + 4 * MAX_CHARS as u64 + 4));
+        let enc = self.doc.encoding();
+        let unicode = enc.is_unicode();
+        let mut parts = Vec::new();
+        let mut more = r.end - r.start > bytes.len() as u64;
+        'outer: for chunk in bytes.utf8_chunks() {
+            let items = chunk
+                .valid()
+                .chars()
+                .map(Ok)
+                .chain(chunk.invalid().iter().map(|&b| Err(b)));
+            for item in items {
+                if parts.len() == MAX_CHARS {
+                    more = true;
+                    break 'outer;
+                }
+                parts.push(match item {
+                    // 読み込み時に不正だったバイト（エスケープ文字）・UTF-8 として不正なバイト
+                    Err(b) => format!("\\x{b:02X}"),
+                    Ok(c) => match yy_encoding::unescape_char(c) {
+                        Some(b) if unicode => format!("\\x{b:02X}"),
+                        Some(b) => format!("{b:02X}"),
+                        None if unicode => format!("{:04X}", c as u32),
+                        None => {
+                            let mut buf = [0u8; 4];
+                            match yy_encoding::encode_all(
+                                enc,
+                                c.encode_utf8(&mut buf).as_bytes(),
+                                yy_encoding::EscapeMode::Literal,
+                            ) {
+                                Ok(b) if !b.is_empty() => {
+                                    b.iter().map(|x| format!("{x:02X}")).collect::<String>()
+                                }
+                                _ => "?".to_owned(),
+                            }
+                        }
+                    },
+                });
+            }
+        }
+        if parts.is_empty() {
+            return String::new();
+        }
+        // 幅を節約するため、U+ や文字コード名は先頭に 1 回だけ書く
+        let prefix = if unicode {
+            "U+".to_owned()
+        } else {
+            enc.name().to_owned()
+        };
+        format!(
+            "コード値 ({prefix}) {}{}",
+            parts.join(" "),
+            if more { " …" } else { "" }
+        )
+    }
+
+    /// 選択範囲（空なら単語）の文字列を変換する。
+    fn transform_selection(&mut self, t: yy_core::transform::Transform) {
+        if self.hex.is_some() || self.code.is_some() || self.rect.is_some() {
+            self.status_msg = if self.hex.is_some() {
+                "16 進数表示では使えません".into()
+            } else if self.code.is_some() {
+                "コード値表示では使えません".into()
+            } else {
+                "矩形選択では使えません（「矩形選択をカーソルに変換」してから使ってください）"
+                    .into()
+            };
+            self.update_status();
+            return;
+        }
+        if self.doc.transform_selections(t) {
+            self.after_edit();
+        }
+    }
+
+    /// 重複する行を削除する（選択範囲の行、なければ文書全体）。
+    fn dedup_lines(&mut self) {
+        if self.hex.is_some() || self.code.is_some() {
+            return;
+        }
+        let n = self.notifier();
+        match self.doc.dedup_lines(&self.pool, n) {
+            Ok(Some(removed)) => {
+                self.status_msg = if removed == 0 {
+                    "重複する行はありません".into()
+                } else {
+                    format!("重複する {} 行を削除しました", group_digits(removed))
+                };
+                self.after_edit();
+            }
+            Ok(None) => {
+                self.pending_dedup = true;
+                self.update_status();
+                self.invalidate();
+            }
+            Err(e) => {
+                self.status_msg = format!("重複行を削除できませんでした: {e}");
+                self.update_status();
+            }
+        }
+    }
+
     fn update_scrollbars(&mut self) {
         if self.hex.is_some() {
             self.hex_update_scrollbars();
+            return;
+        }
+        if self.code.is_some() {
+            self.code_update_scrollbars();
             return;
         }
         let snap = self.doc.snapshot();
@@ -1165,6 +1356,10 @@ impl App {
             self.hex_scroll_rows(delta);
             return;
         }
+        if self.code.is_some() {
+            self.code_scroll_rows(delta);
+            return;
+        }
         let page = self.page_rows();
         if self
             .vp
@@ -1177,6 +1372,10 @@ impl App {
     fn scroll_to_offset(&mut self, offset: u64) {
         if self.hex.is_some() {
             self.hex_scroll_to(offset);
+            return;
+        }
+        if self.code.is_some() {
+            self.code_scroll_to(offset);
             return;
         }
         let page = self.page_rows();
@@ -1220,6 +1419,10 @@ impl App {
                 }
                 if self.hex.is_some() {
                     self.hex_scroll_to_fraction(si.nTrackPos);
+                    return;
+                }
+                if self.code.is_some() {
+                    self.code_scroll_to_fraction(si.nTrackPos);
                     return;
                 }
                 let snap = self.doc.snapshot().clone();
@@ -1368,6 +1571,10 @@ impl App {
             self.hex_ensure_visible();
             return;
         }
+        if self.code.is_some() {
+            self.code_ensure_visible();
+            return;
+        }
         self.sync_renderer();
         let head = self.doc.selections().primary().head;
         let page = self.page_rows();
@@ -1513,6 +1720,9 @@ impl App {
         if self.hex.is_some() {
             return self.hex_key(vk);
         }
+        if self.code.is_some() {
+            return self.code_key(vk);
+        }
         let ctrl = key_down(VK_CONTROL);
         let shift = key_down(VK_SHIFT);
         let alt = key_down(VK_MENU);
@@ -1633,6 +1843,10 @@ impl App {
     fn on_char(&mut self, code: u16) {
         if self.hex.is_some() {
             self.hex_char(code);
+            return;
+        }
+        if self.code.is_some() {
+            self.code_char(code);
             return;
         }
         // Ctrl+英字などは制御文字として届くので無視する（AltGr = Ctrl+Alt は通す）
@@ -2000,6 +2214,10 @@ impl App {
             self.hex_mouse_down(x, y);
             return;
         }
+        if self.code.is_some() {
+            self.code_mouse_down(x, y);
+            return;
+        }
         let shift = key_down(VK_SHIFT);
         let ctrl = key_down(VK_CONTROL);
         if !double && !ctrl && (key_down(VK_MENU) || self.rect_mode) {
@@ -2072,6 +2290,10 @@ impl App {
             self.hex_mouse_move(x, y);
             return;
         }
+        if self.code.is_some() {
+            self.code_mouse_move(x, y);
+            return;
+        }
         let Some(drag) = &self.drag else {
             return;
         };
@@ -2118,6 +2340,10 @@ impl App {
         if self.hex.is_some() {
             return;
         }
+        if self.code.is_some() {
+            self.code_ime_position();
+            return;
+        }
         self.sync_renderer();
         let head = self.doc.selections().primary().head;
         let page = self.page_rows();
@@ -2134,6 +2360,14 @@ impl App {
 
     fn on_composition(&mut self, update: ime::CompositionUpdate) {
         let mut edited = false;
+        if self.code.is_some() {
+            // コード値表示では変換中の文字列は表示せず、確定した文字列を入力する
+            self.composition = None;
+            if let Some(result) = update.result {
+                self.code_ime_result(&result);
+            }
+            return;
+        }
         if let Some(result) = update.result {
             self.composition = None;
             if self.rect.is_some() {
@@ -2177,6 +2411,10 @@ impl App {
     fn paint(&mut self) {
         if self.hex.is_some() {
             self.hex_paint();
+            return;
+        }
+        if self.code.is_some() {
+            self.code_paint();
             return;
         }
         // 区切り文字モード: 表示する行の列幅を先に測る（広がったら表示を作り直す）
@@ -2278,6 +2516,7 @@ impl App {
         self.status_msg.clear();
         self.csv = None;
         self.pending_record_op = None;
+        self.pending_dedup = false;
         self.vp = Viewport::default();
         self.rebuild_cells();
         self.update_csv_menu();
@@ -2286,6 +2525,7 @@ impl App {
         self.syntax_off = false;
         self.bracket_cache = None;
         self.hex = None;
+        self.code = None;
         self.update_hex_menu();
         self.syntax_for_path();
         let n = self.notifier();
@@ -2307,6 +2547,7 @@ impl App {
             rect: self.rect.take(),
             csv: self.csv.take(),
             pending_record_op: self.pending_record_op.take(),
+            pending_dedup: std::mem::take(&mut self.pending_dedup),
             save_flow: self.save_flow.take(),
             save_after_convert: self.save_after_convert.take(),
             warned_noncanonical: self.warned_noncanonical,
@@ -2314,6 +2555,7 @@ impl App {
             syntax: self.syntax.take(),
             syntax_off: self.syntax_off,
             hex: self.hex.take(),
+            code: self.code.take(),
         }
     }
 
@@ -2328,6 +2570,7 @@ impl App {
         self.rect = state.rect;
         self.csv = state.csv;
         self.pending_record_op = state.pending_record_op;
+        self.pending_dedup = state.pending_dedup;
         self.save_flow = state.save_flow;
         self.save_after_convert = state.save_after_convert;
         self.warned_noncanonical = state.warned_noncanonical;
@@ -2335,6 +2578,7 @@ impl App {
         self.syntax = state.syntax;
         self.syntax_off = state.syntax_off;
         self.hex = state.hex;
+        self.code = state.code;
         self.update_hex_menu();
         self.bracket_cache = None;
         self.find_job = None;
@@ -2477,7 +2721,7 @@ impl App {
         let doc =
             Document::open_with(&path, &opts).map_err(|e| format!("{}\n\n{e}", path.display()))?;
         self.add_document(doc);
-        self.set_hex(true);
+        self.set_hex(true, None);
         Ok(())
     }
 
@@ -2488,9 +2732,16 @@ impl App {
         } else {
             MF_UNCHECKED
         };
+        let code = if self.code.is_some() {
+            MF_CHECKED
+        } else {
+            MF_UNCHECKED
+        };
         unsafe {
             CheckMenuItem(self.menu_view, ID_HEX_MODE as u32, (MF_BYCOMMAND | flag).0);
+            CheckMenuItem(self.menu_view, ID_CODE_MODE as u32, (MF_BYCOMMAND | code).0);
         }
+        self.update_charset_menu();
     }
 
     fn reopen(&mut self, path: PathBuf, encoding: Encoding) -> std::result::Result<(), String> {
@@ -2606,6 +2857,9 @@ impl App {
                     (Some(Ok(n)), Some(op)) => {
                         self.status_msg = format!("{} レコードを書き換えました", group_digits(n));
                         self.after_record_op(op);
+                    }
+                    (Some(Ok(n)), None) if std::mem::take(&mut self.pending_dedup) => {
+                        self.status_msg = format!("重複する {} 行を削除しました", group_digits(n));
                     }
                     (Some(Ok(n)), None) => {
                         self.status_msg = format!("{} 個置換しました", group_digits(n));
@@ -4008,11 +4262,31 @@ fn on_command(hwnd: HWND, id: u16) {
                 a.switch_tab(next);
             });
         }
+        ID_TO_UPPER | ID_TO_LOWER | ID_TO_FULL_KANA | ID_TO_HALF_KANA | ID_TO_CAMEL
+        | ID_TO_SNAKE | ID_TO_KEBAB => {
+            use yy_core::transform::Transform;
+            let t = match id {
+                ID_TO_UPPER => Transform::Upper,
+                ID_TO_LOWER => Transform::Lower,
+                ID_TO_FULL_KANA => Transform::FullKatakana,
+                ID_TO_HALF_KANA => Transform::HalfKatakana,
+                ID_TO_CAMEL => Transform::Camel,
+                ID_TO_SNAKE => Transform::Snake,
+                _ => Transform::Kebab,
+            };
+            with_app(|a| a.transform_selection(t));
+        }
+        ID_DEDUP_LINES => {
+            with_app(|a| a.dedup_lines());
+        }
         ID_TOGGLE_COMMENT => {
             with_app(|a| a.toggle_comment());
         }
         ID_GOTO_BRACKET => {
             with_app(|a| a.goto_bracket());
+        }
+        id if hexmode::is_charset_command(id) => {
+            with_app(|a| a.set_hex_charset(id));
         }
         id if (ID_SYNTAX_NONE..ID_SYNTAX_BASE + 150).contains(&id) => {
             with_app(|a| {
@@ -4101,8 +4375,26 @@ fn on_command(hwnd: HWND, id: u16) {
         ID_DELETE if with_app(|a| a.hex.is_some()) == Some(true) => {
             with_app(|a| a.hex_delete(false));
         }
+        ID_CUT | ID_COPY if with_app(|a| a.code.is_some()) == Some(true) => {
+            if let Some(Some(text)) = with_app(|a| a.code_copy_text()) {
+                if !clipboard::set_text(hwnd, &text, false) {
+                    error_box(hwnd, "クリップボードにコピーできませんでした。");
+                } else if id == ID_CUT {
+                    with_app(|a| a.code_cut());
+                }
+            }
+        }
+        ID_PASTE if with_app(|a| a.code.is_some()) == Some(true) => {
+            if let Some((text, _)) = clipboard::get_text(hwnd) {
+                with_app(|a| a.code_paste(&text));
+            }
+        }
+        ID_DELETE if with_app(|a| a.code.is_some()) == Some(true) => {
+            with_app(|a| a.code_delete(false));
+        }
         ID_GOTO if with_app(|a| a.hex.is_some()) == Some(true) => cmd_hex_goto(hwnd),
         ID_HEX_MODE => cmd_toggle_hex(hwnd),
+        ID_CODE_MODE => cmd_toggle_code(hwnd),
         ID_OPEN_BINARY => {
             if let Some((paths, _)) = show_open_dialog(hwnd) {
                 cmd_open_binary(hwnd, paths);
@@ -4801,6 +5093,9 @@ pub(crate) extern "system" fn view_proc(
                 a.drag = None;
                 if let Some(h) = &mut a.hex {
                     h.drag_anchor = None;
+                }
+                if let Some(c) = &mut a.code {
+                    c.drag_anchor = None;
                 }
             });
             LRESULT(0)

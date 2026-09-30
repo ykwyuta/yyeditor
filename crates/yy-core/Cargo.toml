@@ -17,6 +17,7 @@ yy-io.workspace = true
 yy-jobs.workspace = true
 crossbeam-channel.workspace = true
 unicode-segmentation.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 yy-delimited.workspace = true
