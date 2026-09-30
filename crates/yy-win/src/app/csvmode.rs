@@ -445,3 +445,152 @@ impl App {
         Some(s)
     }
 }
+
+impl App {
+    /// 列見出し（A, B, …）の高さ（ピクセル）。区切り文字モードでなければ 0。
+    pub(crate) fn column_header_height(&self) -> i32 {
+        if self.csv.is_none() || self.hex.is_some() || self.code.is_some() {
+            return 0;
+        }
+        let lh = self.renderer.metrics().line_height;
+        (lh / self.renderer.px_to_dip(1.0)).ceil() as i32 + 2
+    }
+
+    /// 列見出しの高さが変わったら（区切り文字モードの切り替え・拡大など）配置し直す。
+    pub(crate) fn sync_column_header(&mut self) {
+        if self.column_header_height() != self.colhead_h {
+            self.layout_children();
+        }
+    }
+
+    /// 列見出しを描く。各列の上に Excel と同じ規則の列名を、列の幅の中央に表示する。
+    fn paint_column_header(&self, hdc: windows::Win32::Graphics::Gdi::HDC, rc: RECT) {
+        use windows::Win32::Graphics::Gdi::*;
+        let cref = |c: yy_config::Color| {
+            windows::Win32::Foundation::COLORREF(
+                c.r as u32 | (c.g as u32) << 8 | (c.b as u32) << 16,
+            )
+        };
+        let colors = &self.config.colors;
+        let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
+        unsafe {
+            let mem = CreateCompatibleDC(Some(hdc));
+            let bmp = CreateCompatibleBitmap(hdc, w, h);
+            let old_bmp = SelectObject(mem, bmp.into());
+            let old_font = SelectObject(mem, self.ui_font.into());
+            let fill = |r: &RECT, c: yy_config::Color| {
+                let b = CreateSolidBrush(cref(c));
+                FillRect(mem, r, b);
+                let _ = DeleteObject(b.into());
+            };
+            fill(&rc, colors.gutter_background);
+            SetBkMode(mem, TRANSPARENT);
+            SetTextColor(mem, cref(colors.line_number));
+            if let Some(cl) = self.rows_cfg.cells.clone() {
+                let scale = 1.0 / self.renderer.px_to_dip(1.0);
+                let cw = self.renderer.metrics().char_width;
+                let origin = self.text_origin_x();
+                let x_of = |dip: f32| ((origin + dip - self.scroll_x) * scale).round() as i32;
+                let left_edge = (origin * scale).round() as i32;
+                // 区切り文字（" │ "）は桁数の倍数の幅とは限らないので、実際の幅で位置を求める
+                let delim = self.renderer.text_width(yy_layout::cells::DELIM_TEXT);
+                let delim = if delim > 0.0 {
+                    delim
+                } else {
+                    cl.delim_cols() as f32 * cw
+                };
+                let current = self.caret_field();
+                // 最後の列（後ろに区切り文字がない）の幅は測っていないので、名前の分だけにする
+                let n = cl.widths.len() as u32 + 1;
+                let mut x0 = 0.0f32; // 列の左端（DIP）
+                for f in 0..n {
+                    let cols = match cl.widths.get(f as usize) {
+                        Some(&w) => w,
+                        None => yy_core::csv::column_name(f).len() as u32 + 2,
+                    };
+                    let x1 = x0 + cols as f32 * cw;
+                    // 区切り文字の中央を列の境界にする
+                    let left = if f == 0 {
+                        x_of(0.0) - 2
+                    } else {
+                        x_of(x0 - delim / 2.0)
+                    };
+                    let right = x_of(x1 + delim / 2.0);
+                    x0 = x1 + delim;
+                    if right < left_edge {
+                        continue;
+                    }
+                    if left > w {
+                        break;
+                    }
+                    let mut cell = RECT {
+                        left: left.max(left_edge),
+                        top: 0,
+                        right,
+                        bottom: h - 1,
+                    };
+                    if current == Some(f) {
+                        fill(&cell, colors.selection);
+                    }
+                    let mut name: Vec<u16> = yy_core::csv::column_name(f).encode_utf16().collect();
+                    DrawTextW(
+                        mem,
+                        &mut name,
+                        &mut cell,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                    );
+                    // 列の境界の縦線
+                    fill(
+                        &RECT {
+                            left: right,
+                            top: 2,
+                            right: right + 1,
+                            bottom: h - 3,
+                        },
+                        colors.line_number,
+                    );
+                }
+            }
+            // 下の境界線
+            fill(
+                &RECT {
+                    left: 0,
+                    top: h - 1,
+                    right: w,
+                    bottom: h,
+                },
+                colors.line_number,
+            );
+            let _ = BitBlt(hdc, 0, 0, w, h, Some(mem), 0, 0, SRCCOPY);
+            SelectObject(mem, old_font);
+            SelectObject(mem, old_bmp);
+            let _ = DeleteObject(bmp.into());
+            let _ = DeleteDC(mem);
+        }
+    }
+}
+
+/// 列見出しのウィンドウプロシージャ。
+pub(crate) extern "system" fn colhead_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    use windows::Win32::Graphics::Gdi::*;
+    match msg {
+        WM_PAINT => unsafe {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rc = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rc);
+            if with_app(|a| a.paint_column_header(hdc, rc)).is_none() {
+                FillRect(hdc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+            }
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        },
+        WM_ERASEBKGND => LRESULT(1),
+        _ => default_proc(hwnd, msg, wparam, lparam),
+    }
+}

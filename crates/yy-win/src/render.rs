@@ -775,6 +775,12 @@ impl Renderer {
         self.clear_cache();
     }
 
+    /// 文字列 `text` を本文のフォントで描いたときの幅（DIP）。
+    pub fn text_width(&self, text: &str) -> f32 {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        self.prefix_width(&wide)
+    }
+
     /// UTF-16 テキストの先頭 `len` 文字分の幅（ヒットテストが使えない環境向けの代替）。
     fn prefix_width(&self, wide: &[u16]) -> f32 {
         if wide.is_empty() {

@@ -43,6 +43,7 @@ pub(crate) const FRAME_CLASS: PCWSTR = w!("YYEditorFrame");
 pub(crate) const VIEW_CLASS: PCWSTR = w!("YYEditorView");
 pub(crate) const FINDBAR_CLASS: PCWSTR = w!("YYEditorFindBar");
 pub(crate) const PREVIEW_CLASS: PCWSTR = w!("YYEditorPreview");
+pub(crate) const COLHEAD_CLASS: PCWSTR = w!("YYEditorColumnHeader");
 pub(crate) const HELP_CLASS: PCWSTR = w!("YYEditorHelp");
 pub(crate) const DIFF_CLASS: PCWSTR = w!("YYEditorDiff");
 
@@ -147,6 +148,18 @@ fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>
             ..Default::default()
         };
         if RegisterClassExW(&bar_class) == 0 {
+            return Err(windows::core::Error::from_thread());
+        }
+
+        let colhead_class = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(app::colhead_proc),
+            hInstance: hinstance,
+            hCursor: cursor,
+            lpszClassName: COLHEAD_CLASS,
+            ..Default::default()
+        };
+        if RegisterClassExW(&colhead_class) == 0 {
             return Err(windows::core::Error::from_thread());
         }
 

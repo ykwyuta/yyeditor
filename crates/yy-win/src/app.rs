@@ -45,13 +45,14 @@ mod hexmode;
 mod previewmode;
 mod syntaxmode;
 
+pub(crate) use csvmode::colhead_proc;
 use previewmode::ID_PREVIEW;
 pub(crate) use previewmode::translate_preview_shortcut;
 
 use crate::findbar::{self, FindBar};
 use crate::render::{Composition, Frame, RectPaint, Renderer};
 use crate::util::{Context, error_box, group_digits, human_size, info_box, wide};
-use crate::{FRAME_CLASS, VIEW_CLASS, clipboard, default_proc, hiword, ime, loword};
+use crate::{COLHEAD_CLASS, FRAME_CLASS, VIEW_CLASS, clipboard, default_proc, hiword, ime, loword};
 use codemode::*;
 use csvmode::*;
 use hexmode::*;
@@ -277,6 +278,10 @@ pub(crate) struct App {
     hex: Option<HexState>,
     /// コード値表示
     code: Option<CodeState>,
+    /// 区切り文字モードの列見出し（A, B, …）
+    colhead: HWND,
+    /// 列見出しの高さ（ピクセル。表示していなければ 0）
+    colhead_h: i32,
     /// タブ・ステータスバーの文字のフォント（メニューと同じ Windows のフォント）
     ui_font: windows::Win32::Graphics::Gdi::HFONT,
     /// Markdown・HTML のプレビュー（右側）
@@ -654,6 +659,21 @@ impl App {
                 None,
             )
             .context("CreateWindowExW(view)")?;
+            let colhead = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                COLHEAD_CLASS,
+                None,
+                WS_CHILD,
+                0,
+                0,
+                0,
+                0,
+                Some(frame),
+                None,
+                Some(hinstance),
+                None,
+            )
+            .context("CreateWindowExW(colhead)")?;
             let tabbar = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 WC_TABCONTROLW,
@@ -765,6 +785,8 @@ impl App {
                 bracket_cache: None,
                 hex: None,
                 code: None,
+                colhead,
+                colhead_h: 0,
                 ui_font: crate::util::ui_font(dpi),
                 preview: Default::default(),
             };
@@ -868,6 +890,9 @@ impl App {
     fn invalidate(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.view), None, false);
+            if self.colhead_h > 0 {
+                let _ = InvalidateRect(Some(self.colhead), None, false);
+            }
         }
     }
 
@@ -931,8 +956,13 @@ impl App {
             let bar_h = self.findbar.height();
             self.findbar.layout(ew);
             let _ = MoveWindow(self.findbar.hwnd, 0, tab_h, ew, bar_h, true);
-            let h = (body_h - bar_h).max(0);
-            let _ = MoveWindow(self.view, 0, tab_h + bar_h, ew, h, true);
+            // 区切り文字モードでは列見出しを本文の上に置く
+            let head_h = self.column_header_height();
+            self.colhead_h = head_h;
+            let _ = MoveWindow(self.colhead, 0, tab_h + bar_h, ew, head_h, true);
+            let _ = ShowWindow(self.colhead, if head_h > 0 { SW_SHOWNA } else { SW_HIDE });
+            let h = (body_h - bar_h - head_h).max(0);
+            let _ = MoveWindow(self.view, 0, tab_h + bar_h + head_h, ew, h, true);
             // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗・メッセージ・コード値
             // 最後の -1 は「右端まで」（0 にすると進捗の欄が見えなくなる）
             let dpi = GetDpiForWindow(self.frame).max(96) as i32;
@@ -1593,6 +1623,7 @@ impl App {
 
     /// キャレットを動かした後の共通処理。
     fn after_move(&mut self) {
+        self.sync_column_header();
         self.reset_blink();
         self.ensure_caret_visible();
         self.update_scrollbars();
