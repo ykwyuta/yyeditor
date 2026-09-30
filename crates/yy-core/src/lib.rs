@@ -15,6 +15,7 @@ mod replace;
 mod selection;
 pub mod syntax;
 mod transcode;
+pub mod transform;
 
 use std::collections::HashMap;
 use std::io;
@@ -1442,6 +1443,112 @@ impl Document {
             Box::new(move |step| {
                 replace::produce(len, limit, &mut |w| {
                     csv::rewrite_records(&snap, dialect, op, w, step)
+                })
+            }),
+        ));
+        Ok(None)
+    }
+
+    /// 各選択範囲（空なら単語）の文字列を `t` で変換する（1 つの Undo 単位）。変換後の文字列を
+    /// 選択したままにする。文書に含まれる不正なバイトはそのまま残す。変更があれば `true`。
+    pub fn transform_selections(&mut self, t: transform::Transform) -> bool {
+        if self.is_busy() {
+            return false;
+        }
+        let snap = self.snapshot.clone();
+        let primary_head = self.sels.primary().head;
+        let mut ranges: Vec<Range<u64>> = self
+            .sels
+            .iter()
+            .map(|s| {
+                if s.is_empty() {
+                    motion::word_range(&snap, s.head)
+                } else {
+                    s.range()
+                }
+            })
+            .filter(|r| !r.is_empty())
+            .collect();
+        ranges.sort_by_key(|r| r.start);
+        let mut merged: Vec<Range<u64>> = Vec::new();
+        for r in ranges {
+            match merged.last_mut() {
+                Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+                _ => merged.push(r),
+            }
+        }
+        let mut changes = Vec::new();
+        let mut new_sels = Vec::new();
+        let mut delta: i128 = 0;
+        let mut primary = 0;
+        for r in &merged {
+            let old = snap.read(r.clone());
+            let mut new = Vec::with_capacity(old.len());
+            for chunk in old.utf8_chunks() {
+                new.extend_from_slice(t.apply(chunk.valid()).as_bytes());
+                new.extend_from_slice(chunk.invalid());
+            }
+            let start = (r.start as i128 + delta) as u64;
+            if r.contains(&primary_head) || r.end == primary_head {
+                primary = new_sels.len();
+            }
+            new_sels.push(Selection::new(start, start + new.len() as u64));
+            delta += new.len() as i128 - old.len() as i128;
+            if new != old {
+                changes.push(Change::replace_bytes(r.clone(), new));
+            }
+        }
+        if changes.is_empty() {
+            return false;
+        }
+        self.apply_changes(changes, EditKind::Other, |_| {
+            SelectionSet::from_vec(new_sels, primary)
+        })
+    }
+
+    /// 重複する行を除く（前に同じ内容の行があれば、その行を削除する。改行コードの違いは無視）。
+    /// 選択範囲があればそれを含む行の中で、なければ文書全体で。1 回の Undo で戻せる。
+    /// 小さな文書はその場で行って除いた行数を返し、大きな文書はバックグラウンドで始めて
+    /// `Ok(None)` を返す（[`Document::replace_all`] と同じ）。
+    pub fn dedup_lines(
+        &mut self,
+        pool: &JobPool,
+        notify: Notifier,
+    ) -> Result<Option<u64>, ReplaceError> {
+        if self.is_busy() {
+            return Err(ReplaceError::Io(io::Error::other("処理中です")));
+        }
+        let snap = self.snapshot.clone();
+        let len = snap.len();
+        let range = if self.sels.iter().all(|s| s.is_empty()) {
+            0..len
+        } else {
+            let start = self.sels.iter().map(|s| s.start()).min().unwrap_or(0);
+            let end = self.sels.iter().map(|s| s.end()).max().unwrap_or(0);
+            let first = motion::line_start(&snap, start);
+            // 選択の終わりが行頭なら、その行は含めない
+            let last = if end > start && motion::line_start(&snap, end) == end {
+                end
+            } else {
+                snap.find_next(end..len, b'\n').map_or(len, |n| n + 1)
+            };
+            first..last
+        };
+        let limit = self.replace_sync_limit;
+        if len <= limit {
+            let o = replace::produce(len, limit, &mut |w| {
+                transform::dedup_lines(&snap, range.clone(), w, &mut |_| true)
+            })?;
+            return Ok(Some(self.apply_replace(o)));
+        }
+        self.typing = None;
+        self.replacing = Some(replace::ReplaceJob::start_task(
+            pool,
+            notify,
+            0..len,
+            Box::new(move |step| {
+                replace::produce(len, limit, &mut |w| {
+                    transform::dedup_lines(&snap, range.clone(), w, step)
                 })
             }),
         ));
