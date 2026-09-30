@@ -511,6 +511,12 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         item(view, ID_WHITESPACE, w!("空白・タブ・改行を表示(&W)"))?;
         item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
         item(view, ID_HEX_MODE, w!("16 進数表示(&X)\tCtrl+Shift+X"))?;
+        AppendMenuW(
+            view,
+            MF_POPUP,
+            hexmode::create_charset_menu()?.0 as usize,
+            w!("16 進数表示の文字の欄の文字コード(&E)"),
+        )?;
         sep(view)?;
         item(view, ID_DIFF, w!("開いているファイルを比較..."))?;
 
@@ -2477,7 +2483,7 @@ impl App {
         let doc =
             Document::open_with(&path, &opts).map_err(|e| format!("{}\n\n{e}", path.display()))?;
         self.add_document(doc);
-        self.set_hex(true);
+        self.set_hex(true, None);
         Ok(())
     }
 
@@ -2491,6 +2497,7 @@ impl App {
         unsafe {
             CheckMenuItem(self.menu_view, ID_HEX_MODE as u32, (MF_BYCOMMAND | flag).0);
         }
+        self.update_charset_menu();
     }
 
     fn reopen(&mut self, path: PathBuf, encoding: Encoding) -> std::result::Result<(), String> {
@@ -4013,6 +4020,9 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_GOTO_BRACKET => {
             with_app(|a| a.goto_bracket());
+        }
+        id if hexmode::is_charset_command(id) => {
+            with_app(|a| a.set_hex_charset(id));
         }
         id if (ID_SYNTAX_NONE..ID_SYNTAX_BASE + 150).contains(&id) => {
             with_app(|a| {

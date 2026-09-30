@@ -4,7 +4,7 @@
 //! 直接決めるので、行の索引がなくても数 GB のファイルの任意の位置をすぐに表示できる。
 //! 選択範囲は文書の選択（バイト位置）をそのまま使うため、検索・置換・Undo も共通になる。
 
-use yy_core::hex::{self, HexLayout, Pane};
+use yy_core::hex::{self, Charset, HexLayout, Pane};
 use yy_core::{EditKind, Selection, SelectionSet};
 
 use super::*;
@@ -12,6 +12,55 @@ use crate::render::HexFrame;
 
 pub(crate) const ID_HEX_MODE: u16 = 207;
 pub(crate) const ID_OPEN_BINARY: u16 = 111;
+/// 「文字の欄の文字コード」の項目（`+ 0` は ASCII、`+ 1 + i` は `Encoding::all()` の i 番目）
+pub(crate) const ID_HEX_CHARSET_BASE: u16 = 1200;
+
+/// 文字の欄の文字コードの選択肢（先頭は ASCII）。
+fn charsets() -> Vec<Charset> {
+    std::iter::once(None)
+        .chain(Encoding::all().into_iter().map(Some))
+        .collect()
+}
+
+/// 選択肢での番号。
+fn charset_index(charset: Charset) -> usize {
+    match charset {
+        None => 0,
+        Some(e) => Encoding::all()
+            .iter()
+            .position(|a| a.same_charset(&e))
+            .map_or(0, |i| i + 1),
+    }
+}
+
+fn charset_name(charset: Charset) -> String {
+    charset.map_or("ASCII".to_owned(), |e| e.name().to_owned())
+}
+
+/// 「文字の欄の文字コード」のメニュー（表示メニューの中）。
+pub(crate) fn create_charset_menu() -> Result<HMENU> {
+    unsafe {
+        let menu = CreatePopupMenu()?;
+        for (i, c) in charsets().into_iter().enumerate() {
+            let label = match c {
+                None => "ASCII（既定）".to_owned(),
+                Some(e) => e.label(),
+            };
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                (ID_HEX_CHARSET_BASE + i as u16) as usize,
+                &HSTRING::from(label),
+            )?;
+        }
+        Ok(menu)
+    }
+}
+
+/// メニューの項目か。
+pub(crate) fn is_charset_command(id: u16) -> bool {
+    (ID_HEX_CHARSET_BASE..ID_HEX_CHARSET_BASE + charsets().len() as u16).contains(&id)
+}
 
 /// 16 進数表示の状態。
 #[derive(Clone, Copy, Debug)]
@@ -25,16 +74,19 @@ pub(crate) struct HexState {
     pub overwrite: bool,
     /// マウスでドラッグ中の選択の起点
     pub drag_anchor: Option<u64>,
+    /// 文字の欄の文字コード
+    pub charset: Charset,
 }
 
 impl HexState {
-    fn new(caret: u64) -> HexState {
+    fn new(caret: u64, charset: Charset) -> HexState {
         HexState {
             top: caret / 16 * 16,
             pane: Pane::Hex,
             nibble: 0,
             overwrite: true,
             drag_anchor: None,
+            charset,
         }
     }
 }
@@ -45,24 +97,55 @@ impl App {
     }
 
     /// 16 進数表示に切り替える・戻す（ファイルを開き直す必要があれば `on` の前に済ませること）。
-    pub(crate) fn set_hex(&mut self, on: bool) {
+    /// `charset` は文字の欄の文字コード。
+    pub(crate) fn set_hex(&mut self, on: bool, charset: Charset) {
         ime::cancel(self.view);
         self.composition = None;
         self.rect = None;
         self.drag = None;
         let head = self.doc.selections().primary().head;
-        self.hex = on.then(|| HexState::new(head));
+        self.hex = on.then(|| HexState::new(head, charset));
         self.scroll_x = 0.0;
         self.renderer.clear_cache();
         self.row_cache.borrow_mut().rows.clear();
+        self.update_hex_menu();
+        self.after_move();
+    }
+
+    /// 文字の欄の文字コードを変える（メニューの項目 `id`）。
+    pub(crate) fn set_hex_charset(&mut self, id: u16) {
+        let Some(&charset) = charsets().get((id - ID_HEX_CHARSET_BASE) as usize) else {
+            return;
+        };
+        let Some(h) = &mut self.hex else { return };
+        h.charset = charset;
+        self.update_hex_menu();
+        self.update_status();
+        self.invalidate();
+    }
+
+    /// 「文字の欄の文字コード」の選択の表示（16 進数表示でなければ選べない）。
+    pub(crate) fn update_charset_menu(&self) {
+        let n = charsets().len() as u32;
+        let base = ID_HEX_CHARSET_BASE as u32;
         unsafe {
-            CheckMenuItem(
+            let enable = if self.hex.is_some() {
+                MF_ENABLED
+            } else {
+                MF_GRAYED
+            };
+            for i in 0..n {
+                let _ = EnableMenuItem(self.menu_view, base + i, MF_BYCOMMAND | enable);
+            }
+            let current = self.hex.map_or(0, |h| charset_index(h.charset)) as u32;
+            let _ = CheckMenuRadioItem(
                 self.menu_view,
-                ID_HEX_MODE as u32,
-                (MF_BYCOMMAND | if on { MF_CHECKED } else { MF_UNCHECKED }).0,
+                base,
+                base + n - 1,
+                base + current,
+                MF_BYCOMMAND.0,
             );
         }
-        self.after_move();
     }
 
     /// 表示中の最後の行の次のオフセットまでの行数。
@@ -201,7 +284,31 @@ impl App {
             let snap = self.doc.snapshot();
             let rows = self.hex_rows() as usize + 1;
             let end = (h.top + rows as u64 * 16).min(snap.len());
-            let data = snap.read(h.top.min(end)..end);
+            // 文字の欄: 前後も読んで、表示する範囲の各バイトの文字を決める
+            let mut ctx = h.top.saturating_sub(hex::CONTEXT_BYTES);
+            if let Some(e) = h.charset
+                && e.records().is_some()
+            {
+                // EBCDIC はシフト状態（SO・SI）が分かる位置から読む
+                let from = h.top.saturating_sub(4096);
+                let shift = [0x0E, 0x0F]
+                    .iter()
+                    .filter_map(|&b| snap.find_prev(from..h.top, b))
+                    .max();
+                ctx = ctx.min(shift.unwrap_or(from));
+            }
+            let ahead = (end + hex::LOOKAHEAD_BYTES).min(snap.len());
+            let all = snap.read(ctx.min(h.top)..ahead);
+            let skip = (h.top.min(end) - ctx.min(h.top)) as usize;
+            let all_cells = hex::char_cells(
+                h.charset,
+                &all,
+                ctx.min(h.top),
+                self.config.editor.ambiguous_wide,
+            );
+            let n = (end - h.top.min(end)) as usize;
+            let data = all[skip..skip + n].to_vec();
+            let cells = &all_cells[skip..skip + n];
             let sel = self.doc.selections().primary();
             let matches = match (&self.searcher, self.findbar.visible) {
                 (Some(s), true) => {
@@ -213,6 +320,7 @@ impl App {
                 layout: self.hex_layout(),
                 first: h.top,
                 data: &data,
+                cells,
                 len: snap.len(),
                 rows,
                 caret: sel.head,
@@ -384,7 +492,11 @@ impl App {
             }
             Pane::Ascii => {
                 let mut buf = [0u8; 4];
-                let bytes = c.encode_utf8(&mut buf).as_bytes().to_vec();
+                let Some(bytes) = hex::encode_text(h.charset, c.encode_utf8(&mut buf)) else {
+                    self.status_msg = format!("「{c}」は {} で表せません", charset_name(h.charset));
+                    self.update_status();
+                    return;
+                };
                 let (change, caret) = hex::type_bytes(len, at, &bytes, h.overwrite);
                 (change, caret, 0)
             }
@@ -468,7 +580,7 @@ impl App {
         let bytes = self.doc.snapshot().read(r);
         Some(match h.pane {
             Pane::Hex => hex::to_hex(&bytes),
-            Pane::Ascii => String::from_utf8_lossy(&bytes).into_owned(),
+            Pane::Ascii => hex::decode_text(h.charset, &bytes),
         })
     }
 
@@ -481,7 +593,17 @@ impl App {
         }
         let bytes = match h.pane {
             Pane::Hex => hex::parse_hex(text).unwrap_or_else(|| text.as_bytes().to_vec()),
-            Pane::Ascii => text.as_bytes().to_vec(),
+            Pane::Ascii => match hex::encode_text(h.charset, text) {
+                Some(b) => b,
+                None => {
+                    self.status_msg = format!(
+                        "貼り付ける文字列に {} で表せない文字があります",
+                        charset_name(h.charset)
+                    );
+                    self.update_status();
+                    return;
+                }
+            },
         };
         if bytes.is_empty() {
             return;
@@ -532,6 +654,9 @@ impl App {
             let n = sel.end() - sel.start();
             s += &format!("  ({} バイト選択)", group_digits(n));
         }
+        if let Some(h) = self.hex {
+            s += &format!("  文字の欄: {}", charset_name(h.charset));
+        }
         s
     }
 }
@@ -539,18 +664,19 @@ impl App {
 /// 16 進数表示に切り替える・戻す。テキストとして読み込んだ文書（UTF-8 以外・BOM 付き）は
 /// バイト列のまま開き直す（変更があれば確認する）。
 pub(crate) fn cmd_toggle_hex(hwnd: HWND) {
-    let Some((on, needs_raw, path)) = with_app(|a| {
+    let Some((on, needs_raw, path, encoding)) = with_app(|a| {
         let needs_raw = a.doc.encoding() != Encoding::Utf8 || a.doc.has_bom();
         (
             a.hex.is_some(),
             needs_raw,
             a.doc.path().map(|p| p.to_owned()),
+            a.doc.encoding(),
         )
     }) else {
         return;
     };
     if on {
-        with_app(|a| a.set_hex(false));
+        with_app(|a| a.set_hex(false, None));
         return;
     }
     if needs_raw {
@@ -566,7 +692,8 @@ pub(crate) fn cmd_toggle_hex(hwnd: HWND) {
             return;
         }
     }
-    with_app(|a| a.set_hex(true));
+    // 文字の欄は、テキストとして読んでいたときの文字コードで表示する
+    with_app(|a| a.set_hex(true, Some(encoding)));
 }
 
 /// 「バイナリとして開く」: ファイルを選んでバイト列のまま 16 進数表示で開く。

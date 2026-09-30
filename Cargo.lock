@@ -1282,6 +1282,7 @@ dependencies = [
  "proptest",
  "tempfile",
  "unicode-segmentation",
+ "unicode-width",
  "yy-buffer",
  "yy-delimited",
  "yy-encoding",

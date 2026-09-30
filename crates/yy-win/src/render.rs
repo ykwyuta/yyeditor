@@ -64,6 +64,8 @@ pub(crate) struct HexFrame<'a> {
     pub first: u64,
     /// `first` からの内容（表示する行の分）
     pub data: &'a [u8],
+    /// `data` の各バイトの文字の欄の表示
+    pub cells: &'a [yy_core::hex::CharCell],
     /// 文書の長さ
     pub len: u64,
     /// 表示する行数
@@ -896,7 +898,7 @@ impl Renderer {
     }
 
     fn draw_hex_frame(&mut self, f: &HexFrame) -> Result<bool> {
-        use yy_core::hex::{Pane, printable};
+        use yy_core::hex::{CellMark, Pane};
         let lh = self.metrics.line_height;
         let cw = self.metrics.char_width;
         let l = f.layout;
@@ -909,6 +911,7 @@ impl Renderer {
         };
         // 表示する行（最後の行が 16 バイトちょうどなら、追加用の空の行も出す）
         let mut rows: Vec<(u64, &[u8])> = Vec::new();
+        let mut row_cells: Vec<&[yy_core::hex::CharCell]> = Vec::new();
         for r in 0..f.rows {
             let off = f.first + r as u64 * 16;
             if off > f.len || (off == f.len && f.len % 16 != 0 && off != 0) {
@@ -917,6 +920,7 @@ impl Renderer {
             let a = (r * 16).min(f.data.len());
             let b = (a + 16).min(f.data.len());
             rows.push((off, &f.data[a..b]));
+            row_cells.push(&f.cells[a.min(f.cells.len())..b.min(f.cells.len())]);
         }
         // 範囲 `range` の各行の矩形（16 進の欄と文字の欄）
         let byte_rects = |range: &std::ops::Range<u64>, out: &mut Vec<D2D_RECT_F>| {
@@ -944,9 +948,9 @@ impl Renderer {
         }
         let brushes = self.target.as_ref().map(|t| &t.brushes);
         let mut layouts = Vec::with_capacity(rows.len());
-        for (off, bytes) in &rows {
-            let text = l.format_row(*off, bytes);
-            let wide: Vec<u16> = text.encode_utf16().collect();
+        for ((off, bytes), cells) in rows.iter().zip(&row_cells) {
+            let row = l.format_row_cells(*off, bytes, cells);
+            let wide: Vec<u16> = row.text.encode_utf16().collect();
             let layout = unsafe {
                 self.dwrite
                     .CreateTextLayout(&wide, &self.text_format, LAYOUT_MAX_WIDTH, lh)?
@@ -962,10 +966,12 @@ impl Renderer {
                     )
                 };
                 effect(&b.line_number, 0, l.digits)?;
-                for (i, &byte) in bytes.iter().enumerate() {
-                    if printable(byte) == '.' && byte != b'.' {
-                        effect(&b.control, l.ascii_col(i), 1)?;
-                    }
+                for (range, mark) in &row.marks {
+                    let brush = match mark {
+                        CellMark::Control => &b.control,
+                        CellMark::Invalid => &b.invalid,
+                    };
+                    effect(brush, range.start, range.len())?;
                 }
             }
             layouts.push(layout);
