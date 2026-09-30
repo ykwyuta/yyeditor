@@ -105,6 +105,9 @@ impl App {
         self.drag = None;
         let head = self.doc.selections().primary().head;
         self.hex = on.then(|| HexState::new(head, charset));
+        if on {
+            self.code = None;
+        }
         self.scroll_x = 0.0;
         self.renderer.clear_cache();
         self.row_cache.borrow_mut().rows.clear();

@@ -243,34 +243,38 @@ fn is_invalid(c: char) -> bool {
 
 /// 位置 `at` から `len` バイトの文字 `s` を割り当てる。
 fn set_char(cells: &mut [CharCell], at: usize, len: usize, s: &str, ambiguous_wide: bool) {
+    cells[at] = match display_char(s, ambiguous_wide && len >= 2) {
+        None => CharCell::Control,
+        Some((text, width)) => CharCell::Char { text, width, len },
+    };
+    for c in &mut cells[at + 1..at + len] {
+        *c = CharCell::Cont;
+    }
+}
+
+/// 文字 `s` の表示（表示する文字列, 桁数 1〜2）。制御文字など表示しない文字なら `None`。
+/// `cjk` なら東アジアの曖昧幅文字を 2 桁とする。
+pub(crate) fn display_char(s: &str, cjk: bool) -> Option<(String, usize)> {
     use unicode_width::UnicodeWidthStr;
     let invisible = s.chars().all(|c| {
         c.is_control()
             || matches!(c, '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}')
     });
     if invisible {
-        cells[at] = CharCell::Control;
+        return None;
+    }
+    let width = if cjk {
+        UnicodeWidthStr::width_cjk(s)
     } else {
-        let width = if ambiguous_wide && len >= 2 {
-            UnicodeWidthStr::width_cjk(s)
-        } else {
-            UnicodeWidthStr::width(s)
-        };
-        // 結合文字だけのときは ◌ に付けて表示する
-        let text = if width == 0 {
-            format!("\u{25CC}{s}")
-        } else {
-            s.to_owned()
-        };
-        cells[at] = CharCell::Char {
-            text,
-            width: width.max(1),
-            len,
-        };
-    }
-    for c in &mut cells[at + 1..at + len] {
-        *c = CharCell::Cont;
-    }
+        UnicodeWidthStr::width(s)
+    };
+    // 結合文字だけのときは ◌ に付けて表示する
+    let text = if width == 0 {
+        format!("\u{25CC}{s}")
+    } else {
+        s.to_owned()
+    };
+    Some((text, width.clamp(1, 2)))
 }
 
 /// 文字の欄に入力・貼り付けする文字列のバイト列。`charset` が `None`（ASCII）なら UTF-8。

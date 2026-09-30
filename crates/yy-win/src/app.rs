@@ -39,6 +39,7 @@ use yy_layout::{
     row_containing, rows_from,
 };
 
+mod codemode;
 mod csvmode;
 mod hexmode;
 mod previewmode;
@@ -51,6 +52,7 @@ use crate::findbar::{self, FindBar};
 use crate::render::{Composition, Frame, RectPaint, Renderer};
 use crate::util::{Context, error_box, group_digits, human_size, info_box, wide};
 use crate::{FRAME_CLASS, VIEW_CLASS, clipboard, default_proc, hiword, ime, loword};
+use codemode::*;
 use csvmode::*;
 use hexmode::*;
 use syntaxmode::*;
@@ -273,6 +275,8 @@ pub(crate) struct App {
     bracket_cache: Option<BracketCache>,
     /// 16 進数（バイナリ）表示
     hex: Option<HexState>,
+    /// コード値表示
+    code: Option<CodeState>,
     /// タブ・ステータスバーの文字のフォント（メニューと同じ Windows のフォント）
     ui_font: windows::Win32::Graphics::Gdi::HFONT,
     /// Markdown・HTML のプレビュー（右側）
@@ -296,6 +300,7 @@ struct TabState {
     syntax: Option<SyntaxState>,
     syntax_off: bool,
     hex: Option<HexState>,
+    code: Option<CodeState>,
 }
 
 impl TabState {
@@ -316,6 +321,7 @@ impl TabState {
             syntax: None,
             syntax_off: false,
             hex: None,
+            code: None,
         }
     }
 }
@@ -410,6 +416,7 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
         ),
         (ctrl, b'G' as u16, ID_GOTO),
         (ctrl_shift, b'X' as u16, ID_HEX_MODE),
+        (ctrl_shift, b'K' as u16, ID_CODE_MODE),
         (ctrl, VK_OEM_2.0, ID_TOGGLE_COMMENT),
         (ctrl, VK_DIVIDE.0, ID_TOGGLE_COMMENT),
         (ctrl, VK_OEM_6.0, ID_GOTO_BRACKET),
@@ -546,6 +553,7 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         item(view, ID_WHITESPACE, w!("空白・タブ・改行を表示(&W)"))?;
         item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
         item(view, ID_HEX_MODE, w!("16 進数表示(&X)\tCtrl+Shift+X"))?;
+        item(view, ID_CODE_MODE, w!("コード値表示(&K)\tCtrl+Shift+K"))?;
         AppendMenuW(
             view,
             MF_POPUP,
@@ -756,6 +764,7 @@ impl App {
                 syntax_off: false,
                 bracket_cache: None,
                 hex: None,
+                code: None,
                 ui_font: crate::util::ui_font(dpi),
                 preview: Default::default(),
             };
@@ -1047,6 +1056,8 @@ impl App {
         }
         if self.hex.is_some() {
             text = self.hex_status();
+        } else if self.code.is_some() {
+            text += &self.code_status();
         }
         self.set_status(0, &text);
         self.set_status(1, &format!("  {}", human_size(snap.len())));
@@ -1070,11 +1081,18 @@ impl App {
             .unwrap_or_default();
         if self.hex.is_some() {
             self.set_status(3, "  16 進数");
+        } else if self.code.is_some() {
+            self.set_status(3, &format!("  {}  コード値", self.doc.eol().label()));
         } else {
             self.set_status(3, &format!("  {}{syntax}", self.doc.eol().label()));
         }
-        let overwrite = self.hex.map_or(self.overwrite, |h| h.overwrite);
-        let mode = match (overwrite, self.rect_mode && self.hex.is_none()) {
+        let overwrite = match (self.hex, self.code) {
+            (Some(h), _) => h.overwrite,
+            (_, Some(c)) => c.overwrite,
+            _ => self.overwrite,
+        };
+        let special = self.hex.is_some() || self.code.is_some();
+        let mode = match (overwrite, self.rect_mode && !special) {
             (false, false) => "  挿入",
             (true, false) => "  上書き",
             (false, true) => "  挿入 / 矩形",
@@ -1203,9 +1221,11 @@ impl App {
 
     /// 選択範囲（空なら単語）の文字列を変換する。
     fn transform_selection(&mut self, t: yy_core::transform::Transform) {
-        if self.hex.is_some() || self.rect.is_some() {
+        if self.hex.is_some() || self.code.is_some() || self.rect.is_some() {
             self.status_msg = if self.hex.is_some() {
                 "16 進数表示では使えません".into()
+            } else if self.code.is_some() {
+                "コード値表示では使えません".into()
             } else {
                 "矩形選択では使えません（「矩形選択をカーソルに変換」してから使ってください）"
                     .into()
@@ -1220,7 +1240,7 @@ impl App {
 
     /// 重複する行を削除する（選択範囲の行、なければ文書全体）。
     fn dedup_lines(&mut self) {
-        if self.hex.is_some() {
+        if self.hex.is_some() || self.code.is_some() {
             return;
         }
         let n = self.notifier();
@@ -1248,6 +1268,10 @@ impl App {
     fn update_scrollbars(&mut self) {
         if self.hex.is_some() {
             self.hex_update_scrollbars();
+            return;
+        }
+        if self.code.is_some() {
+            self.code_update_scrollbars();
             return;
         }
         let snap = self.doc.snapshot();
@@ -1332,6 +1356,10 @@ impl App {
             self.hex_scroll_rows(delta);
             return;
         }
+        if self.code.is_some() {
+            self.code_scroll_rows(delta);
+            return;
+        }
         let page = self.page_rows();
         if self
             .vp
@@ -1344,6 +1372,10 @@ impl App {
     fn scroll_to_offset(&mut self, offset: u64) {
         if self.hex.is_some() {
             self.hex_scroll_to(offset);
+            return;
+        }
+        if self.code.is_some() {
+            self.code_scroll_to(offset);
             return;
         }
         let page = self.page_rows();
@@ -1387,6 +1419,10 @@ impl App {
                 }
                 if self.hex.is_some() {
                     self.hex_scroll_to_fraction(si.nTrackPos);
+                    return;
+                }
+                if self.code.is_some() {
+                    self.code_scroll_to_fraction(si.nTrackPos);
                     return;
                 }
                 let snap = self.doc.snapshot().clone();
@@ -1535,6 +1571,10 @@ impl App {
             self.hex_ensure_visible();
             return;
         }
+        if self.code.is_some() {
+            self.code_ensure_visible();
+            return;
+        }
         self.sync_renderer();
         let head = self.doc.selections().primary().head;
         let page = self.page_rows();
@@ -1680,6 +1720,9 @@ impl App {
         if self.hex.is_some() {
             return self.hex_key(vk);
         }
+        if self.code.is_some() {
+            return self.code_key(vk);
+        }
         let ctrl = key_down(VK_CONTROL);
         let shift = key_down(VK_SHIFT);
         let alt = key_down(VK_MENU);
@@ -1800,6 +1843,10 @@ impl App {
     fn on_char(&mut self, code: u16) {
         if self.hex.is_some() {
             self.hex_char(code);
+            return;
+        }
+        if self.code.is_some() {
+            self.code_char(code);
             return;
         }
         // Ctrl+英字などは制御文字として届くので無視する（AltGr = Ctrl+Alt は通す）
@@ -2167,6 +2214,10 @@ impl App {
             self.hex_mouse_down(x, y);
             return;
         }
+        if self.code.is_some() {
+            self.code_mouse_down(x, y);
+            return;
+        }
         let shift = key_down(VK_SHIFT);
         let ctrl = key_down(VK_CONTROL);
         if !double && !ctrl && (key_down(VK_MENU) || self.rect_mode) {
@@ -2239,6 +2290,10 @@ impl App {
             self.hex_mouse_move(x, y);
             return;
         }
+        if self.code.is_some() {
+            self.code_mouse_move(x, y);
+            return;
+        }
         let Some(drag) = &self.drag else {
             return;
         };
@@ -2285,6 +2340,10 @@ impl App {
         if self.hex.is_some() {
             return;
         }
+        if self.code.is_some() {
+            self.code_ime_position();
+            return;
+        }
         self.sync_renderer();
         let head = self.doc.selections().primary().head;
         let page = self.page_rows();
@@ -2301,6 +2360,14 @@ impl App {
 
     fn on_composition(&mut self, update: ime::CompositionUpdate) {
         let mut edited = false;
+        if self.code.is_some() {
+            // コード値表示では変換中の文字列は表示せず、確定した文字列を入力する
+            self.composition = None;
+            if let Some(result) = update.result {
+                self.code_ime_result(&result);
+            }
+            return;
+        }
         if let Some(result) = update.result {
             self.composition = None;
             if self.rect.is_some() {
@@ -2344,6 +2411,10 @@ impl App {
     fn paint(&mut self) {
         if self.hex.is_some() {
             self.hex_paint();
+            return;
+        }
+        if self.code.is_some() {
+            self.code_paint();
             return;
         }
         // 区切り文字モード: 表示する行の列幅を先に測る（広がったら表示を作り直す）
@@ -2454,6 +2525,7 @@ impl App {
         self.syntax_off = false;
         self.bracket_cache = None;
         self.hex = None;
+        self.code = None;
         self.update_hex_menu();
         self.syntax_for_path();
         let n = self.notifier();
@@ -2483,6 +2555,7 @@ impl App {
             syntax: self.syntax.take(),
             syntax_off: self.syntax_off,
             hex: self.hex.take(),
+            code: self.code.take(),
         }
     }
 
@@ -2505,6 +2578,7 @@ impl App {
         self.syntax = state.syntax;
         self.syntax_off = state.syntax_off;
         self.hex = state.hex;
+        self.code = state.code;
         self.update_hex_menu();
         self.bracket_cache = None;
         self.find_job = None;
@@ -2658,8 +2732,14 @@ impl App {
         } else {
             MF_UNCHECKED
         };
+        let code = if self.code.is_some() {
+            MF_CHECKED
+        } else {
+            MF_UNCHECKED
+        };
         unsafe {
             CheckMenuItem(self.menu_view, ID_HEX_MODE as u32, (MF_BYCOMMAND | flag).0);
+            CheckMenuItem(self.menu_view, ID_CODE_MODE as u32, (MF_BYCOMMAND | code).0);
         }
         self.update_charset_menu();
     }
@@ -4295,8 +4375,26 @@ fn on_command(hwnd: HWND, id: u16) {
         ID_DELETE if with_app(|a| a.hex.is_some()) == Some(true) => {
             with_app(|a| a.hex_delete(false));
         }
+        ID_CUT | ID_COPY if with_app(|a| a.code.is_some()) == Some(true) => {
+            if let Some(Some(text)) = with_app(|a| a.code_copy_text()) {
+                if !clipboard::set_text(hwnd, &text, false) {
+                    error_box(hwnd, "クリップボードにコピーできませんでした。");
+                } else if id == ID_CUT {
+                    with_app(|a| a.code_cut());
+                }
+            }
+        }
+        ID_PASTE if with_app(|a| a.code.is_some()) == Some(true) => {
+            if let Some((text, _)) = clipboard::get_text(hwnd) {
+                with_app(|a| a.code_paste(&text));
+            }
+        }
+        ID_DELETE if with_app(|a| a.code.is_some()) == Some(true) => {
+            with_app(|a| a.code_delete(false));
+        }
         ID_GOTO if with_app(|a| a.hex.is_some()) == Some(true) => cmd_hex_goto(hwnd),
         ID_HEX_MODE => cmd_toggle_hex(hwnd),
+        ID_CODE_MODE => cmd_toggle_code(hwnd),
         ID_OPEN_BINARY => {
             if let Some((paths, _)) = show_open_dialog(hwnd) {
                 cmd_open_binary(hwnd, paths);
@@ -4995,6 +5093,9 @@ pub(crate) extern "system" fn view_proc(
                 a.drag = None;
                 if let Some(h) = &mut a.hex {
                     h.drag_anchor = None;
+                }
+                if let Some(c) = &mut a.code {
+                    c.drag_anchor = None;
                 }
             });
             LRESULT(0)

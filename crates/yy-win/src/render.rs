@@ -81,6 +81,24 @@ pub(crate) struct HexFrame<'a> {
     pub scroll_x: f32,
 }
 
+/// コード値表示の 1 画面分（行は 8 文字）。
+pub(crate) struct CodeFrame<'a> {
+    pub layout: yy_core::codeview::CodeLayout,
+    pub rows: &'a [yy_core::codeview::CodeRow],
+    /// 文書の長さ
+    pub len: u64,
+    pub caret: u64,
+    /// コード値の欄で入力中の値（入力した桁の表記）
+    pub entry: Option<String>,
+    pub pane: yy_core::hex::Pane,
+    pub caret_visible: bool,
+    pub overwrite: bool,
+    pub selection: std::ops::Range<u64>,
+    pub matches: &'a [std::ops::Range<u64>],
+    pub scroll_x: f32,
+    pub ambiguous_wide: bool,
+}
+
 /// 1 行分のトークンの色（`Row::text` 内のバイト範囲, 色の番号）。
 pub(crate) type RowTokens = Vec<(std::ops::Range<usize>, u16)>;
 
@@ -298,7 +316,7 @@ pub(crate) struct Renderer {
 }
 
 const GUTTER_PAD: f32 = 8.0;
-const TEXT_PAD: f32 = 4.0;
+pub(crate) const TEXT_PAD: f32 = 4.0;
 /// 1 行のレイアウト幅の上限（折り返さないので十分大きくする）
 const LAYOUT_MAX_WIDTH: f32 = 1.0e7;
 
@@ -1043,6 +1061,171 @@ impl Renderer {
                         &b.caret,
                     );
                 }
+            }
+            rt.EndDraw(None, None)
+        };
+        if let Err(e) = result {
+            if e.code() == D2DERR_RECREATE_TARGET {
+                self.target = None;
+                self.cache.clear();
+                return Ok(false);
+            }
+            return Err(e);
+        }
+        Ok(true)
+    }
+
+    /// コード値表示を描画する（等幅フォントの桁で位置を決める）。
+    pub fn draw_code(
+        &mut self,
+        hwnd: HWND,
+        width: u32,
+        height: u32,
+        f: &CodeFrame,
+    ) -> Result<bool> {
+        self.ensure_target(hwnd, width, height)?;
+        self.draw_code_frame(f)
+    }
+
+    fn draw_code_frame(&mut self, f: &CodeFrame) -> Result<bool> {
+        use yy_core::codeview::{self, ROW_CHARS};
+        use yy_core::hex::{CellMark, Pane};
+        let lh = self.metrics.line_height;
+        let cw = self.metrics.char_width;
+        let l = f.layout;
+        let x = |col: usize| TEXT_PAD + col as f32 * cw - f.scroll_x;
+        let rect = |c0: usize, c1: usize, row: usize| D2D_RECT_F {
+            left: x(c0),
+            top: row as f32 * lh,
+            right: x(c1),
+            bottom: (row + 1) as f32 * lh,
+        };
+        let caret_at = codeview::locate(f.rows, f.caret, f.len);
+        // 範囲 `range` の各行の矩形（コード値の欄と文字の欄）
+        let cell_rects = |range: &std::ops::Range<u64>, out: &mut Vec<D2D_RECT_F>| {
+            for (ri, row) in f.rows.iter().enumerate() {
+                let Some(r) = codeview::cells_in(row, range) else {
+                    continue;
+                };
+                let half = ROW_CHARS / 2;
+                for (s, e) in [(r.start, r.end.min(half)), (r.start.max(half), r.end)] {
+                    if s < e {
+                        out.push(rect(l.code_col(s), l.code_col(e - 1) + 6, ri));
+                    }
+                }
+                out.push(rect(l.char_col(r.start), l.char_col(r.end - 1) + 2, ri));
+            }
+        };
+        let mut sel_rects = Vec::new();
+        cell_rects(&f.selection, &mut sel_rects);
+        let mut match_rects = Vec::new();
+        for m in f.matches {
+            cell_rects(m, &mut match_rects);
+        }
+        let brushes = self.target.as_ref().map(|t| &t.brushes);
+        let mut layouts = Vec::with_capacity(f.rows.len());
+        for (ri, row) in f.rows.iter().enumerate() {
+            let entry = match (&f.entry, caret_at) {
+                (Some(e), Some((cr, i))) if cr == ri => Some((i, e.as_str())),
+                _ => None,
+            };
+            let text = l.format_row(row, entry, f.ambiguous_wide);
+            let wide: Vec<u16> = text.text.encode_utf16().collect();
+            let layout = unsafe {
+                self.dwrite
+                    .CreateTextLayout(&wide, &self.text_format, LAYOUT_MAX_WIDTH, lh)?
+            };
+            if let Some(b) = brushes {
+                let effect = |brush: &ID2D1SolidColorBrush, start: usize, len: usize| unsafe {
+                    layout.SetDrawingEffect(
+                        &brush.cast::<windows::core::IUnknown>()?,
+                        DWRITE_TEXT_RANGE {
+                            startPosition: start as u32,
+                            length: len as u32,
+                        },
+                    )
+                };
+                effect(&b.line_number, 0, l.digits)?;
+                for (range, mark) in &text.marks {
+                    let brush = match mark {
+                        CellMark::Control => &b.control,
+                        CellMark::Invalid => &b.invalid,
+                    };
+                    effect(brush, range.start, range.len())?;
+                }
+            }
+            layouts.push(layout);
+        }
+        let result = unsafe {
+            let t = self.target.as_ref().unwrap();
+            let (rt, b) = (&t.rt, &t.brushes);
+            rt.BeginDraw();
+            rt.SetTransform(&windows_numerics::Matrix3x2::identity());
+            rt.Clear(Some(&color_f(self.colors.background)));
+            let size = rt.GetSize();
+            rt.FillRectangle(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: x(l.digits) + cw,
+                    bottom: size.height,
+                },
+                &b.gutter_background,
+            );
+            for r in &match_rects {
+                rt.FillRectangle(r, &b.search_match);
+            }
+            for r in &sel_rects {
+                rt.FillRectangle(r, &b.selection);
+            }
+            for (i, layout) in layouts.iter().enumerate() {
+                rt.DrawTextLayout(
+                    Vector2 {
+                        X: x(0),
+                        Y: i as f32 * lh,
+                    },
+                    layout,
+                    &b.foreground,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+            // カーソル: 入力する欄は文字の位置に（上書きは枠、挿入と入力中は縦線）、
+            // もう一方の欄は下線
+            if let Some((ri, i)) = caret_at
+                && f.caret_visible
+            {
+                let entered = f.entry.as_ref().map(|e| e.len());
+                let (active, other) = match f.pane {
+                    Pane::Hex => (
+                        (l.code_col(i) + entered.unwrap_or(0), 6),
+                        (l.char_col(i), 2),
+                    ),
+                    Pane::Ascii => ((l.char_col(i), 2), (l.code_col(i), 6)),
+                };
+                let y = ri as f32 * lh;
+                if f.overwrite && entered.is_none() {
+                    let r = rect(active.0, active.0 + active.1, ri);
+                    rt.DrawRectangle(&r, &b.caret, 1.5, None);
+                } else {
+                    rt.FillRectangle(
+                        &D2D_RECT_F {
+                            left: x(active.0),
+                            top: y,
+                            right: x(active.0) + 2.0,
+                            bottom: y + lh,
+                        },
+                        &b.caret,
+                    );
+                }
+                rt.FillRectangle(
+                    &D2D_RECT_F {
+                        left: x(other.0),
+                        top: y + lh - 2.0,
+                        right: x(other.0 + other.1),
+                        bottom: y + lh,
+                    },
+                    &b.caret,
+                );
             }
             rt.EndDraw(None, None)
         };

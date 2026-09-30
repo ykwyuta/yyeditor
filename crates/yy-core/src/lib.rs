@@ -3,6 +3,7 @@
 //! 文書の内容は永続ピースツリーのスナップショットで持ち、編集・Undo・保存は
 //! すべてスナップショットの差し替えとして行う（01 章 4.3、06 章）。
 
+pub mod codeview;
 pub mod csv;
 pub mod diff;
 pub mod edit;
