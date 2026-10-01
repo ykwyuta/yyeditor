@@ -1,8 +1,8 @@
 //! Markdown / HTML のプレビュー（エディタの右側に表示する）の、画面に依存しない部分。
 //!
-//! * [`markdown_to_html`]: Markdown を HTML にする（拡張構文・mermaid・数式に対応）
+//! * [`markdown_to_html`]: Markdown を HTML にする（拡張構文・mermaid・d3・数式に対応）
 //! * [`markdown_page`] / [`html_page`]: プレビューに表示するページ全体
-//! * [`asset`]: ページが読み込む mermaid・KaTeX などの埋め込みファイル
+//! * [`asset`]: ページが読み込む mermaid・d3・KaTeX などの埋め込みファイル
 //!
 //! ページとファイルは `https://yy-preview.local/` から配信する（Windows では WebView2 の
 //! リソース要求を横取りして返す）。文書と同じフォルダの画像などは `https://yy-doc.local/`
@@ -155,6 +155,7 @@ pub fn asset(path: &str) -> Option<(Cow<'static, [u8]>, &'static str)> {
     let css = "text/css; charset=utf-8";
     Some(match name {
         "mermaid.min.js" => (compressed!("mermaid.min.js"), js),
+        "d3.min.js" => (compressed!("d3.min.js"), js),
         "katex.min.js" => (compressed!("katex.min.js"), js),
         "katex.min.css" => (compressed!("katex.min.css"), css),
         "preview.js" => (

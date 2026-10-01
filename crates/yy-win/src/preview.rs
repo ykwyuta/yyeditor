@@ -844,7 +844,7 @@ mod tests {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
-    /// WebView2 でページを表示し、mermaid の図と KaTeX の数式が描かれること、本文の差し替えが
+    /// WebView2 でページを表示し、mermaid・d3 の図と KaTeX の数式が描かれること、本文の差し替えが
     /// 反映されることを確かめる。WebView2 ランタイムがなければ飛ばす
     /// （`YY_REQUIRE_WEBVIEW2=1` なら失敗にする）。
     #[test]
@@ -882,7 +882,8 @@ mod tests {
         let mut preview = Preview::new(parent, parent).unwrap();
         preview.set_visible(true);
         preview.set_bounds(0, 0, 880, 660);
-        let md = "# Title\n\n```mermaid\ngraph TD\n  A-->B\n```\n\nInline $a^2$ and\n\n$$\\frac{1}{2}$$\n";
+        let md = "# Title\n\n```mermaid\ngraph TD\n  A-->B\n```\n\nInline $a^2$ and\n\n$$\\frac{1}{2}$$\n\n\
+                  ```d3\nreturn d3.create('svg').attr('width', 100).attr('height', 50);\n```\n";
         let body = yy_preview::markdown_to_html(md, None);
         preview.show_markdown(&body, &PageOptions::default(), None, Some(0));
 
@@ -905,13 +906,14 @@ mod tests {
         let ok = pump_until(Duration::from_secs(30), || {
             let r = eval(
                 &preview,
-                "(document.body.hasAttribute('data-diagrams-done') ? 'done' : 'wait') + \
+                "(document.body.hasAttribute('data-d3-done') ? 'done' : 'wait') + \
                  ',' + document.querySelectorAll('pre.mermaid svg').length + \
-                 ',' + document.querySelectorAll('.katex').length",
+                 ',' + document.querySelectorAll('.katex').length + \
+                 ',' + document.querySelectorAll('.yy-d3-out svg').length",
             )
             .unwrap_or_default();
             rendered.set(r.clone());
-            r == "\"done,1,2\""
+            r == "\"done,1,2,1\""
         });
         assert!(ok, "rendered: {}", rendered.take());
 

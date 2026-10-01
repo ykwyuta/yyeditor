@@ -144,12 +144,13 @@ token = "line-number"
 
 - Markdown は CommonMark に加えて拡張構文に対応します: 表、脚注、取り消し線（`~~x~~`）、タスクリスト、定義リスト、上付き・下付き（`^x^`・`~x~`）、見出しの属性（`{#id .class}`）、GitHub のアラート（`> [!NOTE]` など）、Wiki リンク（`[[page]]`）、YAML のフロントマター
 - ```` ```mermaid ```` のコードブロックを図にします（[Mermaid](https://mermaid.js.org/)）
+- ```` ```d3 ```` のコードブロックを [d3.js](https://d3js.org/)（v7）の JavaScript として実行し、グラフを描きます（`d3`・描く場所の `el`・幅の `width` を使える。要素や選択を `return` すると表示。`await` 可）。d3 はブロックがあるときだけ読み込みます
 - `$…$`（インライン）・`$$…$$`（別行立て）・```` ```math ```` を数式にします（[KaTeX](https://katex.org/)）
 - コードブロックはシンタックスハイライトの定義で色付けします（色はハイライトの設定と同じ）
 - HTML 文書はそのまま表示します（スクリプトも動きます）
 - 入力するとすぐに（0.25 秒後）反映され、Markdown はエディタのスクロールに合わせてプレビューもスクロールします
 - 画像などの相対パスは文書のフォルダから読みます。リンクは、文書のフォルダの Markdown・HTML ならエディタで、それ以外（Web ページなど）は既定のブラウザで開きます
-- Mermaid と KaTeX は実行ファイルに埋め込んでいるので、インターネットに接続していなくても表示できます
+- Mermaid・KaTeX・d3 は実行ファイルに埋め込んでいるので、インターネットに接続していなくても表示できます
 
 表示には Microsoft Edge WebView2 ランタイム（Windows 10 / 11 には通常インストール済み）を使います。ランタイムがない環境ではその旨を表示します。
 
@@ -223,14 +224,14 @@ crates/
   yy-core/     文書モデル、選択（マルチカーソル）、一括編集、Undo/Redo、カーソル移動、行数カウント
   yy-layout/   表示行の分割（長大行のセグメント化）、表示テキスト ⇔ オフセット変換、スクロール位置
   yy-syntax/   シンタックスハイライト（TOML の定義、複数パターンの正規表現、行の開始状態の記録、ファイル種類の判定）
-  yy-preview/  Markdown・HTML のプレビュー（Markdown → HTML、ページ、同梱の Mermaid・KaTeX）
+  yy-preview/  Markdown・HTML のプレビュー（Markdown → HTML、ページ、同梱の Mermaid・KaTeX・d3）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
                     ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
 tools/gen-icon/     アイコン（apps/yyeditor/res/yyeditor.ico）の生成（Python + Pillow）
-tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX の取得（npm から）
+tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の取得（npm から）
 ```
 
 `yy-win` 以外は OS に依存しないため、Linux でもテストできます。
@@ -309,7 +310,7 @@ syntax = "cobol"                 # ハイライトの定義（"none" で色を�
 
 ### 同梱ライブラリ（プレビュー）
 
-プレビューのため、[Mermaid](https://github.com/mermaid-js/mermaid) と [KaTeX](https://github.com/KaTeX/KaTeX)（フォントを含む）を実行ファイルに埋め込んでいます。どちらも MIT License です（[crates/yy-preview/assets/](crates/yy-preview/assets/) の `LICENSE-*.txt`。版は `VERSIONS.txt`）。WebView2 の読み込み処理（WebView2LoaderStatic.lib）は Microsoft の WebView2 SDK のものを静的にリンクしています。
+プレビューのため、[Mermaid](https://github.com/mermaid-js/mermaid) と [KaTeX](https://github.com/KaTeX/KaTeX)（フォントを含む）、[d3](https://github.com/d3/d3) を実行ファイルに埋め込んでいます。Mermaid・KaTeX は MIT License、d3 は ISC License です（[crates/yy-preview/assets/](crates/yy-preview/assets/) の `LICENSE-*.txt`。版は `VERSIONS.txt`）。WebView2 の読み込み処理（WebView2LoaderStatic.lib）は Microsoft の WebView2 SDK のものを静的にリンクしています。
 
 ## 保存の仕組み
 
@@ -357,6 +358,7 @@ Copyright (C) 2026 Yuta Yukawa
 |------|------------|
 | UDEV Gothic（既定のフォント） | SIL Open Font License 1.1（[crates/yy-win/fonts/LICENSE-UDEVGothic.txt](crates/yy-win/fonts/LICENSE-UDEVGothic.txt)） |
 | Mermaid・KaTeX（プレビュー） | MIT License（[crates/yy-preview/assets/](crates/yy-preview/assets/)） |
+| d3（プレビュー） | ISC License（[crates/yy-preview/assets/LICENSE-d3.txt](crates/yy-preview/assets/LICENSE-d3.txt)） |
 | EBCDIC の対応表（ICU の `.ucm` から生成） | Unicode License V3 |
 | Microsoft Edge WebView2 Loader（プレビュー。MSVC 版は静的にリンク） | Microsoft.Web.WebView2 SDK のライセンス（上記の追加の許可でリンクを認めています） |
 | 依存している Rust のクレート | MIT / Apache-2.0 など（`cargo metadata` で確認できます） |

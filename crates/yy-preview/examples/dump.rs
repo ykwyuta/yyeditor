@@ -34,6 +34,7 @@ fn main() {
     std::fs::write(out.join("body.html"), &body).unwrap();
     let mut names: Vec<String> = [
         "mermaid.min.js",
+        "d3.min.js",
         "katex.min.js",
         "katex.min.css",
         "preview.js",

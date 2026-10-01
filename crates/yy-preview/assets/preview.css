@@ -78,3 +78,5 @@ pre.mermaid:not(.yy-diagram) { color: transparent; }
 pre.mermaid.yy-error { color: #cf222e; background: #ffebe9; text-align: left; white-space: pre-wrap; }
 pre.mermaid.yy-error::before { content: "Mermaid: " attr(data-error) "\A\A"; font-weight: 600; }
 .math.yy-error { color: #cf222e; }
+.yy-d3 { margin: 0 0 16px; overflow-x: auto; }
+.yy-d3-error { color: #cf222e; background: #ffebe9; white-space: pre-wrap; }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""プレビューで使う mermaid と KaTeX を npm から取得して crates/yy-preview/assets/ に置く。
+"""プレビューで使う mermaid・KaTeX・d3 を npm から取得して crates/yy-preview/assets/ に置く。
 
-    python3 tools/fetch-preview-assets/fetch.py [mermaid のバージョン] [KaTeX のバージョン]
+    python3 tools/fetch-preview-assets/fetch.py [mermaid のバージョン] [KaTeX のバージョン] [d3 のバージョン]
 
 JS・CSS は zlib で圧縮して `.z` として置く（実行ファイルへの埋め込みを小さくするため。
 プレビューが最初に要求したときに展開する）。KaTeX のフォントは woff2 だけを置く。
@@ -39,6 +39,7 @@ def put(rel, data, compress):
 def main():
     mermaid_ver = sys.argv[1] if len(sys.argv) > 1 else "latest"
     katex_ver = sys.argv[2] if len(sys.argv) > 2 else "latest"
+    d3_ver = sys.argv[3] if len(sys.argv) > 3 else "7"
     versions = []
 
     v, tar = package("mermaid", mermaid_ver)
@@ -54,6 +55,11 @@ def main():
     for m in tar.getmembers():
         if m.name.startswith("package/dist/fonts/") and m.name.endswith(".woff2"):
             put("fonts/" + m.name.rsplit("/", 1)[1], tar.extractfile(m).read(), False)
+
+    v, tar = package("d3", d3_ver)
+    versions.append(f"d3 {v}")
+    put("d3.min.js", read(tar, "dist/d3.min.js"), True)
+    put("LICENSE-d3.txt", read(tar, "LICENSE"), False)
 
     (OUT / "VERSIONS.txt").write_text("\n".join(versions) + "\n")
 

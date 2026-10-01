@@ -136,11 +136,30 @@ Markdown で使える記法:
 | アラート | `> [!NOTE]`・`[!TIP]`・`[!IMPORTANT]`・`[!WARNING]`・`[!CAUTION]` |
 | 数式（KaTeX） | `$E = mc^2$`・`$$ \int_0^1 x\,dx $$`・```` ```math ```` |
 | 図（Mermaid） | ```` ```mermaid ```` のコードブロック |
+| グラフ（d3） | ```` ```d3 ```` のコードブロック（JavaScript。下記） |
 | 見出しの ID | `## 見出し {#id}` |
 
 - 画像などの相対パスは文書のフォルダから読みます。リンクは、同じフォルダの Markdown・HTML なら
   エディタで、それ以外は既定のブラウザで開きます。
 - HTML 文書はそのまま表示します。
+- **d3**: ```` ```d3 ```` のコードブロックは [d3.js](https://d3js.org/)（v7）を使う JavaScript として実行し、
+  その場所にグラフを描きます。スクリプトでは `d3`、描く場所の要素 `el`、その幅 `width` を使えます。
+  要素や d3 の選択（`d3.create("svg")` など）を `return` すると `el` に加わります。`await` も使えます
+  （`await d3.csv("data.csv")` で文書のフォルダのファイルを読めます）。誤りがあればその場所に赤く表示します。
+
+  ```` 
+  ```d3
+  const data = [3, 8, 5];
+  const svg = d3.create("svg").attr("width", width).attr("height", 80);
+  svg.selectAll("rect").data(data).join("rect")
+    .attr("x", (d, i) => i * 40).attr("y", d => 80 - d * 8)
+    .attr("width", 30).attr("height", d => d * 8).attr("fill", "steelblue");
+  return svg;
+  ```
+  ````
+
+  文書の中のスクリプトを実行するので、信頼できる文書だけをプレビューしてください（HTML 文書も同じです）。
+  HTML 文書からは `<script src="https://yy-preview.local/assets/d3.min.js"></script>` で同梱の d3 を読み込めます。
 - プレビューには Microsoft Edge WebView2 ランタイムを使います（Windows 10 / 11 には通常インストール済み）。
 
 ## 16 進数（バイナリ）編集 {#hex}
