@@ -346,7 +346,7 @@ impl Renderer {
                 font_size_pt,
                 tab_width,
             )?;
-            Ok(Renderer {
+            let mut r = Renderer {
                 d2d,
                 dwrite,
                 fonts,
@@ -363,12 +363,16 @@ impl Renderer {
                 columns: ColumnConfig {
                     tab_width,
                     ambiguous_wide: true,
+                    wide_box_line: false,
                 },
                 long_cache: HashMap::new(),
                 dpi: dpi as f32,
                 max_text_width: 0.0,
                 show_whitespace: false,
-            })
+            };
+            // 縦線 │ の字形の幅（区切り文字モードの区切り）を測って桁の数え方を合わせる
+            r.columns.wide_box_line = r.text_width("\u{2502}") > r.metrics.char_width * 1.5;
+            Ok(r)
         }
     }
 
@@ -415,6 +419,11 @@ impl Renderer {
         self.cache.clear();
         self.long_cache.clear();
         self.max_text_width = 0.0;
+    }
+
+    /// フォントが縦線 `│` を全角の幅で描くか（桁の数え方を描画に合わせるため）。
+    pub fn wide_box_line(&self) -> bool {
+        self.columns.wide_box_line
     }
 
     /// 長い行の桁の数え方（東アジアの曖昧幅）を設定する。
@@ -1762,6 +1771,7 @@ mod tests {
         let cc = ColumnConfig {
             tab_width: 4,
             ambiguous_wide: true,
+            wide_box_line: false,
         };
         let text = "abc\t日本".repeat(1000);
         let li = LongInfo::build(&text, &cc);

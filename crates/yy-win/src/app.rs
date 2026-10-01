@@ -722,6 +722,7 @@ impl App {
             let ccfg = ColumnConfig {
                 tab_width: config.editor.tab_width,
                 ambiguous_wide: config.editor.ambiguous_wide,
+                wide_box_line: renderer.wide_box_line(),
             };
             let app = App {
                 frame,
