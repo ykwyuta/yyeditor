@@ -339,6 +339,8 @@ syntax = "cobol"                 # ハイライトの定義（"none" で色を�
 
 yyeditor は GNU General Public License バージョン 3 またはそれ以降（GPL-3.0-or-later）で配布します。全文は [COPYING](COPYING) にあります。
 
+ただし、プレビューで使う Microsoft Edge WebView2 Loader（WebView2 SDK の `WebView2LoaderStatic.lib` / `WebView2Loader.dll`。Microsoft のライセンス）とリンクして頒布できるよう、GPL バージョン 3 第 7 条に基づく追加の許可を付けています（[COPYING.EXCEPTION](COPYING.EXCEPTION)）。このローダーのソースコードは、対応するソースに含める必要はありません。
+
 ```
 yyeditor — 巨大ファイル対応の軽量テキストエディタ
 Copyright (C) 2026 Yuta Yukawa
@@ -349,13 +351,14 @@ Copyright (C) 2026 Yuta Yukawa
 いかなる保証もありません。詳しくは GNU 一般公衆利用許諾書をご覧ください。
 ```
 
-実行ファイルに含めている第三者の素材は、それぞれのライセンスに従います（いずれも GPL-3.0 と両立します）。
+実行ファイルに含めている第三者の素材は、それぞれのライセンスに従います（WebView2 Loader 以外は GPL-3.0 と両立するライセンスです）。
 
 | 素材 | ライセンス |
 |------|------------|
 | UDEV Gothic（既定のフォント） | SIL Open Font License 1.1（[crates/yy-win/fonts/LICENSE-UDEVGothic.txt](crates/yy-win/fonts/LICENSE-UDEVGothic.txt)） |
 | Mermaid・KaTeX（プレビュー） | MIT License（[crates/yy-preview/assets/](crates/yy-preview/assets/)） |
 | EBCDIC の対応表（ICU の `.ucm` から生成） | Unicode License V3 |
+| Microsoft Edge WebView2 Loader（プレビュー。MSVC 版は静的にリンク） | Microsoft.Web.WebView2 SDK のライセンス（上記の追加の許可でリンクを認めています） |
 | 依存している Rust のクレート | MIT / Apache-2.0 など（`cargo metadata` で確認できます） |
 
 ## 既知の制限

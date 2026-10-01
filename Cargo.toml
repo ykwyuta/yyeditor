@@ -22,6 +22,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+# 追加の許可（Microsoft Edge WebView2 Loader とのリンク）は COPYING.EXCEPTION
 license = "GPL-3.0-or-later"
 repository = "https://github.com/ykwyuta/yyeditor"
 
