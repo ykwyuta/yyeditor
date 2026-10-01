@@ -14,6 +14,10 @@ pub struct ColumnConfig {
     pub tab_width: u32,
     /// 東アジアの曖昧幅文字（①、○、ギリシャ文字など）を 2 桁として数えるか
     pub ambiguous_wide: bool,
+    /// 縦線 `│`（U+2502。区切り文字モードの区切りの表示に使う）を 2 桁として数えるか。
+    /// 曖昧幅だが字形の幅はフォントによる（UDEV Gothic は半角、MS ゴシックは全角）ので、
+    /// 描画するフォントで測った幅に合わせる
+    pub wide_box_line: bool,
 }
 
 impl Default for ColumnConfig {
@@ -21,6 +25,7 @@ impl Default for ColumnConfig {
         ColumnConfig {
             tab_width: 4,
             ambiguous_wide: true,
+            wide_box_line: false,
         }
     }
 }
@@ -33,6 +38,7 @@ impl ColumnConfig {
                 let t = self.tab_width.max(1);
                 t - col % t
             }
+            '\u{2502}' => 1 + u32::from(self.wide_box_line),
             c => {
                 let w = if self.ambiguous_wide {
                     c.width_cjk()
@@ -206,5 +212,21 @@ pub fn offset_at_col(units: &[Unit], row: &Row, col: u32, edge: Edge) -> (u64, u
         (row.start, 0)
     } else {
         (row.end.max(pos.0), pos.1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box_line_width_follows_the_font() {
+        // 曖昧幅でも、縦線 │ はフォントの字形の幅（既定は半角）で数える
+        let mut cfg = ColumnConfig::default();
+        assert!(cfg.ambiguous_wide);
+        assert_eq!(cfg.text_width(" \u{2502} ", 0), 3);
+        assert_eq!(cfg.char_width('①', 0), 2);
+        cfg.wide_box_line = true;
+        assert_eq!(cfg.text_width(" \u{2502} ", 0), 4);
     }
 }
