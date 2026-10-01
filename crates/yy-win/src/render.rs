@@ -875,12 +875,18 @@ impl Renderer {
 
     /// 行 `row` の中でオフセット `offset` の位置の x 座標（本文の左端からの DIP）。
     pub fn caret_x(&mut self, row: &Row, offset: u64) -> f32 {
+        self.text_x(row, row.text_index(offset))
+    }
+
+    /// 行 `row` の表示テキストの位置 `text_idx`（UTF-8 のバイト位置）の x 座標
+    /// （本文の左端からの DIP。描画と同じレイアウトで求める）。
+    pub fn text_x(&mut self, row: &Row, text_idx: usize) -> f32 {
         if row.text.len() > LONG_ROW_BYTES {
             let li = self.long_info(row);
-            let col = li.col_at(&row.text, row.text_index(offset), &self.columns);
+            let col = li.col_at(&row.text, text_idx, &self.columns);
             return col as f32 * self.metrics.char_width;
         }
-        let idx = utf16_index(&row.text, row.text_index(offset));
+        let idx = utf16_index(&row.text, text_idx);
         match self.geometry_layout(row) {
             Ok(rl) => self.x_at(&rl, idx),
             Err(_) => 0.0,
