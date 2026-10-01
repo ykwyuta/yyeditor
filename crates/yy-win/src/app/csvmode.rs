@@ -464,12 +464,44 @@ impl App {
     }
 
     /// 列見出しを描く。各列の上に Excel と同じ規則の列名を、列の幅の中央に表示する。
-    fn paint_column_header(&self, hdc: windows::Win32::Graphics::Gdi::HDC, rc: RECT) {
+    /// 表示中の行の区切り文字（" │ "）の中央の x 座標（本文の左端からの DIP。左の列から順に）。
+    /// 区切り文字のいちばん多い行を、描画と同じレイアウトで測る。
+    fn measured_delimiters(&mut self) -> Vec<f32> {
+        use yy_layout::SpanKind;
+        let rows = self.cached_rows(self.vp.top, self.page_rows() + 1);
+        // 前の行から続くフィールドの行（列揃えの空白で始まる）は、途中の列から始まるので使わない
+        let best = rows
+            .iter()
+            .filter(|r| r.spans.first().is_none_or(|s| s.kind != SpanKind::Pad))
+            .max_by_key(|r| r.spans.iter().filter(|s| s.kind == SpanKind::Delim).count());
+        let Some(row) = best.cloned() else {
+            return Vec::new();
+        };
+        let delims: Vec<_> = row
+            .spans
+            .iter()
+            .filter(|s| s.kind == SpanKind::Delim)
+            .map(|s| s.range.clone())
+            .collect();
+        delims
+            .into_iter()
+            .map(|r| {
+                (self.renderer.text_x(&row, r.start) + self.renderer.text_x(&row, r.end)) / 2.0
+            })
+            .collect()
+    }
+
+    fn paint_column_header(&mut self, hdc: windows::Win32::Graphics::Gdi::HDC, rc: RECT) {
         use windows::Win32::Graphics::Gdi::*;
         let cref = |c: yy_config::Color| {
             windows::Win32::Foundation::COLORREF(
                 c.r as u32 | (c.g as u32) << 8 | (c.b as u32) << 16,
             )
+        };
+        let measured = if self.rows_cfg.cells.is_some() {
+            self.measured_delimiters()
+        } else {
+            Vec::new()
         };
         let colors = &self.config.colors;
         let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
@@ -492,7 +524,8 @@ impl App {
                 let origin = self.text_origin_x();
                 let x_of = |dip: f32| ((origin + dip - self.scroll_x) * scale).round() as i32;
                 let left_edge = (origin * scale).round() as i32;
-                // 区切り文字（" │ "）は桁数の倍数の幅とは限らないので、実際の幅で位置を求める
+                // 列の境界（区切り文字 " │ " の中央）は、表示中の行を描画と同じレイアウトで測る。
+                // 測った行より右の列は、列の幅と区切り文字の幅から求める
                 let delim = self.renderer.text_width(yy_layout::cells::DELIM_TEXT);
                 let delim = if delim > 0.0 {
                     delim
@@ -501,22 +534,21 @@ impl App {
                 };
                 let current = self.caret_field();
                 // 最後の列（後ろに区切り文字がない）の幅は測っていないので、名前の分だけにする
-                let n = cl.widths.len() as u32 + 1;
-                let mut x0 = 0.0f32; // 列の左端（DIP）
+                let n = cl.widths.len().max(measured.len()) as u32 + 1;
+                let mut prev_mid: Option<f32> = None; // 前の列の右の境界（DIP）
                 for f in 0..n {
-                    let cols = match cl.widths.get(f as usize) {
-                        Some(&w) => w,
-                        None => yy_core::csv::column_name(f).len() as u32 + 2,
+                    let x0 = prev_mid.map_or(0.0, |m| m + delim / 2.0); // 列の左端
+                    let mid = match (measured.get(f as usize), cl.widths.get(f as usize)) {
+                        (Some(&m), _) => m,
+                        (None, Some(&w)) => x0 + w as f32 * cw + delim / 2.0,
+                        (None, None) => x0 + (yy_core::csv::column_name(f).len() + 2) as f32 * cw,
                     };
-                    let x1 = x0 + cols as f32 * cw;
-                    // 区切り文字の中央を列の境界にする
-                    let left = if f == 0 {
-                        x_of(0.0) - 2
-                    } else {
-                        x_of(x0 - delim / 2.0)
+                    let left = match prev_mid {
+                        None => x_of(0.0) - 2,
+                        Some(m) => x_of(m),
                     };
-                    let right = x_of(x1 + delim / 2.0);
-                    x0 = x1 + delim;
+                    let right = x_of(mid);
+                    prev_mid = Some(mid);
                     if right < left_edge {
                         continue;
                     }
