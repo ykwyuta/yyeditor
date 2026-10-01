@@ -422,6 +422,7 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
         (ctrl, b'G' as u16, ID_GOTO),
         (ctrl_shift, b'X' as u16, ID_HEX_MODE),
         (ctrl_shift, b'K' as u16, ID_CODE_MODE),
+        (ctrl_shift, b'R' as u16, ID_RECORD_MODE),
         (ctrl, VK_OEM_2.0, ID_TOGGLE_COMMENT),
         (ctrl, VK_DIVIDE.0, ID_TOGGLE_COMMENT),
         (ctrl, VK_OEM_6.0, ID_GOTO_BRACKET),
@@ -559,6 +560,7 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
         item(view, ID_HEX_MODE, w!("16 進数表示(&X)\tCtrl+Shift+X"))?;
         item(view, ID_CODE_MODE, w!("コード値表示(&K)\tCtrl+Shift+K"))?;
+        item(view, ID_RECORD_MODE, w!("固定長表示(&R)...\tCtrl+Shift+R"))?;
         AppendMenuW(
             view,
             MF_POPUP,
@@ -1110,7 +1112,9 @@ impl App {
             .filter(|_| self.csv.is_none())
             .map(|s| format!("  {}", s.view.syntax().name))
             .unwrap_or_default();
-        if self.hex.is_some() {
+        if let Some(n) = self.hex.and_then(|h| h.record) {
+            self.set_status(3, &format!("  固定長 {} バイト", group_digits(n)));
+        } else if self.hex.is_some() {
             self.set_status(3, "  16 進数");
         } else if self.code.is_some() {
             self.set_status(3, &format!("  {}  コード値", self.doc.eol().label()));
@@ -2759,11 +2763,10 @@ impl App {
 
     /// 「16 進数表示」のチェックを今の表示に合わせる。
     fn update_hex_menu(&self) {
-        let flag = if self.hex.is_some() {
-            MF_CHECKED
-        } else {
-            MF_UNCHECKED
-        };
+        let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
+        let fixed = self.hex.is_some_and(|h| h.record.is_some());
+        let flag = check(self.hex.is_some() && !fixed);
+        let record = check(fixed);
         let code = if self.code.is_some() {
             MF_CHECKED
         } else {
@@ -2772,6 +2775,16 @@ impl App {
         unsafe {
             CheckMenuItem(self.menu_view, ID_HEX_MODE as u32, (MF_BYCOMMAND | flag).0);
             CheckMenuItem(self.menu_view, ID_CODE_MODE as u32, (MF_BYCOMMAND | code).0);
+            CheckMenuItem(
+                self.menu_view,
+                ID_RECORD_MODE as u32,
+                (MF_BYCOMMAND | record).0,
+            );
+            CheckMenuItem(
+                self.menu_view,
+                ID_RECORD_MODE as u32,
+                (MF_BYCOMMAND | record).0,
+            );
         }
         self.update_charset_menu();
     }
@@ -4427,6 +4440,7 @@ fn on_command(hwnd: HWND, id: u16) {
         ID_GOTO if with_app(|a| a.hex.is_some()) == Some(true) => cmd_hex_goto(hwnd),
         ID_HEX_MODE => cmd_toggle_hex(hwnd),
         ID_CODE_MODE => cmd_toggle_code(hwnd),
+        ID_RECORD_MODE => cmd_toggle_record(hwnd),
         ID_OPEN_BINARY => {
             if let Some((paths, _)) = show_open_dialog(hwnd) {
                 cmd_open_binary(hwnd, paths);
@@ -4673,7 +4687,11 @@ fn on_command(hwnd: HWND, id: u16) {
         ID_ABOUT => info_box(
             hwnd,
             &format!(
-                "yyeditor {}\n\n巨大ファイル対応の軽量テキストエディタ",
+                "yyeditor {}\n\n巨大ファイル対応の軽量テキストエディタ\n\n\
+                 このプログラムはフリーソフトウェアです。GNU 一般公衆利用許諾書（GPL）\
+                 バージョン 3、またはそれ以降のバージョンの条件で再頒布・改変できます\
+                 （Microsoft Edge WebView2 Loader とのリンクを認める追加の許可付き）。\
+                 このプログラムは無保証です。",
                 env!("CARGO_PKG_VERSION")
             ),
         ),

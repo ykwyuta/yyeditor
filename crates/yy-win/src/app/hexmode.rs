@@ -5,13 +5,15 @@
 //! 選択範囲は文書の選択（バイト位置）をそのまま使うため、検索・置換・Undo も共通になる。
 
 use yy_core::hex::{self, Charset, HexLayout, Pane};
+use yy_core::record::{self, RecordLayout};
 use yy_core::{EditKind, Selection, SelectionSet};
 
 use super::*;
-use crate::render::HexFrame;
+use crate::render::{HexFrame, RecordFrame};
 
 pub(crate) const ID_HEX_MODE: u16 = 207;
 pub(crate) const ID_OPEN_BINARY: u16 = 111;
+pub(crate) const ID_RECORD_MODE: u16 = 211;
 /// 「文字の欄の文字コード」の項目（`+ 0` は ASCII、`+ 1 + i` は `Encoding::all()` の i 番目）
 pub(crate) const ID_HEX_CHARSET_BASE: u16 = 1200;
 
@@ -57,6 +59,9 @@ pub(crate) fn create_charset_menu() -> Result<HMENU> {
     }
 }
 
+const FIXED_OVERWRITE_ONLY: &str =
+    "固定長表示ではバイトを挿入・削除できません（上書きで書き換えてください）";
+
 /// メニューの項目か。
 pub(crate) fn is_charset_command(id: u16) -> bool {
     (ID_HEX_CHARSET_BASE..ID_HEX_CHARSET_BASE + charsets().len() as u16).contains(&id)
@@ -76,17 +81,21 @@ pub(crate) struct HexState {
     pub drag_anchor: Option<u64>,
     /// 文字の欄の文字コード
     pub charset: Charset,
+    /// 固定長表示のレコード長（バイト）。`None` は 1 行 16 バイトの 16 進ダンプ
+    pub record: Option<u64>,
 }
 
 impl HexState {
-    fn new(caret: u64, charset: Charset) -> HexState {
+    fn new(caret: u64, charset: Charset, record: Option<u64>) -> HexState {
+        let row = record.unwrap_or(16).max(1);
         HexState {
-            top: caret / 16 * 16,
+            top: caret / row * row,
             pane: Pane::Hex,
             nibble: 0,
             overwrite: true,
             drag_anchor: None,
             charset,
+            record,
         }
     }
 }
@@ -96,15 +105,32 @@ impl App {
         HexLayout::for_len(self.doc.snapshot().len())
     }
 
+    /// 固定長表示のレイアウト（固定長表示でなければ `None`）。
+    pub(crate) fn record_layout(&self) -> Option<RecordLayout> {
+        let len = self.hex?.record?;
+        let records = self.doc.snapshot().len().div_ceil(len);
+        Some(RecordLayout::new(records, len))
+    }
+
+    /// 1 行（固定長表示では 1 レコード）のバイト数。
+    fn row_bytes(&self) -> u64 {
+        self.hex.and_then(|h| h.record).unwrap_or(16).max(1)
+    }
+
     /// 16 進数表示に切り替える・戻す（ファイルを開き直す必要があれば `on` の前に済ませること）。
     /// `charset` は文字の欄の文字コード。
     pub(crate) fn set_hex(&mut self, on: bool, charset: Charset) {
+        self.set_hex_mode(on, charset, None);
+    }
+
+    /// 16 進数表示（`record` が `Some` なら、そのレコード長の固定長表示）に切り替える・戻す。
+    pub(crate) fn set_hex_mode(&mut self, on: bool, charset: Charset, record: Option<u64>) {
         ime::cancel(self.view);
         self.composition = None;
         self.rect = None;
         self.drag = None;
         let head = self.doc.selections().primary().head;
-        self.hex = on.then(|| HexState::new(head, charset));
+        self.hex = on.then(|| HexState::new(head, charset, record));
         if on {
             self.code = None;
         }
@@ -153,12 +179,18 @@ impl App {
 
     /// 表示中の最後の行の次のオフセットまでの行数。
     fn hex_rows(&self) -> u64 {
-        self.page_rows() as u64
+        if self.record_layout().is_some() {
+            // 目盛りの 1 行と、1 レコード 3 行
+            (self.page_rows().saturating_sub(1) / record::LINES).max(1) as u64
+        } else {
+            self.page_rows() as u64
+        }
     }
 
     /// 最後の行（文書の終わりの位置を含む行）の先頭。
     fn hex_last_row(&self) -> u64 {
-        self.doc.snapshot().len() / 16 * 16
+        let row = self.row_bytes();
+        self.doc.snapshot().len() / row * row
     }
 
     /// カーソルが見えるように表示位置を変える。
@@ -167,22 +199,25 @@ impl App {
         let page = self.hex_rows();
         let last = self.hex_last_row();
         let l = self.hex_layout();
+        let rl = self.record_layout();
+        let rb = self.row_bytes();
         let Some(h) = &mut self.hex else { return };
-        let row = head / 16 * 16;
+        let row = head / rb * rb;
         if row < h.top {
             h.top = row;
-        } else if row >= h.top + page * 16 {
-            h.top = row + 16 - page * 16;
+        } else if row >= h.top + page * rb {
+            h.top = row + rb - page * rb;
         }
         h.top = h
             .top
-            .min(last.saturating_sub((page.saturating_sub(1)) * 16));
+            .min(last.saturating_sub((page.saturating_sub(1)) * rb));
         // 横方向（カーソルの桁が見えるように）
         let cw = self.renderer.metrics().char_width;
-        let i = (head % 16) as usize;
-        let col = match h.pane {
-            Pane::Hex => l.hex_col(i),
-            Pane::Ascii => l.ascii_col(i),
+        let i = (head % rb) as usize;
+        let col = match (rl, h.pane) {
+            (Some(rl), _) => rl.byte_col(i),
+            (None, Pane::Hex) => l.hex_col(i),
+            (None, Pane::Ascii) => l.ascii_col(i),
         };
         let x = col as f32 * cw;
         let area = self.text_area_width_hex();
@@ -201,13 +236,20 @@ impl App {
     pub(crate) fn hex_scroll_rows(&mut self, rows: i64) {
         let last = self.hex_last_row();
         let page = self.hex_rows();
+        let rb = self.row_bytes();
+        // 固定長表示ではホイールの 1 行を 1 レコードにする（1 レコードが 3 行のため）
+        let rows = if self.record_layout().is_some() {
+            rows.signum() * (rows.unsigned_abs().div_ceil(record::LINES as u64)) as i64
+        } else {
+            rows
+        };
         let Some(h) = &mut self.hex else { return };
-        let max = last.saturating_sub(page.saturating_sub(1) * 16);
+        let max = last.saturating_sub(page.saturating_sub(1) * rb);
         let top = if rows < 0 {
-            h.top.saturating_sub(rows.unsigned_abs().saturating_mul(16))
+            h.top.saturating_sub(rows.unsigned_abs().saturating_mul(rb))
         } else {
             h.top
-                .saturating_add((rows as u64).saturating_mul(16))
+                .saturating_add((rows as u64).saturating_mul(rb))
                 .min(max)
         };
         if top != h.top {
@@ -221,12 +263,13 @@ impl App {
     pub(crate) fn hex_scroll_to(&mut self, offset: u64) {
         let page = self.hex_rows();
         let last = self.hex_last_row();
+        let rb = self.row_bytes();
         if let Some(h) = &mut self.hex {
-            let row = offset.min(last) / 16 * 16;
-            if row < h.top || row >= h.top + page * 16 {
-                h.top = row.saturating_sub(page / 2 * 16);
+            let row = offset.min(last) / rb * rb;
+            if row < h.top || row >= h.top + page * rb {
+                h.top = row.saturating_sub(page / 2 * rb);
             }
-            h.top = h.top.min(last.saturating_sub(page.saturating_sub(1) * 16));
+            h.top = h.top.min(last.saturating_sub(page.saturating_sub(1) * rb));
         }
         self.update_scrollbars();
         self.update_status();
@@ -236,7 +279,8 @@ impl App {
     /// 縦のスクロールバー（全体の行数が大きいので位置の割合で表す）。
     pub(crate) fn hex_update_scrollbars(&mut self) {
         let Some(h) = self.hex else { return };
-        let rows = self.hex_last_row() / 16 + 1;
+        let rb = self.row_bytes();
+        let rows = self.hex_last_row() / rb + 1;
         let page = self.hex_rows();
         let frac = |v: u64| (v as f64 / rows.max(1) as f64 * SCROLL_RANGE as f64) as i32;
         let si = SCROLLINFO {
@@ -245,11 +289,15 @@ impl App {
             nMin: 0,
             nMax: SCROLL_RANGE - 1,
             nPage: frac(page).clamp(1, SCROLL_RANGE) as u32,
-            nPos: frac(h.top / 16),
+            nPos: frac(h.top / rb),
             nTrackPos: 0,
         };
         let cw = self.renderer.metrics().char_width;
-        let width = (self.hex_layout().width() + 4) as f32 * cw;
+        let cols = match self.record_layout() {
+            Some(rl) => rl.width(),
+            None => self.hex_layout().width(),
+        };
+        let width = (cols + 4) as f32 * cw;
         let hsi = SCROLLINFO {
             cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
             fMask: SIF_ALL | SIF_DISABLENOSCROLL,
@@ -268,18 +316,22 @@ impl App {
 
     /// スクロールバーのつまみの位置 `pos`（0〜SCROLL_RANGE）に表示位置を合わせる。
     pub(crate) fn hex_scroll_to_fraction(&mut self, pos: i32) {
-        let rows = self.hex_last_row() / 16 + 1;
+        let rb = self.row_bytes();
+        let rows = self.hex_last_row() / rb + 1;
         let row = (pos as f64 / SCROLL_RANGE as f64 * rows as f64) as u64;
         let last = self.hex_last_row();
         let page = self.hex_rows();
         if let Some(h) = &mut self.hex {
-            h.top = (row * 16).min(last.saturating_sub(page.saturating_sub(1) * 16));
+            h.top = (row * rb).min(last.saturating_sub(page.saturating_sub(1) * rb));
         }
         self.update_status();
         self.invalidate();
     }
 
     pub(crate) fn hex_paint(&mut self) {
+        if self.record_layout().is_some() {
+            return self.record_paint();
+        }
         let Some(h) = self.hex else { return };
         unsafe {
             let mut ps = PAINTSTRUCT::default();
@@ -373,19 +425,28 @@ impl App {
         let shift = key_down(VK_SHIFT);
         let len = self.doc.snapshot().len();
         let head = self.doc.selections().primary().head;
-        let page = self.hex_rows().saturating_sub(1).max(1) * 16;
+        let rb = self.row_bytes();
+        let fixed = self.record_layout().is_some();
+        let page = self.hex_rows().saturating_sub(1).max(1) * rb;
         let target = match vk {
             VK_LEFT => head.saturating_sub(1),
             VK_RIGHT => head + 1,
-            VK_UP => head.checked_sub(16).unwrap_or(head),
-            VK_DOWN if head + 16 <= len => head + 16,
+            VK_UP => head.checked_sub(rb).unwrap_or(head),
+            VK_DOWN if head + rb <= len => head + rb,
             VK_DOWN => head,
             VK_PRIOR => head.saturating_sub(page),
             VK_NEXT => (head + page).min(len),
             VK_HOME if ctrl => 0,
             VK_END if ctrl => len,
-            VK_HOME => head / 16 * 16,
-            VK_END => (head / 16 * 16 + 15).min(len),
+            VK_HOME => head / rb * rb,
+            VK_END => (head / rb * rb + rb - 1).min(len),
+            // 固定長表示は上書きだけ（レコードの長さを変えない）
+            VK_INSERT | VK_DELETE if fixed && !shift && !ctrl => {
+                self.status_msg = FIXED_OVERWRITE_ONLY.into();
+                self.update_status();
+                return true;
+            }
+            VK_BACK if fixed => head.saturating_sub(1),
             VK_TAB => {
                 if let Some(h) = &mut self.hex {
                     h.pane = match h.pane {
@@ -431,6 +492,11 @@ impl App {
     /// 選択範囲（なければカーソルの前後の 1 バイト）を削除する。
     pub(crate) fn hex_delete(&mut self, backward: bool) {
         if !self.hex_editable() {
+            return;
+        }
+        if self.record_layout().is_some() {
+            self.status_msg = FIXED_OVERWRITE_ONLY.into();
+            self.update_status();
             return;
         }
         let len = self.doc.snapshot().len();
@@ -562,6 +628,25 @@ impl App {
         let xd = self.renderer.px_to_dip(x as f32);
         let yd = self.renderer.px_to_dip(y.max(0) as f32);
         let lh = self.renderer.metrics().line_height.max(1.0);
+        if let Some(rl) = self.record_layout() {
+            // 目盛りの行の下に 1 レコード 3 行（コード値・16 進数・文字）
+            let line = ((yd / lh) as usize).saturating_sub(1);
+            let (k, part) = (
+                line / record::LINES,
+                record::Line::from_index(line % record::LINES),
+            );
+            let col = self.renderer.hex_col_at(xd, self.scroll_x);
+            let i = rl.hit(col).unwrap_or(0);
+            let len = self.doc.snapshot().len();
+            let pos = (h.top + k as u64 * rl.len as u64 + i as u64).min(len);
+            let pane = if part == record::Line::Char {
+                Pane::Ascii
+            } else {
+                Pane::Hex
+            };
+            let nibble = u8::from(part == record::Line::Hex && col > rl.byte_col(i) && pos < len);
+            return Some((pos, pane, nibble));
+        }
         let row = h.top + (yd / lh) as u64 * 16;
         let col = self.renderer.hex_col_at(xd, self.scroll_x);
         let (pane, i, nibble) = self.hex_layout().hit(col).unwrap_or((Pane::Hex, 0, 0));
@@ -613,7 +698,8 @@ impl App {
         }
         let len = self.doc.snapshot().len();
         let sel = self.doc.selections().primary().range();
-        let (change, caret) = if sel.is_empty() {
+        // 固定長表示では選択範囲があってもその先頭から上書きする（長さを変えない）
+        let (change, caret) = if sel.is_empty() || h.record.is_some() {
             hex::type_bytes(len, sel.start, &bytes, h.overwrite)
         } else {
             let n = bytes.len() as u64;
@@ -649,7 +735,14 @@ impl App {
         let snap = self.doc.snapshot();
         let sel = self.doc.selections().primary();
         let head = sel.head;
-        let mut s = format!("  位置 0x{head:X} ({})", group_digits(head));
+        let mut s = match self.hex.and_then(|h| h.record) {
+            Some(n) => format!(
+                "  レコード {}, {} バイト目  位置 0x{head:X}",
+                group_digits(head / n + 1),
+                group_digits(head % n + 1)
+            ),
+            None => format!("  位置 0x{head:X} ({})", group_digits(head)),
+        };
         if let Some(b) = snap.byte_at(head) {
             s += &format!("  値 {b:02X}");
         }
@@ -661,6 +754,66 @@ impl App {
             s += &format!("  文字の欄: {}", charset_name(h.charset));
         }
         s
+    }
+
+    /// 固定長表示を描画する。
+    fn record_paint(&mut self) {
+        let (Some(h), Some(rl)) = (self.hex, self.record_layout()) else {
+            return;
+        };
+        unsafe {
+            let mut ps = PAINTSTRUCT::default();
+            BeginPaint(self.view, &mut ps);
+            let snap = self.doc.snapshot();
+            let len = snap.len();
+            let rec = rl.len as u64;
+            // 文書の終わりがレコードの境界なら、追加用の空のレコードも出す
+            let mut records = Vec::new();
+            for k in 0..self.hex_rows() + 1 {
+                let off = h.top + k * rec;
+                if off > len {
+                    break;
+                }
+                let data = snap.read(off..(off + rec).min(len));
+                // レコードごとに読む（EBCDIC のシフト状態はレコードの先頭で戻る）
+                let cells =
+                    hex::char_cells(h.charset, &data, off, self.config.editor.ambiguous_wide);
+                records.push((data, cells));
+                if off + rec > len {
+                    break;
+                }
+            }
+            let end = (h.top + records.len() as u64 * rec).min(len);
+            let sel = self.doc.selections().primary();
+            let matches = match (&self.searcher, self.findbar.visible) {
+                (Some(s), true) => {
+                    s.matches_in(snap, h.top.saturating_sub(4096)..end, HIGHLIGHT_LIMIT)
+                }
+                _ => Vec::new(),
+            };
+            let frame = RecordFrame {
+                layout: rl,
+                first: h.top,
+                records: &records,
+                ebcdic: h.charset.is_some_and(|e| e.records().is_some()),
+                caret: sel.head,
+                nibble: h.nibble,
+                pane: h.pane,
+                caret_visible: self.focused && self.caret_visible,
+                selection: sel.range(),
+                matches: &matches,
+                scroll_x: self.scroll_x,
+            };
+            let r = self
+                .renderer
+                .draw_record(self.view, self.view_px.0, self.view_px.1, &frame);
+            let _ = EndPaint(self.view, &ps);
+            match r {
+                Ok(true) => {}
+                Ok(false) => self.invalidate(),
+                Err(e) => eprintln!("draw failed: {}", crate::util::describe_error(&e)),
+            }
+        }
     }
 }
 
@@ -697,6 +850,66 @@ pub(crate) fn cmd_toggle_hex(hwnd: HWND) {
     }
     // 文字の欄は、テキストとして読んでいたときの文字コードで表示する
     with_app(|a| a.set_hex(true, Some(encoding)));
+}
+
+/// 固定長表示に切り替える・戻す。レコード長は文字コードの固定長レコードの設定（なければ尋ねる）。
+pub(crate) fn cmd_toggle_record(hwnd: HWND) {
+    let Some((record, hex_charset, needs_raw, path, encoding)) = with_app(|a| {
+        let needs_raw = a.doc.encoding() != Encoding::Utf8 || a.doc.has_bom();
+        (
+            a.hex.and_then(|h| h.record),
+            a.hex.map(|h| h.charset),
+            needs_raw,
+            a.doc.path().map(|p| p.to_owned()),
+            a.doc.encoding(),
+        )
+    }) else {
+        return;
+    };
+    if record.is_some() {
+        with_app(|a| a.set_hex(false, None));
+        return;
+    }
+    let default = match encoding.records() {
+        Some(yy_encoding::Records::Fixed(n)) => n as u64,
+        _ => 80,
+    };
+    let Some(text) = crate::goto::prompt_text(
+        hwnd,
+        "固定長表示",
+        "レコード長（バイト。1〜65535）:",
+        &default.to_string(),
+    ) else {
+        return;
+    };
+    let len = match text.trim().parse::<u64>() {
+        Ok(n) if (1..=65535).contains(&n) => n,
+        _ => {
+            info_box(hwnd, "レコード長が正しくありません。");
+            return;
+        }
+    };
+    let charset = match hex_charset {
+        // 16 進数表示中なら文字の欄の文字コードをそのまま使う
+        Some(c) => c,
+        None => {
+            if needs_raw {
+                let Some(path) = path else {
+                    info_box(hwnd, "保存してから固定長表示にしてください。");
+                    return;
+                };
+                if !confirm_discard(hwnd) {
+                    return;
+                }
+                if let Some(Err(msg)) = with_app(|a| a.reopen_raw(path)) {
+                    error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
+                    return;
+                }
+            }
+            Some(encoding)
+        }
+    };
+    with_app(|a| a.set_hex_mode(true, charset, Some(len)));
 }
 
 /// 「バイナリとして開く」: ファイルを選んでバイト列のまま 16 進数表示で開く。

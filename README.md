@@ -69,6 +69,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 | 対応する括弧の強調表示と移動（Ctrl+]）、コメント化 / 解除（Ctrl+/）。文字列・コメント内の括弧は数えない | ✅ |
 | 利用者のハイライト定義（`%APPDATA%\yyeditor\syntax\*.toml`）、トークンの色の設定 | ✅ |
 | 16 進数（バイナリ）編集（表示メニューの「16 進数表示」Ctrl+Shift+X、ファイル メニューの「バイナリとして開く」） | ✅ |
+| 固定長表示（表示メニューの「固定長表示」Ctrl+Shift+R。バイト位置の目盛りの下に 1 レコードをコード値・16 進数・文字の 3 行で表示、上書き編集） | ✅ |
 | コード値の表示・編集（表示メニューの「コード値表示」Ctrl+Shift+K。16 進数表示と同じ形で 1 行 8 文字、Unicode のコード値を入力して文字を書き換え・挿入） | ✅ |
 | 変換（大文字・小文字、全角・半角カタカナ、キャメル・スネーク・ケバブケース）、重複行の削除、選択した文字列のコード値の表示 | ✅ |
 | 仕上げ（M8） | 今後 |
@@ -333,6 +334,32 @@ syntax = "cobol"                 # ハイライトの定義（"none" で色を�
 
 文書は内部で UTF-8 として持つため、UTF-8 以外のファイルは開くときに変換します。32 MB 以下はその場でメモリに、それより大きいファイルはバックグラウンドで UTF-8 の一時ファイル（`%TEMP%\yyeditor-decode-….tmp`、閉じると削除）に変換してメモリマップします。Shift_JIS・EUC-JP 系は行単位で並列に変換します。
 参考値（上の計測と同じ環境、CP932 の日本語 0.69 GB）: 変換 5.8 秒（一時ファイルへの書き込みが律速）、変換後の全行数カウント 0.06 秒。
+
+## ライセンス
+
+yyeditor は GNU General Public License バージョン 3 またはそれ以降（GPL-3.0-or-later）で配布します。全文は [COPYING](COPYING) にあります。
+
+ただし、プレビューで使う Microsoft Edge WebView2 Loader（WebView2 SDK の `WebView2LoaderStatic.lib` / `WebView2Loader.dll`。Microsoft のライセンス）とリンクして頒布できるよう、GPL バージョン 3 第 7 条に基づく追加の許可を付けています（[COPYING.EXCEPTION](COPYING.EXCEPTION)）。このローダーのソースコードは、対応するソースに含める必要はありません。
+
+```
+yyeditor — 巨大ファイル対応の軽量テキストエディタ
+Copyright (C) 2026 Yuta Yukawa
+
+このプログラムはフリーソフトウェアです。フリーソフトウェア財団が公表した GNU 一般公衆利用許諾書の
+バージョン 3、または（任意で）それ以降のバージョンの条件の下で、再頒布や改変ができます。
+このプログラムは有用であることを願って頒布されますが、商品性や特定目的への適合性の黙示の保証も含め、
+いかなる保証もありません。詳しくは GNU 一般公衆利用許諾書をご覧ください。
+```
+
+実行ファイルに含めている第三者の素材は、それぞれのライセンスに従います（WebView2 Loader 以外は GPL-3.0 と両立するライセンスです）。
+
+| 素材 | ライセンス |
+|------|------------|
+| UDEV Gothic（既定のフォント） | SIL Open Font License 1.1（[crates/yy-win/fonts/LICENSE-UDEVGothic.txt](crates/yy-win/fonts/LICENSE-UDEVGothic.txt)） |
+| Mermaid・KaTeX（プレビュー） | MIT License（[crates/yy-preview/assets/](crates/yy-preview/assets/)） |
+| EBCDIC の対応表（ICU の `.ucm` から生成） | Unicode License V3 |
+| Microsoft Edge WebView2 Loader（プレビュー。MSVC 版は静的にリンク） | Microsoft.Web.WebView2 SDK のライセンス（上記の追加の許可でリンクを認めています） |
+| 依存している Rust のクレート | MIT / Apache-2.0 など（`cargo metadata` で確認できます） |
 
 ## 既知の制限
 
