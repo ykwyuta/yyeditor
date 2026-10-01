@@ -116,6 +116,17 @@ pub fn units(row: &Row, cfg: &ColumnConfig) -> Vec<Unit> {
                 });
                 col += 1;
             }
+            SpanKind::Symbol => {
+                // 1 文字を表示テキスト（`<94>`、ASCII）の桁数
+                let w = span.range.len() as u32;
+                out.push(Unit {
+                    start: src0,
+                    end: row.start + span.src.end as u64,
+                    col_start: col,
+                    col_end: col + w,
+                });
+                col += w;
+            }
             SpanKind::Control | SpanKind::Invalid | SpanKind::Escape => {
                 let (w, step) = match span.kind {
                     SpanKind::Control => (1, 1),
