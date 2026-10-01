@@ -590,9 +590,11 @@ impl Renderer {
                             effects.push((start, len, &b.invalid))
                         }
                         // 列揃えの空白には続きの行の区切りの縦線も含まれる
-                        SpanKind::Control | SpanKind::Break | SpanKind::Delim | SpanKind::Pad => {
-                            effects.push((start, len, &b.control))
-                        }
+                        SpanKind::Control
+                        | SpanKind::Break
+                        | SpanKind::Symbol
+                        | SpanKind::Delim
+                        | SpanKind::Pad => effects.push((start, len, &b.control)),
                     }
                 }
             };
@@ -773,6 +775,12 @@ impl Renderer {
     pub fn set_show_whitespace(&mut self, show: bool) {
         self.show_whitespace = show;
         self.clear_cache();
+    }
+
+    /// 文字列 `text` を本文のフォントで描いたときの幅（DIP）。
+    pub fn text_width(&self, text: &str) -> f32 {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        self.prefix_width(&wide)
     }
 
     /// UTF-16 テキストの先頭 `len` 文字分の幅（ヒットテストが使えない環境向けの代替）。

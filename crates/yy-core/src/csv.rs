@@ -184,9 +184,35 @@ pub(crate) fn rewrite_records(
     Ok(n)
 }
 
+/// 列の名前（Excel と同じ規則。0 → `A`、25 → `Z`、26 → `AA`、701 → `ZZ`、702 → `AAA`）。
+pub fn column_name(index: u32) -> String {
+    let mut n = index as u64 + 1;
+    let mut out = Vec::new();
+    while n > 0 {
+        n -= 1;
+        out.push(b'A' + (n % 26) as u8);
+        n /= 26;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_names_follow_excel() {
+        let names: Vec<_> = [0, 1, 25, 26, 27, 51, 52, 701, 702, 16383]
+            .into_iter()
+            .map(column_name)
+            .collect();
+        assert_eq!(
+            names,
+            ["A", "B", "Z", "AA", "AB", "AZ", "BA", "ZZ", "AAA", "XFD"]
+        );
+        assert_eq!(column_name(u32::MAX).len(), 7);
+    }
 
     fn run(text: &str, d: Dialect, op: RecordOp) -> String {
         let s = Snapshot::from_bytes(text.as_bytes().to_vec());

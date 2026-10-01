@@ -58,6 +58,8 @@ fn add_stats(a: &mut DecodeStats, b: DecodeStats) {
     a.invalid += b.invalid;
     a.noncanonical += b.noncanonical;
     a.literal_escapes += b.literal_escapes;
+    // 最後の区間の状態（区間は文書の順に加える）
+    a.open_shift_at_end = b.open_shift_at_end;
 }
 
 /// `input` 全体をデコードして `w` に書く。`step(処理したバイト数)` が `false` を返したら中止して `None`。

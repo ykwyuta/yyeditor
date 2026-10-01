@@ -332,6 +332,9 @@ pub struct SaveFormat {
     pub bom: bool,
     /// 文書内のエスケープ文字の扱い
     pub escapes: EscapeMode,
+    /// 入力の終わりが 2 バイト部でも SI を加えない（EBCDIC。開いたファイルが SI なしで
+    /// 終わっていた場合）
+    pub keep_open_shift: bool,
 }
 
 impl SaveFormat {
@@ -340,6 +343,7 @@ impl SaveFormat {
             encoding: Encoding::Utf8,
             bom: false,
             escapes: EscapeMode::Literal,
+            keep_open_shift: false,
         }
     }
 }
@@ -447,6 +451,9 @@ pub fn save_snapshot_with(
             }
         } else {
             let mut enc = format.encoding.new_encoder(format.escapes);
+            if format.keep_open_shift {
+                enc.keep_open_shift();
+            }
             let mut out = Vec::new();
             let mut found = Vec::new();
             let mut chunks = snap
@@ -594,6 +601,7 @@ mod tests {
             encoding: Encoding::Cp932,
             bom: false,
             escapes: EscapeMode::Literal,
+            keep_open_shift: false,
         };
         save_snapshot(&snap, &target, &fmt, None).unwrap();
         assert_eq!(
@@ -604,6 +612,7 @@ mod tests {
             encoding: Encoding::Utf16Le,
             bom: true,
             escapes: EscapeMode::Literal,
+            keep_open_shift: false,
         };
         save_snapshot(&snap, &target, &fmt, None).unwrap();
         assert_eq!(
@@ -621,6 +630,7 @@ mod tests {
             encoding: Encoding::Cp932,
             bom: false,
             escapes: EscapeMode::Literal,
+            keep_open_shift: false,
         };
         match save_snapshot(&snap, &p, &fmt, None) {
             Err(SaveError::Unmappable { ranges, total, .. }) => {

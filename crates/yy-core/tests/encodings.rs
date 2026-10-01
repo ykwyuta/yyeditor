@@ -394,3 +394,31 @@ fn raw_open_keeps_every_byte() {
     expect[3] = b'T';
     assert_eq!(std::fs::read(&path).unwrap(), expect);
 }
+
+#[test]
+fn ebcdic_file_ending_without_si_is_saved_unchanged() {
+    use yy_encoding::{Ccsid, Records};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.ebc");
+    // パック 10 進数の中の SO（0E）から 2 バイト部になり、SI なしでファイルが終わる
+    let bytes = b"\xC1\x0E\x45\x41\x15\xC1\xC2\x15\xC3";
+    std::fs::write(&path, bytes).unwrap();
+    let enc = Encoding::Ebcdic(Ccsid::Ibm930, Records::Nl);
+    for sync_limit in [u64::MAX, 0] {
+        let mut d = open(&path, Some(enc), sync_limit);
+        assert!(d.decode_stats().open_shift_at_end);
+        assert_eq!(d.decode_stats().noncanonical, 0);
+        d.save().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "limit={sync_limit}");
+        // 先頭を編集しても最後に SI は加えない
+        d.set_selections(yy_core::SelectionSet::single(yy_core::Selection::caret(0)));
+        d.insert_text("B", false);
+        d.save().unwrap();
+        let mut edited = b"\xC2".to_vec();
+        edited.extend_from_slice(bytes);
+        assert_eq!(std::fs::read(&path).unwrap(), edited);
+        // Windows では開いている文書のファイルは書き換えられないので閉じてから戻す
+        drop(d);
+        std::fs::write(&path, bytes).unwrap();
+    }
+}

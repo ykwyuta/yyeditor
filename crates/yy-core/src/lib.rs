@@ -1065,6 +1065,9 @@ impl Document {
             encoding,
             bom: bom && encoding.supports_bom(),
             escapes,
+            // SI なしで終わっていたファイルは、同じ文字コードなら SI を加えずに保存する
+            keep_open_shift: encoding.same_charset(&self.encoding)
+                && self.decode_stats.open_shift_at_end,
         }
     }
 

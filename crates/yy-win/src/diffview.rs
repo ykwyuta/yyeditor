@@ -231,12 +231,19 @@ fn visible_line(snapshot: &Snapshot, offset: u64, len: u64, skip: u64) -> String
     }
     String::from_utf8_lossy(&bytes[first..stop])
         .chars()
-        .map(|c| match c {
-            '\0'..='\x1f' if c != '\t' => char::from_u32(0x2400 + c as u32).unwrap_or(' '),
-            '\x7f' => '\u{2421}',
-            _ => c,
+        .fold(String::new(), |mut s, c| {
+            match c {
+                '\0'..='\x1f' if c != '\t' => {
+                    s.push(char::from_u32(0x2400 + c as u32).unwrap_or(' '))
+                }
+                '\x7f' => s.push('\u{2421}'),
+                '\u{85}' => s.push('\u{2424}'),
+                // 字形のない C1 制御文字（本文の表示と同じ）
+                '\u{80}'..='\u{9f}' => s.push_str(&format!("<{:02X}>", c as u32)),
+                _ => s.push(c),
+            }
+            s
         })
-        .collect()
 }
 
 fn paint(hwnd: HWND, state: &mut DiffWindow) {
