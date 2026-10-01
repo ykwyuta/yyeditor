@@ -417,6 +417,8 @@ fn ebcdic_file_ending_without_si_is_saved_unchanged() {
         let mut edited = b"\xC2".to_vec();
         edited.extend_from_slice(bytes);
         assert_eq!(std::fs::read(&path).unwrap(), edited);
+        // Windows では開いている文書のファイルは書き換えられないので閉じてから戻す
+        drop(d);
         std::fs::write(&path, bytes).unwrap();
     }
 }
