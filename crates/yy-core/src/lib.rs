@@ -12,6 +12,7 @@ pub mod hex;
 mod history;
 mod indexer;
 pub mod motion;
+pub mod record;
 mod replace;
 mod selection;
 pub mod syntax;

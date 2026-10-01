@@ -81,6 +81,25 @@ pub(crate) struct HexFrame<'a> {
     pub scroll_x: f32,
 }
 
+/// 固定長表示の 1 画面分（1 レコードを 3 行で表示する）。
+pub(crate) struct RecordFrame<'a> {
+    pub layout: yy_core::record::RecordLayout,
+    /// 先頭のレコードのオフセット（レコード長の倍数）
+    pub first: u64,
+    /// 表示するレコード（内容, 各バイトの文字の表示）
+    pub records: &'a [(Vec<u8>, Vec<yy_core::hex::CharCell>)],
+    /// 文字コードが EBCDIC か（SO / SI をコード値の行で示す）
+    pub ebcdic: bool,
+    pub caret: u64,
+    /// カーソルのある 16 進の桁（0 = 上位, 1 = 下位）
+    pub nibble: u8,
+    pub pane: yy_core::hex::Pane,
+    pub caret_visible: bool,
+    pub selection: std::ops::Range<u64>,
+    pub matches: &'a [std::ops::Range<u64>],
+    pub scroll_x: f32,
+}
+
 /// コード値表示の 1 画面分（行は 8 文字）。
 pub(crate) struct CodeFrame<'a> {
     pub layout: yy_core::codeview::CodeLayout,
@@ -1080,6 +1099,201 @@ impl Renderer {
                             top: y + lh - 2.0,
                             right: x(other.0 + other.1),
                             bottom: y + lh,
+                        },
+                        &b.caret,
+                    );
+                }
+            }
+            rt.EndDraw(None, None)
+        };
+        if let Err(e) = result {
+            if e.code() == D2DERR_RECREATE_TARGET {
+                self.target = None;
+                self.cache.clear();
+                return Ok(false);
+            }
+            return Err(e);
+        }
+        Ok(true)
+    }
+
+    /// 固定長表示を描画する（等幅フォントの桁で位置を決める）。
+    pub fn draw_record(
+        &mut self,
+        hwnd: HWND,
+        width: u32,
+        height: u32,
+        f: &RecordFrame,
+    ) -> Result<bool> {
+        self.ensure_target(hwnd, width, height)?;
+        self.draw_record_frame(f)
+    }
+
+    fn draw_record_frame(&mut self, f: &RecordFrame) -> Result<bool> {
+        use yy_core::hex::{CellMark, Pane};
+        use yy_core::record::LINES;
+        let lh = self.metrics.line_height;
+        let cw = self.metrics.char_width;
+        let l = f.layout;
+        let rec_len = l.len as u64;
+        let x = |col: usize| TEXT_PAD + col as f32 * cw - f.scroll_x;
+        // 表示の行 `line`（0 は目盛り、レコード k の行 i は 1 + 3k + i）の y
+        let y_of = |line: usize| line as f32 * lh;
+        let rect = |c0: usize, c1: usize, line: usize| D2D_RECT_F {
+            left: x(c0),
+            top: y_of(line),
+            right: x(c1),
+            bottom: y_of(line + 1),
+        };
+        // 範囲 `range` の各レコード・各行の矩形
+        let byte_rects = |range: &std::ops::Range<u64>, out: &mut Vec<D2D_RECT_F>| {
+            for (k, (bytes, _)) in f.records.iter().enumerate() {
+                let off = f.first + k as u64 * rec_len;
+                let n = bytes.len() as u64;
+                let (a, b) = (range.start.max(off), range.end.min(off + n));
+                if a >= b {
+                    continue;
+                }
+                let (i0, i1) = ((a - off) as usize, (b - off) as usize);
+                for line in 0..LINES {
+                    out.push(rect(
+                        l.byte_col(i0),
+                        l.byte_col(i1 - 1) + 2,
+                        1 + k * LINES + line,
+                    ));
+                }
+            }
+        };
+        let mut sel_rects = Vec::new();
+        byte_rects(&f.selection, &mut sel_rects);
+        let mut match_rects = Vec::new();
+        for m in f.matches {
+            byte_rects(m, &mut match_rects);
+        }
+        let brushes = self.target.as_ref().map(|t| &t.brushes);
+        // 目盛り
+        let header: Vec<u16> = l.header().encode_utf16().collect();
+        let header_layout = unsafe {
+            self.dwrite
+                .CreateTextLayout(&header, &self.text_format, LAYOUT_MAX_WIDTH, lh)?
+        };
+        let mut layouts = Vec::with_capacity(f.records.len() * LINES);
+        for (k, (bytes, cells)) in f.records.iter().enumerate() {
+            let number = (f.first + k as u64 * rec_len) / rec_len + 1;
+            let lines = l.format_record(number, bytes, cells, f.ebcdic);
+            for (li, row) in lines.iter().enumerate() {
+                let wide: Vec<u16> = row.text.encode_utf16().collect();
+                let layout = unsafe {
+                    self.dwrite
+                        .CreateTextLayout(&wide, &self.text_format, LAYOUT_MAX_WIDTH, lh)?
+                };
+                if let Some(b) = brushes {
+                    let effect = |brush: &ID2D1SolidColorBrush, start: usize, len: usize| unsafe {
+                        layout.SetDrawingEffect(
+                            &brush.cast::<windows::core::IUnknown>()?,
+                            DWRITE_TEXT_RANGE {
+                                startPosition: start as u32,
+                                length: len as u32,
+                            },
+                        )
+                    };
+                    if li == 0 {
+                        effect(&b.line_number, 0, l.digits)?;
+                    }
+                    for (range, mark) in &row.marks {
+                        let brush = match mark {
+                            CellMark::Control => &b.control,
+                            CellMark::Invalid => &b.invalid,
+                        };
+                        effect(brush, range.start, range.len())?;
+                    }
+                }
+                layouts.push(layout);
+            }
+        }
+        let result = unsafe {
+            let t = self.target.as_ref().unwrap();
+            let (rt, b) = (&t.rt, &t.brushes);
+            rt.BeginDraw();
+            rt.SetTransform(&windows_numerics::Matrix3x2::identity());
+            rt.Clear(Some(&color_f(self.colors.background)));
+            let size = rt.GetSize();
+            // 目盛りの行とレコード番号の欄
+            rt.FillRectangle(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: size.width,
+                    bottom: lh,
+                },
+                &b.gutter_background,
+            );
+            rt.FillRectangle(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: x(l.digits) + cw,
+                    bottom: size.height,
+                },
+                &b.gutter_background,
+            );
+            for r in &match_rects {
+                rt.FillRectangle(r, &b.search_match);
+            }
+            for r in &sel_rects {
+                rt.FillRectangle(r, &b.selection);
+            }
+            rt.DrawTextLayout(
+                Vector2 { X: x(0), Y: 0.0 },
+                &header_layout,
+                &b.line_number,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+            for (i, layout) in layouts.iter().enumerate() {
+                rt.DrawTextLayout(
+                    Vector2 {
+                        X: x(0),
+                        Y: y_of(1 + i),
+                    },
+                    layout,
+                    &b.foreground,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+            // レコードの区切りの線
+            for k in 0..=f.records.len() {
+                let y = y_of(1 + k * LINES);
+                rt.FillRectangle(
+                    &D2D_RECT_F {
+                        left: 0.0,
+                        top: y - 0.5,
+                        right: size.width,
+                        bottom: y + 0.5,
+                    },
+                    &b.whitespace,
+                );
+            }
+            // カーソル: 入力する行は桁の位置に枠、もう一方の行は下線
+            if f.caret >= f.first && f.caret_visible {
+                let rel = f.caret - f.first;
+                let (k, i) = ((rel / rec_len) as usize, (rel % rec_len) as usize);
+                if k < f.records.len() {
+                    let base = 1 + k * LINES;
+                    let hex = (l.byte_col(i) + f.nibble as usize, 1, base + 1);
+                    let chr = (l.byte_col(i), 2, base + 2);
+                    let (active, other) = match f.pane {
+                        Pane::Hex => (hex, (l.byte_col(i), 2, base + 2)),
+                        Pane::Ascii => (chr, (l.byte_col(i), 2, base + 1)),
+                    };
+                    let r = rect(active.0, active.0 + active.1, active.2);
+                    rt.DrawRectangle(&r, &b.caret, 1.5, None);
+                    let y = y_of(other.2 + 1);
+                    rt.FillRectangle(
+                        &D2D_RECT_F {
+                            left: x(other.0),
+                            top: y - 2.0,
+                            right: x(other.0 + other.1),
+                            bottom: y,
                         },
                         &b.caret,
                     );
