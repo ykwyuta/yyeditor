@@ -4687,7 +4687,10 @@ fn on_command(hwnd: HWND, id: u16) {
         ID_ABOUT => info_box(
             hwnd,
             &format!(
-                "yyeditor {}\n\n巨大ファイル対応の軽量テキストエディタ",
+                "yyeditor {}\n\n巨大ファイル対応の軽量テキストエディタ\n\n\
+                 このプログラムはフリーソフトウェアです。GNU 一般公衆利用許諾書（GPL）\
+                 バージョン 3、またはそれ以降のバージョンの条件で再頒布・改変できます。\
+                 このプログラムは無保証です。",
                 env!("CARGO_PKG_VERSION")
             ),
         ),

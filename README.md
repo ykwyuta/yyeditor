@@ -335,6 +335,29 @@ syntax = "cobol"                 # ハイライトの定義（"none" で色を�
 文書は内部で UTF-8 として持つため、UTF-8 以外のファイルは開くときに変換します。32 MB 以下はその場でメモリに、それより大きいファイルはバックグラウンドで UTF-8 の一時ファイル（`%TEMP%\yyeditor-decode-….tmp`、閉じると削除）に変換してメモリマップします。Shift_JIS・EUC-JP 系は行単位で並列に変換します。
 参考値（上の計測と同じ環境、CP932 の日本語 0.69 GB）: 変換 5.8 秒（一時ファイルへの書き込みが律速）、変換後の全行数カウント 0.06 秒。
 
+## ライセンス
+
+yyeditor は GNU General Public License バージョン 3 またはそれ以降（GPL-3.0-or-later）で配布します。全文は [COPYING](COPYING) にあります。
+
+```
+yyeditor — 巨大ファイル対応の軽量テキストエディタ
+Copyright (C) 2026 Yuta Yukawa
+
+このプログラムはフリーソフトウェアです。フリーソフトウェア財団が公表した GNU 一般公衆利用許諾書の
+バージョン 3、または（任意で）それ以降のバージョンの条件の下で、再頒布や改変ができます。
+このプログラムは有用であることを願って頒布されますが、商品性や特定目的への適合性の黙示の保証も含め、
+いかなる保証もありません。詳しくは GNU 一般公衆利用許諾書をご覧ください。
+```
+
+実行ファイルに含めている第三者の素材は、それぞれのライセンスに従います（いずれも GPL-3.0 と両立します）。
+
+| 素材 | ライセンス |
+|------|------------|
+| UDEV Gothic（既定のフォント） | SIL Open Font License 1.1（[crates/yy-win/fonts/LICENSE-UDEVGothic.txt](crates/yy-win/fonts/LICENSE-UDEVGothic.txt)） |
+| Mermaid・KaTeX（プレビュー） | MIT License（[crates/yy-preview/assets/](crates/yy-preview/assets/)） |
+| EBCDIC の対応表（ICU の `.ucm` から生成） | Unicode License V3 |
+| 依存している Rust のクレート | MIT / Apache-2.0 など（`cargo metadata` で確認できます） |
+
 ## 既知の制限
 
 - プレビュー: 8 MiB を超える文書はプレビューしません。下付き・上付きは前後が空白などで区切られている場合だけです（`H~2~O` のような語の途中は不可）。HTML 文書は編集のたびに読み直します（スクロール位置は保ちます）。プレビューのスクロールはエディタに合わせるだけで、逆方向（プレビューをスクロールしてエディタを動かす）には対応していません。
