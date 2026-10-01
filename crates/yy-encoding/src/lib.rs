@@ -417,6 +417,9 @@ pub struct DecodeStats {
     /// ファイルに元から含まれていたエスケープ文字の数。
     /// 0 でなければエスケープ文字を使わずにデコードし直す必要がある
     pub literal_escapes: u64,
+    /// 入力が SO / SI の 2 バイト部のまま、SI なしで終わった（EBCDIC）。同じ文字コードで
+    /// 保存するときは、元のバイトに合わせて最後に SI を加えない（[`Encoder::keep_open_shift`]）
+    pub open_shift_at_end: bool,
 }
 
 /// デコード結果の書き込み先。
@@ -556,6 +559,14 @@ fn next_char(src: &[u8]) -> Result<(char, usize), bool> {
 }
 
 impl Encoder {
+    /// 入力の終わりが 2 バイト部でも SI を加えない（EBCDIC。開いたファイルが SI なしで
+    /// 終わっていた場合に、元のバイトのまま保存するため。[`DecodeStats::open_shift_at_end`]）。
+    pub fn keep_open_shift(&mut self) {
+        if let EncImp::Ebcdic(e) = &mut self.imp {
+            e.keep_open_shift();
+        }
+    }
+
     /// 文書のバイト列 `src` をエンコードして `dst` に追記する。
     /// 変換できない文字の文書内の範囲を `bad` に報告する。
     pub fn encode(

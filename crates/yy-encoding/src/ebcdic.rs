@@ -412,8 +412,14 @@ impl Decoder {
                 self.enc.apply(t, b);
             }
             if let Some(e) = self.enc.expected(t, class) {
-                // エンコーダがここにシフトを加える（固定長レコード・入力の終わりが 2 バイト部の場合）
-                sink.stats.noncanonical += 1;
+                if class == Class::Boundary {
+                    // 入力が SI なしで 2 バイト部のまま終わった。同じ文字コードで保存するときは
+                    // エンコーダにも SI を加えさせない
+                    sink.stats.open_shift_at_end = true;
+                } else {
+                    // エンコーダがここにシフトを加える（固定長レコードが 2 バイト部の場合）
+                    sink.stats.noncanonical += 1;
+                }
                 self.enc.apply(t, e);
             }
         }
@@ -576,6 +582,8 @@ pub(crate) struct Encoder {
     table: &'static Table,
     records: Records,
     shift: Shift,
+    /// 入力の終わりが 2 バイト部なら SI を出す
+    close_at_end: bool,
     /// 固定長レコードの中の位置
     rec_pos: u64,
 }
@@ -586,8 +594,14 @@ impl Encoder {
             table,
             records,
             shift: Shift::default(),
+            close_at_end: true,
             rec_pos: 0,
         }
+    }
+
+    /// 入力の終わりが 2 バイト部でも SI を出さない。
+    pub(crate) fn keep_open_shift(&mut self) {
+        self.close_at_end = false;
     }
 
     /// 文書のエスケープ文字を元のバイトに戻した。
@@ -686,7 +700,7 @@ impl Encoder {
                 bad(i..i + len);
             }
         }
-        if last && fixed.is_none_or(|n| self.rec_pos + 1 < n) {
+        if last && self.close_at_end && fixed.is_none_or(|n| self.rec_pos + 1 < n) {
             self.shift(Class::Boundary, dst);
         }
     }

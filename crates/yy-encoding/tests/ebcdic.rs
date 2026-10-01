@@ -2,7 +2,8 @@
 
 use proptest::prelude::*;
 use yy_encoding::{
-    Ccsid, Encoding, EscapeMode, Records, decode_all, detect_ebcdic, encode_all, escape_char,
+    Ccsid, DecodeStats, Encoding, EscapeMode, Records, decode_all, detect_ebcdic, encode_all,
+    escape_char,
 };
 
 fn enc(c: Ccsid, r: Records) -> Encoding {
@@ -19,10 +20,27 @@ fn encode(e: Encoding, text: &str) -> Vec<u8> {
     encode_all(e, text.as_bytes(), EscapeMode::Restore).unwrap()
 }
 
+/// 保存と同じように、開いたときの統計に合わせてエンコードする（SI なしで終わっていたら
+/// 最後に SI を加えない）。
+fn encode_as_opened(
+    e: Encoding,
+    text: &[u8],
+    stats: DecodeStats,
+) -> Result<Vec<u8>, Vec<std::ops::Range<u64>>> {
+    let mut enc = e.new_encoder(EscapeMode::Restore);
+    if stats.open_shift_at_end {
+        enc.keep_open_shift();
+    }
+    let mut out = Vec::new();
+    let mut bad = Vec::new();
+    enc.encode(text, &mut out, true, &mut |r| bad.push(r));
+    if bad.is_empty() { Ok(out) } else { Err(bad) }
+}
+
 /// デコード → エンコードでバイト列が戻る（正規化される場合はそれを読むと同じ文字）。
 fn check_roundtrip(e: Encoding, bytes: &[u8]) {
     let (text, stats) = decode_all(e, bytes, true);
-    let out = encode_all(e, &text, EscapeMode::Restore)
+    let out = encode_as_opened(e, &text, stats)
         .unwrap_or_else(|bad| panic!("{e:?}: unmappable {bad:?} in {bytes:02X?}"));
     if stats.noncanonical == 0 {
         assert_eq!(out, bytes, "{e:?}");
@@ -139,13 +157,28 @@ fn irregular_shifts_roundtrip() {
     // SO だけで終わるデータもそのまま
     check_roundtrip(e, b"\xC1\x0E");
     assert_eq!(decode_all(e, b"\xC1\x0E", true).1.noncanonical, 0);
-    // 入力の終わりが 2 バイト部（SI がない）なら SI を補う（正規化）
-    let (t, s) = decode_all(e, b"\x0E\x4F\x58", true);
-    assert_eq!(s.noncanonical, 1);
-    assert_eq!(
-        encode_all(e, &t, EscapeMode::Restore).unwrap(),
-        b"\x0E\x4F\x58\x0F"
-    );
+    // 入力の終わりが 2 バイト部（SI がない）: 開いたときの統計に記録し、同じ文字コードで
+    // 保存するときは SI を加えない（改行を越えて 2 バイト部が続く場合も）
+    for bytes in [
+        &b"\x0E\x4F\x58"[..],
+        b"\xC1\x0E\x45\x41\x15\xC1\xC2\x15\xC3",
+    ] {
+        let (t, s) = decode_all(e, bytes, true);
+        assert_eq!(s.noncanonical, 0, "{bytes:02X?}");
+        assert!(s.open_shift_at_end, "{bytes:02X?}");
+        assert_eq!(encode_as_opened(e, &t, s).unwrap(), bytes);
+        // 指定しなければ SI で閉じる（新しく作った文書・別の文字コードからの保存）
+        let mut closed = bytes.to_vec();
+        closed.push(0x0F);
+        assert_eq!(encode_all(e, &t, EscapeMode::Restore).unwrap(), closed);
+    }
+    // 固定長でも最後のレコードの途中で終わっていれば同じ
+    let fixed = enc(Ccsid::Ibm930, Records::Fixed(8));
+    let (t, s) = decode_all(fixed, b"\xC1\x0E\x45\x41", true);
+    assert!(s.open_shift_at_end);
+    assert_eq!(encode_as_opened(fixed, &t, s).unwrap(), b"\xC1\x0E\x45\x41");
+    // SI で閉じていれば記録しない
+    assert!(!decode_all(e, b"\x0E\x4F\x58\x0F", true).1.open_shift_at_end);
 }
 
 #[test]
