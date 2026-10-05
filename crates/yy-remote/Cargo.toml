@@ -1,0 +1,21 @@
+[package]
+name = "yy-remote"
+description = "Remote editing over SSH for yyeditor: agent placement, protocol client, host settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+yy-proto.workspace = true
+crossbeam-channel.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+data-encoding.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
