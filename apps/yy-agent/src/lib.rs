@@ -169,6 +169,10 @@ impl Agent {
                 remove(&to_path(&path), recursive)?;
                 Response::Done
             }
+            Request::Copy { from, to } => {
+                copy(&to_path(&from), &to_path(&to))?;
+                Response::Done
+            }
         })
     }
 }
@@ -441,6 +445,26 @@ fn rename(from: &Path, to: &Path) -> io::Result<()> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// 中身ごとコピーする（上書きしない）。途中で失敗したら、作りかけのコピーを消す。
+fn copy(from: &Path, to: &Path) -> io::Result<()> {
+    fs::symlink_metadata(from)?;
+    if fs::symlink_metadata(to).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} は既にあります", to.display()),
+        ));
+    }
+    if is_within(to, from) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "フォルダをその中へはコピーできません",
+        ));
+    }
+    copy_tree(from, to).inspect_err(|_| {
+        let _ = remove(to, true);
+    })
 }
 
 /// `path` が `dir` 自身か、その中か（パスの文字列で比べる）。

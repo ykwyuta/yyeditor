@@ -427,3 +427,41 @@ fn copies_trees_across_file_systems() {
         Path::new("d/x.sh")
     );
 }
+
+#[test]
+fn copies_without_overwriting() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = Agent::default();
+    let a = dir.path().join("a");
+    fs::create_dir_all(a.join("sub")).unwrap();
+    fs::write(a.join("sub").join("f.txt"), b"data").unwrap();
+    let b = dir.path().join("b");
+    ok(
+        &mut agent,
+        Request::Copy {
+            from: bytes(&a),
+            to: bytes(&b),
+        },
+    );
+    assert_eq!(fs::read(b.join("sub").join("f.txt")).unwrap(), b"data");
+    assert!(a.join("sub").join("f.txt").exists());
+    // 既にあれば上書きしない
+    let r = run(
+        &mut agent,
+        Request::Copy {
+            from: bytes(&a),
+            to: bytes(&b),
+        },
+    );
+    assert!(matches!(r, Response::Error(_)), "{r:?}");
+    // フォルダをその中へはコピーしない
+    let r = run(
+        &mut agent,
+        Request::Copy {
+            from: bytes(&a),
+            to: bytes(&a.join("sub").join("a")),
+        },
+    );
+    assert!(matches!(r, Response::Error(_)), "{r:?}");
+    assert!(!a.join("sub").join("a").exists());
+}

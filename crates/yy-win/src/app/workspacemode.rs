@@ -53,6 +53,7 @@ const CM_RENAME: u32 = 13;
 const CM_DELETE: u32 = 14;
 const CM_CUT: u32 = 15;
 const CM_PASTE: u32 = 16;
+const CM_COPY: u32 = 17;
 
 /// サイドバーとツリーの境界の幅（96 DPI でのピクセル）
 const SPLITTER: i32 = 5;
@@ -83,6 +84,14 @@ fn remote_uri(path: &Path) -> Option<yy_remote::RemoteUri> {
     path.to_str().and_then(yy_remote::RemoteUri::parse)
 }
 
+/// コピー・切り取りしたもの。
+#[derive(Clone)]
+struct Clip {
+    path: PathBuf,
+    /// 切り取り（貼り付けで移動する）。でなければコピー
+    cut: bool,
+}
+
 /// ワークスペースとサイドバーの状態。
 pub(crate) struct WorkspacePane {
     pub tree: HWND,
@@ -101,8 +110,8 @@ pub(crate) struct WorkspacePane {
     icons: std::collections::HashMap<String, (i32, i32)>,
     /// ツリーを作り直すたびに増える（作り直す前に頼んだリモートの読み込みを捨てる）
     generation: usize,
-    /// 切り取ったファイル・フォルダ（貼り付けで移動する）
-    cut: Option<PathBuf>,
+    /// コピー・切り取りしたファイル・フォルダ（貼り付けでコピー・移動する）
+    clip: Option<Clip>,
     /// ドラッグ中の項目の番号
     drag: Option<usize>,
 }
@@ -186,7 +195,7 @@ pub(crate) fn create_pane(frame: HWND, instance: HINSTANCE) -> Result<WorkspaceP
         nodes: Vec::new(),
         icons: Default::default(),
         generation: 0,
-        cut: None,
+        clip: None,
         drag: None,
     })
 }
@@ -827,7 +836,7 @@ pub(crate) fn on_tree_notify(hwnd: HWND, hdr: &NMHDR, lparam: LPARAM) -> Option<
             let nm = unsafe { &*(lparam.0 as *const NMTREEVIEWW) };
             let index = nm.itemNew.lParam.0 as usize;
             let ok = with_app(|a| {
-                let movable = a.ws.nodes.get(index).is_some_and(|n| !n.root && n.alive);
+                let movable = a.ws.nodes.get(index).is_some_and(|n| n.alive);
                 if movable {
                     a.ws.drag = Some(index);
                 }
@@ -904,7 +913,7 @@ fn context_menu(hwnd: HWND, tree: HWND) {
     } else {
         None
     };
-    let cut_pending = with_app(|a| a.ws.cut.is_some()).unwrap_or(false);
+    let clip_pending = with_app(|a| a.ws.clip.is_some()).unwrap_or(false);
     let cmd = unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let add = |id: u32, text: &str| {
@@ -929,7 +938,8 @@ fn context_menu(hwnd: HWND, tree: HWND) {
                 if !root {
                     add(CM_CUT, "切り取り(&X)\tCtrl+X");
                 }
-                if *is_dir && cut_pending {
+                add(CM_COPY, "コピー(&C)\tCtrl+C");
+                if *is_dir && clip_pending {
                     add(CM_PASTE, "貼り付け(&P)\tCtrl+V");
                 }
                 if !root {
@@ -998,7 +1008,8 @@ fn run_context_command(hwnd: HWND, cmd: u32, item: HTREEITEM, node: Option<(Path
         CM_NEW_FILE => return post_op(hwnd, WsOp::NewFile(path)),
         CM_NEW_FOLDER => return post_op(hwnd, WsOp::NewFolder(path)),
         CM_DELETE => return post_op(hwnd, WsOp::Delete { path, is_dir }),
-        CM_CUT => return cut(path),
+        CM_CUT => return set_clip(path, true),
+        CM_COPY => return set_clip(path, false),
         CM_PASTE => return paste_into(hwnd, path, is_dir),
         CM_RENAME => {
             if let Some(tree) = with_app(|a| a.ws.tree) {
@@ -1194,7 +1205,7 @@ pub(crate) fn on_workspace_command(hwnd: HWND, id: u16) -> bool {
         }
     }
     // サイドバーにフォーカスがあれば、切り取り・貼り付けはファイル・フォルダの操作
-    if matches!(id, ID_CUT | ID_PASTE)
+    if matches!(id, ID_CUT | ID_COPY | ID_PASTE)
         && with_app(|a| unsafe { GetFocus() } == a.ws.tree) == Some(true)
     {
         let node = with_app(|a| {
@@ -1204,7 +1215,8 @@ pub(crate) fn on_workspace_command(hwnd: HWND, id: u16) -> bool {
         })
         .flatten();
         match (id, node) {
-            (ID_CUT, Some((path, _, false))) => cut(path),
+            (ID_CUT, Some((path, _, false))) => set_clip(path, true),
+            (ID_COPY, Some((path, _, _))) => set_clip(path, false),
             (ID_PASTE, Some((path, is_dir, _))) => paste_into(hwnd, path, is_dir),
             _ => {}
         }
@@ -1306,6 +1318,11 @@ pub(crate) enum WsOp {
         from: PathBuf,
         to_dir: PathBuf,
     },
+    /// `from` を `to_dir` の中へコピーする（手元とリモートの間も）
+    Copy {
+        from: PathBuf,
+        to_dir: PathBuf,
+    },
 }
 
 /// 操作を後で行うよう頼む。
@@ -1327,27 +1344,33 @@ pub(crate) fn on_op(hwnd: HWND, lparam: LPARAM) {
         WsOp::Rename { path, name } => rename_item(&path, name.trim()),
         WsOp::Delete { path, is_dir } => delete_item(hwnd, &path, is_dir),
         WsOp::Move { from, to_dir } => move_item(&from, &to_dir),
+        WsOp::Copy { from, to_dir } => copy_item(&from, &to_dir),
     };
     if let Err(e) = r {
         error_box(hwnd, &e);
     }
 }
 
-/// 切り取る（貼り付けで移す）。
-fn cut(path: PathBuf) {
+/// コピー・切り取りする（貼り付けでコピー・移動する）。
+fn set_clip(path: PathBuf, cut: bool) {
     with_app(|a| {
+        let what = if cut {
+            "切り取りました"
+        } else {
+            "コピーしました"
+        };
         a.status_msg = format!(
-            "{} を切り取りました（移動先のフォルダで貼り付け）",
+            "{} を{what}（貼り付ける先のフォルダで貼り付け）",
             workspace::name_of(&path)
         );
-        a.ws.cut = Some(path);
+        a.ws.clip = Some(Clip { path, cut });
         a.update_status();
     });
 }
 
-/// 切り取ったものを `path`（ファイルならそのフォルダ）に移す。
+/// コピー・切り取りしたものを `path`（ファイルならそのフォルダ）にコピー・移動する。
 fn paste_into(hwnd: HWND, path: PathBuf, is_dir: bool) {
-    let Some(Some(from)) = with_app(|a| a.ws.cut.clone()) else {
+    let Some(Some(clip)) = with_app(|a| a.ws.clip.clone()) else {
         return;
     };
     let to_dir = if is_dir {
@@ -1358,7 +1381,15 @@ fn paste_into(hwnd: HWND, path: PathBuf, is_dir: bool) {
             None => return,
         }
     };
-    post_op(hwnd, WsOp::Move { from, to_dir });
+    let from = clip.path;
+    post_op(
+        hwnd,
+        if clip.cut {
+            WsOp::Move { from, to_dir }
+        } else {
+            WsOp::Copy { from, to_dir }
+        },
+    );
 }
 
 fn with_path(path: &Path, e: impl std::fmt::Display) -> String {
@@ -1446,9 +1477,19 @@ fn rename_item(path: &Path, name: &str) -> std::result::Result<(), String> {
 fn move_item(from: &Path, to_dir: &Path) -> std::result::Result<(), String> {
     if !workspace::same_place(from, to_dir) {
         return Err(
-            "パソコンとリモートの間や、別の接続先へは移動できません（同じ場所の中だけ移動できます）。"
+            "パソコンとリモートの間や、別の接続先へは移動できません（同じ場所の中だけ移動できます）。\n\
+             コピーして貼り付けてください。"
                 .into(),
         );
+    }
+    let root = with_app(|a| {
+        a.ws.workspace
+            .folders
+            .iter()
+            .any(|f| yy_config::recent::same_path(f, from))
+    });
+    if root == Some(true) {
+        return Err("ワークスペースの起点のフォルダは移動できません（コピーはできます）。".into());
     }
     if workspace::is_within(to_dir, from) {
         return Err("フォルダを、そのフォルダの中へは移動できません。".into());
@@ -1464,6 +1505,87 @@ fn move_item(from: &Path, to_dir: &Path) -> std::result::Result<(), String> {
         ));
     }
     move_path(from, &to)
+}
+
+/// `path` がフォルダか。
+fn is_dir_path(path: &Path) -> std::result::Result<bool, String> {
+    match remote_uri(path) {
+        Some(u) => {
+            let p = u.path.clone();
+            crate::remote::file_op(&u, "", move |s| s.stat(&p).map(|i| i.is_dir()))
+        }
+        None => std::fs::metadata(path)
+            .map(|m| m.is_dir())
+            .map_err(|e| with_path(path, e)),
+    }
+}
+
+/// コピー元・コピー先の場所（リモートなら接続する）。
+fn loc_of(path: &Path) -> std::result::Result<yy_remote::transfer::Loc, String> {
+    use yy_remote::transfer::Loc;
+    Ok(match remote_uri(path) {
+        Some(u) => Loc::Remote(
+            crate::remote::session(&u.target(), &crate::remote::show_status)?,
+            u.path,
+        ),
+        None => Loc::Local(path.to_owned()),
+    })
+}
+
+/// `from` を `to_dir` の中へコピーする。同じ名前があれば「名前 - コピー」にする。
+fn copy_item(from: &Path, to_dir: &Path) -> std::result::Result<(), String> {
+    if workspace::same_place(from, to_dir) && workspace::is_within(to_dir, from) {
+        return Err("フォルダを、そのフォルダの中へはコピーできません。".into());
+    }
+    let is_dir = is_dir_path(from)?;
+    let base = workspace::name_of(from);
+    let mut target = None;
+    for n in 0..1000 {
+        let cand = workspace::child(to_dir, &workspace::copy_name(&base, n, is_dir));
+        if !exists(&cand)? {
+            target = Some(cand);
+            break;
+        }
+    }
+    let Some(target) = target else {
+        return Err(format!("「{base}」のコピーの名前を決められませんでした。"));
+    };
+    let (src, dst) = (loc_of(from)?, loc_of(&target)?);
+    crate::remote::show_status(&format!("{base} をコピーしています…（Esc で中止）"));
+    let r = crate::remote::wait(&crate::remote::show_status, move |work| {
+        yy_remote::transfer::copy(&src, &dst, &mut |st| {
+            work.report(format!(
+                "コピーしています… {} 個のファイル、{}（Esc で中止）",
+                group_digits(st.files),
+                crate::util::human_size(st.bytes)
+            ));
+            !work.cancelled()
+        })
+    });
+    let name = workspace::name_of(&target);
+    let msg = match r {
+        Ok(st) => {
+            let mut m = format!("{name} にコピーしました");
+            if st.skipped > 0 {
+                m += &format!(
+                    "（フォルダを指すリンクなど {} 個は飛ばしました）",
+                    group_digits(st.skipped)
+                );
+            }
+            m
+        }
+        Err(e) if yy_remote::transfer::is_cancelled(&e) => "コピーを中止しました".to_owned(),
+        Err(e) => {
+            crate::remote::show_status("");
+            return Err(with_path(&target, e));
+        }
+    };
+    with_app(|a| {
+        a.refresh_folder(to_dir);
+        a.status_msg = msg;
+        a.update_status();
+    });
+    Ok(())
 }
 
 /// `from` を `to` へ移し（名前を変え）、開いているタブ・ワークスペース・ツリーを合わせる。
@@ -1635,10 +1757,10 @@ impl App {
         for t in self.tabs.iter_mut().flatten() {
             fix(&mut t.doc);
         }
-        if let Some(c) = &self.ws.cut
-            && workspace::is_within(c, from)
+        if let Some(c) = &self.ws.clip
+            && workspace::is_within(&c.path, from)
         {
-            self.ws.cut = None;
+            self.ws.clip = None;
         }
         let mut roots_changed = false;
         for f in &mut self.ws.workspace.folders {
@@ -1671,11 +1793,11 @@ impl App {
     fn after_delete(&mut self, path: &Path) {
         if self
             .ws
-            .cut
-            .as_deref()
-            .is_some_and(|c| workspace::is_within(c, path))
+            .clip
+            .as_ref()
+            .is_some_and(|c| workspace::is_within(&c.path, path))
         {
-            self.ws.cut = None;
+            self.ws.clip = None;
         }
         let n = self.ws.workspace.folders.len();
         self.ws
@@ -1772,7 +1894,14 @@ pub(crate) fn drag_end(hwnd: HWND, x: i32, y: i32, drop: bool) -> bool {
         let _ = ReleaseCapture();
     }
     if let (true, (Some(from), Some(to_dir))) = (drop, target) {
-        post_op(hwnd, WsOp::Move { from, to_dir });
+        // 別の場所へはコピー。同じ場所の中は移動（Ctrl を押していればコピー）
+        let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+        let op = if ctrl || !workspace::same_place(&from, &to_dir) {
+            WsOp::Copy { from, to_dir }
+        } else {
+            WsOp::Move { from, to_dir }
+        };
+        post_op(hwnd, op);
     }
     true
 }

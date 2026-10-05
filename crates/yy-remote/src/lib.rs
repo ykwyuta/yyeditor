@@ -12,6 +12,7 @@ pub mod local;
 pub mod rpc;
 pub mod session;
 pub mod ssh_config;
+pub mod transfer;
 pub mod uri;
 
 use std::io::{self, Read, Write};

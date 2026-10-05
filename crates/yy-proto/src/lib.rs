@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// プロトコルの版。メッセージの形を変えたら増やす。
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// エージェントが起動直後に出す印。ログインシェルの初期化ファイルが標準出力に文字を出しても、
 /// 端末はこれより前を読み捨てて同期する（11 章 6.2）。
@@ -127,6 +127,9 @@ pub enum Request {
     /// ファイル・フォルダを消す（ごみ箱はない）。フォルダは `recursive` なら中身ごと、でなければ
     /// 空のときだけ。シンボリックリンクはリンクだけを消す。応答は [`Response::Done`]
     Remove { path: Vec<u8>, recursive: bool },
+    /// ファイル・フォルダを中身ごとコピーする（接続先の中で。転送はしない）。`to` が既にあれば
+    /// エラー。フォルダをその中へはコピーしない。応答は [`Response::Done`]
+    Copy { from: Vec<u8>, to: Vec<u8> },
 }
 
 /// エージェントからの応答。

@@ -203,6 +203,14 @@ impl Session {
         })?)
     }
 
+    /// 接続先の中でファイル・フォルダを中身ごとコピーする（`to` が既にあればエラー）。
+    pub fn copy(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
+        check_done(self.client.call(&Request::Copy {
+            from: from.to_vec(),
+            to: to.to_vec(),
+        })?)
+    }
+
     /// 空のファイルを作る（既にあればエラー）。
     pub fn create_file(self: &Arc<Self>, path: &[u8]) -> io::Result<FileInfo> {
         match self.upload(&mut io::empty(), path, None, &mut |_| true)? {

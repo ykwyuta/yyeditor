@@ -390,6 +390,24 @@ pub fn relocated(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
     Some(rest.iter().fold(to.to_owned(), |p, name| child(&p, name)))
 }
 
+/// コピーの名前（`n` 番目の候補）。`n == 0` は元の名前、1 は「名前 - コピー.拡張子」、2 以降は
+/// 「名前 - コピー (n).拡張子」（エクスプローラーと同じ形）。フォルダには拡張子を考えない。
+pub fn copy_name(name: &str, n: usize, is_dir: bool) -> String {
+    if n == 0 {
+        return name.to_owned();
+    }
+    let suffix = if n == 1 {
+        " - コピー".to_owned()
+    } else {
+        format!(" - コピー ({n})")
+    };
+    // 先頭の「.」だけのもの（.bashrc）は拡張子とみなさない
+    match name.rfind('.').filter(|&i| !is_dir && i > 0) {
+        Some(i) => format!("{}{suffix}{}", &name[..i], &name[i..]),
+        None => format!("{name}{suffix}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +572,14 @@ mod tests {
         assert_eq!(parent(&f), Some(d.join("src")));
         assert_eq!(name_of(&f), "main.rs");
         assert!(same_place(&f, &r.join("z")));
+    }
+
+    #[test]
+    fn copy_names() {
+        assert_eq!(copy_name("a.txt", 0, false), "a.txt");
+        assert_eq!(copy_name("a.txt", 1, false), "a - コピー.txt");
+        assert_eq!(copy_name("a.tar.gz", 2, false), "a.tar - コピー (2).gz");
+        assert_eq!(copy_name(".bashrc", 1, false), ".bashrc - コピー");
+        assert_eq!(copy_name("v1.2", 1, true), "v1.2 - コピー");
     }
 }

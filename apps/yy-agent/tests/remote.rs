@@ -220,3 +220,104 @@ fn manages_files_and_folders() {
     session.remove(&bytes(&moved), false).unwrap();
     assert!(!dir.exists() && !moved.exists());
 }
+
+fn tree(root: &Path) {
+    fs::create_dir_all(root.join("sub").join("deep")).unwrap();
+    fs::write(root.join("a.txt"), b"hello").unwrap();
+    fs::write(
+        root.join("sub").join("deep").join("b.bin"),
+        vec![7u8; 3 << 20],
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("sub", root.join("dirlink")).unwrap();
+    std::os::unix::fs::symlink("a.txt", root.join("filelink")).unwrap();
+}
+
+fn assert_copied(dst: &Path) {
+    assert_eq!(fs::read(dst.join("a.txt")).unwrap(), b"hello");
+    assert_eq!(fs::read(dst.join("filelink")).unwrap(), b"hello");
+    assert_eq!(
+        fs::read(dst.join("sub").join("deep").join("b.bin")).unwrap(),
+        vec![7u8; 3 << 20]
+    );
+    // フォルダを指すリンクはたどらない
+    assert!(!dst.join("dirlink").exists());
+}
+
+#[test]
+fn copies_between_local_and_remote() {
+    use yy_remote::transfer::{Loc, copy};
+    let s = setup();
+    let session = start(&s);
+    let src = s.work.join("src");
+    tree(&src);
+    let all = &mut |_: &yy_remote::transfer::CopyStats| true;
+
+    // 手元 → 接続先
+    let up = s.work.join("up");
+    let st = copy(
+        &Loc::Local(src.clone()),
+        &Loc::Remote(session.clone(), bytes(&up)),
+        all,
+    )
+    .unwrap();
+    assert_copied(&up);
+    assert_eq!((st.files, st.dirs, st.skipped), (3, 3, 1));
+    assert_eq!(st.bytes, 10 + (3 << 20));
+
+    // 接続先 → 手元
+    let down = s.work.join("down");
+    copy(
+        &Loc::Remote(session.clone(), bytes(&up)),
+        &Loc::Local(down.clone()),
+        all,
+    )
+    .unwrap();
+    assert_copied(&down);
+
+    // 同じ接続先の中（エージェントがコピーする。リンクはリンクのまま）
+    let same = s.work.join("same");
+    copy(
+        &Loc::Remote(session.clone(), bytes(&up)),
+        &Loc::Remote(session.clone(), bytes(&same)),
+        all,
+    )
+    .unwrap();
+    assert_eq!(fs::read(same.join("a.txt")).unwrap(), b"hello");
+
+    // 別の接続先の間（手元を経由する）
+    let other = start(&s);
+    let across = s.work.join("across");
+    copy(
+        &Loc::Remote(session.clone(), bytes(&src)),
+        &Loc::Remote(other, bytes(&across)),
+        all,
+    )
+    .unwrap();
+    assert_copied(&across);
+
+    // 上書きしない
+    let e = copy(&Loc::Local(src.clone()), &Loc::Local(down.clone()), all).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+}
+
+#[test]
+fn cancelled_copies_leave_nothing_behind() {
+    use yy_remote::transfer::{Loc, copy};
+    let s = setup();
+    let session = start(&s);
+    let src = s.work.join("src");
+    tree(&src);
+    for to in [
+        Loc::Local(s.work.join("partial-local")),
+        Loc::Remote(session.clone(), bytes(&s.work.join("partial-remote"))),
+    ] {
+        let e = copy(&Loc::Local(src.clone()), &to, &mut |st| {
+            st.bytes < (1 << 20)
+        })
+        .unwrap_err();
+        assert!(yy_remote::transfer::is_cancelled(&e), "{e}");
+    }
+    assert!(!s.work.join("partial-local").exists());
+    assert!(!s.work.join("partial-remote").exists());
+}
