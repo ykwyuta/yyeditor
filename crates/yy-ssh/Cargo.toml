@@ -1,0 +1,15 @@
+[package]
+name = "yy-ssh"
+description = "Built-in SSH client (russh) for yyeditor's remote editing; no dependency on OpenSSH"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+yy-remote.workspace = true
+russh.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

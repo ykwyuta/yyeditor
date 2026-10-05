@@ -33,6 +33,7 @@ pub use yy_encoding::{DecodeStats, Encoding, EscapeMode};
 pub use yy_io::SaveError;
 use yy_io::{FileGuard, MmapSource, SaveFormat};
 use yy_jobs::{JobPool, Notifier};
+pub use yy_proto::FileId;
 pub use yy_search::{Query, QueryError, ReplaceError, Replacement, Searcher};
 
 use edit::Change;
@@ -184,17 +185,38 @@ pub struct Document {
     _guard: Option<FileGuard>,
     typing: Option<TypingRun>,
     load_error: Option<String>,
+    /// SSH 接続先のファイル（11 章）。`path` はそれを取り寄せた手元の一時ファイル
+    remote: Option<RemoteFile>,
 }
+
+/// SSH 接続先のファイルとして開いた文書の出所（11 章 7）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteFile {
+    /// `ssh://` で始まる場所（履歴・タイトルに使う）
+    pub uri: String,
+    /// ファイル名（表示用）
+    pub name: String,
+    /// 開いた・保存した時点のファイルの同一性（外部での変更の検出に使う）
+    pub id: Option<FileId>,
+}
+
+/// リモートのファイルへの送り出し（11 章 7.1）。保存の内容を書き出した手元のファイルと、
+/// 進捗の通知（送った量。`false` が返ったら中止する）を受け取り、保存したファイルの同一性を返す。
+/// 保存先が外部で変更されていたら [`SaveError::Conflict`] を返すこと。
+pub type Upload =
+    Box<dyn FnOnce(&Path, &mut dyn FnMut(u64) -> bool) -> Result<FileId, SaveError> + Send>;
 
 /// バックグラウンドの保存。ドロップしても保存は続く（文書を閉じても書きかけにしない）。
 struct SaveJob {
     job: yy_jobs::JobHandle,
-    rx: crossbeam_channel::Receiver<Result<(), SaveError>>,
+    rx: crossbeam_channel::Receiver<Result<Option<FileId>, SaveError>>,
     path: PathBuf,
     encoding: Encoding,
     format: SaveFormat,
     /// 保存している内容の版
     version: Version,
+    /// リモートのファイルへの保存なら、保存後の出所
+    remote: Option<RemoteFile>,
 }
 
 /// 終わった保存（[`Document::poll_save`]）。
@@ -274,6 +296,7 @@ impl Document {
             _guard: None,
             typing: None,
             load_error: None,
+            remote: None,
         }
     }
 
@@ -330,6 +353,47 @@ impl Document {
         doc.source = f.source;
         doc._guard = f.guard;
         Ok(doc)
+    }
+
+    /// SSH 接続先から取り寄せた手元のファイル `cache` を、`remote` のファイルとして開く（11 章 7）。
+    ///
+    /// `cache` は開いたあとで名前を消す（内容は文書が参照し続け、使われなくなったら消える）。
+    /// 文字コードの判別や変換は手元のファイルと同じ。
+    pub fn open_remote(
+        cache: &Path,
+        opts: &OpenOptions,
+        remote: RemoteFile,
+    ) -> io::Result<Document> {
+        let r = Document::open_with(cache, opts);
+        let mut doc = match r {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = std::fs::remove_file(cache);
+                return Err(e);
+            }
+        };
+        match &doc.source {
+            Some(s) => s.unlink(),
+            None => {
+                let _ = std::fs::remove_file(cache);
+            }
+        }
+        doc.remote = Some(remote);
+        Ok(doc)
+    }
+
+    /// SSH 接続先のファイルなら、その出所。
+    pub fn remote(&self) -> Option<&RemoteFile> {
+        self.remote.as_ref()
+    }
+
+    /// 利用者に見せるファイルの場所（リモートなら `ssh://…`、名前がなければ `None`）。
+    /// 履歴・ブックマーク・ファイル種類の判定に使う（[`Document::path`] は手元の写しの場所）。
+    pub fn location(&self) -> Option<PathBuf> {
+        match &self.remote {
+            Some(r) => Some(PathBuf::from(&r.uri)),
+            None => self.path.clone(),
+        }
     }
 
     /// 他のアプリケーションが書き込み用に開いているファイルを読み取り専用で開く。
@@ -394,6 +458,9 @@ impl Document {
 
     /// タイトルバー等に表示する名前。
     pub fn display_name(&self) -> String {
+        if let Some(r) = &self.remote {
+            return r.name.clone();
+        }
         self.path
             .as_deref()
             .and_then(|p| p.file_name())
@@ -1039,6 +1106,12 @@ impl Document {
     /// 上書き保存（開いたときの文字コード・BOM で）。ファイル名がなければエラー
     /// （UI は「名前を付けて保存」を使う）。
     pub fn save(&mut self) -> Result<(), SaveError> {
+        if self.remote.is_some() {
+            return Err(io::Error::other(
+                "リモートのファイルは start_save_remote で保存してください",
+            )
+            .into());
+        }
         let path = self
             .path
             .clone()
@@ -1085,6 +1158,7 @@ impl Document {
         let format = self.check_save(encoding, bom)?;
         yy_io::save_snapshot(&self.snapshot, path, &format, self.source.as_deref())?;
         self.apply_saved(path, encoding, &format, self.version);
+        self.remote = None;
         Ok(())
     }
 
@@ -1111,6 +1185,34 @@ impl Document {
         pool: &JobPool,
         notify: Notifier,
     ) -> Result<(), SaveError> {
+        self.spawn_save(path.to_owned(), encoding, bom, pool, notify, None)
+    }
+
+    /// SSH 接続先のファイル `target` として保存する（11 章 7.1）。保存の内容は手元の一時ファイルに
+    /// 書き出してから `upload` で送り出す（どちらもバックグラウンド）。送り出せたら保存できたことに
+    /// なり、文書は `target` のファイルになる。結果は [`Document::poll_save`] で受け取る。
+    pub fn start_save_remote(
+        &mut self,
+        encoding: Encoding,
+        bom: bool,
+        pool: &JobPool,
+        notify: Notifier,
+        target: RemoteFile,
+        upload: Upload,
+    ) -> Result<(), SaveError> {
+        let staging = yy_io::temp_path("remote");
+        self.spawn_save(staging, encoding, bom, pool, notify, Some((target, upload)))
+    }
+
+    fn spawn_save(
+        &mut self,
+        path: PathBuf,
+        encoding: Encoding,
+        bom: bool,
+        pool: &JobPool,
+        notify: Notifier,
+        remote: Option<(RemoteFile, Upload)>,
+    ) -> Result<(), SaveError> {
         let format = self.check_save(encoding, bom)?;
         // 保存する内容を Undo の区切りにする（保存中の入力をまとめない）
         self.typing = None;
@@ -1118,24 +1220,45 @@ impl Document {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let snap = self.snapshot.clone();
         let source = self.source.clone();
-        let target = path.to_owned();
+        let target = path.clone();
         let fmt = format;
+        let (remote, upload) = match remote {
+            Some((r, u)) => (Some(r), Some(u)),
+            None => (None, None),
+        };
         let job = pool.spawn(move |ctx| {
-            ctx.progress.set_total(snap.len());
+            let len = snap.len();
+            // リモートなら、書き出しと送り出しで半分ずつ
+            let total = if upload.is_some() { len * 2 } else { len };
+            ctx.progress.set_total(total);
             let r = yy_io::save_snapshot_with(&snap, &target, &fmt, source.as_deref(), &mut |p| {
                 ctx.progress.set_done(p);
                 !ctx.cancel.is_cancelled()
             });
+            let r = match (r, upload) {
+                (Ok(()), Some(upload)) => {
+                    let r = upload(&target, &mut |sent| {
+                        ctx.progress.set_done((len + sent).min(total));
+                        !ctx.cancel.is_cancelled()
+                    });
+                    if r.is_err() {
+                        let _ = std::fs::remove_file(&target);
+                    }
+                    r.map(Some)
+                }
+                (r, _) => r.map(|()| None),
+            };
             let _ = tx.send(r);
             notify();
         });
         self.saving = Some(SaveJob {
             job,
             rx,
-            path: path.to_owned(),
+            path,
             encoding,
             format,
             version: self.version,
+            remote,
         });
         Ok(())
     }
@@ -1172,9 +1295,26 @@ impl Document {
         };
         let s = self.saving.take().expect("saving");
         let edited = self.version != s.version;
-        if result.is_ok() {
-            self.apply_saved(&s.path, s.encoding, &s.format, s.version);
-        }
+        let result = match result {
+            Ok(id) => {
+                self.apply_saved(&s.path, s.encoding, &s.format, s.version);
+                self.remote = s.remote.map(|mut r| {
+                    r.id = id;
+                    r
+                });
+                if self.remote.is_some() {
+                    // 保存した内容を書き出した手元の一時ファイルを、次に使う手元の写しにする
+                    match &self.source {
+                        Some(src) => src.unlink(),
+                        None => {
+                            let _ = std::fs::remove_file(&s.path);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
+        };
         Some(SaveDone { result, edited })
     }
 
@@ -2070,5 +2210,113 @@ mod tests {
         assert!(!path.exists());
         assert!(d.is_modified());
         assert_eq!(d.path(), None);
+    }
+
+    fn remote_file(name: &str, len: u64) -> RemoteFile {
+        RemoteFile {
+            uri: format!("ssh://host/home/u/{name}"),
+            name: name.into(),
+            id: Some(FileId {
+                dev: 1,
+                ino: 2,
+                len,
+                mtime_ns: 3,
+            }),
+        }
+    }
+
+    #[test]
+    fn remote_documents_save_by_uploading() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.tmp");
+        let remote = dir.path().join("remote.txt");
+        // Shift_JIS のファイルを取り寄せた写し
+        let sjis = b"\x93\xfa\x96\x7b\x8c\xea\n"; // 「日本語」
+        std::fs::write(&cache, sjis).unwrap();
+        std::fs::write(&remote, sjis).unwrap();
+        let mut d = Document::open_remote(&cache, &OpenOptions::default(), remote_file("a.txt", 7))
+            .unwrap();
+        // 写しの名前は開いたら消す
+        assert!(!cache.exists());
+        assert_eq!(d.display_name(), "a.txt");
+        assert_eq!(
+            d.location().unwrap().extension().unwrap(),
+            std::ffi::OsStr::new("txt")
+        );
+        assert_eq!(d.location(), Some(PathBuf::from("ssh://host/home/u/a.txt")));
+        assert_eq!(d.encoding(), Encoding::Cp932);
+        assert!(d.save().is_err());
+        d.set_selections(SelectionSet::single(Selection::caret(0)));
+        d.insert_text("新しい", false);
+
+        let pool = JobPool::new(1);
+        let target = remote.clone();
+        let upload: Upload = Box::new(move |local, progress| {
+            assert!(progress(1));
+            std::fs::copy(local, &target)?;
+            Ok(FileId {
+                dev: 1,
+                ino: 2,
+                len: std::fs::metadata(&target)?.len(),
+                mtime_ns: 4,
+            })
+        });
+        d.start_save_remote(
+            Encoding::Cp932,
+            false,
+            &pool,
+            Arc::new(|| {}),
+            remote_file("a.txt", 7),
+            upload,
+        )
+        .unwrap();
+        let done = wait_save(&mut d);
+        assert!(done.result.is_ok(), "{:?}", done.result);
+        assert!(!d.is_modified());
+        let expected = b"\x90\x56\x82\xb5\x82\xa2\x93\xfa\x96\x7b\x8c\xea\n"; // 「新しい日本語」
+        assert_eq!(std::fs::read(&remote).unwrap(), expected);
+        assert_eq!(d.remote().unwrap().id.unwrap().mtime_ns, 4);
+        // 書き出した手元の一時ファイルも名前は残さない
+        assert!(!d.path().unwrap().exists());
+        assert_eq!(text(&d), "新しい日本語\n");
+
+        // 外部で変更されていれば保存しない（変更ありのまま、出所も変えない）
+        d.insert_text("!", false);
+        let upload: Upload = Box::new(|_, _| Err(SaveError::Conflict("changed".into())));
+        d.start_save_remote(
+            Encoding::Cp932,
+            false,
+            &pool,
+            Arc::new(|| {}),
+            remote_file("a.txt", 0),
+            upload,
+        )
+        .unwrap();
+        let done = wait_save(&mut d);
+        assert!(matches!(done.result, Err(SaveError::Conflict(_))));
+        assert!(d.is_modified());
+        assert_eq!(d.remote().unwrap().id.unwrap().mtime_ns, 4);
+        assert_eq!(std::fs::read(&remote).unwrap(), expected);
+
+        // 手元に保存し直せば手元のファイルになる
+        let local = dir.path().join("local.txt");
+        d.start_save(&local, Encoding::Utf8, false, &pool, Arc::new(|| {}))
+            .unwrap();
+        assert!(wait_save(&mut d).result.is_ok());
+        assert!(d.remote().is_none());
+        assert_eq!(d.display_name(), "local.txt");
+    }
+
+    #[test]
+    fn empty_remote_files_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.tmp");
+        std::fs::write(&cache, b"").unwrap();
+        let d =
+            Document::open_remote(&cache, &OpenOptions::default(), remote_file("e", 0)).unwrap();
+        assert!(!cache.exists());
+        assert_eq!(d.snapshot().len(), 0);
+        let e = Document::open_remote(&cache, &OpenOptions::default(), remote_file("e", 0));
+        assert!(e.is_err());
     }
 }

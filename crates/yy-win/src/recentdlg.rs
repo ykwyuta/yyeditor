@@ -80,7 +80,11 @@ impl ListKind {
 }
 
 /// 一覧に記録する形（絶対パス。Windows では区切りを `\` にそろえる）。
+/// SSH 接続先のファイル（`ssh://…`）はそのまま。
 pub(crate) fn normalize(path: &Path) -> PathBuf {
+    if recent::is_remote(path) {
+        return path.to_owned();
+    }
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     PathBuf::from(abs.to_string_lossy().replace('/', "\\"))
 }
@@ -111,11 +115,7 @@ struct State {
 
 fn build_template(kind: ListKind) -> Template {
     let (w, h) = (360i16, 230i16);
-    let count = match kind {
-        ListKind::History => 8,
-        ListKind::Bookmarks => 9,
-    };
-    let mut t = Template::dialog(kind.title(), count, w, h);
+    let mut t = Template::dialog(kind.title(), w, h);
     let button = WS_TABSTOP.0 | BS_PUSHBUTTON as u32;
     t.item(0, 7, 9, 40, 10, 0, CLASS_STATIC, "絞り込み:");
     t.item(

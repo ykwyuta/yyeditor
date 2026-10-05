@@ -27,6 +27,8 @@ mod ime;
 mod preview;
 mod recentdlg;
 mod recorddlg;
+mod remote;
+mod remotedlg;
 mod render;
 mod tabclose;
 mod util;
@@ -39,6 +41,9 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 use crate::util::Context;
+
+/// SSH の接続の実装を作る関数（`yy-ssh`。実行ファイルが [`run`] に渡す）
+pub use yy_remote::ConnectorFactory;
 
 pub(crate) const FRAME_CLASS: PCWSTR = w!("YYEditorFrame");
 pub(crate) const VIEW_CLASS: PCWSTR = w!("YYEditorView");
@@ -78,8 +83,13 @@ fn app_icons(hinstance: windows::Win32::Foundation::HINSTANCE) -> (HICON, HICON)
 ///
 /// 起動に失敗した場合は、その内容をメッセージボックスで表示してからエラーを返す。
 /// `initial_line` を指定すると、開いたファイルのその行（1 始まり）へ移動する。
-pub fn run(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>) -> Result<()> {
-    let r = run_inner(initial_file, initial_line);
+/// `ssh` は SSH 接続先のファイルの編集に使う接続の実装（11 章。なければリモートの機能は使えない）。
+pub fn run(
+    initial_file: Option<std::path::PathBuf>,
+    initial_line: Option<u64>,
+    ssh: Option<yy_remote::ConnectorFactory>,
+) -> Result<()> {
+    let r = run_inner(initial_file, initial_line, ssh);
     if let Err(e) = &r {
         util::error_box(
             HWND::default(),
@@ -89,7 +99,11 @@ pub fn run(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>) 
     r
 }
 
-fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>) -> Result<()> {
+fn run_inner(
+    initial_file: Option<std::path::PathBuf>,
+    initial_line: Option<u64>,
+    ssh: Option<yy_remote::ConnectorFactory>,
+) -> Result<()> {
     // 以前の異常終了で残った作業用の一時ファイルを片付ける
     std::thread::spawn(yy_io::remove_stale_temps);
     unsafe {
@@ -209,7 +223,7 @@ fn run_inner(initial_file: Option<std::path::PathBuf>, initial_line: Option<u64>
         }
 
         let accel = app::create_accelerators().context("CreateAcceleratorTableW")?;
-        let frame = app::App::create(hinstance, initial_file, initial_line)?;
+        let frame = app::App::create(hinstance, initial_file, initial_line, ssh)?;
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {

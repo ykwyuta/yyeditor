@@ -135,7 +135,7 @@ impl App {
             return;
         };
         let syntax_id = self.syntax.as_ref().map(|s| s.view.syntax().id.clone());
-        let path = self.doc.path().map(|p| p.to_owned());
+        let path = self.doc.location();
         let Some(kind) = Kind::detect(syntax_id.as_deref(), path.as_deref()) else {
             pane.show_notice("Markdown・HTML の文書を開くと、ここにプレビューを表示します。");
             return;
@@ -146,10 +146,27 @@ impl App {
             return;
         }
         let text = String::from_utf8_lossy(&snap.read(0..snap.len())).into_owned();
-        let folder = path
-            .as_deref()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_owned());
+        // 相対パスの画像などの起点（リモートの文書は接続先のフォルダから取り寄せる）
+        let folder =
+            match self
+                .doc
+                .remote()
+                .and_then(|r| yy_remote::RemoteUri::parse(&r.uri))
+            {
+                Some(u) => self.remote.connected(&u.target()).map(|session| {
+                    crate::preview::DocBase::Remote {
+                        session,
+                        dir: yy_remote::RemoteUri {
+                            path: yy_proto::parent_path(&u.path),
+                            ..u
+                        },
+                    }
+                }),
+                None => path
+                    .as_deref()
+                    .and_then(|p| p.parent())
+                    .map(|p| crate::preview::DocBase::Local(p.to_owned())),
+            };
         let opts = PageOptions {
             has_folder: folder.is_some(),
             token_colors: self

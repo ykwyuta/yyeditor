@@ -62,10 +62,13 @@ yyeditor/
 │  ├─ yy-layout/              # 表示用レイアウト計算（折り返し、表示列、仮想行）。描画 API 非依存
 │  ├─ yy-config/              # 設定、キーマップ、ファイルタイプ（拡張子→モード/区切り文字/ハイライト定義）、カラーテーマ
 │  ├─ yy-jobs/                # バックグラウンドジョブ基盤（進捗、キャンセルトークン）
+│  ├─ yy-proto/               # リモート編集のプロトコル（端末とエージェントで共有。11 章）
+│  ├─ yy-remote/              # 組み込み SSH クライアント、エージェントの配置、リモートソース（11 章）
 │  └─ yy-win/                 # Win32 アプリ層：ウィンドウ、描画、IME、メニュー、ダイアログ
 │     └─ src/{app.rs, frame.rs, editor_view.rs, render/, ime.rs, dialogs/, statusbar.rs}
 ├─ apps/
-│  └─ yyeditor/               # バイナリクレート（main.rs、リソース .rc、manifest、アイコン）
+│  ├─ yyeditor/               # バイナリクレート（main.rs、リソース .rc、manifest、アイコン）
+│  └─ yy-agent/               # SSH 接続先で動くエージェント（Linux musl。11 章）
 │     ├─ build.rs             # embed-resource で manifest（PerMonitorV2 DPI, longPathAware, UTF-8）埋め込み
 │     └─ res/
 ├─ tools/

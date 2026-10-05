@@ -15,6 +15,7 @@ yy-syntax.workspace = true
 memchr.workspace = true
 yy-io.workspace = true
 yy-jobs.workspace = true
+yy-proto.workspace = true
 crossbeam-channel.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true

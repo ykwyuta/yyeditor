@@ -17,6 +17,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | R9 | 保存時の拡張子変更と文字コード変換 | [06-undo-backup-save](06-undo-backup-save.md) |
 | R10 | 矩形選択、マルチカーソルによる複数行同時編集 | [09-multi-cursor-rectangle](09-multi-cursor-rectangle.md) |
 | R11 | ファイル種類別のシンタックスハイライト | [10-syntax-highlight](10-syntax-highlight.md) |
+| R12 | SSH 接続先のファイルのリモート編集（接続先にエージェントを置く方式。端末側は OpenSSH に依存しない） | [11-remote-ssh](11-remote-ssh.md) |
 
 > 依頼文の「encdic」は、IBM メインフレーム系の **EBCDIC**（日本では EBCDIK / IBM CCSID 930・939・1390・1399、富士通 JEF、日立 KEIS などの EBCDIC 系漢字コード）を指すものと解釈しています。
 
@@ -49,6 +50,9 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 10. **シンタックスハイライトは独自の軽量エンジン（宣言的な TOML 定義＋状態機械）で行う。**
    拡張子・ファイル名・先頭行などでファイル種類を判定します。行をまたぐ状態（ブロックコメント等）は CSV と同じ「状態チェックポイント＋収束判定」で管理するため、数 GB のファイルでも表示範囲だけを処理して即座に色付けでき、入力時の再処理も数行で済みます。COBOL・JCL のような固定桁形式にも対応します。
 
+11. **リモート編集は「組み込み SSH ＋ 接続先エージェント」で行う。**
+   VS Code の Remote - SSH と同様に接続先へ小さなエージェント（`yy-agent`）を送り込みますが、SSH は `ssh.exe` を使わず exe に組み込んだ Pure Rust 実装（`russh`）で話すため、端末側は OpenSSH に依存しません。編集（ピースツリー）は手元に持って入力の応答を回線遅延から切り離し、バイトの実体は接続先に置いたまま表示範囲だけを取り寄せます。ソースが追記専用であることを利用してスナップショットを接続先に再構成し、保存・検索・Grep・文字コード変換を接続先で実行するため、10 GB のファイルの 1 行修正も数 KB の転送で保存できます。
+
 ## 3. 文書構成
 
 | ファイル | 内容 |
@@ -63,6 +67,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | [08-roadmap-testing.md](08-roadmap-testing.md) | 開発ロードマップ、テスト・性能目標、リスクと対策 |
 | [09-multi-cursor-rectangle.md](09-multi-cursor-rectangle.md) | 矩形選択、マルチカーソル・複数行同時編集、CSV のセル範囲選択 |
 | [10-syntax-highlight.md](10-syntax-highlight.md) | ファイル種類の判定、ハイライト定義の形式、巨大ファイル対応のハイライトエンジン、カラーテーマ |
+| [11-remote-ssh.md](11-remote-ssh.md) | SSH 経由のリモート編集：組み込み SSH、エージェントの配置、疎キャッシュ、接続先でのジョブ実行、保存・再接続、プロトコル |
 
 ## 4. 性能・品質目標（抜粋）
 

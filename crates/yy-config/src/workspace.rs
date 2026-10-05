@@ -4,10 +4,11 @@
 //! TOML）に保存する。
 //!
 //! ```toml
-//! folders = ["C:\\src\\app", "..\\docs"]
+//! folders = ["C:\\src\\app", "..\\docs", "ssh://build/home/yamada/proj"]
 //! ```
 //!
-//! 相対パスはワークスペースのファイルのあるフォルダからの位置。名前を付けて保存していない
+//! 相対パスはワークスペースのファイルのあるフォルダからの位置。`ssh://` で始まるものは
+//! SSH 接続先のフォルダ（11 章）で、書いたとおりに扱う。名前を付けて保存していない
 //! ワークスペースは設定フォルダの `untitled.yyworkspace` に保存し、最後に使ったワークスペースは
 //! `last-workspace.txt` に記録して次に起動したときに開き直す。
 
@@ -48,6 +49,10 @@ impl Workspace {
         let mut ws = Workspace::default();
         for s in f.folders {
             let p = PathBuf::from(&s);
+            if crate::recent::is_remote(&p) {
+                ws.add(&p);
+                continue;
+            }
             let p = if p.is_absolute() { p } else { base.join(p) };
             ws.add(&normalize(&p));
         }
@@ -272,6 +277,20 @@ mod tests {
         assert_eq!(Workspace::parse(&text, &base).unwrap(), ws);
         assert!(Workspace::parse("folder = []", &base).is_err());
         assert_eq!(Workspace::parse("", &base).unwrap(), Workspace::default());
+    }
+
+    #[test]
+    fn keeps_remote_folders_as_written() {
+        let base = root().join("ws");
+        let remote = "ssh://yamada@build:2222/home/yamada/proj";
+        let toml = format!("folders = [\"docs\", {remote:?}]");
+        let ws = Workspace::parse(&toml, &base).unwrap();
+        assert_eq!(ws.folders, [base.join("docs"), PathBuf::from(remote)]);
+        let text = ws.to_toml(Some(&base));
+        assert!(text.contains(remote), "{text}");
+        assert_eq!(Workspace::parse(&text, &base).unwrap(), ws);
+        let file = PathBuf::from(format!("{remote}/src/main.rs"));
+        assert_eq!(ws.root_of(&file), Some(Path::new(remote)));
     }
 
     #[test]

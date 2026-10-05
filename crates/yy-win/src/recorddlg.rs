@@ -29,7 +29,7 @@ struct State {
 }
 
 fn build_template() -> Template {
-    let mut t = Template::dialog("レコードの区切り方", 8, 220, 108);
+    let mut t = Template::dialog("レコードの区切り方", 220, 108);
     t.item(0, 7, 7, 206, 18, ID_LABEL, CLASS_STATIC, "");
     t.item(
         (WS_GROUP | WS_TABSTOP).0 | BS_AUTORADIOBUTTON as u32,
