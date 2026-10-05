@@ -5236,7 +5236,8 @@ pub(crate) extern "system" fn frame_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            let (x, _) = point_of(lparam);
+            let (x, y) = point_of(lparam);
+            workspacemode::drag_move(x, y);
             with_app(|a| {
                 if a.preview.dragging {
                     a.drag_preview_splitter(x);
@@ -5248,6 +5249,11 @@ pub(crate) extern "system" fn frame_proc(
             LRESULT(0)
         }
         WM_LBUTTONUP | WM_CAPTURECHANGED => {
+            // サイドバーの項目のドラッグ（ボタンを離したら移す。キャプチャを失ったら取りやめる）
+            let (x, y) = point_of(lparam);
+            if workspacemode::drag_end(hwnd, x, y, msg == WM_LBUTTONUP) {
+                return LRESULT(0);
+            }
             let dragged = with_app(|a| {
                 std::mem::take(&mut a.preview.dragging) | std::mem::take(&mut a.ws.dragging)
             });
@@ -5275,6 +5281,10 @@ pub(crate) extern "system" fn frame_proc(
                     a.update_status();
                 });
             }
+            LRESULT(0)
+        }
+        workspacemode::WM_APP_WS_OP => {
+            workspacemode::on_op(hwnd, lparam);
             LRESULT(0)
         }
         workspacemode::WM_APP_WS_REMOTE => {

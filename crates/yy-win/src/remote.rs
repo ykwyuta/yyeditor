@@ -743,6 +743,19 @@ pub(crate) fn list_dir(dir: &RemoteUri) -> Result<(Vec<workspace::Entry>, usize)
     Ok((entries, skipped))
 }
 
+/// 接続先 `uri` でファイル操作をする（接続していなければ接続する。待つ間は進みを表示する）。
+pub(crate) fn file_op<T: Send + 'static>(
+    uri: &RemoteUri,
+    label: &str,
+    f: impl FnOnce(&Arc<Session>) -> std::io::Result<T> + Send + 'static,
+) -> Result<T, String> {
+    let session = session(&uri.target(), &show_status)?;
+    show_status(label);
+    let r = wait(&show_status, move |_| f(&session));
+    show_status("");
+    r.map_err(|e| e.to_string())
+}
+
 /// `ssh://` の場所を開く（履歴・ブックマーク・コマンドラインから）。
 pub(crate) fn open_location(
     owner: HWND,

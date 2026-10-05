@@ -387,6 +387,29 @@ impl Document {
         self.remote.as_ref()
     }
 
+    /// ファイルの名前が変わった・移動した（ワークスペースでの操作）ことを反映する。`location` は
+    /// 新しい場所（リモートなら `ssh://…`）。内容・編集の状態・Undo の履歴はそのまま。
+    pub fn relocate(&mut self, location: &Path) {
+        if let Some(r) = &mut self.remote {
+            r.uri = location.to_string_lossy().into_owned();
+            r.name = r
+                .uri
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .to_owned();
+            return;
+        }
+        // マップ中のファイルの名前も直す（上書き保存のときに、それを退避してから置き換えるため）
+        if let (Some(src), Some(old)) = (&self.source, &self.path)
+            && src.path() == *old
+        {
+            src.set_path(location);
+        }
+        self.path = Some(location.to_owned());
+    }
+
     /// 利用者に見せるファイルの場所（リモートなら `ssh://…`、名前がなければ `None`）。
     /// 履歴・ブックマーク・ファイル種類の判定に使う（[`Document::path`] は手元の写しの場所）。
     pub fn location(&self) -> Option<PathBuf> {
@@ -2318,5 +2341,36 @@ mod tests {
         assert_eq!(d.snapshot().len(), 0);
         let e = Document::open_remote(&cache, &OpenOptions::default(), remote_file("e", 0));
         assert!(e.is_err());
+    }
+
+    #[test]
+    fn relocated_documents_save_to_the_new_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.txt");
+        std::fs::write(&old, "abc\n").unwrap();
+        let mut d = Document::open(&old).unwrap();
+        // 開いたままのファイルの名前を変える（ワークスペースの操作）
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let new = dir.path().join("sub").join("new.txt");
+        std::fs::rename(&old, &new).unwrap();
+        d.relocate(&new);
+        assert_eq!(d.path(), Some(new.as_path()));
+        assert_eq!(d.display_name(), "new.txt");
+        d.set_selections(SelectionSet::single(Selection::caret(3)));
+        d.insert_text("d", false);
+        d.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "abcd\n");
+        assert!(!old.exists());
+        let names: Vec<_> = std::fs::read_dir(dir.path().join("sub")).unwrap().collect();
+        assert_eq!(names.len(), 1);
+
+        let mut r = Document::from_text("x");
+        r.remote = Some(remote_file("a.txt", 1));
+        r.relocate(Path::new("ssh://host/home/u/dir/b.md"));
+        assert_eq!(r.display_name(), "b.md");
+        assert_eq!(
+            r.location(),
+            Some(PathBuf::from("ssh://host/home/u/dir/b.md"))
+        );
     }
 }

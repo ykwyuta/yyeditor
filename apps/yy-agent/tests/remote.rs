@@ -197,3 +197,26 @@ fn cancel_and_disconnect() {
     session.stat(&bytes(&path)).unwrap();
     assert!(!session.is_closed());
 }
+
+#[test]
+fn manages_files_and_folders() {
+    let s = setup();
+    let session = start(&s);
+    let dir = s.work.join("proj");
+    session.make_dir(&bytes(&dir)).unwrap();
+    let file = dir.join("new.txt");
+    session.create_file(&bytes(&file)).unwrap();
+    assert_eq!(fs::read(&file).unwrap(), b"");
+    let e = session.create_file(&bytes(&file)).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+    let moved = s.work.join("moved.txt");
+    session.rename(&bytes(&file), &bytes(&moved)).unwrap();
+    assert!(moved.is_file() && !file.exists());
+    let e = session.rename(&bytes(&moved), &bytes(&moved)).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+    fs::write(dir.join("x"), b"1").unwrap();
+    assert!(session.remove(&bytes(&dir), false).is_err());
+    session.remove(&bytes(&dir), true).unwrap();
+    session.remove(&bytes(&moved), false).unwrap();
+    assert!(!dir.exists() && !moved.exists());
+}

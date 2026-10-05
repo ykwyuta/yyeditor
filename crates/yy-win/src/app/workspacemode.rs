@@ -31,6 +31,8 @@ pub(crate) const ID_WS_ADD_REMOTE: u16 = 1306;
 /// リモートのフォルダの中身を読む（`WPARAM` はツリーの世代、`LPARAM` は項目の番号）。
 /// 展開の通知の中で接続・取得（メッセージを処理しながら待つ）をしないよう、後で行う
 pub(crate) const WM_APP_WS_REMOTE: u32 = WM_APP + 32;
+/// ファイル・フォルダの操作（`LPARAM` は `Box<WsOp>`）。ツリーの通知の中では行わず、後で行う
+pub(crate) const WM_APP_WS_OP: u32 = WM_APP + 33;
 /// サイドバーのツリー ビューの ID
 const ID_TREE: u16 = 1310;
 
@@ -45,6 +47,12 @@ const CM_REFRESH: u32 = 7;
 const CM_REMOVE_ROOT: u32 = 8;
 const CM_ADD_FOLDER: u32 = 9;
 const CM_ADD_REMOTE: u32 = 10;
+const CM_NEW_FILE: u32 = 11;
+const CM_NEW_FOLDER: u32 = 12;
+const CM_RENAME: u32 = 13;
+const CM_DELETE: u32 = 14;
+const CM_CUT: u32 = 15;
+const CM_PASTE: u32 = 16;
 
 /// サイドバーとツリーの境界の幅（96 DPI でのピクセル）
 const SPLITTER: i32 = 5;
@@ -59,6 +67,8 @@ struct Node {
     root: bool,
     /// ツリーの項目
     item: HTREEITEM,
+    /// ツリーに残っている（フォルダを読み直すと、中の項目は消える）
+    alive: bool,
 }
 
 impl Node {
@@ -91,6 +101,10 @@ pub(crate) struct WorkspacePane {
     icons: std::collections::HashMap<String, (i32, i32)>,
     /// ツリーを作り直すたびに増える（作り直す前に頼んだリモートの読み込みを捨てる）
     generation: usize,
+    /// 切り取ったファイル・フォルダ（貼り付けで移動する）
+    cut: Option<PathBuf>,
+    /// ドラッグ中の項目の番号
+    drag: Option<usize>,
 }
 
 impl WorkspacePane {
@@ -116,7 +130,8 @@ pub(crate) fn create_pane(frame: HWND, instance: HINSTANCE) -> Result<WorkspaceP
                         | TVS_LINESATROOT
                         | TVS_SHOWSELALWAYS
                         | TVS_FULLROWSELECT
-                        | TVS_INFOTIP,
+                        | TVS_INFOTIP
+                        | TVS_EDITLABELS,
                 ),
             0,
             0,
@@ -171,6 +186,8 @@ pub(crate) fn create_pane(frame: HWND, instance: HINSTANCE) -> Result<WorkspaceP
         nodes: Vec::new(),
         icons: Default::default(),
         generation: 0,
+        cut: None,
+        drag: None,
     })
 }
 
@@ -406,6 +423,7 @@ impl App {
                     loaded: false,
                     root: true,
                     item: HTREEITEM::default(),
+                    alive: true,
                 },
                 &label,
             );
@@ -507,6 +525,7 @@ impl App {
                     loaded: false,
                     root: false,
                     item: HTREEITEM::default(),
+                    alive: true,
                 },
                 &e.name,
             );
@@ -559,6 +578,13 @@ impl App {
             );
         }
         self.ws.nodes[i].loaded = false;
+        // 消した子の項目は使わない
+        let dir = self.ws.nodes[i].path.clone();
+        for n in &mut self.ws.nodes {
+            if n.path != dir && workspace::is_within(&n.path, &dir) {
+                n.alive = false;
+            }
+        }
         let state = unsafe {
             SendMessageW(
                 self.ws.tree,
@@ -660,7 +686,7 @@ pub(crate) fn load_remote(hwnd: HWND, generation: usize, index: usize) {
             return None;
         }
         let n = a.ws.nodes.get(index)?;
-        if n.loaded {
+        if n.loaded || !n.alive {
             return None;
         }
         Some((n.remote()?, n.item, n.path.clone()))
@@ -731,6 +757,25 @@ pub(crate) fn on_tree_notify(hwnd: HWND, hdr: &NMHDR, lparam: LPARAM) -> Option<
         }
         TVN_KEYDOWN => {
             let nm = unsafe { &*(lparam.0 as *const NMTVKEYDOWN) };
+            if nm.wVKey == VK_F2.0 || nm.wVKey == VK_DELETE.0 {
+                let item = with_app(|a| a.selected_item())?;
+                let node = with_app(|a| {
+                    let i = a.node_of(item)?;
+                    let n = &a.ws.nodes[i];
+                    (!n.root).then(|| (n.path.clone(), n.is_dir))
+                })
+                .flatten();
+                if let Some((path, is_dir)) = node {
+                    if nm.wVKey == VK_F2.0 {
+                        unsafe {
+                            SendMessageW(tree, TVM_EDITLABELW, None, Some(LPARAM(item.0)));
+                        }
+                    } else {
+                        post_op(hwnd, WsOp::Delete { path, is_dir });
+                    }
+                }
+                return Some(LRESULT(0));
+            }
             if nm.wVKey == VK_RETURN.0 {
                 let item = with_app(|a| a.selected_item())?;
                 match with_app(|a| a.item_info(item)).flatten() {
@@ -752,6 +797,48 @@ pub(crate) fn on_tree_notify(hwnd: HWND, hdr: &NMHDR, lparam: LPARAM) -> Option<
         NM_RCLICK => {
             context_menu(hwnd, tree);
             Some(LRESULT(1))
+        }
+        TVN_BEGINLABELEDITW => {
+            // 起点のフォルダの名前は変えない（ワークスペースから外して加え直す）
+            let info = unsafe { &*(lparam.0 as *const NMTVDISPINFOW) };
+            let root = with_app(|a| a.ws.nodes.get(info.item.lParam.0 as usize).map(|n| n.root))
+                .flatten()
+                .unwrap_or(true);
+            Some(LRESULT(isize::from(root)))
+        }
+        TVN_ENDLABELEDITW => {
+            let info = unsafe { &*(lparam.0 as *const NMTVDISPINFOW) };
+            if !info.item.pszText.is_null() {
+                let name = unsafe { info.item.pszText.to_string() }.unwrap_or_default();
+                let path = with_app(|a| {
+                    a.ws.nodes
+                        .get(info.item.lParam.0 as usize)
+                        .map(|n| n.path.clone())
+                })
+                .flatten();
+                if let Some(path) = path {
+                    post_op(hwnd, WsOp::Rename { path, name });
+                }
+            }
+            // 表示は名前を変えたあとに読み直して直す
+            Some(LRESULT(0))
+        }
+        TVN_BEGINDRAGW => {
+            let nm = unsafe { &*(lparam.0 as *const NMTREEVIEWW) };
+            let index = nm.itemNew.lParam.0 as usize;
+            let ok = with_app(|a| {
+                let movable = a.ws.nodes.get(index).is_some_and(|n| !n.root && n.alive);
+                if movable {
+                    a.ws.drag = Some(index);
+                }
+                movable
+            });
+            if ok == Some(true) {
+                unsafe {
+                    SetCapture(hwnd);
+                }
+            }
+            Some(LRESULT(0))
         }
         TVN_GETINFOTIPW => {
             let tip = unsafe { &mut *(lparam.0 as *mut NMTVGETINFOTIPW) };
@@ -817,6 +904,7 @@ fn context_menu(hwnd: HWND, tree: HWND) {
     } else {
         None
     };
+    let cut_pending = with_app(|a| a.ws.cut.is_some()).unwrap_or(false);
     let cmd = unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let add = |id: u32, text: &str| {
@@ -833,6 +921,22 @@ fn context_menu(hwnd: HWND, tree: HWND) {
                     add(CM_OPEN, "開く(&O)");
                     sep();
                 }
+                if *is_dir {
+                    add(CM_NEW_FILE, "新しいファイル(&W)...");
+                    add(CM_NEW_FOLDER, "新しいフォルダ(&N)...");
+                    sep();
+                }
+                if !root {
+                    add(CM_CUT, "切り取り(&X)\tCtrl+X");
+                }
+                if *is_dir && cut_pending {
+                    add(CM_PASTE, "貼り付け(&P)\tCtrl+V");
+                }
+                if !root {
+                    add(CM_RENAME, "名前の変更(&M)\tF2");
+                    add(CM_DELETE, "削除(&D)\tDel");
+                }
+                sep();
                 if local {
                     add(CM_TERMINAL, "ターミナルで開く(&T)");
                     add(CM_EXPLORER, "エクスプローラーで開く(&E)");
@@ -890,6 +994,22 @@ fn run_context_command(hwnd: HWND, cmd: u32, item: HTREEITEM, node: Option<(Path
     let Some((path, is_dir, _)) = node else {
         return;
     };
+    match cmd {
+        CM_NEW_FILE => return post_op(hwnd, WsOp::NewFile(path)),
+        CM_NEW_FOLDER => return post_op(hwnd, WsOp::NewFolder(path)),
+        CM_DELETE => return post_op(hwnd, WsOp::Delete { path, is_dir }),
+        CM_CUT => return cut(path),
+        CM_PASTE => return paste_into(hwnd, path, is_dir),
+        CM_RENAME => {
+            if let Some(tree) = with_app(|a| a.ws.tree) {
+                unsafe {
+                    SendMessageW(tree, TVM_EDITLABELW, None, Some(LPARAM(item.0)));
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
     // ファイルの場合はそのフォルダ
     let dir = if is_dir {
         path.clone()
@@ -1052,6 +1172,44 @@ fn pick_workspace_file(owner: HWND, save: bool, current: Option<&Path>) -> Optio
 
 /// ワークスペースのメニューの項目。処理したら `true`。
 pub(crate) fn on_workspace_command(hwnd: HWND, id: u16) -> bool {
+    // サイドバーで名前を変えている間の編集のショートカットは、その入力欄で行う
+    let label_edit = with_app(|a| unsafe {
+        HWND(SendMessageW(a.ws.tree, TVM_GETEDITCONTROL, None, None).0 as *mut _)
+    })
+    .filter(|e| !e.0.is_null() && unsafe { GetFocus() } == *e);
+    if let Some(edit) = label_edit {
+        let msg = match id {
+            ID_CUT => Some((WM_CUT, 0, 0)),
+            ID_COPY => Some((WM_COPY, 0, 0)),
+            ID_PASTE => Some((WM_PASTE, 0, 0)),
+            ID_UNDO => Some((WM_UNDO, 0, 0)),
+            ID_SELECT_ALL => Some((windows::Win32::UI::Controls::EM_SETSEL, 0, -1)),
+            _ => None,
+        };
+        if let Some((m, w, l)) = msg {
+            unsafe {
+                SendMessageW(edit, m, Some(WPARAM(w)), Some(LPARAM(l)));
+            }
+            return true;
+        }
+    }
+    // サイドバーにフォーカスがあれば、切り取り・貼り付けはファイル・フォルダの操作
+    if matches!(id, ID_CUT | ID_PASTE)
+        && with_app(|a| unsafe { GetFocus() } == a.ws.tree) == Some(true)
+    {
+        let node = with_app(|a| {
+            let i = a.node_of(a.selected_item())?;
+            let n = &a.ws.nodes[i];
+            Some((n.path.clone(), n.is_dir, n.root))
+        })
+        .flatten();
+        match (id, node) {
+            (ID_CUT, Some((path, _, false))) => cut(path),
+            (ID_PASTE, Some((path, is_dir, _))) => paste_into(hwnd, path, is_dir),
+            _ => {}
+        }
+        return true;
+    }
     match id {
         ID_WS_SIDEBAR => {
             with_app(|a| a.toggle_sidebar());
@@ -1120,4 +1278,501 @@ pub(crate) fn create_workspace_menu() -> Result<HMENU> {
         item(ID_WS_SAVE_AS, w!("ワークスペースに名前を付けて保存(&S)..."))?;
         Ok(m)
     }
+}
+
+// ---- ファイル・フォルダの操作 -------------------------------------------------------
+//
+// 作成・名前の変更・削除・移動を、手元のフォルダでもリモート（`ssh://`）のフォルダでも行う。
+// 移動は同じ場所（同じパソコン、または同じ接続先）の中だけ。手元の削除はごみ箱へ移す。
+// リモートの操作は接続中のダイアログや待ちを伴うので、ツリーの通知の中では行わず
+// [`WM_APP_WS_OP`] で後で行う。
+
+/// サイドバーでのファイル・フォルダの操作。
+pub(crate) enum WsOp {
+    /// フォルダの中に新しいフォルダを作る（名前を尋ねる）
+    NewFolder(PathBuf),
+    /// フォルダの中に新しいファイルを作って開く（名前を尋ねる）
+    NewFile(PathBuf),
+    Rename {
+        path: PathBuf,
+        name: String,
+    },
+    Delete {
+        path: PathBuf,
+        is_dir: bool,
+    },
+    /// `from` を `to_dir` の中へ移す
+    Move {
+        from: PathBuf,
+        to_dir: PathBuf,
+    },
+}
+
+/// 操作を後で行うよう頼む。
+fn post_op(frame: HWND, op: WsOp) {
+    let boxed = Box::into_raw(Box::new(op));
+    unsafe {
+        if PostMessageW(Some(frame), WM_APP_WS_OP, WPARAM(0), LPARAM(boxed as isize)).is_err() {
+            drop(Box::from_raw(boxed));
+        }
+    }
+}
+
+/// [`WM_APP_WS_OP`] を処理する（フレームのウィンドウプロシージャから）。
+pub(crate) fn on_op(hwnd: HWND, lparam: LPARAM) {
+    let op = unsafe { *Box::from_raw(lparam.0 as *mut WsOp) };
+    let r = match op {
+        WsOp::NewFolder(dir) => new_item(hwnd, &dir, true),
+        WsOp::NewFile(dir) => new_item(hwnd, &dir, false),
+        WsOp::Rename { path, name } => rename_item(&path, name.trim()),
+        WsOp::Delete { path, is_dir } => delete_item(hwnd, &path, is_dir),
+        WsOp::Move { from, to_dir } => move_item(&from, &to_dir),
+    };
+    if let Err(e) = r {
+        error_box(hwnd, &e);
+    }
+}
+
+/// 切り取る（貼り付けで移す）。
+fn cut(path: PathBuf) {
+    with_app(|a| {
+        a.status_msg = format!(
+            "{} を切り取りました（移動先のフォルダで貼り付け）",
+            workspace::name_of(&path)
+        );
+        a.ws.cut = Some(path);
+        a.update_status();
+    });
+}
+
+/// 切り取ったものを `path`（ファイルならそのフォルダ）に移す。
+fn paste_into(hwnd: HWND, path: PathBuf, is_dir: bool) {
+    let Some(Some(from)) = with_app(|a| a.ws.cut.clone()) else {
+        return;
+    };
+    let to_dir = if is_dir {
+        path
+    } else {
+        match workspace::parent(&path) {
+            Some(p) => p,
+            None => return,
+        }
+    };
+    post_op(hwnd, WsOp::Move { from, to_dir });
+}
+
+fn with_path(path: &Path, e: impl std::fmt::Display) -> String {
+    format!("{}\n\n{e}", path.display())
+}
+
+/// `path` があるか。
+fn exists(path: &Path) -> std::result::Result<bool, String> {
+    match remote_uri(path) {
+        Some(u) => {
+            let p = u.path.clone();
+            crate::remote::file_op(&u, "", move |s| match s.stat(&p) {
+                Ok(_) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(e),
+            })
+        }
+        None => Ok(std::fs::symlink_metadata(path).is_ok()),
+    }
+}
+
+/// 新しいフォルダ・ファイルを `dir` の中に作る。
+fn new_item(hwnd: HWND, dir: &Path, folder: bool) -> std::result::Result<(), String> {
+    let remote = remote_uri(dir).is_some();
+    let (title, prompt, initial) = if folder {
+        ("新しいフォルダ", "フォルダの名前:", "新しいフォルダ")
+    } else {
+        ("新しいファイル", "ファイルの名前:", "新しいファイル.txt")
+    };
+    let Some(name) = crate::goto::prompt_text(hwnd, title, prompt, initial) else {
+        return Ok(());
+    };
+    let name = name.trim();
+    workspace::check_name(name, remote)?;
+    let target = workspace::child(dir, name);
+    match remote_uri(&target) {
+        Some(u) => {
+            let p = u.path.clone();
+            crate::remote::file_op(&u, "作成しています…", move |s| {
+                if folder {
+                    s.make_dir(&p)
+                } else {
+                    s.create_file(&p).map(|_| ())
+                }
+            })?;
+        }
+        None => {
+            let r = if folder {
+                std::fs::create_dir(&target)
+            } else {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)
+                    .map(|_| ())
+            };
+            r.map_err(|e| with_path(&target, e))?;
+        }
+    }
+    with_app(|a| a.refresh_folder(dir));
+    if !folder {
+        open_path(hwnd, target, None, false);
+    }
+    Ok(())
+}
+
+/// 名前を変える。
+fn rename_item(path: &Path, name: &str) -> std::result::Result<(), String> {
+    if name == workspace::name_of(path) {
+        return Ok(());
+    }
+    workspace::check_name(name, remote_uri(path).is_some())?;
+    let Some(dir) = workspace::parent(path) else {
+        return Ok(());
+    };
+    let to = workspace::child(&dir, name);
+    // 大文字・小文字だけを変える場合（Windows では同じファイル）は、あるかを確かめない
+    if !yy_config::recent::same_path(path, &to) && exists(&to)? {
+        return Err(format!("「{name}」は既にあります。"));
+    }
+    move_path(path, &to)
+}
+
+/// `from` を `to_dir` の中へ移す。
+fn move_item(from: &Path, to_dir: &Path) -> std::result::Result<(), String> {
+    if !workspace::same_place(from, to_dir) {
+        return Err(
+            "パソコンとリモートの間や、別の接続先へは移動できません（同じ場所の中だけ移動できます）。"
+                .into(),
+        );
+    }
+    if workspace::is_within(to_dir, from) {
+        return Err("フォルダを、そのフォルダの中へは移動できません。".into());
+    }
+    if workspace::parent(from).is_some_and(|p| yy_config::recent::same_path(&p, to_dir)) {
+        return Ok(());
+    }
+    let to = workspace::child(to_dir, &workspace::name_of(from));
+    if exists(&to)? {
+        return Err(format!(
+            "移動先に「{}」が既にあります。",
+            workspace::name_of(from)
+        ));
+    }
+    move_path(from, &to)
+}
+
+/// `from` を `to` へ移し（名前を変え）、開いているタブ・ワークスペース・ツリーを合わせる。
+fn move_path(from: &Path, to: &Path) -> std::result::Result<(), String> {
+    match remote_uri(from) {
+        Some(u) => {
+            let (f, t) = (
+                u.path.clone(),
+                remote_uri(to).map(|t| t.path).unwrap_or_default(),
+            );
+            crate::remote::file_op(&u, "移動しています…", move |s| s.rename(&f, &t))?;
+        }
+        None => local_move(from, to)?,
+    }
+    with_app(|a| a.after_path_moved(from, to));
+    Ok(())
+}
+
+/// 手元のファイル・フォルダを移す（別のドライブへはシェルでコピーしてから消す）。
+fn local_move(from: &Path, to: &Path) -> std::result::Result<(), String> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        // ERROR_NOT_SAME_DEVICE
+        Err(e) if e.raw_os_error() == Some(17) => {
+            let dir = workspace::parent(to).unwrap_or_default();
+            shell_op(windows::Win32::UI::Shell::FO_MOVE, from, Some(&dir), 0)
+        }
+        Err(e) => Err(with_path(from, e)),
+    }
+}
+
+/// 消す（手元はごみ箱へ、リモートは完全に）。開いているタブは閉じる。
+fn delete_item(hwnd: HWND, path: &Path, is_dir: bool) -> std::result::Result<(), String> {
+    let docs = with_app(|a| a.documents_within(path)).unwrap_or_default();
+    if docs.iter().any(|&(_, modified)| modified) {
+        return Err(
+            "保存していない変更があるファイルを開いています。保存するか閉じてから削除してください。"
+                .into(),
+        );
+    }
+    let remote = remote_uri(path).is_some();
+    let name = workspace::name_of(path);
+    let mut text = if remote {
+        format!(
+            "「{name}」を削除しますか？\n\nリモートのファイルはごみ箱に入らず、元に戻せません。"
+        )
+    } else {
+        format!("「{name}」をごみ箱に移動しますか？")
+    };
+    if is_dir {
+        text += "\nフォルダの中身もすべて削除します。";
+    }
+    if !docs.is_empty() {
+        text += &format!("\n\n開いている {} 個のタブを閉じます。", docs.len());
+    }
+    let r = unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            &HSTRING::from(text),
+            &HSTRING::from("yyeditor"),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
+    };
+    if r != IDYES {
+        return Ok(());
+    }
+    // 開いているファイルを先に閉じる（手元のファイルはマップしているので）
+    let mut indices: Vec<usize> = docs.iter().map(|&(i, _)| i).collect();
+    indices.sort_unstable_by(|a, b| b.cmp(a));
+    for i in indices {
+        close_tab_at(hwnd, i);
+    }
+    match remote_uri(path) {
+        Some(u) => {
+            let p = u.path.clone();
+            crate::remote::file_op(&u, "削除しています…", move |s| s.remove(&p, true))?;
+        }
+        None => {
+            use windows::Win32::UI::Shell::{
+                FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING,
+            };
+            shell_op(
+                FO_DELETE,
+                path,
+                None,
+                (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING).0,
+            )?;
+        }
+    }
+    with_app(|a| a.after_delete(path));
+    Ok(())
+}
+
+/// シェルのファイル操作（ごみ箱への削除、別のドライブへの移動）。
+fn shell_op(
+    func: u32,
+    from: &Path,
+    to: Option<&Path>,
+    flags: u32,
+) -> std::result::Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::{FOF_NOCONFIRMMKDIR, SHFILEOPSTRUCTW, SHFileOperationW};
+    // 文字列は 2 つの NUL で終える
+    let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain([0, 0]).collect() };
+    let from_w = wide(from);
+    let to_w = to.map(wide);
+    let frame = with_app(|a| a.frame).unwrap_or_default();
+    let mut op = SHFILEOPSTRUCTW {
+        hwnd: frame,
+        wFunc: func,
+        pFrom: windows::core::PCWSTR(from_w.as_ptr()),
+        pTo: to_w.as_ref().map_or(windows::core::PCWSTR::null(), |t| {
+            windows::core::PCWSTR(t.as_ptr())
+        }),
+        fFlags: (flags | FOF_NOCONFIRMMKDIR.0) as u16,
+        ..Default::default()
+    };
+    let r = unsafe { SHFileOperationW(&mut op) };
+    if r != 0 {
+        return Err(with_path(from, format!("操作できませんでした（{r:#x}）")));
+    }
+    if op.fAnyOperationsAborted.as_bool() {
+        return Err(with_path(from, "中止しました"));
+    }
+    Ok(())
+}
+
+impl App {
+    /// `dir` を表示しているフォルダの項目を読み直す。
+    fn refresh_folder(&mut self, dir: &Path) {
+        let items: Vec<HTREEITEM> = self
+            .ws
+            .nodes
+            .iter()
+            .filter(|n| n.alive && n.is_dir && yy_config::recent::same_path(&n.path, dir))
+            .map(|n| n.item)
+            .collect();
+        for item in items {
+            self.refresh_item(item);
+        }
+    }
+
+    /// `path`（またはその中）を開いているタブ（番号, 変更があるか）。
+    fn documents_within(&self, path: &Path) -> Vec<(usize, bool)> {
+        (0..self.tabs.len())
+            .filter_map(|i| {
+                let doc = if i == self.active_tab {
+                    &self.doc
+                } else {
+                    &self.tabs[i].as_ref()?.doc
+                };
+                let loc = doc.location()?;
+                workspace::is_within(&loc, path).then(|| (i, doc.is_modified() || doc.is_saving()))
+            })
+            .collect()
+    }
+
+    /// `from` を `to` に移した（名前を変えた）あと: 開いているタブ・ワークスペースの起点・切り取り・ツリーを合わせる。
+    fn after_path_moved(&mut self, from: &Path, to: &Path) {
+        let fix = |d: &mut Document| {
+            if let Some(n) = d
+                .location()
+                .and_then(|loc| workspace::relocated(&loc, from, to))
+            {
+                d.relocate(&n);
+            }
+        };
+        fix(&mut self.doc);
+        for t in self.tabs.iter_mut().flatten() {
+            fix(&mut t.doc);
+        }
+        if let Some(c) = &self.ws.cut
+            && workspace::is_within(c, from)
+        {
+            self.ws.cut = None;
+        }
+        let mut roots_changed = false;
+        for f in &mut self.ws.workspace.folders {
+            if let Some(n) = workspace::relocated(f, from, to) {
+                *f = n;
+                roots_changed = true;
+            }
+        }
+        if roots_changed {
+            self.save_workspace();
+            self.rebuild_tree();
+        } else {
+            for dir in [workspace::parent(from), workspace::parent(to)]
+                .into_iter()
+                .flatten()
+            {
+                self.refresh_folder(&dir);
+            }
+        }
+        self.status_msg = format!(
+            "{} を {} に移しました",
+            workspace::name_of(from),
+            to.display()
+        );
+        self.update_title();
+        self.update_status();
+    }
+
+    /// `path` を消したあと: ワークスペースの起点・切り取り・ツリーを合わせる。
+    fn after_delete(&mut self, path: &Path) {
+        if self
+            .ws
+            .cut
+            .as_deref()
+            .is_some_and(|c| workspace::is_within(c, path))
+        {
+            self.ws.cut = None;
+        }
+        let n = self.ws.workspace.folders.len();
+        self.ws
+            .workspace
+            .folders
+            .retain(|f| !workspace::is_within(f, path));
+        if self.ws.workspace.folders.len() != n {
+            self.save_workspace();
+            self.rebuild_tree();
+        } else if let Some(dir) = workspace::parent(path) {
+            self.refresh_folder(&dir);
+        }
+        self.status_msg = format!("{} を削除しました", workspace::name_of(path));
+        self.update_status();
+    }
+
+    /// ドラッグ中の項目の番号と、`(x, y)`（フレームのクライアント座標）の下の項目。
+    fn drag_target(&self, x: i32, y: i32) -> Option<(usize, HTREEITEM)> {
+        let index = self.ws.drag?;
+        let mut pt = windows::Win32::Foundation::POINT { x, y };
+        unsafe {
+            windows::Win32::Graphics::Gdi::MapWindowPoints(
+                Some(self.frame),
+                Some(self.ws.tree),
+                std::slice::from_mut(&mut pt),
+            );
+        }
+        let mut hit = TVHITTESTINFO {
+            pt,
+            ..Default::default()
+        };
+        let item = HTREEITEM(unsafe {
+            SendMessageW(
+                self.ws.tree,
+                TVM_HITTEST,
+                None,
+                Some(LPARAM(&mut hit as *mut _ as isize)),
+            )
+            .0
+        });
+        Some((index, item))
+    }
+
+    fn set_drop_highlight(&self, item: HTREEITEM) {
+        unsafe {
+            SendMessageW(
+                self.ws.tree,
+                TVM_SELECTITEM,
+                Some(WPARAM(TVGN_DROPHILITE as usize)),
+                Some(LPARAM(item.0)),
+            );
+        }
+    }
+
+    /// 移動先のフォルダ（項目がファイルならそのフォルダ）。
+    fn drop_dir(&self, item: HTREEITEM) -> Option<PathBuf> {
+        let i = self.node_of(item)?;
+        let n = &self.ws.nodes[i];
+        if n.is_dir {
+            Some(n.path.clone())
+        } else {
+            workspace::parent(&n.path)
+        }
+    }
+}
+
+/// ドラッグ中のマウスの移動（フレームの WM_MOUSEMOVE）。ドラッグ中でなければ何もしない。
+pub(crate) fn drag_move(x: i32, y: i32) {
+    with_app(|a| {
+        if let Some((_, item)) = a.drag_target(x, y) {
+            a.set_drop_highlight(item);
+        }
+    });
+}
+
+/// ドラッグの終わり（フレームの WM_LBUTTONUP / WM_CAPTURECHANGED）。`drop` ならその位置へ移す。
+/// ドラッグ中だったら `true`。
+pub(crate) fn drag_end(hwnd: HWND, x: i32, y: i32, drop: bool) -> bool {
+    let Some(target) = with_app(|a| {
+        let (index, item) = a.drag_target(x, y)?;
+        a.ws.drag = None;
+        a.set_drop_highlight(HTREEITEM::default());
+        let from =
+            a.ws.nodes
+                .get(index)
+                .filter(|n| n.alive)
+                .map(|n| n.path.clone());
+        Some((from, a.drop_dir(item)))
+    })
+    .flatten() else {
+        return false;
+    };
+    unsafe {
+        let _ = ReleaseCapture();
+    }
+    if let (true, (Some(from), Some(to_dir))) = (drop, target) {
+        post_op(hwnd, WsOp::Move { from, to_dir });
+    }
+    true
 }
