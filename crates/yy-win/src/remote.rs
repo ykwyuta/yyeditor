@@ -17,6 +17,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::HSTRING;
 use yy_config::RemoteConfig;
+use yy_config::workspace;
 use yy_core::{Document, Encoding, FileId, RemoteFile, SaveError, Upload};
 use yy_remote::ssh_config::{HostOverride, Resolver};
 use yy_remote::uri::{RemoteUri, Target};
@@ -702,6 +703,39 @@ pub(crate) fn current_dest(file: &RemoteFile) -> Result<RemoteDest, String> {
         expected: file.id,
         force: false,
     })
+}
+
+/// リモートのフォルダの中身（ワークスペースのサイドバー用）。項目のパスは `ssh://…`。
+/// フォルダを先に名前順、[`workspace::EXCLUDED`] を除き、[`workspace::MAX_ENTRIES`] を超えた数も返す。
+pub(crate) fn list_dir(dir: &RemoteUri) -> Result<(Vec<workspace::Entry>, usize), String> {
+    let session = session(&dir.target(), &show_status)?;
+    let path = dir.path.clone();
+    let listed = wait(&show_status, move |_| session.read_dir(&path));
+    show_status("");
+    let items = listed.map_err(|e| describe(dir, &e))?;
+    let mut entries = Vec::new();
+    let mut skipped = 0;
+    for e in items {
+        let name = yy_proto::display_path(&e.name);
+        if workspace::EXCLUDED.contains(&name.as_str()) {
+            continue;
+        }
+        if entries.len() >= workspace::MAX_ENTRIES {
+            skipped += 1;
+            continue;
+        }
+        let child = RemoteUri {
+            path: yy_proto::join_path(&dir.path, &e.name),
+            ..dir.clone()
+        };
+        entries.push(workspace::Entry {
+            name,
+            path: PathBuf::from(child.to_string()),
+            is_dir: e.info.as_ref().is_some_and(|i| i.is_dir()),
+        });
+    }
+    workspace::sort_entries(&mut entries);
+    Ok((entries, skipped))
 }
 
 /// `ssh://` の場所を開く（履歴・ブックマーク・コマンドラインから）。

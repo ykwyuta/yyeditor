@@ -5277,6 +5277,10 @@ pub(crate) extern "system" fn frame_proc(
             }
             LRESULT(0)
         }
+        workspacemode::WM_APP_WS_REMOTE => {
+            workspacemode::load_remote(hwnd, wparam.0, lparam.0 as usize);
+            LRESULT(0)
+        }
         crate::remote::WM_APP_REMOTE_PROMPT => {
             crate::remote::on_prompt(hwnd, lparam);
             LRESULT(0)

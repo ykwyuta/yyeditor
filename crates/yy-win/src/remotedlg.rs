@@ -35,6 +35,8 @@ const CLASS_COMBOBOX: u16 = 0x0085;
 pub(crate) enum Mode {
     Open,
     Save,
+    /// フォルダを選ぶ（ワークスペースに加える）
+    Folder,
 }
 
 /// 選んだファイル。
@@ -86,7 +88,7 @@ pub(crate) fn show(
     let targets = crate::app::with_app(|a| a.remote.known_targets()).unwrap_or_default();
     let (target, dir, name) = match &initial {
         Some(u) => {
-            let is_file = mode == Mode::Save || !u.path.ends_with(b"/");
+            let is_file = mode == Mode::Save || (mode == Mode::Open && !u.path.ends_with(b"/"));
             if is_file {
                 (
                     Some(u.target()),
@@ -130,12 +132,12 @@ pub(crate) fn show(
 
 fn build_template(mode: Mode) -> Template {
     let (w, h) = (400i16, 282i16);
-    let count = if mode == Mode::Save { 15 } else { 14 };
     let title = match mode {
         Mode::Open => "リモートのファイルを開く",
         Mode::Save => "リモートに名前を付けて保存",
+        Mode::Folder => "ワークスペースに追加するリモートのフォルダ",
     };
-    let mut t = Template::dialog(title, count, w, h);
+    let mut t = Template::dialog(title, w, h);
     let tab = WS_TABSTOP.0;
     t.item(0, 7, 9, 42, 10, 0, CLASS_STATIC, "接続先:");
     t.item(
@@ -172,6 +174,42 @@ fn build_template(mode: Mode) -> Template {
     let list_style = (WS_BORDER | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP).0
         | (LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_USETABSTOPS) as u32;
     t.item(list_style, 7, 45, w - 14, 150, ID_LIST, CLASS_LISTBOX, "");
+    if mode != Mode::Folder {
+        add_file_fields(&mut t, mode, w);
+    }
+    t.item(0, 7, 240, w - 14, 18, ID_INFO, CLASS_STATIC, "");
+    let ok = match mode {
+        Mode::Open => "開く",
+        Mode::Save => "保存",
+        Mode::Folder => "このフォルダを追加",
+    };
+    let ok_w = if mode == Mode::Folder { 80 } else { 50 };
+    t.item(
+        tab | BS_DEFPUSHBUTTON as u32,
+        w - 61 - ok_w,
+        h - 21,
+        ok_w,
+        14,
+        IDOK_,
+        CLASS_BUTTON,
+        ok,
+    );
+    t.item(
+        tab | BS_PUSHBUTTON as u32,
+        w - 57,
+        h - 21,
+        50,
+        14,
+        IDCANCEL_,
+        CLASS_BUTTON,
+        "キャンセル",
+    );
+    t
+}
+
+/// ファイル名・文字コード（・BOM）の欄。
+fn add_file_fields(t: &mut Template, mode: Mode, w: i16) {
+    let tab = WS_TABSTOP.0;
     t.item(0, 7, 203, 42, 10, 0, CLASS_STATIC, "ファイル名:");
     t.item(
         (WS_BORDER | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32,
@@ -206,32 +244,6 @@ fn build_template(mode: Mode) -> Template {
             "BOM を付ける",
         );
     }
-    t.item(0, 7, 240, w - 14, 18, ID_INFO, CLASS_STATIC, "");
-    let ok = match mode {
-        Mode::Open => "開く",
-        Mode::Save => "保存",
-    };
-    t.item(
-        tab | BS_DEFPUSHBUTTON as u32,
-        w - 111,
-        h - 21,
-        50,
-        14,
-        IDOK_,
-        CLASS_BUTTON,
-        ok,
-    );
-    t.item(
-        tab | BS_PUSHBUTTON as u32,
-        w - 57,
-        h - 21,
-        50,
-        14,
-        IDCANCEL_,
-        CLASS_BUTTON,
-        "キャンセル",
-    );
-    t
 }
 
 unsafe fn state<'a>(hwnd: HWND) -> &'a mut State {
@@ -426,6 +438,9 @@ fn activate_row(hwnd: HWND) {
             let next = yy_proto::join_path(&st.dir, &e.name);
             list(hwnd, &next);
         }
+        Some(Some(_)) if st.mode == Mode::Folder => {
+            set_info(hwnd, "フォルダを選んでください");
+        }
         Some(Some(e)) => {
             set_text(hwnd, ID_NAME, &yy_proto::display_path(&e.name));
             accept_name(hwnd);
@@ -451,6 +466,9 @@ fn go_to_dir_field(hwnd: HWND) {
     let show = |t: &str| set_info(hwnd, t);
     match remote::wait(&show, move |_| session.stat(&p)) {
         Ok(i) if i.is_dir() => list(hwnd, &path),
+        Ok(_) if st.mode == Mode::Folder => {
+            set_info(hwnd, &format!("{typed} はフォルダではありません"))
+        }
         Ok(_) => {
             st.dir = yy_proto::parent_path(&path);
             set_text(
@@ -463,6 +481,30 @@ fn go_to_dir_field(hwnd: HWND) {
             accept_name(hwnd);
         }
         Err(e) => set_info(hwnd, &format!("{typed}: {e}")),
+    }
+}
+
+/// 表示しているフォルダに決める（フォルダを選ぶとき）。
+fn accept_folder(hwnd: HWND) {
+    let st = unsafe { state(hwnd) };
+    let (Some(session), Some(target)) = (st.session.clone(), st.target.clone()) else {
+        connect(hwnd);
+        return;
+    };
+    st.result = Some(Picked {
+        uri: RemoteUri {
+            user: target.user.clone(),
+            host: target.host.clone(),
+            port: target.port,
+            path: st.dir.clone(),
+        },
+        session,
+        encoding: None,
+        bom: false,
+        existing: None,
+    });
+    unsafe {
+        let _ = EndDialog(hwnd, IDOK_ as isize);
     }
 }
 
@@ -610,6 +652,8 @@ extern "system" fn dialog_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             go_to_dir_field(hwnd);
                         } else if focus == item(hwnd, ID_LIST) {
                             activate_row(hwnd);
+                        } else if state(hwnd).mode == Mode::Folder {
+                            accept_folder(hwnd);
                         } else {
                             accept_name(hwnd);
                         }

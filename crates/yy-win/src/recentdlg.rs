@@ -115,11 +115,7 @@ struct State {
 
 fn build_template(kind: ListKind) -> Template {
     let (w, h) = (360i16, 230i16);
-    let count = match kind {
-        ListKind::History => 8,
-        ListKind::Bookmarks => 9,
-    };
-    let mut t = Template::dialog(kind.title(), count, w, h);
+    let mut t = Template::dialog(kind.title(), w, h);
     let button = WS_TABSTOP.0 | BS_PUSHBUTTON as u32;
     t.item(0, 7, 9, 40, 10, 0, CLASS_STATIC, "絞り込み:");
     t.item(

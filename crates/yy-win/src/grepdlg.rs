@@ -36,7 +36,7 @@ pub(crate) struct GrepRequest {
 }
 
 fn build_template() -> Template {
-    let mut t = Template::dialog("ファイルから検索 (Grep)", 13, 260, 118);
+    let mut t = Template::dialog("ファイルから検索 (Grep)", 260, 118);
     let edit = (WS_BORDER | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32;
     let check = WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32;
     t.item(0, 7, 8, 60, 10, 0, CLASS_STATIC, "検索する文字列:");

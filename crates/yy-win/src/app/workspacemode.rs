@@ -27,6 +27,10 @@ pub(crate) const ID_WS_OPEN: u16 = 1302;
 pub(crate) const ID_WS_SAVE_AS: u16 = 1303;
 pub(crate) const ID_WS_NEW: u16 = 1304;
 pub(crate) const ID_WS_REFRESH: u16 = 1305;
+pub(crate) const ID_WS_ADD_REMOTE: u16 = 1306;
+/// リモートのフォルダの中身を読む（`WPARAM` はツリーの世代、`LPARAM` は項目の番号）。
+/// 展開の通知の中で接続・取得（メッセージを処理しながら待つ）をしないよう、後で行う
+pub(crate) const WM_APP_WS_REMOTE: u32 = WM_APP + 32;
 /// サイドバーのツリー ビューの ID
 const ID_TREE: u16 = 1310;
 
@@ -40,6 +44,7 @@ const CM_GREP: u32 = 6;
 const CM_REFRESH: u32 = 7;
 const CM_REMOVE_ROOT: u32 = 8;
 const CM_ADD_FOLDER: u32 = 9;
+const CM_ADD_REMOTE: u32 = 10;
 
 /// サイドバーとツリーの境界の幅（96 DPI でのピクセル）
 const SPLITTER: i32 = 5;
@@ -52,6 +57,20 @@ struct Node {
     loaded: bool,
     /// 起点のフォルダ
     root: bool,
+    /// ツリーの項目
+    item: HTREEITEM,
+}
+
+impl Node {
+    /// SSH 接続先のフォルダ・ファイル（パスは `ssh://…`）か。
+    fn remote(&self) -> Option<yy_remote::RemoteUri> {
+        remote_uri(&self.path)
+    }
+}
+
+/// `ssh://…` のパスなら、その場所。
+fn remote_uri(path: &Path) -> Option<yy_remote::RemoteUri> {
+    path.to_str().and_then(yy_remote::RemoteUri::parse)
 }
 
 /// ワークスペースとサイドバーの状態。
@@ -70,6 +89,8 @@ pub(crate) struct WorkspacePane {
     nodes: Vec<Node>,
     /// 拡張子ごとのアイコンの番号（システムのイメージ リスト）
     icons: std::collections::HashMap<String, (i32, i32)>,
+    /// ツリーを作り直すたびに増える（作り直す前に頼んだリモートの読み込みを捨てる）
+    generation: usize,
 }
 
 impl WorkspacePane {
@@ -149,6 +170,7 @@ pub(crate) fn create_pane(frame: HWND, instance: HINSTANCE) -> Result<WorkspaceP
         file,
         nodes: Vec::new(),
         icons: Default::default(),
+        generation: 0,
     })
 }
 
@@ -335,7 +357,7 @@ impl App {
                 },
             },
         };
-        unsafe {
+        let item = unsafe {
             HTREEITEM(
                 SendMessageW(
                     self.ws.tree,
@@ -345,7 +367,9 @@ impl App {
                 )
                 .0,
             )
-        }
+        };
+        self.ws.nodes[index].item = item;
+        item
     }
 
     /// ツリーを作り直す（起点のフォルダだけを並べる）。
@@ -355,6 +379,7 @@ impl App {
             SendMessageW(self.ws.tree, TVM_DELETEITEM, None, Some(LPARAM(TVI_ROOT.0)));
         }
         self.ws.nodes.clear();
+        self.ws.generation += 1;
         let folders = self.ws.workspace.folders.clone();
         for f in folders {
             // 同じ名前の起点があれば親のフォルダも示す
@@ -367,8 +392,10 @@ impl App {
                 .filter(|g| display_name(g).eq_ignore_ascii_case(&name))
                 .count()
                 > 1;
-            let label = match (dup, f.parent()) {
-                (true, Some(p)) => format!("{name}（{}）", p.display()),
+            let label = match (remote_uri(&f), dup, f.parent()) {
+                // リモートのフォルダは接続先も示す
+                (Some(u), _, _) => format!("{name} [{}]", u.target()),
+                (None, true, Some(p)) => format!("{name}（{}）", p.display()),
                 _ => name,
             };
             self.insert_node(
@@ -378,6 +405,7 @@ impl App {
                     is_dir: true,
                     loaded: false,
                     root: true,
+                    item: HTREEITEM::default(),
                 },
                 &label,
             );
@@ -407,11 +435,25 @@ impl App {
         (ok != 0 && (tv.lParam.0 as usize) < self.ws.nodes.len()).then_some(tv.lParam.0 as usize)
     }
 
-    /// フォルダの項目の中身を読む（まだなら）。
-    fn load_children(&mut self, item: HTREEITEM) {
-        let Some(i) = self.node_of(item) else { return };
+    /// フォルダの項目の中身を読む（まだなら）。リモートのフォルダは後で読む
+    /// （[`WM_APP_WS_REMOTE`]）ので、そのときは `true` を返す（展開はそのあとで行う）。
+    fn load_children(&mut self, item: HTREEITEM) -> bool {
+        let Some(i) = self.node_of(item) else {
+            return false;
+        };
         if self.ws.nodes[i].loaded || !self.ws.nodes[i].is_dir {
-            return;
+            return false;
+        }
+        if self.ws.nodes[i].remote().is_some() {
+            unsafe {
+                let _ = PostMessageW(
+                    Some(self.frame),
+                    WM_APP_WS_REMOTE,
+                    WPARAM(self.ws.generation),
+                    LPARAM(i as isize),
+                );
+            }
+            return true;
         }
         self.ws.nodes[i].loaded = true;
         let dir = self.ws.nodes[i].path.clone();
@@ -423,6 +465,18 @@ impl App {
                 (Vec::new(), 0)
             }
         };
+        self.insert_children(item, &dir, entries, skipped);
+        false
+    }
+
+    /// 読んだフォルダの中身を `item` の下に並べる。
+    fn insert_children(
+        &mut self,
+        item: HTREEITEM,
+        dir: &Path,
+        entries: Vec<workspace::Entry>,
+        skipped: usize,
+    ) {
         if entries.is_empty() {
             // 中身がなければ展開のボタンを消す
             let tv = TVITEMEXW {
@@ -452,6 +506,7 @@ impl App {
                     is_dir: e.is_dir,
                     loaded: false,
                     root: false,
+                    item: HTREEITEM::default(),
                 },
                 &e.name,
             );
@@ -514,7 +569,7 @@ impl App {
             .0
         };
         if state & TVIS_EXPANDED.0 as isize != 0 {
-            self.load_children(item);
+            let _ = self.load_children(item);
         }
     }
 
@@ -598,6 +653,49 @@ impl App {
     }
 }
 
+/// [`WM_APP_WS_REMOTE`]: リモートのフォルダの中身を読み（接続していなければ接続し）、展開する。
+pub(crate) fn load_remote(hwnd: HWND, generation: usize, index: usize) {
+    let target = with_app(|a| {
+        if a.ws.generation != generation {
+            return None;
+        }
+        let n = a.ws.nodes.get(index)?;
+        if n.loaded {
+            return None;
+        }
+        Some((n.remote()?, n.item, n.path.clone()))
+    })
+    .flatten();
+    let Some((uri, item, dir)) = target else {
+        return;
+    };
+    // 読んでいる間はアプリの状態を借りない（接続中の問い合わせのダイアログが出るため）
+    let listed = crate::remote::list_dir(&uri);
+    let expand = with_app(|a| {
+        // 待っている間にツリーが作り直されていれば捨てる
+        if a.ws.generation != generation || a.ws.nodes.get(index).is_none_or(|n| n.loaded) {
+            return Ok(false);
+        }
+        let (entries, skipped) = listed?;
+        a.ws.nodes[index].loaded = true;
+        a.insert_children(item, &dir, entries, skipped);
+        Ok::<_, String>(true)
+    });
+    match expand {
+        Some(Ok(true)) => unsafe {
+            let tree = with_app(|a| a.ws.tree).unwrap_or_default();
+            SendMessageW(
+                tree,
+                TVM_EXPAND,
+                Some(WPARAM(TVE_EXPAND.0 as usize)),
+                Some(LPARAM(item.0)),
+            );
+        },
+        Some(Err(e)) => error_box(hwnd, &format!("フォルダを開けません。\n{e}")),
+        _ => {}
+    }
+}
+
 /// ツリーの通知（フレームの WM_NOTIFY）。処理したら戻り値。
 pub(crate) fn on_tree_notify(hwnd: HWND, hdr: &NMHDR, lparam: LPARAM) -> Option<LRESULT> {
     let tree = with_app(|a| a.ws.tree)?;
@@ -607,8 +705,11 @@ pub(crate) fn on_tree_notify(hwnd: HWND, hdr: &NMHDR, lparam: LPARAM) -> Option<
     match hdr.code {
         TVN_ITEMEXPANDINGW => {
             let nm = unsafe { &*(lparam.0 as *const NMTREEVIEWW) };
-            if nm.action == TVE_EXPAND {
-                with_app(|a| a.load_children(nm.itemNew.hItem));
+            if nm.action == TVE_EXPAND
+                && with_app(|a| a.load_children(nm.itemNew.hItem)) == Some(true)
+            {
+                // リモートのフォルダは読んでから展開する
+                return Some(LRESULT(1));
             }
             Some(LRESULT(0))
         }
@@ -725,17 +826,21 @@ fn context_menu(hwnd: HWND, tree: HWND) {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         };
         match &node {
-            Some((_, is_dir, root)) => {
+            Some((path, is_dir, root)) => {
+                // リモートの項目には、手元のプログラムで開く操作と Grep はない
+                let local = remote_uri(path).is_none();
                 if !is_dir {
                     add(CM_OPEN, "開く(&O)");
                     sep();
                 }
-                add(CM_TERMINAL, "ターミナルで開く(&T)");
-                add(CM_EXPLORER, "エクスプローラーで開く(&E)");
-                if *is_dir {
-                    add(CM_GREP, "フォルダ内を検索 (Grep)(&F)...");
+                if local {
+                    add(CM_TERMINAL, "ターミナルで開く(&T)");
+                    add(CM_EXPLORER, "エクスプローラーで開く(&E)");
+                    if *is_dir {
+                        add(CM_GREP, "フォルダ内を検索 (Grep)(&F)...");
+                    }
+                    sep();
                 }
-                sep();
                 add(CM_COPY_PATH, "パスをコピー(&C)");
                 add(CM_COPY_RELATIVE, "相対パスをコピー(&R)");
                 if *is_dir {
@@ -747,8 +852,18 @@ fn context_menu(hwnd: HWND, tree: HWND) {
                 }
                 sep();
                 add(CM_ADD_FOLDER, "フォルダをワークスペースに追加(&A)...");
+                add(
+                    CM_ADD_REMOTE,
+                    "リモートのフォルダをワークスペースに追加(&S)...",
+                );
             }
-            None => add(CM_ADD_FOLDER, "フォルダをワークスペースに追加(&A)..."),
+            None => {
+                add(CM_ADD_FOLDER, "フォルダをワークスペースに追加(&A)...");
+                add(
+                    CM_ADD_REMOTE,
+                    "リモートのフォルダをワークスペースに追加(&S)...",
+                );
+            }
         }
         let cmd = TrackPopupMenu(
             menu,
@@ -768,6 +883,9 @@ fn context_menu(hwnd: HWND, tree: HWND) {
 fn run_context_command(hwnd: HWND, cmd: u32, item: HTREEITEM, node: Option<(PathBuf, bool, bool)>) {
     if cmd == CM_ADD_FOLDER {
         return cmd_add_folder(hwnd);
+    }
+    if cmd == CM_ADD_REMOTE {
+        return cmd_add_remote_folder(hwnd);
     }
     let Some((path, is_dir, _)) = node else {
         return;
@@ -789,7 +907,22 @@ fn run_context_command(hwnd: HWND, cmd: u32, item: HTREEITEM, node: Option<(Path
         }
         CM_EXPLORER => open_explorer(&path),
         CM_COPY_PATH | CM_COPY_RELATIVE => {
-            let text = if cmd == CM_COPY_RELATIVE {
+            let text = if let Some(u) = remote_uri(&path) {
+                // リモートは接続先のパス（相対パスは起点のフォルダから。区切りは /）
+                let root = with_app(|a| a.ws.workspace.root_of(&path).map(|r| r.to_owned()))
+                    .flatten()
+                    .and_then(|r| remote_uri(&r));
+                let relative = root.as_ref().and_then(|r| {
+                    let rest = u.path.strip_prefix(r.path.as_slice())?;
+                    let rest = rest.strip_prefix(b"/").unwrap_or(rest);
+                    (!rest.is_empty()).then(|| yy_proto::display_path(rest))
+                });
+                if cmd == CM_COPY_RELATIVE {
+                    relative.unwrap_or_else(|| display_name(&path))
+                } else {
+                    yy_proto::display_path(&u.path)
+                }
+            } else if cmd == CM_COPY_RELATIVE {
                 with_app(|a| {
                     a.ws.workspace
                         .root_of(&path)
@@ -844,6 +977,45 @@ pub(crate) fn cmd_add_folder(hwnd: HWND) {
     }
 }
 
+/// 「リモートのフォルダをワークスペースに追加」。
+pub(crate) fn cmd_add_remote_folder(hwnd: HWND) {
+    let Some((available, initial)) = with_app(|a| {
+        // 選択中のリモートの項目、なければ最後に使った場所から
+        let selected = a
+            .node_of(a.selected_item())
+            .and_then(|i| a.ws.nodes[i].remote());
+        (
+            a.remote.available(),
+            selected.or_else(|| a.remote.last.clone()),
+        )
+    }) else {
+        return;
+    };
+    if !available {
+        info_box(
+            hwnd,
+            "この yyeditor には SSH の機能が組み込まれていません。",
+        );
+        return;
+    }
+    let initial = initial.map(|mut u| {
+        // ファイルならそのフォルダから
+        if !u.path.ends_with(b"/") {
+            u.path = yy_proto::parent_path(&u.path);
+        }
+        u
+    });
+    if let Some(p) =
+        crate::remotedlg::show(hwnd, crate::remotedlg::Mode::Folder, initial, None, false)
+    {
+        let dir = PathBuf::from(p.uri.to_string());
+        with_app(|a| {
+            a.remote.last = Some(p.uri.clone());
+            a.add_workspace_folder(&dir);
+        });
+    }
+}
+
 /// ワークスペースのファイルを選ぶ（`save` なら保存先）。
 fn pick_workspace_file(owner: HWND, save: bool, current: Option<&Path>) -> Option<PathBuf> {
     use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
@@ -885,6 +1057,7 @@ pub(crate) fn on_workspace_command(hwnd: HWND, id: u16) -> bool {
             with_app(|a| a.toggle_sidebar());
         }
         ID_WS_ADD_FOLDER => cmd_add_folder(hwnd),
+        ID_WS_ADD_REMOTE => cmd_add_remote_folder(hwnd),
         ID_WS_NEW => {
             with_app(|a| a.switch_workspace(Workspace::default(), None));
         }
@@ -935,6 +1108,10 @@ pub(crate) fn create_workspace_menu() -> Result<HMENU> {
         item(
             ID_WS_ADD_FOLDER,
             w!("フォルダをワークスペースに追加(&A)..."),
+        )?;
+        item(
+            ID_WS_ADD_REMOTE,
+            w!("リモートのフォルダをワークスペースに追加(&S)..."),
         )?;
         item(ID_WS_REFRESH, w!("最新の情報に更新(&U)"))?;
         AppendMenuW(m, MF_SEPARATOR, 0, None)?;

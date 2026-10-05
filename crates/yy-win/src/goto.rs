@@ -20,12 +20,15 @@ struct State {
     text: String,
 }
 
+/// DLGTEMPLATE の中のコントロールの数（`cdit`）の位置（u16 単位）
+const COUNT_INDEX: usize = 4;
+
 /// DLGTEMPLATE / DLGITEMTEMPLATE をバイト列として組み立てる。
 pub(crate) struct Template(pub(crate) Vec<u16>);
 
 impl Template {
-    /// ダイアログの見出し（`count` 個のコントロール、大きさはダイアログ単位）。
-    pub(crate) fn dialog(title: &str, count: u16, cx: i16, cy: i16) -> Template {
+    /// ダイアログの見出し（大きさはダイアログ単位）。コントロールの数は [`Template::item`] で数える。
+    pub(crate) fn dialog(title: &str, cx: i16, cy: i16) -> Template {
         let mut t = Template(Vec::with_capacity(512));
         let style = WS_POPUP.0
             | WS_CAPTION.0
@@ -35,7 +38,7 @@ impl Template {
             | DS_CENTER as u32;
         t.dword(style);
         t.dword(0);
-        t.0.push(count);
+        t.0.push(0); // コントロールの数（item で増やす）
         for v in [0i16, 0, cx, cy] {
             t.0.push(v as u16);
         }
@@ -85,6 +88,7 @@ impl Template {
         class: u16,
         text: &str,
     ) {
+        self.0[COUNT_INDEX] += 1;
         self.align_dword();
         self.dword(style | (WS_CHILD | WS_VISIBLE).0);
         self.dword(0);
@@ -109,7 +113,7 @@ fn build_template() -> Template {
 
 /// `edit_style` は入力欄の追加のスタイル（数字だけ・パスワードなど）。
 fn build_template_with(title: &str, edit_style: i32) -> Template {
-    let mut t = Template::dialog(title, 4, 200, 64);
+    let mut t = Template::dialog(title, 200, 64);
     t.item(0, 7, 7, 186, 10, ID_LABEL, CLASS_STATIC, "");
     t.item(
         (WS_BORDER | WS_TABSTOP).0 | (edit_style | ES_AUTOHSCROLL) as u32,
