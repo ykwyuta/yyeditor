@@ -8,7 +8,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 
 ## 現在の状態
 
-ロードマップ（[08 章](docs/proposal/08-roadmap-testing.md)）の **M0（基盤）・M1（巨大ファイルビューア）・M2（エディタ基本）・M2.5（矩形選択・マルチカーソル）・M3（文字コード）・M4（検索・置換）・M5（区切り文字 / CSV）・M6（タブ・比較などの追加要件）・M7（EBCDIC・外部の対応表）・M7.5（シンタックスハイライト）** を実装済みです。
+ロードマップ（[08 章](docs/proposal/08-roadmap-testing.md)）の **M0（基盤）・M1（巨大ファイルビューア）・M2（エディタ基本）・M2.5（矩形選択・マルチカーソル）・M3（文字コード）・M4（検索・置換）・M5（区切り文字 / CSV）・M6（タブ・比較などの追加要件）・M7（EBCDIC・外部の対応表）・M7.5（シンタックスハイライト）** と、**M9.1（リモート編集の接続基盤）** を実装済みです。
 
 | 機能 | 状態 |
 |------|------|
@@ -73,6 +73,8 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 | 固定長表示（表示メニューの「固定長表示」Ctrl+Shift+R。バイト位置の目盛りの下に 1 レコードをコード値・16 進数・文字の 3 行で表示、上書き編集） | ✅ |
 | コード値の表示・編集（表示メニューの「コード値表示」Ctrl+Shift+K。16 進数表示と同じ形で 1 行 8 文字、Unicode のコード値を入力して文字を書き換え・挿入） | ✅ |
 | 変換（大文字・小文字、全角・半角カタカナ、キャメル・スネーク・ケバブケース）、重複行の削除、選択した文字列のコード値の表示 | ✅ |
+| リモート（SSH）のファイルの編集（Ctrl+Shift+O。接続先に置くエージェント経由。OpenSSH を使わない組み込みの SSH、ホスト鍵の確認、公開鍵・パスワード・対話式の認証、外部での変更の検出、`ssh://` の履歴） | ✅（M9.1） |
+| リモートの巨大ファイル（表示範囲だけの取り寄せ）、Linux aarch64 の接続先、接続先での Grep・全置換 | 今後（M9.2〜M9.4） |
 | 仕上げ（M8） | 今後 |
 
 自動バックアップ（旧 M6）は要件から取り下げました。
@@ -82,6 +84,16 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 - ファイル メニューの「共有中のファイルを読み取り専用で開く」は、元ファイルを作業用ファイルにコピーしてから表示します。外部アプリのその後の変更は自動反映されません。閉じて開き直すと最新の内容になります。
 - 表示メニューの「開いているファイルを比較」は現在のタブと別のタブを左右に並べ、変更行を赤・緑で示します。巨大文書もバックグラウンドで比較し、画面には表示範囲だけを読み込みます。縦・横スクロールで全体を閲覧できます。差分索引は OS の一時フォルダに作成し、比較画面を閉じると削除します。文字コードの変換中は完了後に比較してください。
 - 検索バーで条件を入力し、検索欄の下の「一致箇所をすべて選択」ボタン（編集メニューの「検索条件に一致する箇所をすべて選択」、Ctrl+Shift+M と同じ）を使います。そのまま入力すると一致箇所がまとめて書き換わります。複数選択のコピーは各一致文字列を改行で連結します。選択上限は 100,000 箇所です。
+
+### リモート（SSH）のファイル
+
+提案書 [11 章](docs/proposal/11-remote-ssh.md) の方式で、SSH 接続先（Linux x86_64）のファイルを編集できます。
+
+- SSH は Pure Rust の `russh`（暗号は `ring`）で yyeditor に組み込んであり、`ssh.exe` など OpenSSH のプログラムは使いません。`~/.ssh/config` と `~/.ssh/known_hosts` は読むだけで使います（承認したホスト鍵は `%APPDATA%\yyeditor\known_hosts` に記録します）。
+- 初めて接続するとき、接続先の `~/.yyeditor/agent/<版>-<ハッシュ>/yy-agent` にエージェント（静的リンクの Linux 用バイナリ、約 0.5 MB）を SSH 越しに置き、SHA-256 を照合します。`curl`・`sftp-server`・インターネット接続は使いません。エージェントはポートを待ち受けず、SSH のチャネルの標準入出力だけで通信します。
+- エージェントは配布物の `agents\yy-agent-x86_64-linux`（exe と同じフォルダ）を使います。開発中は環境変数 `YY_AGENT_DIR` でフォルダを指定できます。
+- 保存は、接続先の同じフォルダの一時ファイルに書いてから置き換えます（権限・所有者・シンボリックリンク・ハードリンクを保つ）。開いたあとで外部で変更されていれば、上書きするか尋ねます。
+- 今のところ、ファイルは全体を取り寄せてから開きます（M9.2 で表示範囲だけの取り寄せにします）。`sudo` による保存には対応しません。
 
 ### 対応している文字コード
 
@@ -226,8 +238,12 @@ crates/
   yy-layout/   表示行の分割（長大行のセグメント化）、表示テキスト ⇔ オフセット変換、スクロール位置
   yy-syntax/   シンタックスハイライト（TOML の定義、複数パターンの正規表現、行の開始状態の記録、ファイル種類の判定）
   yy-preview/  Markdown・HTML のプレビュー（Markdown → HTML、ページ、同梱の Mermaid・KaTeX・d3）
+  yy-proto/    リモート編集のプロトコル（端末とエージェントで共有するメッセージとフレーム）
+  yy-remote/   リモート編集の端末側（エージェントの配置、要求と応答、~/.ssh/config・known_hosts の読み取り）
+  yy-ssh/      組み込みの SSH クライアント（russh + ring。OpenSSH を使わない）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
+apps/yy-agent/ SSH 接続先に置くエージェント（Linux 用、musl で静的リンク）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
                     ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
@@ -246,6 +262,13 @@ cargo build --release -p yyeditor
 target\release\yyeditor.exe [開くファイル]
 ```
 
+リモート編集のエージェント（Linux 用。exe と同じフォルダの `agents\yy-agent-x86_64-linux` に置く）:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+cargo build --release -p yy-agent --target x86_64-unknown-linux-musl
+```
+
 テスト・静的解析:
 
 ```sh
@@ -253,7 +276,8 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 # Linux から Windows UI 層の型検査のみ行う場合
 rustup target add x86_64-pc-windows-msvc
-cargo check -p yy-win -p yyeditor --target x86_64-pc-windows-msvc
+# （組み込みの SSH が使う ring は Windows SDK がないと C のビルドができないので外す）
+cargo check -p yy-win -p yyeditor --no-default-features --target x86_64-pc-windows-msvc
 ```
 
 巨大ファイルでの性能確認:
@@ -362,7 +386,7 @@ Copyright (C) 2026 Yuta Yukawa
 | d3（プレビュー） | ISC License（[crates/yy-preview/assets/LICENSE-d3.txt](crates/yy-preview/assets/LICENSE-d3.txt)） |
 | EBCDIC の対応表（ICU の `.ucm` から生成） | Unicode License V3 |
 | Microsoft Edge WebView2 Loader（プレビュー。MSVC 版は静的にリンク） | Microsoft.Web.WebView2 SDK のライセンス（上記の追加の許可でリンクを認めています） |
-| 依存している Rust のクレート | MIT / Apache-2.0 など（`cargo metadata` で確認できます） |
+| 依存している Rust のクレート（組み込みの SSH の `russh`・`ring` を含む） | MIT / Apache-2.0 / ISC など（`cargo metadata` で確認できます） |
 
 ## 既知の制限
 
