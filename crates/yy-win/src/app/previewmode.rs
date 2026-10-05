@@ -72,7 +72,8 @@ impl App {
     }
 
     /// エディタの幅を決めてプレビューを置く。プレビューを表示していなければ全幅を返す。
-    pub(crate) fn layout_preview(&mut self, width: i32, top: i32, height: i32) -> i32 {
+    /// `left` はエディタを置く範囲の左端（フレームのクライアント座標）、`width` はその幅。
+    pub(crate) fn layout_preview(&mut self, left: i32, width: i32, top: i32, height: i32) -> i32 {
         let Some(pane) = self.preview.pane.as_ref().filter(|_| self.preview.visible) else {
             self.preview.splitter = RECT::default();
             return width;
@@ -83,11 +84,11 @@ impl App {
         let pw = ((width as f32 * self.preview.ratio) as i32)
             .clamp(min.min(width / 2), (width - min).max(0));
         let editor = (width - pw - split).max(0);
-        pane.set_bounds(editor + split, top, pw, height);
+        pane.set_bounds(left + editor + split, top, pw, height);
         self.preview.splitter = RECT {
-            left: editor,
+            left: left + editor,
             top,
-            right: editor + split,
+            right: left + editor + split,
             bottom: top + height,
         };
         editor
@@ -105,8 +106,10 @@ impl App {
         unsafe {
             let _ = GetClientRect(self.frame, &mut rc);
         }
-        let w = (rc.right - rc.left).max(1);
-        self.preview.ratio = ((w - x) as f32 / w as f32).clamp(0.1, 0.9);
+        let w = rc.right - rc.left;
+        // サイドバーの右からフレームの右端までの幅に対する割合
+        let area = (w - self.ws.splitter.right).max(1);
+        self.preview.ratio = ((w - x) as f32 / area as f32).clamp(0.1, 0.9);
         self.layout_children();
         self.invalidate();
     }
