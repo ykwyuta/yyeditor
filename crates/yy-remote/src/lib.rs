@@ -129,6 +129,20 @@ pub fn run(t: &dyn Transport, command: &[u8], input: &[u8]) -> io::Result<Output
     })
 }
 
+/// [`Connector`] を作るときの設定。
+#[derive(Clone, Debug)]
+pub struct ConnectorOptions {
+    /// yyeditor 自身のホスト鍵の記録（承認した鍵を書き込む）
+    pub known_hosts: PathBuf,
+    /// 読むだけのホスト鍵の記録（`~/.ssh/known_hosts` など）
+    pub extra_known_hosts: Vec<PathBuf>,
+    /// 死活確認の間隔
+    pub keepalive: std::time::Duration,
+}
+
+/// 設定から [`Connector`] を作る関数（UI は SSH の実装を知らずに、起動時に受け取る）。
+pub type ConnectorFactory = Arc<dyn Fn(&ConnectorOptions) -> Arc<dyn Connector> + Send + Sync>;
+
 /// SSH の接続を作るもの（実装は `yy-ssh`）。
 pub trait Connector: Send + Sync {
     /// `spec` に接続して認証する。ホスト鍵の確認や、パスワードなどの入力は `prompter` に尋ねる。

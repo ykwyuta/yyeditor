@@ -24,11 +24,22 @@ fn main() {
             initial = Some(std::path::PathBuf::from(a));
         }
     }
-    if let Err(e) = yy_win::run(initial, line) {
+    if let Err(e) = yy_win::run(initial, line, ssh()) {
         // GUI の初期化に失敗した場合はコンソールがないため、ここでは終了コードのみ返す
         eprintln!("yyeditor: {e}");
         std::process::exit(1);
     }
+}
+
+/// SSH 接続先のファイルの編集に使う接続の実装（OpenSSH は使わない。11 章 4）。
+#[cfg(all(windows, feature = "ssh"))]
+fn ssh() -> Option<yy_win::ConnectorFactory> {
+    Some(yy_ssh::SshConnector::factory())
+}
+
+#[cfg(all(windows, not(feature = "ssh")))]
+fn ssh() -> Option<yy_win::ConnectorFactory> {
+    None
 }
 
 #[cfg(not(windows))]

@@ -22,8 +22,8 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use yy_remote::known_hosts::{self, HostKeyStatus};
 use yy_remote::{
-    Connector, Exit, HostKeyCheck, HostKeyQuestion, HostSpec, Process, Prompter, STDERR_LIMIT,
-    Transport,
+    Connector, ConnectorFactory, ConnectorOptions, Exit, HostKeyCheck, HostKeyQuestion, HostSpec,
+    Process, Prompter, STDERR_LIMIT, Transport,
 };
 
 /// 接続を待つ時間の上限
@@ -85,6 +85,21 @@ impl client::Handler for Client {
 }
 
 impl SshConnector {
+    pub fn new(opts: &ConnectorOptions) -> SshConnector {
+        SshConnector {
+            known_hosts: opts.known_hosts.clone(),
+            extra_known_hosts: opts.extra_known_hosts.clone(),
+            keepalive: opts.keepalive,
+        }
+    }
+
+    /// UI に渡す、[`SshConnector`] を作る関数。
+    pub fn factory() -> ConnectorFactory {
+        Arc::new(|opts: &ConnectorOptions| -> Arc<dyn Connector> {
+            Arc::new(SshConnector::new(opts))
+        })
+    }
+
     fn known_hosts_files(&self) -> Vec<PathBuf> {
         let mut files = vec![self.known_hosts.clone()];
         files.extend(self.extra_known_hosts.iter().cloned());

@@ -39,7 +39,9 @@ impl App {
     }
 
     fn detect_syntax(&self) -> Option<String> {
-        let path = self.doc.path();
+        // リモートのファイルも名前（`ssh://…` の最後）で判定する
+        let location = self.doc.location();
+        let path = location.as_deref();
         // 設定のファイル種類（拡張子）の指定を優先する
         if let Some(ext) = path.and_then(|p| p.extension()) {
             let ext = ext.to_string_lossy().into_owned();

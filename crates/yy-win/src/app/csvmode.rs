@@ -99,7 +99,8 @@ impl App {
     pub(crate) fn csv_mode_for_path(&mut self) {
         let d = self
             .doc
-            .path()
+            .location()
+            .as_deref()
             .and_then(|p| p.extension())
             .and_then(|e| Dialect::for_extension(&e.to_string_lossy()));
         if d.is_some() || self.csv.is_some() {

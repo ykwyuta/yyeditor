@@ -72,6 +72,9 @@ const ID_DIFF: u16 = 110;
 const ID_HISTORY: u16 = 112;
 const ID_BOOKMARKS: u16 = 113;
 const ID_BOOKMARK_TOGGLE: u16 = 114;
+const ID_OPEN_REMOTE: u16 = 115;
+const ID_SAVE_AS_REMOTE: u16 = 116;
+const ID_SAVE_AS_LOCAL: u16 = 117;
 const ID_GOTO: u16 = 201;
 const ID_ZOOM_IN: u16 = 202;
 const ID_ZOOM_OUT: u16 = 203;
@@ -289,6 +292,8 @@ pub(crate) struct App {
     ui_font: windows::Win32::Graphics::Gdi::HFONT,
     /// Markdown・HTML のプレビュー（右側）
     preview: previewmode::PreviewPane,
+    /// SSH 接続先のファイルの編集（11 章）
+    pub(crate) remote: crate::remote::RemoteState,
 }
 
 /// 非表示タブの文書と表示位置。検索条件と表示設定はウィンドウ全体で共有する。
@@ -399,6 +404,7 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
     let accels = [
         (ctrl, b'N' as u16, ID_NEW),
         (ctrl, b'O' as u16, ID_OPEN),
+        (ctrl_shift, b'O' as u16, ID_OPEN_REMOTE),
         (ctrl, b'E' as u16, ID_HISTORY),
         (ctrl, b'B' as u16, ID_BOOKMARKS),
         (ctrl_shift, b'B' as u16, ID_BOOKMARK_TOGGLE),
@@ -465,6 +471,11 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         let file = CreatePopupMenu()?;
         item(file, ID_NEW, w!("新規作成(&N)\tCtrl+N"))?;
         item(file, ID_OPEN, w!("開く(&O)...\tCtrl+O"))?;
+        item(
+            file,
+            ID_OPEN_REMOTE,
+            w!("リモートのファイルを開く(&E)...\tCtrl+Shift+O"),
+        )?;
         item(file, ID_OPEN_BINARY, w!("バイナリとして開く(&B)..."))?;
         item(
             file,
@@ -498,6 +509,16 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             file,
             ID_SAVE_AS,
             w!("名前を付けて保存(&A)...\tCtrl+Shift+S"),
+        )?;
+        item(
+            file,
+            ID_SAVE_AS_REMOTE,
+            w!("リモートに名前を付けて保存(&T)..."),
+        )?;
+        item(
+            file,
+            ID_SAVE_AS_LOCAL,
+            w!("このパソコンに名前を付けて保存(&L)..."),
         )?;
         item(file, ID_CLOSE, w!("閉じる(&C)\tCtrl+W"))?;
         sep(file)?;
@@ -629,6 +650,7 @@ impl App {
         hinstance: HINSTANCE,
         initial_file: Option<PathBuf>,
         initial_line: Option<u64>,
+        ssh: Option<yy_remote::ConnectorFactory>,
     ) -> Result<HWND> {
         let (config, config_error) = Config::load();
         // 外部の対応表（%APPDATA%\yyeditor\mappings\*.map）
@@ -739,6 +761,7 @@ impl App {
                 ambiguous_wide: config.editor.ambiguous_wide,
                 wide_box_line: renderer.wide_box_line(),
             };
+            let remote = crate::remote::RemoteState::new(ssh, config.remote.clone());
             let app = App {
                 frame,
                 view,
@@ -805,6 +828,7 @@ impl App {
                 colhead_h: 0,
                 ui_font: crate::util::ui_font(dpi),
                 preview: Default::default(),
+                remote,
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
             with_app(|a| {
@@ -1023,7 +1047,14 @@ impl App {
         } else {
             ""
         };
-        let title = format!("{mark}{}{read} - yyeditor", self.doc.display_name());
+        // リモートのファイルは接続先も示す
+        let host = self
+            .doc
+            .remote()
+            .and_then(|r| yy_remote::RemoteUri::parse(&r.uri))
+            .map(|u| format!(" [{}]", u.target()))
+            .unwrap_or_default();
+        let title = format!("{mark}{}{host}{read} - yyeditor", self.doc.display_name());
         unsafe {
             let _ = SetWindowTextW(self.frame, &HSTRING::from(title));
         }
@@ -1383,8 +1414,8 @@ impl App {
         // 開いているファイルがブックマークにあればチェックを付ける
         unsafe {
             let menu = GetMenu(self.frame);
-            let path = self.doc.path();
-            let marked = path.is_some_and(|p| {
+            let path = self.doc.location();
+            let marked = path.as_deref().is_some_and(|p| {
                 crate::recentdlg::ListKind::Bookmarks
                     .load()
                     .contains(&crate::recentdlg::normalize(p))
@@ -2567,7 +2598,7 @@ impl App {
 
     // ---- 文書の切り替え・保存 -----------------------------------------------
 
-    fn set_document(&mut self, doc: Document) {
+    pub(crate) fn set_document(&mut self, doc: Document) {
         ime::cancel(self.view);
         self.composition = None;
         self.drag = None;
@@ -2681,7 +2712,7 @@ impl App {
         self.restore_tab(next);
     }
 
-    fn add_document(&mut self, doc: Document) {
+    pub(crate) fn add_document(&mut self, doc: Document) {
         if self.tabs.len() == 1
             && self.doc.path().is_none()
             && !self.doc.is_modified()
@@ -2720,38 +2751,71 @@ impl App {
         }
     }
 
+    pub(crate) fn frame_hwnd(&self) -> HWND {
+        self.frame
+    }
+
+    /// ステータスバーに案内を出す（空なら消す）。
+    pub(crate) fn show_status_message(&mut self, text: &str) {
+        self.status_msg = text.to_owned();
+        self.update_status();
+    }
+
+    /// `location`（手元のパスまたは `ssh://…`）を編集用に開いているタブがあれば表に出す。
+    pub(crate) fn focus_location(&mut self, location: &std::path::Path) -> bool {
+        self.focus_open(location, false)
+    }
+
+    fn focus_open(&mut self, location: &std::path::Path, read_only: bool) -> bool {
+        let same = |d: &Document| {
+            d.is_read_only() == read_only
+                && d.location()
+                    .is_some_and(|l| yy_config::recent::same_path(&l, location))
+        };
+        if same(&self.doc) {
+            return true;
+        }
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(|t| same(&t.doc)))
+        {
+            self.switch_tab(index);
+            return true;
+        }
+        false
+    }
+
+    /// ファイルを開くときの指定。文字コードの指定がなければファイル種類の設定（拡張子）の文字コード。
+    pub(crate) fn open_options(
+        &self,
+        location: &std::path::Path,
+        encoding: Option<Encoding>,
+        raw: bool,
+    ) -> OpenOptions {
+        let configured = encoding.or_else(|| {
+            let ext = location.extension()?.to_string_lossy().into_owned();
+            let (_, ft) = self.config.filetype_for_extension(&ext)?;
+            Encoding::from_name(ft.encoding.as_deref()?)
+        });
+        OpenOptions {
+            encoding: configured.filter(|_| !raw),
+            detect_ebcdic: self.config.editor.detect_ebcdic,
+            raw,
+            ..OpenOptions::default()
+        }
+    }
+
     fn open(
         &mut self,
         path: PathBuf,
         encoding: Option<Encoding>,
         shared_read_only: bool,
     ) -> std::result::Result<(), String> {
-        // 文字コードの指定がなければファイル種類の設定（拡張子）の文字コード
-        let configured = encoding.or_else(|| {
-            let ext = path.extension()?.to_string_lossy().into_owned();
-            let (_, ft) = self.config.filetype_for_extension(&ext)?;
-            Encoding::from_name(ft.encoding.as_deref()?)
-        });
-        let opts = OpenOptions {
-            encoding: configured,
-            detect_ebcdic: self.config.editor.detect_ebcdic,
-            ..OpenOptions::default()
-        };
+        let opts = self.open_options(&path, encoding, false);
         // 既に開いているパスなら、そのタブへ移動する（明示的な開き直しは別処理）。
-        if encoding.is_none() {
-            if self.doc.path() == Some(path.as_path())
-                && self.doc.is_read_only() == shared_read_only
-            {
-                return Ok(());
-            }
-            if let Some(index) = self.tabs.iter().position(|slot| {
-                slot.as_ref().is_some_and(|t| {
-                    t.doc.path() == Some(path.as_path()) && t.doc.is_read_only() == shared_read_only
-                })
-            }) {
-                self.switch_tab(index);
-                return Ok(());
-            }
+        if encoding.is_none() && self.focus_open(&path, shared_read_only) {
+            return Ok(());
         }
         let doc = if shared_read_only {
             Document::open_shared_read_only(&path, &opts)
@@ -2842,9 +2906,16 @@ impl App {
     fn start_save(&mut self, flow: SaveFlow) -> std::result::Result<(), String> {
         let n = self.notifier();
         let t = &flow.target;
-        self.doc
-            .start_save(&t.path, t.encoding, t.bom, &self.pool, n)
-            .map_err(|e| format!("{}\n\n{e}", t.path.display()))?;
+        match &t.remote {
+            Some(r) => {
+                self.doc
+                    .start_save_remote(t.encoding, t.bom, &self.pool, n, r.file(), r.upload())
+            }
+            None => self
+                .doc
+                .start_save(&t.path, t.encoding, t.bom, &self.pool, n),
+        }
+        .map_err(|e| format!("{}\n\n{e}", t.path.display()))?;
         self.save_flow = Some(flow);
         self.status_msg.clear();
         self.update_status();
@@ -3378,6 +3449,7 @@ impl App {
             r.whole_word = q.whole_word;
         }
         if r.dir.is_empty()
+            && self.doc.remote().is_none()
             && let Some(dir) = self.doc.path().and_then(|p| p.parent())
         {
             r.dir = dir.display().to_string();
@@ -3470,7 +3542,7 @@ impl App {
         let Some((path, n)) = yy_core::grep::parse_tag_line(&line) else {
             return Some("この行にはファイル名と行番号がありません。".into());
         };
-        if self.doc.path().is_some_and(|p| p == path) {
+        if self.doc.remote().is_none() && self.doc.path().is_some_and(|p| p == path) {
             self.goto_line(n);
             return None;
         }
@@ -3762,7 +3834,8 @@ pub(crate) fn is_close_command(wparam: WPARAM) -> bool {
 /// 開いているファイルをブックマークに加える（既にあれば外す）。
 fn cmd_toggle_bookmark(hwnd: HWND) {
     use crate::recentdlg::ListKind;
-    let Some(Some(path)) = with_app(|a| a.doc.path().map(crate::recentdlg::normalize)) else {
+    let Some(Some(path)) = with_app(|a| a.doc.location().map(|p| crate::recentdlg::normalize(&p)))
+    else {
         info_box(hwnd, "保存してからブックマークしてください。");
         return;
     };
@@ -3793,7 +3866,52 @@ fn cmd_toggle_bookmark(hwnd: HWND) {
     });
 }
 
+/// リモートのファイルを選んで開く（11 章 7.2）。
+fn cmd_open_remote(hwnd: HWND) {
+    let Some((available, initial)) = with_app(|a| {
+        let current = a
+            .doc
+            .remote()
+            .and_then(|r| yy_remote::RemoteUri::parse(&r.uri));
+        (
+            a.remote.available(),
+            current.or_else(|| a.remote.last.clone()),
+        )
+    }) else {
+        return;
+    };
+    if !available {
+        info_box(
+            hwnd,
+            "この yyeditor には SSH の機能が組み込まれていません。",
+        );
+        return;
+    }
+    let Some(p) = crate::remotedlg::show(hwnd, crate::remotedlg::Mode::Open, initial, None, false)
+    else {
+        return;
+    };
+    let enc = match p
+        .encoding
+        .map(|e| crate::recorddlg::confirm(hwnd, e, "開く"))
+    {
+        Some(None) => return,
+        Some(e) => e,
+        None => None,
+    };
+    if let Err(msg) = crate::remote::open(hwnd, &p.uri, enc, false, crate::remote::OpenAs::NewTab) {
+        error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
+    }
+}
+
 fn open_path(hwnd: HWND, path: PathBuf, encoding: Option<Encoding>, shared_read_only: bool) {
+    // SSH 接続先のファイル（履歴・ブックマーク・コマンドラインの `ssh://…`）
+    if yy_config::recent::is_remote(&path) {
+        if let Err(msg) = crate::remote::open_location(hwnd, &path, encoding) {
+            error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
+        }
+        return;
+    }
     if let Some(Err(msg)) = with_app(|a| a.open(path, encoding, shared_read_only)) {
         error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
     }
@@ -3801,11 +3919,14 @@ fn open_path(hwnd: HWND, path: PathBuf, encoding: Option<Encoding>, shared_read_
 
 /// 保存先と形式。
 pub(crate) struct SaveTarget {
+    /// 保存先（リモートなら `ssh://…`。メッセージと拡張子の判定に使う）
     path: PathBuf,
     encoding: Encoding,
     bom: bool,
     /// 保存前に揃える改行コード（`None` なら変更しない）
     eol: Option<Eol>,
+    /// SSH 接続先のファイルへの保存（11 章 7.1）
+    remote: Option<crate::remote::RemoteDest>,
 }
 
 /// バックグラウンドの保存の手順（変換できない文字の扱いを尋ねて保存し直すための状態）。
@@ -3831,6 +3952,19 @@ fn message_box(hwnd: HWND, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RE
 /// 保存する。`as_new` または名前がなければ保存先と形式を尋ねる。保存はバックグラウンドで行い
 /// （結果は [`on_save_done`] で処理する）、始められたら `true`。
 fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
+    cmd_save_to(hwnd, as_new, SaveWhere::Same)
+}
+
+/// 「名前を付けて保存」の保存先の種類。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SaveWhere {
+    /// 今のファイルと同じ側（リモートのファイルならリモート）
+    Same,
+    Remote,
+    Local,
+}
+
+fn cmd_save_to(hwnd: HWND, as_new: bool, place: SaveWhere) -> bool {
     if with_app(|a| a.doc.is_read_only()) == Some(true) {
         info_box(hwnd, "読み取り専用で開いたファイルは保存できません。");
         return false;
@@ -3839,7 +3973,7 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
         info_box(hwnd, "保存中です。終わってから、もう一度保存してください。");
         return false;
     }
-    let Some((current, encoding, bom, eol, loading, noncanonical)) = with_app(|a| {
+    let Some((current, remote, encoding, bom, eol, loading, noncanonical)) = with_app(|a| {
         let nc = if a.warned_noncanonical {
             0
         } else {
@@ -3847,6 +3981,7 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
         };
         (
             a.doc.path().map(|p| p.to_owned()),
+            a.doc.remote().cloned(),
             a.doc.encoding(),
             a.doc.has_bom(),
             a.doc.eol(),
@@ -3856,18 +3991,73 @@ fn cmd_save(hwnd: HWND, as_new: bool) -> bool {
     }) else {
         return false;
     };
+    // リモートのファイルの保存は、手元の写しのパスを使わない
+    let current = if remote.is_some() { None } else { current };
     if loading {
         info_box(hwnd, "読み込みが終わるまで保存できません。");
         return false;
     }
-    let target = match current {
-        Some(path) if !as_new => SaveTarget {
+    let to_remote = match place {
+        SaveWhere::Same => remote.is_some(),
+        SaveWhere::Remote => true,
+        SaveWhere::Local => false,
+    };
+    let target = match (&remote, current) {
+        // リモートのファイルの上書き保存
+        (Some(file), _) if !as_new && to_remote => match crate::remote::current_dest(file) {
+            Ok(dest) => SaveTarget {
+                path: PathBuf::from(&file.uri),
+                encoding,
+                bom,
+                eol: None,
+                remote: Some(dest),
+            },
+            Err(msg) => {
+                error_box(hwnd, &format!("保存できませんでした。\n{msg}"));
+                return false;
+            }
+        },
+        (_, Some(path)) if !as_new => SaveTarget {
             path,
             encoding,
             bom,
             eol: None,
+            remote: None,
         },
-        current => match show_save_dialog(hwnd, current.as_deref(), encoding, bom, eol) {
+        _ if to_remote => {
+            let initial = with_app(|a| {
+                remote
+                    .as_ref()
+                    .and_then(|f| yy_remote::RemoteUri::parse(&f.uri))
+                    .or_else(|| a.remote.last.clone())
+            })
+            .flatten();
+            let Some(p) = crate::remotedlg::show(
+                hwnd,
+                crate::remotedlg::Mode::Save,
+                initial,
+                Some(encoding),
+                bom,
+            ) else {
+                return false;
+            };
+            let mut enc = p.encoding.unwrap_or(encoding);
+            if enc != encoding {
+                // EBCDIC はレコードの区切り方も尋ねる
+                match crate::recorddlg::confirm(hwnd, enc, "保存する") {
+                    Some(e) => enc = e,
+                    None => return false,
+                }
+            }
+            SaveTarget {
+                path: PathBuf::from(p.uri.to_string()),
+                encoding: enc,
+                bom: p.bom && enc.supports_bom(),
+                eol: None,
+                remote: Some(p.dest()),
+            }
+        }
+        (_, current) => match show_save_dialog(hwnd, current.as_deref(), encoding, bom, eol) {
             Some(t) => t,
             None => return false,
         },
@@ -3988,7 +4178,14 @@ fn handle_save_result(hwnd: HWND, flow: Option<SaveFlow>, done: yy_core::SaveDon
             let path = with_app(|a| {
                 a.status_msg = "保存しました".into();
                 a.update_status();
-                a.doc.path().map(|p| p.to_owned())
+                if let Some(u) = a
+                    .doc
+                    .remote()
+                    .and_then(|r| yy_remote::RemoteUri::parse(&r.uri))
+                {
+                    a.remote.last = Some(u);
+                }
+                a.doc.location()
             });
             // 名前を付けて保存したファイルも履歴に残す
             if let Some(Some(p)) = path {
@@ -4011,6 +4208,20 @@ fn handle_save_result(hwnd: HWND, flow: Option<SaveFlow>, done: yy_core::SaveDon
             return;
         }
         SaveError::Unmappable { ranges, total, .. } => (ranges, total),
+        // リモートのファイルが外部で変更されていた（11 章 7.1）
+        SaveError::Conflict(msg) => {
+            let text = format!(
+                "{}\n\n{msg}\n\n上書きしますか？（いいえ: 保存しない）",
+                flow.target.path.display()
+            );
+            if message_box(hwnd, &text, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES {
+                if let Some(r) = flow.target.remote.as_mut() {
+                    r.force = true;
+                }
+                begin_save(hwnd, flow);
+            }
+            return;
+        }
         e => {
             error_box(
                 hwnd,
@@ -4255,6 +4466,7 @@ fn show_save_dialog(
             encoding,
             bom,
             eol: None,
+            remote: None,
         };
         if let Some(c) = &custom {
             target.encoding = match selected_encoding(c, false) {
@@ -4352,7 +4564,19 @@ fn on_command(hwnd: HWND, id: u16) {
                 return;
             };
             if confirm_discard(hwnd) {
-                if let Some(Err(msg)) = with_app(|a| a.reopen(path, enc)) {
+                // リモートのファイルは取り寄せ直す
+                let remote = with_app(|a| a.doc.remote().map(|r| r.uri.clone())).flatten();
+                let r = match remote.as_deref().and_then(yy_remote::RemoteUri::parse) {
+                    Some(uri) => crate::remote::open(
+                        hwnd,
+                        &uri,
+                        Some(enc),
+                        false,
+                        crate::remote::OpenAs::Replace,
+                    ),
+                    None => with_app(|a| a.reopen(path, enc)).unwrap_or(Ok(())),
+                };
+                if let Err(msg) = r {
                     error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
                 }
             }
@@ -4363,6 +4587,13 @@ fn on_command(hwnd: HWND, id: u16) {
         ID_SAVE_AS => {
             cmd_save(hwnd, true);
         }
+        ID_SAVE_AS_REMOTE => {
+            cmd_save_to(hwnd, true, SaveWhere::Remote);
+        }
+        ID_SAVE_AS_LOCAL => {
+            cmd_save_to(hwnd, true, SaveWhere::Local);
+        }
+        ID_OPEN_REMOTE => cmd_open_remote(hwnd),
         ID_CLOSE => {
             if confirm_discard(hwnd) {
                 with_app(|a| a.close_tab());
@@ -5003,6 +5234,12 @@ pub(crate) extern "system" fn frame_proc(
             }
             LRESULT(0)
         }
+        crate::remote::WM_APP_REMOTE_PROMPT => {
+            crate::remote::on_prompt(hwnd, lparam);
+            LRESULT(0)
+        }
+        // バックグラウンドの処理を待つループ（remote::wait）の外に届いた通知
+        crate::remote::WM_APP_REMOTE_WAKE => LRESULT(0),
         crate::tabclose::WM_APP_CLOSE_TAB => {
             close_tab_at(hwnd, wparam.0);
             LRESULT(0)

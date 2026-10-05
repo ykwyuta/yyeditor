@@ -80,7 +80,11 @@ impl ListKind {
 }
 
 /// 一覧に記録する形（絶対パス。Windows では区切りを `\` にそろえる）。
+/// SSH 接続先のファイル（`ssh://…`）はそのまま。
 pub(crate) fn normalize(path: &Path) -> PathBuf {
+    if recent::is_remote(path) {
+        return path.to_owned();
+    }
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     PathBuf::from(abs.to_string_lossy().replace('/', "\\"))
 }

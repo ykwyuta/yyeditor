@@ -2959,6 +2959,8 @@ dependencies = [
  "yy-jobs",
  "yy-layout",
  "yy-preview",
+ "yy-proto",
+ "yy-remote",
  "yy-syntax",
 ]
 
@@ -2966,6 +2968,7 @@ dependencies = [
 name = "yyeditor"
 version = "0.1.0"
 dependencies = [
+ "yy-ssh",
  "yy-win",
 ]
 

@@ -132,7 +132,7 @@ impl App {
             return;
         };
         let syntax_id = self.syntax.as_ref().map(|s| s.view.syntax().id.clone());
-        let path = self.doc.path().map(|p| p.to_owned());
+        let path = self.doc.location();
         let Some(kind) = Kind::detect(syntax_id.as_deref(), path.as_deref()) else {
             pane.show_notice("Markdown・HTML の文書を開くと、ここにプレビューを表示します。");
             return;
@@ -143,8 +143,10 @@ impl App {
             return;
         }
         let text = String::from_utf8_lossy(&snap.read(0..snap.len())).into_owned();
+        // 相対パスの画像などは手元のフォルダから読む（リモートのファイルでは読まない）
         let folder = path
             .as_deref()
+            .filter(|_| self.doc.remote().is_none())
             .and_then(|p| p.parent())
             .map(|p| p.to_owned());
         let opts = PageOptions {

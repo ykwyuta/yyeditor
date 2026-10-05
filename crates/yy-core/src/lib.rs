@@ -387,6 +387,15 @@ impl Document {
         self.remote.as_ref()
     }
 
+    /// 利用者に見せるファイルの場所（リモートなら `ssh://…`、名前がなければ `None`）。
+    /// 履歴・ブックマーク・ファイル種類の判定に使う（[`Document::path`] は手元の写しの場所）。
+    pub fn location(&self) -> Option<PathBuf> {
+        match &self.remote {
+            Some(r) => Some(PathBuf::from(&r.uri)),
+            None => self.path.clone(),
+        }
+    }
+
     /// 他のアプリケーションが書き込み用に開いているファイルを読み取り専用で開く。
     /// 書き込み中の mmap は安全ではないため、作業用ファイルへコピーしてからマップする。
     ///
@@ -2230,6 +2239,11 @@ mod tests {
         // 写しの名前は開いたら消す
         assert!(!cache.exists());
         assert_eq!(d.display_name(), "a.txt");
+        assert_eq!(
+            d.location().unwrap().extension().unwrap(),
+            std::ffi::OsStr::new("txt")
+        );
+        assert_eq!(d.location(), Some(PathBuf::from("ssh://host/home/u/a.txt")));
         assert_eq!(d.encoding(), Encoding::Cp932);
         assert!(d.save().is_err());
         d.set_selections(SelectionSet::single(Selection::caret(0)));

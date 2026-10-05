@@ -843,7 +843,7 @@ pub(crate) fn cmd_toggle_hex(hwnd: HWND) {
         if !confirm_discard(hwnd) {
             return;
         }
-        if let Some(Err(msg)) = with_app(|a| a.reopen_raw(path)) {
+        if let Some(Err(msg)) = Some(reopen_raw(hwnd, path)) {
             error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
             return;
         }
@@ -901,7 +901,7 @@ pub(crate) fn cmd_toggle_record(hwnd: HWND) {
                 if !confirm_discard(hwnd) {
                     return;
                 }
-                if let Some(Err(msg)) = with_app(|a| a.reopen_raw(path)) {
+                if let Some(Err(msg)) = Some(reopen_raw(hwnd, path)) {
                     error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
                     return;
                 }
@@ -939,5 +939,14 @@ pub(crate) fn cmd_hex_goto(hwnd: HWND) {
             with_app(|a| a.hex_goto(off));
         }
         _ => info_box(hwnd, "オフセットが正しくありません。"),
+    }
+}
+
+/// 作業中の文書をバイト列のまま開き直す（リモートのファイルは取り寄せ直す）。
+fn reopen_raw(hwnd: HWND, path: PathBuf) -> std::result::Result<(), String> {
+    let remote = with_app(|a| a.doc.remote().map(|r| r.uri.clone())).flatten();
+    match remote.as_deref().and_then(yy_remote::RemoteUri::parse) {
+        Some(uri) => crate::remote::open(hwnd, &uri, None, true, crate::remote::OpenAs::Replace),
+        None => with_app(|a| a.reopen_raw(path)).unwrap_or(Ok(())),
     }
 }

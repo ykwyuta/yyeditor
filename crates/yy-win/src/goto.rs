@@ -104,14 +104,15 @@ pub(crate) const CLASS_EDIT: u16 = 0x0081;
 pub(crate) const CLASS_STATIC: u16 = 0x0082;
 
 fn build_template() -> Template {
-    build_template_with("行へ移動", true)
+    build_template_with("行へ移動", ES_NUMBER)
 }
 
-fn build_template_with(title: &str, numeric: bool) -> Template {
+/// `edit_style` は入力欄の追加のスタイル（数字だけ・パスワードなど）。
+fn build_template_with(title: &str, edit_style: i32) -> Template {
     let mut t = Template::dialog(title, 4, 200, 64);
     t.item(0, 7, 7, 186, 10, ID_LABEL, CLASS_STATIC, "");
     t.item(
-        (WS_BORDER | WS_TABSTOP).0 | (if numeric { ES_NUMBER } else { 0 } | ES_AUTOHSCROLL) as u32,
+        (WS_BORDER | WS_TABSTOP).0 | (edit_style | ES_AUTOHSCROLL) as u32,
         7,
         20,
         186,
@@ -145,7 +146,22 @@ fn build_template_with(title: &str, numeric: bool) -> Template {
 
 /// 文字列の入力を求める。キャンセルされたら `None`。
 pub(crate) fn prompt_text(owner: HWND, title: &str, prompt: &str, initial: &str) -> Option<String> {
-    let aligned = build_template_with(title, false).aligned();
+    prompt_with(owner, title, prompt, initial, 0)
+}
+
+/// パスワードなど、入力した文字を表示しない入力を求める。キャンセルされたら `None`。
+pub(crate) fn prompt_secret(owner: HWND, title: &str, prompt: &str) -> Option<String> {
+    prompt_with(owner, title, prompt, "", ES_PASSWORD)
+}
+
+fn prompt_with(
+    owner: HWND,
+    title: &str,
+    prompt: &str,
+    initial: &str,
+    edit_style: i32,
+) -> Option<String> {
+    let aligned = build_template_with(title, edit_style).aligned();
     let mut state = State {
         prompt: prompt.to_owned(),
         text: initial.to_owned(),
@@ -204,7 +220,7 @@ extern "system" fn dialog_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 let id = crate::loword(wparam.0) as u16;
                 if id == IDOK_ {
                     let state = &mut *(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut State);
-                    let mut buf = [0u16; 64];
+                    let mut buf = [0u16; 1024];
                     let n = GetDlgItemTextW(hwnd, ID_EDIT as i32, &mut buf) as usize;
                     state.text = String::from_utf16_lossy(&buf[..n]);
                     let _ = EndDialog(hwnd, IDOK_ as isize);

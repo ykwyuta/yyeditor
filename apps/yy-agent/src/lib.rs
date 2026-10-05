@@ -478,5 +478,6 @@ pub fn clean_old_versions(exe: &Path, max_age: Duration) {
     }
 }
 
-#[cfg(test)]
+// エージェントは Linux で動かす（Windows では開いているファイルを rename で置き換えられない）
+#[cfg(all(test, unix))]
 mod tests;

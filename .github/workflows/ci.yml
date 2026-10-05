@@ -10,9 +10,37 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  agent:
+    # SSH 接続先に置くエージェント（11 章 6）。静的リンクの Linux 用バイナリを作る
+    name: Remote agent (Linux x86_64, musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release -p yy-agent --target x86_64-unknown-linux-musl
+      - name: check the binary
+        run: |
+          A=target/x86_64-unknown-linux-musl/release/yy-agent
+          file "$A"
+          "$A" --version
+          test "$("$A" --sha256)" = "$(sha256sum "$A" | cut -d' ' -f1)"
+          mkdir -p agents
+          cp "$A" agents/yy-agent-x86_64-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yy-agent-x86_64-linux
+          path: agents/yy-agent-x86_64-linux
+
   windows:
     name: Windows (build, lint, test)
     runs-on: windows-latest
+    needs: agent
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -38,10 +66,18 @@ jobs:
         run: cargo test --workspace
       - name: build release
         run: cargo build --release -p yyeditor
+      # エージェントは exe と同じフォルダの agents\ に置いて配布する（11 章 6.2）
+      - uses: actions/download-artifact@v4
+        with:
+          name: yy-agent-x86_64-linux
+          path: dist/agents
+      - name: collect
+        shell: pwsh
+        run: Copy-Item target/release/yyeditor.exe dist/
       - uses: actions/upload-artifact@v4
         with:
           name: yyeditor-windows-x64
-          path: target/release/yyeditor.exe
+          path: dist/
 
   linux-core:
     name: Linux (core crates)
@@ -59,4 +95,6 @@ jobs:
       - name: type-check Windows UI
         run: |
           rustup target add x86_64-pc-windows-msvc
-          cargo check -p yy-win -p yyeditor --target x86_64-pc-windows-msvc
+          # 組み込みの SSH（ring）は C のビルドに Windows SDK が要るので、ここでは外して確かめる
+          # （SSH を含むビルドは Windows のジョブで行う）
+          cargo check -p yy-win -p yyeditor --no-default-features --target x86_64-pc-windows-msvc

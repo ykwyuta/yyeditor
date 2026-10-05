@@ -11,8 +11,14 @@ build = "build.rs"
 name = "yyeditor"
 path = "src/main.rs"
 
+[features]
+default = ["ssh"]
+# SSH 接続先のファイルの編集（11 章）に使う組み込みの SSH クライアント
+ssh = ["dep:yy-ssh"]
+
 [target.'cfg(windows)'.dependencies]
 yy-win.workspace = true
+yy-ssh = { workspace = true, optional = true }
 
 [lints]
 workspace = true
