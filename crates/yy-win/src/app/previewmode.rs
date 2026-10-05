@@ -146,12 +146,27 @@ impl App {
             return;
         }
         let text = String::from_utf8_lossy(&snap.read(0..snap.len())).into_owned();
-        // 相対パスの画像などは手元のフォルダから読む（リモートのファイルでは読まない）
-        let folder = path
-            .as_deref()
-            .filter(|_| self.doc.remote().is_none())
-            .and_then(|p| p.parent())
-            .map(|p| p.to_owned());
+        // 相対パスの画像などの起点（リモートの文書は接続先のフォルダから取り寄せる）
+        let folder =
+            match self
+                .doc
+                .remote()
+                .and_then(|r| yy_remote::RemoteUri::parse(&r.uri))
+            {
+                Some(u) => self.remote.connected(&u.target()).map(|session| {
+                    crate::preview::DocBase::Remote {
+                        session,
+                        dir: yy_remote::RemoteUri {
+                            path: yy_proto::parent_path(&u.path),
+                            ..u
+                        },
+                    }
+                }),
+                None => path
+                    .as_deref()
+                    .and_then(|p| p.parent())
+                    .map(|p| crate::preview::DocBase::Local(p.to_owned())),
+            };
         let opts = PageOptions {
             has_folder: folder.is_some(),
             token_colors: self

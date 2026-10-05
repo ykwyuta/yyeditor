@@ -116,6 +116,11 @@ impl RemoteState {
             .map(|(_, s)| s.clone())
     }
 
+    /// 接続済みなら `target` のセッション（接続はしない）。
+    pub(crate) fn connected(&mut self, target: &Target) -> Option<Arc<Session>> {
+        self.live_session(target)
+    }
+
     /// 接続先の候補（設定の名前、`~/.ssh/config` の Host、接続中・履歴の接続先）。
     pub(crate) fn known_targets(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
