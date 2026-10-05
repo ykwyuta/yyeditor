@@ -312,3 +312,156 @@ fn hashes_contents() {
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
 }
+
+fn ok(agent: &mut Agent, req: Request) {
+    let r = run(agent, req);
+    assert_eq!(r, Response::Done);
+}
+
+#[test]
+fn makes_renames_and_removes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = Agent::default();
+    let a = dir.path().join("a");
+    ok(&mut agent, Request::MakeDir { path: bytes(&a) });
+    assert!(a.is_dir());
+    // 既にあればエラー
+    assert!(matches!(
+        run(&mut agent, Request::MakeDir { path: bytes(&a) }),
+        Response::Error(RemoteError {
+            kind: yy_proto::ErrorKind::AlreadyExists,
+            ..
+        })
+    ));
+    fs::write(a.join("f.txt"), b"x").unwrap();
+    let b = dir.path().join("b");
+    ok(
+        &mut agent,
+        Request::Rename {
+            from: bytes(&a),
+            to: bytes(&b),
+        },
+    );
+    assert!(!a.exists() && b.join("f.txt").is_file());
+    // 上書きしない
+    fs::write(dir.path().join("g.txt"), b"y").unwrap();
+    let r = run(
+        &mut agent,
+        Request::Rename {
+            from: bytes(&b.join("f.txt")),
+            to: bytes(&dir.path().join("g.txt")),
+        },
+    );
+    assert!(matches!(r, Response::Error(_)), "{r:?}");
+    assert_eq!(fs::read(dir.path().join("g.txt")).unwrap(), b"y");
+    // フォルダをその中には移動できない
+    fs::create_dir(b.join("sub")).unwrap();
+    let r = run(
+        &mut agent,
+        Request::Rename {
+            from: bytes(&b),
+            to: bytes(&b.join("sub").join("b")),
+        },
+    );
+    assert!(matches!(r, Response::Error(_)), "{r:?}");
+    // 空でないフォルダは recursive でなければ消さない
+    let r = run(
+        &mut agent,
+        Request::Remove {
+            path: bytes(&b),
+            recursive: false,
+        },
+    );
+    assert!(matches!(r, Response::Error(_)));
+    ok(
+        &mut agent,
+        Request::Remove {
+            path: bytes(&b),
+            recursive: true,
+        },
+    );
+    assert!(!b.exists());
+    ok(
+        &mut agent,
+        Request::Remove {
+            path: bytes(&dir.path().join("g.txt")),
+            recursive: false,
+        },
+    );
+    let r = run(
+        &mut agent,
+        Request::Remove {
+            path: b"/".to_vec(),
+            recursive: true,
+        },
+    );
+    assert!(matches!(r, Response::Error(_)));
+}
+
+#[test]
+fn copies_trees_across_file_systems() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(src.join("d")).unwrap();
+    fs::write(src.join("d").join("x.sh"), b"#!/bin/sh").unwrap();
+    fs::set_permissions(
+        src.join("d").join("x.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    symlink("d/x.sh", src.join("link")).unwrap();
+    let dst = dir.path().join("dst");
+    copy_tree(&src, &dst).unwrap();
+    assert_eq!(fs::read(dst.join("d").join("x.sh")).unwrap(), b"#!/bin/sh");
+    assert_eq!(
+        fs::metadata(dst.join("d").join("x.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::read_link(dst.join("link")).unwrap(),
+        Path::new("d/x.sh")
+    );
+}
+
+#[test]
+fn copies_without_overwriting() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = Agent::default();
+    let a = dir.path().join("a");
+    fs::create_dir_all(a.join("sub")).unwrap();
+    fs::write(a.join("sub").join("f.txt"), b"data").unwrap();
+    let b = dir.path().join("b");
+    ok(
+        &mut agent,
+        Request::Copy {
+            from: bytes(&a),
+            to: bytes(&b),
+        },
+    );
+    assert_eq!(fs::read(b.join("sub").join("f.txt")).unwrap(), b"data");
+    assert!(a.join("sub").join("f.txt").exists());
+    // 既にあれば上書きしない
+    let r = run(
+        &mut agent,
+        Request::Copy {
+            from: bytes(&a),
+            to: bytes(&b),
+        },
+    );
+    assert!(matches!(r, Response::Error(_)), "{r:?}");
+    // フォルダをその中へはコピーしない
+    let r = run(
+        &mut agent,
+        Request::Copy {
+            from: bytes(&a),
+            to: bytes(&a.join("sub").join("a")),
+        },
+    );
+    assert!(matches!(r, Response::Error(_)), "{r:?}");
+    assert!(!a.join("sub").join("a").exists());
+}

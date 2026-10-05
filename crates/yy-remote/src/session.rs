@@ -180,6 +180,48 @@ impl Session {
         }
     }
 
+    /// フォルダを作る（親のフォルダは既にあること）。
+    pub fn make_dir(&self, path: &[u8]) -> io::Result<()> {
+        check_done(self.client.call(&Request::MakeDir {
+            path: path.to_vec(),
+        })?)
+    }
+
+    /// 名前を変える・移動する（`to` が既にあればエラー。上書きしない）。
+    pub fn rename(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
+        check_done(self.client.call(&Request::Rename {
+            from: from.to_vec(),
+            to: to.to_vec(),
+        })?)
+    }
+
+    /// ファイル・フォルダを消す（フォルダは `recursive` なら中身ごと）。ごみ箱はない。
+    pub fn remove(&self, path: &[u8], recursive: bool) -> io::Result<()> {
+        check_done(self.client.call(&Request::Remove {
+            path: path.to_vec(),
+            recursive,
+        })?)
+    }
+
+    /// 接続先の中でファイル・フォルダを中身ごとコピーする（`to` が既にあればエラー）。
+    pub fn copy(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
+        check_done(self.client.call(&Request::Copy {
+            from: from.to_vec(),
+            to: to.to_vec(),
+        })?)
+    }
+
+    /// 空のファイルを作る（既にあればエラー）。
+    pub fn create_file(self: &Arc<Self>, path: &[u8]) -> io::Result<FileInfo> {
+        match self.upload(&mut io::empty(), path, None, &mut |_| true)? {
+            UploadOutcome::Saved(info) => Ok(info),
+            UploadOutcome::Conflict { .. } => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} は既にあります", yy_proto::display_path(path)),
+            )),
+        }
+    }
+
     /// ファイル全体を `out` に取り寄せる。`progress(済み, 全体)` が `false` を返したら中止する。
     /// 取り寄せている間に外部で変更されたらエラー。開いたときのファイルの情報を返す。
     pub fn download(

@@ -248,6 +248,166 @@ pub fn set_last_used(path: &Path) -> io::Result<()> {
     std::fs::write(file, format!("{}\n", path.to_string_lossy()))
 }
 
+// ---- ファイル・フォルダの操作に使うパスの計算 ------------------------------------
+//
+// ワークスペースの項目のパスは、手元のパスか `ssh://接続先/パス`（11 章）のどちらか。
+// リモートの場所は Windows の区切り（`\`）を使わずに文字列のまま扱う。
+
+fn remote_parts(path: &Path) -> Option<(&str, &str)> {
+    let s = path.to_str()?;
+    let rest = s.strip_prefix("ssh://")?;
+    let slash = rest.find('/')?;
+    // （接続先, 接続先の中の絶対パス）
+    Some((&s[..6 + slash], &rest[slash..]))
+}
+
+/// ファイル・フォルダの名前として使えるか。`remote` なら接続先（Linux）の規則、でなければ Windows の規則。
+pub fn check_name(name: &str, remote: bool) -> Result<(), String> {
+    if name.is_empty() || name.trim().is_empty() {
+        return Err("名前を入力してください".into());
+    }
+    if name == "." || name == ".." {
+        return Err(format!("「{name}」は名前に使えません"));
+    }
+    let bad: &[char] = if remote {
+        &['/', '\0']
+    } else {
+        &['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+    };
+    if let Some(c) = name.chars().find(|c| bad.contains(c) || c.is_control()) {
+        return Err(format!("名前に「{}」は使えません", c.escape_default()));
+    }
+    if !remote {
+        if name.ends_with(['.', ' ']) {
+            return Err("名前の最後に「.」や空白は使えません".into());
+        }
+        let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let reserved = ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+            || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.len() == 4
+                && stem.as_bytes()[3].is_ascii_digit());
+        if reserved {
+            return Err(format!("「{name}」は Windows では名前に使えません"));
+        }
+    }
+    Ok(())
+}
+
+/// `dir` の中の `name`。
+pub fn child(dir: &Path, name: &str) -> PathBuf {
+    match dir.to_str().filter(|_| remote_parts(dir).is_some()) {
+        Some(s) => PathBuf::from(format!("{}/{name}", s.trim_end_matches('/'))),
+        None => dir.join(name),
+    }
+}
+
+/// 親のフォルダ（ルート・接続先のルートなら `None`）。
+pub fn parent(path: &Path) -> Option<PathBuf> {
+    match remote_parts(path) {
+        Some((target, p)) => {
+            let p = p.trim_end_matches('/');
+            let i = p.rfind('/')?;
+            Some(PathBuf::from(format!(
+                "{target}{}",
+                if i == 0 { "/" } else { &p[..i] }
+            )))
+        }
+        None => path.parent().map(|p| p.to_owned()),
+    }
+}
+
+/// 最後の名前。
+pub fn name_of(path: &Path) -> String {
+    match remote_parts(path) {
+        Some((_, p)) => p
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_owned(),
+        None => path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    }
+}
+
+/// 同じ場所（同じパソコン、または同じ接続先）か。移動はその中だけで行う。
+pub fn same_place(a: &Path, b: &Path) -> bool {
+    match (remote_parts(a), remote_parts(b)) {
+        (Some((x, _)), Some((y, _))) => x.eq_ignore_ascii_case(y),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// `path` の `dir` からの残り（`path` が `dir` 自身なら空、`dir` の外なら `None`）。
+fn rest_after(path: &Path, dir: &Path) -> Option<Vec<String>> {
+    match (remote_parts(path), remote_parts(dir)) {
+        (Some((t, p)), Some((u, d))) => {
+            if !t.eq_ignore_ascii_case(u) {
+                return None;
+            }
+            let split = |s: &str| -> Vec<String> {
+                s.split('/')
+                    .filter(|c| !c.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            };
+            let (p, d) = (split(p), split(d));
+            p.starts_with(&d).then(|| p[d.len()..].to_vec())
+        }
+        (None, None) => {
+            // Windows は大文字・小文字を区別しない
+            let key = |c: std::path::Component| {
+                let s = c.as_os_str().to_string_lossy().into_owned();
+                if cfg!(windows) { s.to_lowercase() } else { s }
+            };
+            let p: Vec<_> = path.components().collect();
+            let d: Vec<_> = dir.components().collect();
+            if d.len() > p.len() || p.iter().zip(&d).any(|(a, b)| key(*a) != key(*b)) {
+                return None;
+            }
+            Some(
+                p[d.len()..]
+                    .iter()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// `path` が `dir` 自身か、その中か。
+pub fn is_within(path: &Path, dir: &Path) -> bool {
+    rest_after(path, dir).is_some()
+}
+
+/// `from` を `to` に移したとき、`path`（`from` 自身またはその中）の移した先。`from` の外なら `None`。
+pub fn relocated(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+    let rest = rest_after(path, from)?;
+    Some(rest.iter().fold(to.to_owned(), |p, name| child(&p, name)))
+}
+
+/// コピーの名前（`n` 番目の候補）。`n == 0` は元の名前、1 は「名前 - コピー.拡張子」、2 以降は
+/// 「名前 - コピー (n).拡張子」（エクスプローラーと同じ形）。フォルダには拡張子を考えない。
+pub fn copy_name(name: &str, n: usize, is_dir: bool) -> String {
+    if n == 0 {
+        return name.to_owned();
+    }
+    let suffix = if n == 1 {
+        " - コピー".to_owned()
+    } else {
+        format!(" - コピー ({n})")
+    };
+    // 先頭の「.」だけのもの（.bashrc）は拡張子とみなさない
+    match name.rfind('.').filter(|&i| !is_dir && i > 0) {
+        Some(i) => format!("{}{suffix}{}", &name[..i], &name[i..]),
+        None => format!("{name}{suffix}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +509,77 @@ mod tests {
         assert!(text.contains("\"proj\""), "{text}");
         assert_eq!(Workspace::load(&file).unwrap(), ws);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checks_names() {
+        assert!(check_name("a.txt", false).is_ok());
+        assert!(check_name("日本語 フォルダ", false).is_ok());
+        for bad in [
+            "", "  ", ".", "..", "a/b", "a\\b", "a:b", "a?", "con", "COM1.txt", "a.",
+        ] {
+            assert!(check_name(bad, false).is_err(), "{bad:?}");
+        }
+        assert!(check_name("a:b?", true).is_ok());
+        assert!(check_name("a/b", true).is_err());
+        assert!(check_name("..", true).is_err());
+    }
+
+    #[test]
+    fn remote_paths() {
+        let d = Path::new("ssh://u@h:22/home/u/proj");
+        assert_eq!(
+            child(d, "a.txt"),
+            PathBuf::from("ssh://u@h:22/home/u/proj/a.txt")
+        );
+        assert_eq!(
+            child(Path::new("ssh://h/"), "etc"),
+            PathBuf::from("ssh://h/etc")
+        );
+        assert_eq!(parent(d), Some(PathBuf::from("ssh://u@h:22/home/u")));
+        assert_eq!(
+            parent(Path::new("ssh://h/etc")),
+            Some(PathBuf::from("ssh://h/"))
+        );
+        assert_eq!(parent(Path::new("ssh://h/")), None);
+        assert_eq!(name_of(d), "proj");
+        let f = child(d, "src/main.rs");
+        assert!(is_within(&f, d) && is_within(d, d));
+        assert!(!is_within(Path::new("ssh://u@h:22/home/u/project"), d));
+        assert!(!is_within(Path::new("ssh://other/home/u/proj/x"), d));
+        assert_eq!(
+            relocated(&f, d, Path::new("ssh://u@h:22/srv/p")),
+            Some(PathBuf::from("ssh://u@h:22/srv/p/src/main.rs"))
+        );
+        assert!(same_place(d, Path::new("ssh://U@H:22/x")));
+        assert!(!same_place(d, Path::new("ssh://other/x")));
+        assert!(!same_place(d, &root().join("x")));
+    }
+
+    #[test]
+    fn local_paths() {
+        let r = root();
+        let d = r.join("work").join("proj");
+        let f = d.join("src").join("main.rs");
+        assert!(is_within(&f, &d));
+        assert!(!is_within(&r.join("work").join("project"), &d));
+        assert_eq!(
+            relocated(&f, &d, &r.join("other")),
+            Some(r.join("other").join("src").join("main.rs"))
+        );
+        assert_eq!(relocated(&d, &d, &r.join("x")), Some(r.join("x")));
+        assert_eq!(relocated(&r.join("y"), &d, &r.join("x")), None);
+        assert_eq!(parent(&f), Some(d.join("src")));
+        assert_eq!(name_of(&f), "main.rs");
+        assert!(same_place(&f, &r.join("z")));
+    }
+
+    #[test]
+    fn copy_names() {
+        assert_eq!(copy_name("a.txt", 0, false), "a.txt");
+        assert_eq!(copy_name("a.txt", 1, false), "a - コピー.txt");
+        assert_eq!(copy_name("a.tar.gz", 2, false), "a.tar - コピー (2).gz");
+        assert_eq!(copy_name(".bashrc", 1, false), ".bashrc - コピー");
+        assert_eq!(copy_name("v1.2", 1, true), "v1.2 - コピー");
     }
 }

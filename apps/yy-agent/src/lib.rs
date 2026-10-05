@@ -157,6 +157,22 @@ impl Agent {
                 self.uploads.remove(&upload);
                 Response::Done
             }
+            Request::MakeDir { path } => {
+                fs::create_dir(to_path(&path))?;
+                Response::Done
+            }
+            Request::Rename { from, to } => {
+                rename(&to_path(&from), &to_path(&to))?;
+                Response::Done
+            }
+            Request::Remove { path, recursive } => {
+                remove(&to_path(&path), recursive)?;
+                Response::Done
+            }
+            Request::Copy { from, to } => {
+                copy(&to_path(&from), &to_path(&to))?;
+                Response::Done
+            }
         })
     }
 }
@@ -400,6 +416,119 @@ fn commit(u: &mut Upload, expected: Option<FileId>, force: bool) -> io::Result<O
     }
     sync_dir(&u.target);
     Ok(Some(stat(&u.target)?))
+}
+
+/// 名前を変える・移動する（上書きしない）。
+fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    fs::symlink_metadata(from)?;
+    if fs::symlink_metadata(to).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} は既にあります", to.display()),
+        ));
+    }
+    if is_within(to, from) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "フォルダをその中には移動できません",
+        ));
+    }
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        // 別のファイルシステムへの移動は、コピーしてから元を消す
+        Err(e) if is_cross_device(&e) => {
+            if let Err(e) = copy_tree(from, to) {
+                let _ = remove(to, true);
+                return Err(e);
+            }
+            remove(from, true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// 中身ごとコピーする（上書きしない）。途中で失敗したら、作りかけのコピーを消す。
+fn copy(from: &Path, to: &Path) -> io::Result<()> {
+    fs::symlink_metadata(from)?;
+    if fs::symlink_metadata(to).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} は既にあります", to.display()),
+        ));
+    }
+    if is_within(to, from) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "フォルダをその中へはコピーできません",
+        ));
+    }
+    copy_tree(from, to).inspect_err(|_| {
+        let _ = remove(to, true);
+    })
+}
+
+/// `path` が `dir` 自身か、その中か（パスの文字列で比べる）。
+fn is_within(path: &Path, dir: &Path) -> bool {
+    let (Ok(p), Ok(d)) = (
+        fs::canonicalize(path.parent().unwrap_or(path)),
+        fs::canonicalize(dir),
+    ) else {
+        return path.starts_with(dir);
+    };
+    p.starts_with(&d)
+}
+
+#[cfg(unix)]
+fn is_cross_device(e: &io::Error) -> bool {
+    // EXDEV
+    e.raw_os_error() == Some(18)
+}
+
+#[cfg(not(unix))]
+fn is_cross_device(e: &io::Error) -> bool {
+    // ERROR_NOT_SAME_DEVICE
+    e.raw_os_error() == Some(17)
+}
+
+/// ファイル・フォルダを中身ごとコピーする（権限も。シンボリックリンクはリンクとして）。
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(from)?;
+    if meta.file_type().is_symlink() {
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(fs::read_link(from)?, to);
+        #[cfg(not(unix))]
+        return fs::copy(from, to).map(|_| ());
+    }
+    if meta.is_dir() {
+        fs::create_dir(to)?;
+        for e in fs::read_dir(from)? {
+            let e = e?;
+            copy_tree(&e.path(), &to.join(e.file_name()))?;
+        }
+        fs::set_permissions(to, meta.permissions())
+    } else {
+        fs::copy(from, to).map(|_| ())
+    }
+}
+
+/// ファイル・フォルダを消す。
+fn remove(path: &Path, recursive: bool) -> io::Result<()> {
+    if path.parent().is_none() || path == Path::new("/") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ルートは消せません",
+        ));
+    }
+    let meta = fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+        if recursive {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_dir(path)
+        }
+    } else {
+        fs::remove_file(path)
+    }
 }
 
 fn copy_into(from: &Path, to: &Path) -> io::Result<()> {

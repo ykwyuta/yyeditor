@@ -28,21 +28,29 @@ pub use yy_encoding::{Encoding, EscapeMode};
 pub struct MmapSource {
     map: ManuallyDrop<Mmap>,
     file: ManuallyDrop<File>,
-    path: PathBuf,
+    /// 今の名前（名前を変えた・移動したら [`MmapSource::set_path`] で直す）
+    path: Mutex<PathBuf>,
     delete_on_drop: Mutex<Option<PathBuf>>,
 }
 
 impl MmapSource {
     /// 開いたときのパス（退避後は元の名前のまま）。
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> PathBuf {
+        self.path.lock().unwrap().clone()
+    }
+
+    /// ファイルの名前が変わった（ワークスペースで名前を変えた・移動した）ことを記録する。
+    /// 上書き保存のときに、マップ中のファイルを退避する判定に使う。
+    pub fn set_path(&self, path: &Path) {
+        *self.path.lock().unwrap() = path.to_owned();
     }
 
     /// 作業用のファイル（リモートのファイルを取り寄せた一時ファイルなど）の名前を消す。
     /// マップは内容を参照し続ける。消せない環境では、マップが使われなくなったときに消す。
     pub fn unlink(&self) {
-        if std::fs::remove_file(&self.path).is_err() {
-            self.delete_when_dropped(self.path.clone());
+        let path = self.path();
+        if std::fs::remove_file(&path).is_err() {
+            self.delete_when_dropped(path);
         }
     }
 
@@ -146,7 +154,7 @@ pub fn open_file(path: &Path) -> io::Result<OpenedFile> {
     let source = Arc::new(MmapSource {
         map: ManuallyDrop::new(map),
         file: ManuallyDrop::new(file),
-        path: path.to_owned(),
+        path: Mutex::new(path.to_owned()),
         delete_on_drop: Mutex::new(None),
     });
     Ok(OpenedFile {
@@ -263,7 +271,7 @@ pub fn map_temp(path: &Path) -> io::Result<Arc<MmapSource>> {
     let source = Arc::new(MmapSource {
         map: ManuallyDrop::new(map),
         file: ManuallyDrop::new(file),
-        path: path.to_owned(),
+        path: Mutex::new(path.to_owned()),
         delete_on_drop: Mutex::new(None),
     });
     if std::fs::remove_file(path).is_err() {
@@ -510,7 +518,7 @@ pub fn save_snapshot_with(
     }
 
     let retreat = match current {
-        Some(c) if same_file(c.path(), target) => {
+        Some(c) if same_file(&c.path(), target) => {
             let r = sibling_name(target, "yyorig");
             if let Err(e) = std::fs::rename(target, &r) {
                 let _ = std::fs::remove_file(&tmp);
