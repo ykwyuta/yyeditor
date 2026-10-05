@@ -139,7 +139,7 @@ fn checked(hwnd: HWND, id: u16) -> bool {
 }
 
 /// フォルダを選ぶ。
-fn browse_folder(owner: HWND) -> Option<PathBuf> {
+pub(crate) fn browse_folder(owner: HWND) -> Option<PathBuf> {
     unsafe {
         let dialog: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
