@@ -34,6 +34,8 @@ pub struct Config {
     pub colors: Colors,
     /// ファイル種類（拡張子 → モード・文字コード等）。M3 以降で使用する。
     pub filetype: BTreeMap<String, FileType>,
+    /// SSH 接続先のファイルの編集（11 章 4.4）
+    pub remote: RemoteConfig,
 }
 
 impl Default for Config {
@@ -43,6 +45,7 @@ impl Default for Config {
             view: ViewConfig::default(),
             colors: Colors::default(),
             filetype: default_filetypes(),
+            remote: RemoteConfig::default(),
         }
     }
 }
@@ -273,6 +276,50 @@ pub enum EditMode {
     Delimited,
 }
 
+/// SSH 接続先のファイルの編集の設定（11 章 4.4）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemoteConfig {
+    /// `%USERPROFILE%\.ssh\config` を読む（読むだけ。OpenSSH のプログラムは使わない）
+    pub read_ssh_config: bool,
+    /// `%USERPROFILE%\.ssh\known_hosts` を読む（読むだけ。承認した鍵は yyeditor の known_hosts に書く）
+    pub read_ssh_known_hosts: bool,
+    /// 接続の死活確認の間隔（秒）
+    pub keepalive_secs: u32,
+    /// 接続先にエージェントを置くフォルダ（空なら `~/.yyeditor/agent`）
+    pub agent_dir: String,
+    /// 接続先ごとの設定（`[remote.host.<名前>]`）
+    pub host: BTreeMap<String, RemoteHost>,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        RemoteConfig {
+            read_ssh_config: true,
+            read_ssh_known_hosts: true,
+            keepalive_secs: 15,
+            agent_dir: String::new(),
+            host: BTreeMap::new(),
+        }
+    }
+}
+
+/// 接続先ごとの設定。書いていない項目は `~/.ssh/config`、それもなければ既定値を使う。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemoteHost {
+    /// 接続するホスト名（省略すると設定の名前）
+    pub hostname: Option<String>,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+    /// 秘密鍵のファイル
+    pub identity_file: Option<String>,
+    /// 踏み台（今後対応）
+    pub proxy_jump: Option<String>,
+    /// この接続先でエージェントを置くフォルダ（ホームが noexec の場合など）
+    pub agent_dir: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileType {
@@ -442,6 +489,34 @@ mod tests {
             c.colors.syntax_color("string")
         );
         assert_eq!(c.colors.syntax_color("nothing"), None);
+    }
+
+    #[test]
+    fn remote_hosts() {
+        let c = Config::from_toml(
+            r#"
+            [remote]
+            agent_dir = "/work/agent"
+            [remote.host.build]
+            hostname = "build01.example.co.jp"
+            user = "yamada"
+            port = 2222
+            "#,
+        )
+        .unwrap();
+        assert!(c.remote.read_ssh_config);
+        assert_eq!(c.remote.agent_dir, "/work/agent");
+        let h = &c.remote.host["build"];
+        assert_eq!(h.hostname.as_deref(), Some("build01.example.co.jp"));
+        assert_eq!(h.port, Some(2222));
+        assert_eq!(h.identity_file, None);
+        assert!(
+            Config::from_toml(
+                "[remote.host.x]
+portt = 1"
+            )
+            .is_err()
+        );
     }
 
     #[test]

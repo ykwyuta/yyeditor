@@ -24,13 +24,21 @@ pub struct PathList {
 }
 
 /// 2 つのパスが同じファイルを指すか（Windows では大文字・小文字と区切りの `/` `\` を区別しない）。
+/// SSH 接続先のファイル（`ssh://`。11 章 5.3）は書いたとおりに比べる（接続先は大文字・小文字を区別する）。
 pub fn same_path(a: &Path, b: &Path) -> bool {
-    if cfg!(windows) {
+    if is_remote(a) || is_remote(b) {
+        a.as_os_str() == b.as_os_str()
+    } else if cfg!(windows) {
         let norm = |p: &Path| p.to_string_lossy().replace('/', "\\").to_lowercase();
         norm(a) == norm(b)
     } else {
         a == b
     }
+}
+
+/// SSH 接続先のファイルの場所（`ssh://` で始まる）か。
+pub fn is_remote(p: &Path) -> bool {
+    p.to_str().is_some_and(|s| s.starts_with("ssh://"))
 }
 
 impl PathList {
@@ -207,6 +215,17 @@ mod tests {
         assert_eq!(b.items(), [p("y"), p("x")]);
         assert!(!b.shift(&p("y"), true));
         assert!(!b.shift(&p("x"), false));
+    }
+
+    #[test]
+    fn remote_entries_compare_exactly() {
+        let a = Path::new("ssh://build/home/u/A.txt");
+        assert!(is_remote(a));
+        assert!(!is_remote(Path::new("C:\\ssh\\x")));
+        assert!(same_path(a, Path::new("ssh://build/home/u/A.txt")));
+        assert!(!same_path(a, Path::new("ssh://build/home/u/a.txt")));
+        let l = PathList::parse("ssh://h/a\nssh://h/A\nssh://h/a\n", 10);
+        assert_eq!(l.len(), 2);
     }
 
     #[test]

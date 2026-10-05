@@ -2827,6 +2827,7 @@ dependencies = [
  "yy-encoding",
  "yy-io",
  "yy-jobs",
+ "yy-proto",
  "yy-search",
  "yy-syntax",
 ]

@@ -38,6 +38,14 @@ impl MmapSource {
         &self.path
     }
 
+    /// 作業用のファイル（リモートのファイルを取り寄せた一時ファイルなど）の名前を消す。
+    /// マップは内容を参照し続ける。消せない環境では、マップが使われなくなったときに消す。
+    pub fn unlink(&self) {
+        if std::fs::remove_file(&self.path).is_err() {
+            self.delete_when_dropped(self.path.clone());
+        }
+    }
+
     /// このマップが使われなくなったら `path` のファイルを削除する。
     fn delete_when_dropped(&self, path: PathBuf) {
         *self.delete_on_drop.lock().unwrap() = Some(path);
@@ -361,6 +369,9 @@ pub enum SaveError {
         ranges: Vec<Range<u64>>,
         total: u64,
     },
+    /// 保存先が開いたときから外部で変更されていた、または新しく作るはずのファイルが既にあった
+    /// （リモートのファイル。保存先は変更していない）
+    Conflict(String),
 }
 
 impl fmt::Display for SaveError {
@@ -370,6 +381,7 @@ impl fmt::Display for SaveError {
             SaveError::Unmappable {
                 encoding, total, ..
             } => write!(f, "{encoding} に変換できない文字が {total} 個あります"),
+            SaveError::Conflict(msg) => f.write_str(msg),
         }
     }
 }
