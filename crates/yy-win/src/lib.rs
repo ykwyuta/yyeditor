@@ -25,6 +25,7 @@ mod help;
 mod highlight;
 mod ime;
 mod preview;
+mod recentdlg;
 mod recorddlg;
 mod render;
 mod tabclose;

@@ -4,6 +4,8 @@
 //! 見出しの属性・GitHub のアラート `> [!NOTE]`・Wiki リンク・YAML のフロントマター）を扱う。
 //!
 //! * ```` ```mermaid ```` のコードブロックは mermaid.js が描く `<pre class="mermaid">` にする
+//! * ```` ```d3 ```` のコードブロックは d3.js を使うスクリプトとして、プレビューで実行する
+//!   （`<div class="yy-d3">` の中の隠した `<pre>` にスクリプトを入れる）
 //! * `$…$`・`$$…$$` と ```` ```math ```` は KaTeX が描く `.math` の要素にする
 //! * その他のコードブロックは yy-syntax の定義で色付けする（`tok-*` のクラス）
 //! * 見出しには GitHub と同じ規則の `id` を付ける（ページ内リンク用）
@@ -228,6 +230,10 @@ fn code_block(
     let data_line = line.map_or(String::new(), |l| format!(" data-line=\"{l}\""));
     match lang.to_ascii_lowercase().as_str() {
         "mermaid" => format!("<pre class=\"mermaid\"{data_line}>{}</pre>\n", escape(code)),
+        "d3" => format!(
+            "<div class=\"yy-d3\"{data_line}><pre class=\"yy-d3-src\" hidden>{}</pre></div>\n",
+            escape(code)
+        ),
         "math" | "latex" | "katex" => format!(
             "<div class=\"math math-display\"{data_line}>{}</div>\n",
             escape(code)

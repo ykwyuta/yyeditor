@@ -69,6 +69,9 @@ const ID_OPEN_SHARED: u16 = 107;
 const ID_TAB_NEXT: u16 = 108;
 const ID_TAB_PREV: u16 = 109;
 const ID_DIFF: u16 = 110;
+const ID_HISTORY: u16 = 112;
+const ID_BOOKMARKS: u16 = 113;
+const ID_BOOKMARK_TOGGLE: u16 = 114;
 const ID_GOTO: u16 = 201;
 const ID_ZOOM_IN: u16 = 202;
 const ID_ZOOM_OUT: u16 = 203;
@@ -396,6 +399,9 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
     let accels = [
         (ctrl, b'N' as u16, ID_NEW),
         (ctrl, b'O' as u16, ID_OPEN),
+        (ctrl, b'E' as u16, ID_HISTORY),
+        (ctrl, b'B' as u16, ID_BOOKMARKS),
+        (ctrl_shift, b'B' as u16, ID_BOOKMARK_TOGGLE),
         (ctrl, b'S' as u16, ID_SAVE),
         (ctrl_shift, b'S' as u16, ID_SAVE_AS),
         (ctrl, b'W' as u16, ID_CLOSE),
@@ -464,6 +470,13 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             file,
             ID_OPEN_SHARED,
             w!("共有中のファイルを読み取り専用で開く..."),
+        )?;
+        item(file, ID_HISTORY, w!("最近開いたファイル(&H)...\tCtrl+E"))?;
+        item(file, ID_BOOKMARKS, w!("ブックマーク(&K)...\tCtrl+B"))?;
+        item(
+            file,
+            ID_BOOKMARK_TOGGLE,
+            w!("このファイルをブックマーク(&M)\tCtrl+Shift+B"),
         )?;
         let reopen = CreatePopupMenu()?;
         for (i, e) in Encoding::all().iter().enumerate() {
@@ -1367,6 +1380,24 @@ impl App {
         set(ID_COPY, has_sel);
         set(ID_DELETE, has_sel && !self.doc.is_read_only());
         set(ID_RECT_TO_CARETS, self.rect.is_some());
+        // 開いているファイルがブックマークにあればチェックを付ける
+        unsafe {
+            let menu = GetMenu(self.frame);
+            let path = self.doc.path();
+            let marked = path.is_some_and(|p| {
+                crate::recentdlg::ListKind::Bookmarks
+                    .load()
+                    .contains(&crate::recentdlg::normalize(p))
+            });
+            let flag = if marked { MF_CHECKED } else { MF_UNCHECKED };
+            CheckMenuItem(menu, ID_BOOKMARK_TOGGLE as u32, (MF_BYCOMMAND | flag).0);
+            let enable = if path.is_some() {
+                MF_ENABLED
+            } else {
+                MF_GRAYED
+            };
+            let _ = EnableMenuItem(menu, ID_BOOKMARK_TOGGLE as u32, MF_BYCOMMAND | enable);
+        }
         let flag = if self.rect_mode {
             MF_CHECKED
         } else {
@@ -2728,6 +2759,7 @@ impl App {
             Document::open_with(&path, &opts)
         }
         .map_err(|e| format!("{}\n\n{e}", path.display()))?;
+        crate::recentdlg::remember(&path);
         self.add_document(doc);
         Ok(())
     }
@@ -2756,6 +2788,7 @@ impl App {
         };
         let doc =
             Document::open_with(&path, &opts).map_err(|e| format!("{}\n\n{e}", path.display()))?;
+        crate::recentdlg::remember(&path);
         self.add_document(doc);
         self.set_hex(true, None);
         Ok(())
@@ -3726,6 +3759,40 @@ pub(crate) fn is_close_command(wparam: WPARAM) -> bool {
     loword(wparam.0) as u16 == ID_CLOSE
 }
 
+/// 開いているファイルをブックマークに加える（既にあれば外す）。
+fn cmd_toggle_bookmark(hwnd: HWND) {
+    use crate::recentdlg::ListKind;
+    let Some(Some(path)) = with_app(|a| a.doc.path().map(crate::recentdlg::normalize)) else {
+        info_box(hwnd, "保存してからブックマークしてください。");
+        return;
+    };
+    let msg = match ListKind::Bookmarks.update(|l| {
+        if l.remove(&path) {
+            Ok(false)
+        } else {
+            l.push(&path).map(|_| true)
+        }
+    }) {
+        Some(Ok(true)) => "ブックマークに追加しました".to_owned(),
+        Some(Ok(false)) => "ブックマークから外しました".to_owned(),
+        Some(Err(())) => {
+            info_box(
+                hwnd,
+                &format!(
+                    "ブックマークは {} 件までです。不要なものを外してください（ファイル メニューの「ブックマーク」）。",
+                    ListKind::Bookmarks.limit()
+                ),
+            );
+            return;
+        }
+        None => "ブックマークを保存できませんでした".to_owned(),
+    };
+    with_app(|a| {
+        a.status_msg = msg;
+        a.update_status();
+    });
+}
+
 fn open_path(hwnd: HWND, path: PathBuf, encoding: Option<Encoding>, shared_read_only: bool) {
     if let Some(Err(msg)) = with_app(|a| a.open(path, encoding, shared_read_only)) {
         error_box(hwnd, &format!("ファイルを開けません。\n{msg}"));
@@ -3918,10 +3985,15 @@ fn on_save_done(hwnd: HWND) {
 fn handle_save_result(hwnd: HWND, flow: Option<SaveFlow>, done: yy_core::SaveDone) {
     let err = match done.result {
         Ok(()) => {
-            with_app(|a| {
+            let path = with_app(|a| {
                 a.status_msg = "保存しました".into();
                 a.update_status();
+                a.doc.path().map(|p| p.to_owned())
             });
+            // 名前を付けて保存したファイルも履歴に残す
+            if let Some(Some(p)) = path {
+                crate::recentdlg::remember(&p);
+            }
             return;
         }
         Err(e) => e,
@@ -4439,6 +4511,17 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_GOTO if with_app(|a| a.hex.is_some()) == Some(true) => cmd_hex_goto(hwnd),
         ID_HEX_MODE => cmd_toggle_hex(hwnd),
+        ID_HISTORY | ID_BOOKMARKS => {
+            let kind = if id == ID_HISTORY {
+                crate::recentdlg::ListKind::History
+            } else {
+                crate::recentdlg::ListKind::Bookmarks
+            };
+            for p in crate::recentdlg::show(hwnd, kind) {
+                open_path(hwnd, p, None, false);
+            }
+        }
+        ID_BOOKMARK_TOGGLE => cmd_toggle_bookmark(hwnd),
         ID_CODE_MODE => cmd_toggle_code(hwnd),
         ID_RECORD_MODE => cmd_toggle_record(hwnd),
         ID_OPEN_BINARY => {

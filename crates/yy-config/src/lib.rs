@@ -3,6 +3,8 @@
 //! `%APPDATA%\yyeditor\config.toml`（Windows 以外では `$XDG_CONFIG_HOME/yyeditor/config.toml`）
 //! から読み込む。ファイルがない・項目が欠けている場合は既定値を使う。
 
+pub mod recent;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};

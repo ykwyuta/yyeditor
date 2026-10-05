@@ -53,6 +53,18 @@ fn footnotes_are_collected_at_the_end() {
 }
 
 #[test]
+fn d3_blocks_become_scripts() {
+    let html = md("text\n\n```d3\nconst x = 1 < 2 && \"</pre>\";\nel.append(\"p\");\n```\n");
+    assert!(
+        html.contains(
+            "<div class=\"yy-d3\" data-line=\"2\"><pre class=\"yy-d3-src\" hidden>\
+             const x = 1 &lt; 2 &amp;&amp; &quot;&lt;/pre&gt;&quot;;\nel.append(&quot;p&quot;);\n</pre></div>"
+        ),
+        "{html}"
+    );
+}
+
+#[test]
 fn mermaid_and_math() {
     let html = md("```mermaid\ngraph TD\n  A-->B<C\n```\n\n\
          inline $a^2 + b^2$ and\n\n$$\\int_0^1 x\\,dx$$\n\n```math\n\\frac{1}{2}\n```\n");
@@ -185,6 +197,8 @@ fn pages_reference_bundled_assets() {
 
 #[test]
 fn embedded_assets_decompress() {
+    let (d3, _) = asset("/assets/d3.min.js").unwrap();
+    assert!(String::from_utf8_lossy(&d3[..100]).contains("d3js.org v7"));
     let (js, mime) = asset("/assets/mermaid.min.js").unwrap();
     assert!(mime.starts_with("text/javascript"));
     assert!(js.len() > 1_000_000);
