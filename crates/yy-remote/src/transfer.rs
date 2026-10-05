@@ -201,6 +201,46 @@ impl Ticker<'_> {
     }
 }
 
+/// コピーする量を数える（コピーと同じく、フォルダを指すリンクはたどらない）。
+pub fn measure(loc: &Loc, step: &mut dyn FnMut(&CopyStats) -> bool) -> io::Result<CopyStats> {
+    let mut t = Ticker {
+        stats: CopyStats::default(),
+        step,
+    };
+    let kind = loc.kind()?;
+    measure_node(loc, kind, &mut t)?;
+    Ok(t.stats)
+}
+
+fn measure_node(loc: &Loc, kind: Kind, t: &mut Ticker) -> io::Result<()> {
+    match kind {
+        Kind::Skip => t.stats.skipped += 1,
+        Kind::File => {
+            t.stats.files += 1;
+            t.stats.bytes += match loc {
+                Loc::Local(p) => fs::metadata(p)?.len(),
+                Loc::Remote(s, p) => s.stat(p)?.len(),
+            };
+        }
+        Kind::Dir => {
+            t.stats.dirs += 1;
+            for (name, kind) in loc.children()? {
+                measure_node(&loc.join(&name), kind, t)?;
+            }
+        }
+    }
+    t.tick()
+}
+
+/// 手元と接続先の間（または別の接続先の間）で、内容を転送するコピーか。
+pub fn crosses_network(from: &Loc, to: &Loc) -> bool {
+    match (from, to) {
+        (Loc::Local(_), Loc::Local(_)) => false,
+        (Loc::Remote(a, _), Loc::Remote(b, _)) => !Arc::ptr_eq(a, b),
+        _ => true,
+    }
+}
+
 /// `from` を `to` にコピーする（`to` は新しく作る名前）。`step(これまでの量)` が `false` を
 /// 返したら中止する。
 pub fn copy(

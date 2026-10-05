@@ -1344,7 +1344,7 @@ pub(crate) fn on_op(hwnd: HWND, lparam: LPARAM) {
         WsOp::Rename { path, name } => rename_item(&path, name.trim()),
         WsOp::Delete { path, is_dir } => delete_item(hwnd, &path, is_dir),
         WsOp::Move { from, to_dir } => move_item(&from, &to_dir),
-        WsOp::Copy { from, to_dir } => copy_item(&from, &to_dir),
+        WsOp::Copy { from, to_dir } => copy_item(hwnd, &from, &to_dir),
     };
     if let Err(e) = r {
         error_box(hwnd, &e);
@@ -1532,8 +1532,13 @@ fn loc_of(path: &Path) -> std::result::Result<yy_remote::transfer::Loc, String> 
     })
 }
 
+/// この大きさ以上のコピーは、始める前に確かめる
+const COPY_WARN_BYTES: u64 = 10 << 20;
+/// この大きさ以上は、このパソコンとリモートの間（別の接続先の間も）ではコピーしない
+const COPY_REMOTE_LIMIT: u64 = 50 << 20;
+
 /// `from` を `to_dir` の中へコピーする。同じ名前があれば「名前 - コピー」にする。
-fn copy_item(from: &Path, to_dir: &Path) -> std::result::Result<(), String> {
+fn copy_item(hwnd: HWND, from: &Path, to_dir: &Path) -> std::result::Result<(), String> {
     if workspace::same_place(from, to_dir) && workspace::is_within(to_dir, from) {
         return Err("フォルダを、そのフォルダの中へはコピーできません。".into());
     }
@@ -1551,9 +1556,73 @@ fn copy_item(from: &Path, to_dir: &Path) -> std::result::Result<(), String> {
         return Err(format!("「{base}」のコピーの名前を決められませんでした。"));
     };
     let (src, dst) = (loc_of(from)?, loc_of(&target)?);
+    let cross = yy_remote::transfer::crosses_network(&src, &dst);
+    // 始める前に量を数え、大きければ確かめる（リモートとの間で大きすぎればコピーしない）
+    crate::remote::show_status(&format!("{base} の大きさを調べています…（Esc で中止）"));
+    let s2 = src.clone();
+    let measured = crate::remote::wait(&crate::remote::show_status, move |work| {
+        yy_remote::transfer::measure(&s2, &mut |st| {
+            work.report(format!(
+                "大きさを調べています… {} 個のファイル、{}（Esc で中止）",
+                group_digits(st.files),
+                crate::util::human_size(st.bytes)
+            ));
+            !work.cancelled()
+        })
+    });
+    crate::remote::show_status("");
+    let size = match measured {
+        Ok(st) => st,
+        Err(e) if yy_remote::transfer::is_cancelled(&e) => {
+            crate::remote::show_status("コピーを中止しました");
+            return Ok(());
+        }
+        Err(e) => return Err(with_path(from, e)),
+    };
+    let human = crate::util::human_size(size.bytes);
+    if cross && size.bytes >= COPY_REMOTE_LIMIT {
+        return Err(format!(
+            "「{base}」は {human} あります。\n\n\
+             このパソコンとリモートの間（別の接続先の間を含む）では、{} MB 以上はコピーできません。",
+            COPY_REMOTE_LIMIT >> 20
+        ));
+    }
+    if size.bytes >= COPY_WARN_BYTES {
+        let files = if size.files > 1 {
+            format!("（{} 個のファイル）", group_digits(size.files))
+        } else {
+            String::new()
+        };
+        let text = format!(
+            "「{base}」は {human}{files} あります。\n\nコピーしますか？{}",
+            if cross {
+                "\n（このパソコンとリモートの間で転送するので、時間がかかることがあります）"
+            } else {
+                ""
+            }
+        );
+        let r = unsafe {
+            MessageBoxW(
+                Some(hwnd),
+                &HSTRING::from(text),
+                &HSTRING::from("yyeditor"),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+            )
+        };
+        if r != IDYES {
+            return Ok(());
+        }
+    }
     crate::remote::show_status(&format!("{base} をコピーしています…（Esc で中止）"));
+    let too_big = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = too_big.clone();
     let r = crate::remote::wait(&crate::remote::show_status, move |work| {
         yy_remote::transfer::copy(&src, &dst, &mut |st| {
+            // 数えたあとでファイルが大きくなった場合も、リモートとの間では上限で止める
+            if cross && st.bytes >= COPY_REMOTE_LIMIT {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                return false;
+            }
             work.report(format!(
                 "コピーしています… {} 個のファイル、{}（Esc で中止）",
                 group_digits(st.files),
@@ -1562,6 +1631,13 @@ fn copy_item(from: &Path, to_dir: &Path) -> std::result::Result<(), String> {
             !work.cancelled()
         })
     });
+    if too_big.load(std::sync::atomic::Ordering::Relaxed) {
+        crate::remote::show_status("");
+        return Err(format!(
+            "コピー中に {} MB を超えたため、中止しました（作りかけのコピーは消しました）。",
+            COPY_REMOTE_LIMIT >> 20
+        ));
+    }
     let name = workspace::name_of(&target);
     let msg = match r {
         Ok(st) => {

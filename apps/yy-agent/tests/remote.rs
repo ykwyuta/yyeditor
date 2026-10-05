@@ -321,3 +321,32 @@ fn cancelled_copies_leave_nothing_behind() {
     assert!(!s.work.join("partial-local").exists());
     assert!(!s.work.join("partial-remote").exists());
 }
+
+#[test]
+fn measures_before_copying() {
+    use yy_remote::transfer::{Loc, crosses_network, measure};
+    let s = setup();
+    let session = start(&s);
+    let src = s.work.join("src");
+    tree(&src);
+    let all = &mut |_: &yy_remote::transfer::CopyStats| true;
+    let local = measure(&Loc::Local(src.clone()), all).unwrap();
+    let remote = measure(&Loc::Remote(session.clone(), bytes(&src)), all).unwrap();
+    for st in [&local, &remote] {
+        assert_eq!(st.bytes, 10 + (3 << 20));
+        assert_eq!((st.files, st.dirs, st.skipped), (3, 3, 1));
+    }
+    let file = measure(&Loc::Local(src.join("a.txt")), all).unwrap();
+    assert_eq!((file.files, file.bytes), (1, 5));
+
+    let other = start(&s);
+    let l = Loc::Local(src.clone());
+    let r = Loc::Remote(session.clone(), bytes(&src));
+    assert!(!crosses_network(&l, &l));
+    assert!(crosses_network(&l, &r) && crosses_network(&r, &l));
+    assert!(!crosses_network(
+        &r,
+        &Loc::Remote(session.clone(), b"/x".to_vec())
+    ));
+    assert!(crosses_network(&r, &Loc::Remote(other, b"/x".to_vec())));
+}
