@@ -247,41 +247,46 @@ pub fn set_last_used(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// 絶対パスの根（Windows は `C:\`、それ以外は `/`）。
+    fn root() -> PathBuf {
+        PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" })
+    }
+
     #[test]
     fn parses_and_writes_folders() {
-        let base = Path::new("/ws");
-        let ws = Workspace::parse(
-            "folders = [\"/src/app\", \"docs\", \"../other\", \"/src/app\"]",
-            base,
-        )
-        .unwrap();
+        let r = root();
+        let base = r.join("ws");
+        let app = r.join("src").join("app");
+        let toml = format!(
+            "folders = [{:?}, \"docs\", \"../other\", {:?}]",
+            app.to_string_lossy(),
+            app.to_string_lossy()
+        );
+        let ws = Workspace::parse(&toml, &base).unwrap();
         assert_eq!(
             ws.folders,
-            [
-                PathBuf::from("/src/app"),
-                PathBuf::from("/ws/docs"),
-                PathBuf::from("/other")
-            ]
+            [app.clone(), base.join("docs"), r.join("other")]
         );
-        let text = ws.to_toml(Some(base));
-        assert!(text.contains("\"/src/app\""), "{text}");
+        let text = ws.to_toml(Some(&base));
         assert!(text.contains("\"docs\""), "{text}");
-        assert_eq!(Workspace::parse(&text, base).unwrap(), ws);
-        assert!(Workspace::parse("folder = []", base).is_err());
-        assert_eq!(Workspace::parse("", base).unwrap(), Workspace::default());
+        assert_eq!(Workspace::parse(&text, &base).unwrap(), ws);
+        assert!(Workspace::parse("folder = []", &base).is_err());
+        assert_eq!(Workspace::parse("", &base).unwrap(), Workspace::default());
     }
 
     #[test]
     fn adds_removes_and_finds_roots() {
+        let r = root();
+        let (a, ab) = (r.join("a"), r.join("a").join("b"));
         let mut ws = Workspace::default();
-        assert!(ws.add(Path::new("/a")));
-        assert!(ws.add(Path::new("/a/b")));
-        assert!(!ws.add(Path::new("/a")));
-        assert_eq!(ws.root_of(Path::new("/a/b/c.txt")), Some(Path::new("/a/b")));
-        assert_eq!(ws.root_of(Path::new("/a/x.txt")), Some(Path::new("/a")));
-        assert_eq!(ws.root_of(Path::new("/z.txt")), None);
-        assert!(ws.remove(Path::new("/a")));
-        assert_eq!(ws.folders, [PathBuf::from("/a/b")]);
+        assert!(ws.add(&a));
+        assert!(ws.add(&ab));
+        assert!(!ws.add(&a));
+        assert_eq!(ws.root_of(&ab.join("c.txt")), Some(ab.as_path()));
+        assert_eq!(ws.root_of(&a.join("x.txt")), Some(a.as_path()));
+        assert_eq!(ws.root_of(&r.join("z.txt")), None);
+        assert!(ws.remove(&a));
+        assert_eq!(ws.folders, [ab]);
     }
 
     #[test]
@@ -318,7 +323,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("my.yyworkspace");
         let ws = Workspace {
-            folders: vec![dir.join("proj"), PathBuf::from("/elsewhere")],
+            folders: vec![dir.join("proj"), root().join("elsewhere")],
         };
         ws.save(&file).unwrap();
         let text = std::fs::read_to_string(&file).unwrap();
