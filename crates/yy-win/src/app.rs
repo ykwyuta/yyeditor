@@ -44,6 +44,7 @@ mod csvmode;
 mod hexmode;
 mod previewmode;
 mod syntaxmode;
+mod workspacemode;
 
 pub(crate) use csvmode::colhead_proc;
 use previewmode::ID_PREVIEW;
@@ -57,6 +58,7 @@ use codemode::*;
 use csvmode::*;
 use hexmode::*;
 use syntaxmode::*;
+use workspacemode::*;
 
 // メニュー・アクセラレータのコマンド ID
 const ID_OPEN: u16 = 101;
@@ -294,6 +296,8 @@ pub(crate) struct App {
     preview: previewmode::PreviewPane,
     /// SSH 接続先のファイルの編集（11 章）
     pub(crate) remote: crate::remote::RemoteState,
+    /// ワークスペースとサイドバー（左側）
+    ws: WorkspacePane,
 }
 
 /// 非表示タブの文書と表示位置。検索条件と表示設定はウィンドウ全体で共有する。
@@ -435,6 +439,7 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
         (ctrl_shift, b'X' as u16, ID_HEX_MODE),
         (ctrl_shift, b'K' as u16, ID_CODE_MODE),
         (ctrl_shift, b'R' as u16, ID_RECORD_MODE),
+        (ctrl_shift, b'E' as u16, ID_WS_SIDEBAR),
         (ctrl, VK_OEM_2.0, ID_TOGGLE_COMMENT),
         (ctrl, VK_DIVIDE.0, ID_TOGGLE_COMMENT),
         (ctrl, VK_OEM_6.0, ID_GOTO_BRACKET),
@@ -633,6 +638,8 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         AppendMenuW(bar, MF_POPUP, edit.0 as usize, w!("編集(&E)"))?;
         AppendMenuW(bar, MF_POPUP, search.0 as usize, w!("検索(&S)"))?;
         AppendMenuW(bar, MF_POPUP, view.0 as usize, w!("表示(&V)"))?;
+        let ws = create_workspace_menu()?;
+        AppendMenuW(bar, MF_POPUP, ws.0 as usize, w!("ワークスペース(&W)"))?;
         let csv = create_csv_menu()?;
         AppendMenuW(bar, MF_POPUP, csv.0 as usize, w!("CSV(&C)"))?;
         AppendMenuW(bar, MF_POPUP, help.0 as usize, w!("ヘルプ(&H)"))?;
@@ -762,6 +769,7 @@ impl App {
                 wide_box_line: renderer.wide_box_line(),
             };
             let remote = crate::remote::RemoteState::new(ssh, config.remote.clone());
+            let ws = create_pane(frame, hinstance)?;
             let app = App {
                 frame,
                 view,
@@ -829,10 +837,13 @@ impl App {
                 ui_font: crate::util::ui_font(dpi),
                 preview: Default::default(),
                 remote,
+                ws,
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
             with_app(|a| {
                 a.apply_ui_font();
+                a.rebuild_tree();
+                a.update_workspace_menu();
                 a.refresh_tabs();
                 a.update_line_number_menu();
                 a.update_syntax_menu();
@@ -958,7 +969,7 @@ impl App {
     /// タブ・ステータスバーに画面の部品のフォントを設定する（設定しないとタブは
     /// 古いシステムフォントになり、メニューなどと見た目がそろわない）。
     fn apply_ui_font(&self) {
-        for w in [self.tabbar, self.status] {
+        for w in [self.tabbar, self.status, self.ws.tree] {
             unsafe {
                 SendMessageW(
                     w,
@@ -987,22 +998,26 @@ impl App {
             let mut src = RECT::default();
             let _ = GetWindowRect(self.status, &mut src);
             let sh = src.bottom - src.top;
-            let w = rc.right - rc.left;
+            let full_w = rc.right - rc.left;
+            // ワークスペースのサイドバーを左端に置き、タブ・エディタ・プレビューはその右
+            let left = self.layout_sidebar(full_w, (rc.bottom - rc.top - sh).max(0));
+            let w = full_w - left;
             let tab_h = (32 * GetDpiForWindow(self.frame) as i32 / 96).max(24);
-            let _ = MoveWindow(self.tabbar, 0, 0, w, tab_h, true);
+            let _ = MoveWindow(self.tabbar, left, 0, w, tab_h, true);
             // プレビューを表示していれば右側に置き、エディタ（検索バーを含む）はその左
             let body_h = (rc.bottom - rc.top - sh - tab_h).max(0);
-            let ew = self.layout_preview(w, tab_h, body_h);
+            let ew = self.layout_preview(left, w, tab_h, body_h);
             let bar_h = self.findbar.height();
             self.findbar.layout(ew);
-            let _ = MoveWindow(self.findbar.hwnd, 0, tab_h, ew, bar_h, true);
+            let _ = MoveWindow(self.findbar.hwnd, left, tab_h, ew, bar_h, true);
             // 区切り文字モードでは列見出しを本文の上に置く
             let head_h = self.column_header_height();
             self.colhead_h = head_h;
-            let _ = MoveWindow(self.colhead, 0, tab_h + bar_h, ew, head_h, true);
+            let _ = MoveWindow(self.colhead, left, tab_h + bar_h, ew, head_h, true);
             let _ = ShowWindow(self.colhead, if head_h > 0 { SW_SHOWNA } else { SW_HIDE });
             let h = (body_h - bar_h - head_h).max(0);
-            let _ = MoveWindow(self.view, 0, tab_h + bar_h + head_h, ew, h, true);
+            let _ = MoveWindow(self.view, left, tab_h + bar_h + head_h, ew, h, true);
+            let w = full_w;
             // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗・メッセージ・コード値
             // 最後の -1 は「右端まで」（0 にすると進捗の欄が見えなくなる）
             let dpi = GetDpiForWindow(self.frame).max(96) as i32;
@@ -1054,7 +1069,14 @@ impl App {
             .and_then(|r| yy_remote::RemoteUri::parse(&r.uri))
             .map(|u| format!(" [{}]", u.target()))
             .unwrap_or_default();
-        let title = format!("{mark}{}{host}{read} - yyeditor", self.doc.display_name());
+        let ws = self
+            .workspace_title()
+            .map(|n| format!(" - {n}"))
+            .unwrap_or_default();
+        let title = format!(
+            "{mark}{}{host}{read}{ws} - yyeditor",
+            self.doc.display_name()
+        );
         unsafe {
             let _ = SetWindowTextW(self.frame, &HSTRING::from(title));
         }
@@ -4515,6 +4537,9 @@ fn cmd_copy(hwnd: HWND, cut: bool) {
 }
 
 fn on_command(hwnd: HWND, id: u16) {
+    if on_workspace_command(hwnd, id) {
+        return;
+    }
     match id {
         ID_NEW => {
             with_app(|a| a.new_tab());
@@ -5138,6 +5163,9 @@ pub(crate) extern "system" fn frame_proc(
         WM_NOTIFY => {
             if lparam.0 != 0 {
                 let hdr = unsafe { &*(lparam.0 as *const NMHDR) };
+                if let Some(r) = on_tree_notify(hwnd, hdr, lparam) {
+                    return r;
+                }
                 if hdr.code == TCN_SELCHANGE {
                     let view = with_app(|a| {
                         if hdr.hwndFrom == a.tabbar {
@@ -5160,7 +5188,12 @@ pub(crate) extern "system" fn frame_proc(
         }
         WM_DROPFILES => {
             for p in dropped_files(HDROP(wparam.0 as *mut _)) {
-                open_path(hwnd, p, None, false);
+                // フォルダはワークスペースに加える
+                if p.is_dir() {
+                    with_app(|a| a.add_workspace_folder(&p));
+                } else {
+                    open_path(hwnd, p, None, false);
+                }
             }
             LRESULT(0)
         }
@@ -5175,7 +5208,8 @@ pub(crate) extern "system" fn frame_proc(
                 let mut pt = windows::Win32::Foundation::POINT::default();
                 let _ = GetCursorPos(&mut pt);
                 let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt);
-                with_app(|a| a.on_preview_splitter(pt.x, pt.y)).unwrap_or(false)
+                with_app(|a| a.on_preview_splitter(pt.x, pt.y) || a.on_sidebar_splitter(pt.x, pt.y))
+                    .unwrap_or(false)
             };
             if on {
                 unsafe {
@@ -5193,6 +5227,11 @@ pub(crate) extern "system" fn frame_proc(
                 unsafe {
                     SetCapture(hwnd);
                 }
+            } else if with_app(|a| a.on_sidebar_splitter(x, y)) == Some(true) {
+                with_app(|a| a.ws.dragging = true);
+                unsafe {
+                    SetCapture(hwnd);
+                }
             }
             LRESULT(0)
         }
@@ -5202,13 +5241,17 @@ pub(crate) extern "system" fn frame_proc(
                 if a.preview.dragging {
                     a.drag_preview_splitter(x);
                 }
+                if a.ws.dragging {
+                    a.drag_sidebar_splitter(x);
+                }
             });
             LRESULT(0)
         }
         WM_LBUTTONUP | WM_CAPTURECHANGED => {
-            if with_app(|a| std::mem::take(&mut a.preview.dragging)) == Some(true)
-                && msg == WM_LBUTTONUP
-            {
+            let dragged = with_app(|a| {
+                std::mem::take(&mut a.preview.dragging) | std::mem::take(&mut a.ws.dragging)
+            });
+            if dragged == Some(true) && msg == WM_LBUTTONUP {
                 unsafe {
                     let _ = ReleaseCapture();
                 }

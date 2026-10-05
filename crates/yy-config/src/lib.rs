@@ -4,6 +4,7 @@
 //! から読み込む。ファイルがない・項目が欠けている場合は既定値を使う。
 
 pub mod recent;
+pub mod workspace;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -32,6 +33,7 @@ pub struct Config {
     pub editor: EditorConfig,
     pub view: ViewConfig,
     pub colors: Colors,
+    pub workspace: WorkspaceConfig,
     /// ファイル種類（拡張子 → モード・文字コード等）。M3 以降で使用する。
     pub filetype: BTreeMap<String, FileType>,
     /// SSH 接続先のファイルの編集（11 章 4.4）
@@ -44,10 +46,19 @@ impl Default for Config {
             editor: EditorConfig::default(),
             view: ViewConfig::default(),
             colors: Colors::default(),
+            workspace: WorkspaceConfig::default(),
             filetype: default_filetypes(),
             remote: RemoteConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkspaceConfig {
+    /// 「ターミナルで開く」で起動するコマンドと引数（`{dir}` はフォルダに置き換える）。
+    /// 空なら Windows Terminal（`wt.exe -d {dir}`）、なければコマンド プロンプト
+    pub terminal: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
