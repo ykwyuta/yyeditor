@@ -15,6 +15,7 @@ members = [
     "crates/yy-proto",
     "crates/yy-remote",
     "crates/yy-ssh",
+    "crates/yy-term",
     "crates/yy-win",
     "apps/yyeditor",
     "apps/yy-agent",
@@ -45,6 +46,7 @@ yy-preview = { path = "crates/yy-preview" }
 yy-proto = { path = "crates/yy-proto" }
 yy-remote = { path = "crates/yy-remote" }
 yy-ssh = { path = "crates/yy-ssh" }
+yy-term = { path = "crates/yy-term" }
 yy-agent = { path = "apps/yy-agent" }
 yy-win = { path = "crates/yy-win" }
 

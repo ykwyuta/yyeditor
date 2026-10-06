@@ -41,6 +41,8 @@ struct TestServer {
     auth_attempts: Arc<AtomicUsize>,
     /// 踏み台として中継を頼まれた接続先
     forwards: Arc<Mutex<Vec<String>>>,
+    /// 端末の要求（`pty xterm-256color 80x24`・`resize 100x30`）
+    ptys: Arc<Mutex<Vec<String>>>,
     _rt: tokio::runtime::Runtime,
 }
 
@@ -50,6 +52,7 @@ struct Handler {
     auth_attempts: Arc<AtomicUsize>,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     forwards: Arc<Mutex<Vec<String>>>,
+    ptys: Arc<Mutex<Vec<String>>>,
 }
 
 impl server::Handler for Handler {
@@ -111,6 +114,55 @@ impl server::Handler for Handler {
             }
             Err(_) => reply.reject(ChannelOpenFailure::ConnectFailed).await,
         }
+        Ok(())
+    }
+
+    async fn pty_request(
+        &mut self,
+        id: ChannelId,
+        term: &str,
+        cols: u32,
+        rows: u32,
+        _: u32,
+        _: u32,
+        _: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.ptys
+            .lock()
+            .unwrap()
+            .push(format!("pty {term} {cols}x{rows}"));
+        session.channel_success(id)?;
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        _: ChannelId,
+        cols: u32,
+        rows: u32,
+        _: u32,
+        _: u32,
+        _: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.ptys
+            .lock()
+            .unwrap()
+            .push(format!("resize {cols}x{rows}"));
+        Ok(())
+    }
+
+    /// 対話シェル（端末はないので、標準入力からコマンドを読む `sh`）
+    async fn shell_request(
+        &mut self,
+        id: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let Some(channel) = self.channels.lock().unwrap().remove(&id) else {
+            return Ok(());
+        };
+        session.channel_success(id)?;
+        tokio::spawn(run_command(channel, b"exec sh".to_vec()));
         Ok(())
     }
 
@@ -200,7 +252,9 @@ impl TestServer {
         });
         let auth_attempts = Arc::new(AtomicUsize::new(0));
         let forwards = Arc::new(Mutex::new(Vec::new()));
+        let ptys = Arc::new(Mutex::new(Vec::new()));
         let handler = Handler {
+            ptys: ptys.clone(),
             allowed_keys: Arc::new(allowed_keys),
             auth_attempts: auth_attempts.clone(),
             channels: Arc::default(),
@@ -226,6 +280,7 @@ impl TestServer {
             host_key,
             auth_attempts,
             forwards,
+            ptys,
             _rt: rt,
         }
     }
@@ -946,4 +1001,44 @@ fn remembers_passphrases_when_asked() {
     assert_eq!(p.log(), ["passphrase"]);
     assert!(p.notes.lock().unwrap()[0].contains("保存したパスフレーズでは開けませんでした"));
     assert!(store.keys().is_empty());
+}
+
+#[test]
+fn opens_interactive_shells() {
+    use std::io::{Read, Write};
+    let server = TestServer::start(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let p = Answers {
+        passwords: Mutex::new(vec![PASSWORD.into()]),
+        ..Answers::default()
+    };
+    let t = connector(dir.path())
+        .connect(&server.spec(vec![]), &p, &ConnectLog::new())
+        .unwrap();
+
+    // ログインシェル: 入力したコマンドを実行し、終了コードを返す
+    let mut sh = t.shell("xterm-256color", (80, 24), None).unwrap();
+    (sh.resize)(100, 30);
+    sh.input
+        .write_all(b"echo hello; echo oops >&2; exit 3\n")
+        .unwrap();
+    sh.input.flush().unwrap();
+    let mut out = Vec::new();
+    sh.output.read_to_end(&mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("hello") && out.contains("oops"), "{out:?}");
+    assert_eq!((sh.finish)().unwrap().status, Some(3));
+    let ptys = server.ptys.lock().unwrap().clone();
+    assert_eq!(ptys[0], "pty xterm-256color 80x24");
+    assert!(ptys.contains(&"resize 100x30".to_owned()), "{ptys:?}");
+
+    // コマンドを端末つきで実行する（接続先のフォルダで始めるのに使う）
+    let mut sh = t
+        .shell("xterm-256color", (80, 24), Some(b"cd /tmp && pwd"))
+        .unwrap();
+    drop(sh.input);
+    let mut out = String::new();
+    sh.output.read_to_string(&mut out).unwrap();
+    assert_eq!(out.trim(), "/tmp");
 }

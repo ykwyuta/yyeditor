@@ -30,7 +30,7 @@ use yy_remote::known_hosts::{self, HostKeyStatus};
 use yy_remote::{
     ConnectLog, Connector, ConnectorFactory, ConnectorOptions, Exit, HostKeyCheck, HostKeyQuestion,
     HostSpec, PassphraseRequest, PasswordAnswer, PasswordRequest, PasswordStore, Process, Prompter,
-    STDERR_LIMIT, SavedPassword, Transport,
+    STDERR_LIMIT, SavedPassword, Shell, Transport,
 };
 
 /// 接続を待つ時間の上限
@@ -832,17 +832,53 @@ impl Drop for SshTransport {
     }
 }
 
-impl Transport for SshTransport {
-    fn exec(&self, command: &[u8]) -> io::Result<Process> {
+/// チャネルで始めること。
+enum Start {
+    Exec(Vec<u8>),
+    /// 端末つき（`command` がなければログインシェル）
+    Shell {
+        term: String,
+        cols: u16,
+        rows: u16,
+        command: Option<Vec<u8>>,
+    },
+}
+
+/// 開いたチャネル。
+struct Opened {
+    writer: ChannelWriter,
+    reader: ChannelReader,
+    finish: Box<dyn FnOnce() -> io::Result<Exit> + Send>,
+    half: Arc<russh::ChannelWriteHalf<client::Msg>>,
+}
+
+impl SshTransport {
+    /// セッションのチャネルを開いて `start` を行う。`merge_stderr` なら標準エラー出力も出力に流す。
+    fn open(&self, start: Start, merge_stderr: bool) -> io::Result<Opened> {
         let rt = runtime()?;
         let channel = rt.block_on(async {
             let ch = self.handle.channel_open_session().await?;
-            ch.exec(true, command.to_vec()).await?;
+            match start {
+                Start::Exec(command) => ch.exec(true, command).await?,
+                Start::Shell {
+                    term,
+                    cols,
+                    rows,
+                    command,
+                } => {
+                    ch.request_pty(true, &term, u32::from(cols), u32::from(rows), 0, 0, &[])
+                        .await?;
+                    match command {
+                        Some(c) => ch.exec(true, c).await?,
+                        None => ch.request_shell(true).await?,
+                    }
+                }
+            }
             Ok::<_, russh::Error>(ch)
         });
         let channel = channel.map_err(ssh_error)?;
         let (mut read_half, write_half) = channel.split();
-        // 標準出力は数を限った受け渡し口に流す（読む側が遅ければ SSH のウィンドウで送信を止める）
+        // 出力は数を限った受け渡し口に流す（読む側が遅ければ SSH のウィンドウで送信を止める）
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
         let (exit_tx, exit_rx) = std::sync::mpsc::channel::<Exit>();
         rt.spawn(async move {
@@ -855,6 +891,13 @@ impl Transport for SshTransport {
                             && tx.send(data.to_vec()).await.is_err()
                         {
                             // 読む側がいなくなった
+                            out = None;
+                        }
+                    }
+                    ChannelMsg::ExtendedData { data, ext: 1 } if merge_stderr => {
+                        if let Some(tx) = &out
+                            && tx.send(data.to_vec()).await.is_err()
+                        {
                             out = None;
                         }
                     }
@@ -877,9 +920,10 @@ impl Transport for SshTransport {
             drop(out);
             let _ = exit_tx.send(exit);
         });
+        let half = Arc::new(write_half);
         let writer = ChannelWriter {
-            inner: Some(Box::pin(write_half.make_writer())),
-            half: Some(write_half),
+            inner: Some(Box::pin(half.make_writer())),
+            half: Some(half.clone()),
         };
         let reader = ChannelReader {
             rx: out_rx,
@@ -891,7 +935,48 @@ impl Transport for SshTransport {
                 .recv()
                 .map_err(|_| io::Error::other("コマンドの終了を受け取れませんでした"))
         });
-        Ok(Process::new(Box::new(writer), Box::new(reader), finish))
+        Ok(Opened {
+            writer,
+            reader,
+            finish,
+            half,
+        })
+    }
+}
+
+impl Transport for SshTransport {
+    fn exec(&self, command: &[u8]) -> io::Result<Process> {
+        let o = self.open(Start::Exec(command.to_vec()), false)?;
+        Ok(Process::new(
+            Box::new(o.writer),
+            Box::new(o.reader),
+            o.finish,
+        ))
+    }
+
+    fn shell(&self, term: &str, size: (u16, u16), command: Option<&[u8]>) -> io::Result<Shell> {
+        let o = self.open(
+            Start::Shell {
+                term: term.to_owned(),
+                cols: size.0,
+                rows: size.1,
+                command: command.map(<[u8]>::to_vec),
+            },
+            true,
+        )?;
+        let half = o.half;
+        let resize = Box::new(move |cols: u16, rows: u16| {
+            // 送るだけ（応答は待たない）。入力より先に届くよう、この場で送る
+            if let Ok(rt) = runtime() {
+                let _ = rt.block_on(half.window_change(u32::from(cols), u32::from(rows), 0, 0));
+            }
+        });
+        Ok(Shell {
+            input: Box::new(o.writer),
+            output: Box::new(o.reader),
+            resize,
+            finish: o.finish,
+        })
     }
 
     fn is_closed(&self) -> bool {
@@ -927,7 +1012,7 @@ type AsyncWriter = Pin<Box<dyn tokio::io::AsyncWrite + Send>>;
 
 struct ChannelWriter {
     inner: Option<AsyncWriter>,
-    half: Option<russh::ChannelWriteHalf<client::Msg>>,
+    half: Option<Arc<russh::ChannelWriteHalf<client::Msg>>>,
 }
 
 impl Write for ChannelWriter {

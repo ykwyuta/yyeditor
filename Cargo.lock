@@ -2943,6 +2943,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-term"
+version = "0.1.0"
+dependencies = [
+ "unicode-width",
+]
+
+[[package]]
 name = "yy-win"
 version = "0.1.0"
 dependencies = [

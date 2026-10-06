@@ -34,6 +34,26 @@ pub trait Transport: Send + Sync {
     fn exec(&self, command: &[u8]) -> io::Result<Process>;
     /// 接続が切れているか。
     fn is_closed(&self) -> bool;
+    /// 端末（PTY）つきの対話シェルを起動する（ターミナル。12 章）。`command` を指定すると
+    /// シェルの代わりにそのコマンドを端末つきで実行する。
+    fn shell(&self, _term: &str, _size: (u16, u16), _command: Option<&[u8]>) -> io::Result<Shell> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "この接続では対話シェルを起動できません",
+        ))
+    }
+}
+
+/// 端末つきの対話シェル。
+pub struct Shell {
+    /// キー入力（閉じると相手には EOF が届く）
+    pub input: Box<dyn Write + Send>,
+    /// 端末への出力（標準出力と標準エラー出力をまとめたもの）
+    pub output: Box<dyn Read + Send>,
+    /// 端末の大きさ（桁, 行）を知らせる
+    pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
+    /// 終わるまで待って結果を返す
+    pub finish: Box<dyn FnOnce() -> io::Result<Exit> + Send>,
 }
 
 /// 起動したコマンド。
