@@ -200,10 +200,28 @@ pub(crate) fn create_pane(frame: HWND, instance: HINSTANCE) -> Result<WorkspaceP
     })
 }
 
-/// フォルダをターミナルで開く。`custom` は設定のコマンド（空なら Windows Terminal、
-/// なければコマンド プロンプト）。
+/// 実行ファイルと同じフォルダの yyterm（12 章。なければ `None`）。
+pub(crate) fn yyterm_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.parent()?.join("yyterm.exe");
+    exe.is_file().then_some(exe)
+}
+
+/// フォルダをターミナルで開く。`custom` は設定のコマンド（空なら yyterm、なければ Windows Terminal、
+/// なければコマンド プロンプト）。リモートのフォルダ（`ssh://…`）は yyterm だけで開ける。
 pub(crate) fn open_terminal(dir: &Path, custom: &[String]) -> std::result::Result<(), String> {
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    if remote_uri(dir).is_some() || custom.is_empty() {
+        if let Some(t) = yyterm_exe() {
+            return Command::new(&t)
+                .arg(dir)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("{}: {e}", t.display()));
+        }
+        if remote_uri(dir).is_some() {
+            return Err("リモートのフォルダは yyterm（yyterm.exe）で開きます。".into());
+        }
+    }
     if let Some((cmd, args)) = custom.split_first() {
         let d = dir.to_string_lossy();
         return Command::new(cmd)
@@ -954,6 +972,10 @@ fn context_menu(hwnd: HWND, tree: HWND) {
                         add(CM_GREP, "フォルダ内を検索 (Grep)(&F)...");
                     }
                     sep();
+                } else if yyterm_exe().is_some() {
+                    // リモートのフォルダは yyterm の SSH で開く
+                    add(CM_TERMINAL, "ターミナルで開く(&T)");
+                    sep();
                 }
                 add(CM_COPY_PATH, "パスをコピー(&C)");
                 add(CM_COPY_RELATIVE, "相対パスをコピー(&R)");
@@ -1025,7 +1047,7 @@ fn run_context_command(hwnd: HWND, cmd: u32, item: HTREEITEM, node: Option<(Path
     let dir = if is_dir {
         path.clone()
     } else {
-        path.parent().map(|p| p.to_owned()).unwrap_or_default()
+        workspace::parent(&path).unwrap_or_default()
     };
     let result = match cmd {
         CM_OPEN => {
@@ -1116,8 +1138,8 @@ pub(crate) fn cmd_add_remote_folder(hwnd: HWND) {
             .node_of(a.selected_item())
             .and_then(|i| a.ws.nodes[i].remote());
         (
-            a.remote.available(),
-            selected.or_else(|| a.remote.last.clone()),
+            crate::remote::available(),
+            selected.or_else(crate::remote::last),
         )
     }) else {
         return;
@@ -1141,14 +1163,18 @@ pub(crate) fn cmd_add_remote_folder(hwnd: HWND) {
     {
         let dir = PathBuf::from(p.uri.to_string());
         with_app(|a| {
-            a.remote.last = Some(p.uri.clone());
+            crate::remote::set_last(p.uri.clone());
             a.add_workspace_folder(&dir);
         });
     }
 }
 
 /// ワークスペースのファイルを選ぶ（`save` なら保存先）。
-fn pick_workspace_file(owner: HWND, save: bool, current: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn pick_workspace_file(
+    owner: HWND,
+    save: bool,
+    current: Option<&Path>,
+) -> Option<PathBuf> {
     use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
     unsafe {
         let filters = [COMDLG_FILTERSPEC {

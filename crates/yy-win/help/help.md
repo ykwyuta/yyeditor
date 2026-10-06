@@ -9,6 +9,7 @@ yyeditor は、数 GB のファイルもすぐに開ける Windows 向けの軽�
 - [ファイルを開く・保存する](#files)
 - [リモート（SSH）のファイル](#remote)
 - [ワークスペース](#workspace)
+- [ターミナル（yyterm）](#terminal)
 - [タブと比較](#tabs)
 - [編集](#editing)
 - [複数のカーソルと矩形選択](#multi)
@@ -117,7 +118,8 @@ VS Code のワークスペースのように、作業に使う **起点のフォ
   ファイルはダブルクリックか Enter で開きます。項目にマウスを置くとフルパスを表示します。
 - **右クリックのメニュー**:
   - **ターミナルで開く**: そのフォルダ（ファイルならそのファイルのあるフォルダ）を作業フォルダにして
-    ターミナルを開きます。Windows Terminal があればそれを、なければコマンド プロンプトを使います
+    ターミナルを開きます。yyeditor と同じフォルダに [yyterm](#terminal) があればそれを（リモートのフォルダも
+    SSH で開けます）、なければ Windows Terminal、それもなければコマンド プロンプトを使います
     （設定の `[workspace]` の `terminal` で変えられます）。
   - **エクスプローラーで開く**: フォルダを開きます（ファイルならそのフォルダを開いてファイルを選びます）。
   - **フォルダ内を検索 (Grep)**: そのフォルダを指定して [ファイルから検索](#search) を開きます。
@@ -160,6 +162,31 @@ VS Code のワークスペースのように、作業に使う **起点のフォ
   - ワークスペースのファイルには `ssh://接続先/パス` の形で書きます。
   - リモートの項目では、ターミナル・エクスプローラーで開く、フォルダ内を検索（Grep）は使えません。
     「パスをコピー」は接続先のパス（`/home/...`）をコピーします。
+
+## ターミナル（yyterm） {#terminal}
+
+yyterm は、yyeditor と同じ部品で作ったターミナルです（`yyterm.exe`。yyeditor と同じフォルダに置きます）。
+フォント（同梱の UDEV Gothic）、設定ファイル、SSH の接続設定・ホスト鍵・保存したパスワード、ワークスペースを
+yyeditor と共通に使います。
+
+- **手元のシェル**: 既定は PowerShell 7、なければ Windows PowerShell、なければコマンド プロンプトです
+  （設定の `[terminal]` の `shell` で変えられます。例: `["cmd.exe"]`、`["wsl.exe"]`）。
+- **SSH で接続**（Ctrl+Shift+O）: 接続先（`ユーザー@ホスト:ポート` または `~/.ssh/config` の Host の名前）を
+  入力します。yyeditor と同じ組み込みの SSH を使い、OpenSSH（ssh.exe）は使いません。踏み台・プロキシ・
+  パスワードの保存・接続の記録も [リモート（SSH）のファイル](#remote) と同じです。ターミナルだけの接続では
+  エージェントを置かないので、Linux 以外の接続先にも接続できます。
+- **ワークスペース**（Ctrl+Shift+E）: フォルダをダブルクリック（Enter）すると、そこでターミナルを開きます
+  （リモートのフォルダは SSH で接続して、そのフォルダで始めます）。ファイルは yyeditor で開きます。
+  ワークスペースのメニューで、新しいワークスペース・開く・名前を付けて保存・フォルダの追加ができます。
+- **タブ**: 新しいタブ（Ctrl+Shift+T。選んでいるタブと同じ場所で開きます）、閉じる（Ctrl+Shift+W）、
+  切り替え（Ctrl+Tab・Ctrl+Shift+Tab）。シェルが終わったタブは Enter で閉じます。
+- **コピー・貼り付け**: ドラッグで選択、ダブルクリックで単語を選択します。Ctrl+Shift+C（Ctrl+Insert）で
+  コピー、Ctrl+Shift+V（Shift+Insert）で貼り付け。右クリックは、選択していればコピー、していなければ
+  貼り付けです。vim や tmux などがマウスを使っているときは、Shift を押しながら選択します。
+- **スクロールバック**: Shift+PageUp・PageDown・↑・↓、マウスのホイール、スクロールバー
+  （less・vim などの全画面のプログラムでは、ホイールはカーソルキーとして送ります）。
+- **文字の大きさ**: Ctrl++・Ctrl+-・Ctrl+0、Ctrl+ホイール。
+- **起動の引数**: `yyterm.exe [フォルダ | ssh://接続先/パス | ユーザー@ホスト]`。
 
 ## タブと比較 {#tabs}
 
@@ -481,7 +508,7 @@ show_whitespace = true        # 空白・タブ・改行を記号で表示
 wheel_lines = 3               # ホイール 1 目盛りでスクロールする行数
 
 [workspace]
-# 「ターミナルで開く」のコマンド（{dir} はフォルダ）。空なら Windows Terminal → コマンド プロンプト
+# 「ターミナルで開く」のコマンド（{dir} はフォルダ）。空なら yyterm → Windows Terminal → コマンド プロンプト
 terminal = ["pwsh.exe", "-NoExit", "-WorkingDirectory", "{dir}"]
 
 [colors]
@@ -503,6 +530,15 @@ keepalive_secs = 15           # 接続の死活確認の間隔（秒）
 agent_dir = ""                # エージェントを置くフォルダ（空なら ~/.yyeditor/agent）
 proxy = ""                    # すべての接続先に使うプロキシ（例: "http://proxy:8080"、"socks5://user@socks:1080"）
 remember_passwords = true     # パスワード・パスフレーズを資格情報マネージャーに保存できるようにする
+
+[terminal]                    # ターミナル（yyterm）
+shell = []                    # 手元のシェルのコマンドと引数（空なら pwsh → powershell → cmd）
+font_family = ""              # 空なら [editor] と同じ
+font_size = 0.0               # 0 なら [editor] と同じ
+scrollback = 10000            # スクロールバックの行数
+ambiguous_wide = false        # ○ ※ などを全角とする（接続先の設定と合わせる）
+term = "xterm-256color"       # SSH の接続先に知らせる端末の種類
+copy_on_select = false        # 選択したら自動でコピーする
 
 [remote.host.build]           # 接続先の名前ごとの設定（書いていない項目は ~/.ssh/config）
 hostname = "build01.example.co.jp"

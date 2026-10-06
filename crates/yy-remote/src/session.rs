@@ -155,6 +155,11 @@ impl Session {
         })
     }
 
+    /// SSH の接続（ターミナルのシェルなど、エージェントを使わない用途にも使う）。
+    pub fn transport(&self) -> Arc<dyn Transport> {
+        self.transport.clone()
+    }
+
     /// 接続先のホームフォルダ。
     pub fn home(&self) -> &[u8] {
         &self.home

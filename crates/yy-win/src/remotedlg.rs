@@ -85,7 +85,7 @@ pub(crate) fn show(
     encoding: Option<Encoding>,
     bom: bool,
 ) -> Option<Picked> {
-    let targets = crate::app::with_app(|a| a.remote.known_targets()).unwrap_or_default();
+    let targets = crate::remote::with_state(|r| r.known_targets()).unwrap_or_default();
     let (target, dir, name) = match &initial {
         Some(u) => {
             let is_file = mode == Mode::Save || (mode == Mode::Open && !u.path.ends_with(b"/"));
@@ -559,7 +559,7 @@ fn accept_name(hwnd: HWND) {
                 MessageBoxW(
                     Some(hwnd),
                     &HSTRING::from(text),
-                    &HSTRING::from("yyeditor"),
+                    &HSTRING::from(crate::util::app_name()),
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
                 )
             };

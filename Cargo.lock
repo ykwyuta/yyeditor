@@ -2969,10 +2969,19 @@ dependencies = [
  "yy-proto",
  "yy-remote",
  "yy-syntax",
+ "yy-term",
 ]
 
 [[package]]
 name = "yyeditor"
+version = "0.1.0"
+dependencies = [
+ "yy-ssh",
+ "yy-win",
+]
+
+[[package]]
+name = "yyterm"
 version = "0.1.0"
 dependencies = [
  "yy-ssh",

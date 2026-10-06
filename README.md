@@ -99,6 +99,16 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 - 保存は、接続先の同じフォルダの一時ファイルに書いてから置き換えます（権限・所有者・シンボリックリンク・ハードリンクを保つ）。開いたあとで外部で変更されていれば、上書きするか尋ねます。
 - 今のところ、ファイルは全体を取り寄せてから開きます（M9.2 で表示範囲だけの取り寄せにします）。`sudo` による保存には対応しません。
 
+### ターミナル（yyterm）
+
+提案書 [12 章](docs/proposal/12-terminal.md) の方式で、エディタと同じクレートを使った別のアプリとしてターミナル（`yyterm.exe`）を作っています。
+
+- 手元のシェルは ConPTY（Windows 10 1809 以降）で動かします。既定は PowerShell 7、なければ Windows PowerShell、なければコマンド プロンプト（設定 `[terminal] shell`）。
+- SSH はエディタと同じ組み込みの SSH（OpenSSH を使わない）で、接続設定・踏み台・プロキシ・ホスト鍵・保存したパスワード・接続の記録も共通です（Ctrl+Shift+O）。ターミナルだけの接続ではエージェントを置かないので、Linux 以外の接続先にも使えます。
+- フォントはエディタと同じ同梱の UDEV Gothic。全角・結合文字、256 色・24 ビット色、代替画面（vim・less など）、マウス、ブラケット ペースト、IME の入力に対応します。
+- ワークスペースはエディタと同じ `*.yyworkspace`。サイドバー（Ctrl+Shift+E）のフォルダをダブルクリックするとそこでターミナルを開き（リモートのフォルダは SSH）、ファイルはエディタで開きます。エディタのワークスペースの「ターミナルで開く」は、yyterm.exe が同じフォルダにあれば yyterm で開きます。
+- タブ（Ctrl+Shift+T・Ctrl+Shift+W・Ctrl+Tab）、コピー・貼り付け（Ctrl+Shift+C/V、右クリック）、スクロールバック（Shift+PageUp/PageDown、ホイール）、文字の大きさ（Ctrl++/-/0）。
+
 ### 対応している文字コード
 
 | 文字コード | 備考 |
@@ -245,13 +255,15 @@ crates/
   yy-proto/    リモート編集のプロトコル（端末とエージェントで共有するメッセージとフレーム）
   yy-remote/   リモート編集の端末側（エージェントの配置、要求と応答、~/.ssh/config・known_hosts の読み取り）
   yy-ssh/      組み込みの SSH クライアント（russh + ring。OpenSSH を使わない）
+  yy-term/     ターミナルの中核（制御シーケンスの解釈、画面、スクロールバック、キーの送り方。OS 非依存）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
+apps/yyterm/   ターミナルの実行ファイル（yy-win の term モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yy-agent/ SSH 接続先に置くエージェント（Linux 用、musl で静的リンク）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
                     ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
-tools/gen-icon/     アイコン（apps/yyeditor/res/yyeditor.ico）の生成（Python + Pillow）
+tools/gen-icon/     アイコン（apps/yyeditor/res/yyeditor.ico・apps/yyterm/res/yyterm.ico）の生成（Python + Pillow）
 tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の取得（npm から）
 ```
 
@@ -262,8 +274,9 @@ tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の�
 Windows（MSVC）:
 
 ```sh
-cargo build --release -p yyeditor
+cargo build --release -p yyeditor -p yyterm
 target\release\yyeditor.exe [開くファイル]
+target\release\yyterm.exe [フォルダ | ssh://接続先/パス | ユーザー@ホスト]
 ```
 
 リモート編集のエージェント（Linux 用。exe と同じフォルダの `agents\yy-agent-x86_64-linux` に置く）:
@@ -281,7 +294,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Linux から Windows UI 層の型検査のみ行う場合
 rustup target add x86_64-pc-windows-msvc
 # （組み込みの SSH が使う ring は Windows SDK がないと C のビルドができないので外す）
-cargo check -p yy-win -p yyeditor --no-default-features --target x86_64-pc-windows-msvc
+cargo check -p yy-win -p yyeditor -p yyterm --no-default-features --target x86_64-pc-windows-msvc
 ```
 
 巨大ファイルでの性能確認:

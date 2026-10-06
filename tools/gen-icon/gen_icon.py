@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""yyeditor のアイコン（apps/yyeditor/res/yyeditor.ico）を作る。
+"""yyeditor と yyterm のアイコン（apps/yyeditor/res/yyeditor.ico、apps/yyterm/res/yyterm.ico）を作る。
 
     python3 tools/gen-icon/gen_icon.py
 
-角丸の青い四角に白の「YY」と、その下にテキストの行を表す線を描く。文字は図形で描くので
-フォントに依存しない。各サイズを 4 倍で描いて縮小する。Pillow が必要。
+角丸の四角に白の「YY」を描く。エディタは青地にテキストの行を表す線、ターミナルは黒地に
+プロンプト（`>_`）。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
+Pillow が必要。
 """
 
 import io
@@ -15,8 +16,9 @@ from PIL import Image, ImageDraw
 
 SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256]
 SCALE = 4
-TOP = (0x3B, 0x82, 0xF6)
-BOTTOM = (0x1D, 0x4E, 0xD8)
+EDITOR = ((0x3B, 0x82, 0xF6), (0x1D, 0x4E, 0xD8))
+TERMINAL = ((0x37, 0x41, 0x51), (0x11, 0x18, 0x27))
+PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
 
@@ -34,7 +36,8 @@ def draw_y(d, x, y, w, h, t, a):
     )
 
 
-def render(size):
+def render(size, terminal=False):
+    top_c, bottom_c = TERMINAL if terminal else EDITOR
     n = size * SCALE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     # 縦のグラデーション
@@ -42,7 +45,7 @@ def render(size):
     gd = ImageDraw.Draw(grad)
     for yy in range(n):
         f = yy / max(n - 1, 1)
-        c = tuple(round(TOP[i] + (BOTTOM[i] - TOP[i]) * f) for i in range(3))
+        c = tuple(round(top_c[i] + (bottom_c[i] - top_c[i]) * f) for i in range(3))
         gd.line([(0, yy), (n, yy)], fill=c + (255,))
     mask = Image.new("L", (n, n), 0)
     margin = n * (0.03 if size >= 32 else 0.0)
@@ -66,7 +69,15 @@ def render(size):
     x0 = (n - (w * 2 + gap)) / 2
     draw_y(d, x0, top, w, h, t, a)
     draw_y(d, x0 + w + gap, top, w, h, t, a)
-    if not small:
+    if not small and terminal:
+        # プロンプト「>_」
+        lt = n * 0.06
+        left, yy = n * 0.2, n * 0.7
+        size_p = n * 0.16
+        d.line([(left, yy), (left + size_p * 0.7, yy + size_p / 2), (left, yy + size_p)], fill=PROMPT, width=round(lt))
+        ux = left + size_p * 0.95
+        d.rectangle([ux, yy + size_p - lt, ux + size_p * 0.9, yy + size_p], fill=PROMPT)
+    elif not small:
         # テキストの行
         lt = n * 0.055
         left = n * 0.18
@@ -109,11 +120,13 @@ def write_ico(path, images):
 
 def main():
     root = Path(__file__).resolve().parents[2]
-    out = root / "apps" / "yyeditor" / "res" / "yyeditor.ico"
-    images = [render(s) for s in SIZES]
-    write_ico(out, images)
-    images[-1].save(root / "apps" / "yyeditor" / "res" / "yyeditor-256.png")
-    print(out)
+    for app, terminal in [("yyeditor", False), ("yyterm", True)]:
+        res = root / "apps" / app / "res"
+        res.mkdir(parents=True, exist_ok=True)
+        images = [render(s, terminal) for s in SIZES]
+        write_ico(res / f"{app}.ico", images)
+        images[-1].save(res / f"{app}-256.png")
+        print(res / f"{app}.ico")
 
 
 if __name__ == "__main__":

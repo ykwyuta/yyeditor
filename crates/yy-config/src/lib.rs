@@ -38,6 +38,8 @@ pub struct Config {
     pub filetype: BTreeMap<String, FileType>,
     /// SSH 接続先のファイルの編集（11 章 4.4）
     pub remote: RemoteConfig,
+    /// ターミナル（yyterm。12 章）
+    pub terminal: TerminalConfig,
 }
 
 impl Default for Config {
@@ -49,6 +51,42 @@ impl Default for Config {
             workspace: WorkspaceConfig::default(),
             filetype: default_filetypes(),
             remote: RemoteConfig::default(),
+            terminal: TerminalConfig::default(),
+        }
+    }
+}
+
+/// ターミナル（yyterm）の設定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TerminalConfig {
+    /// 手元で起動するシェルのコマンドと引数。空なら PowerShell 7（pwsh.exe）、なければ
+    /// Windows PowerShell、なければコマンド プロンプト
+    pub shell: Vec<String>,
+    /// フォント名（空ならエディタと同じ。既定は同梱の UDEV Gothic）
+    pub font_family: String,
+    /// フォントサイズ（ポイント。0 ならエディタと同じ）
+    pub font_size: f32,
+    /// スクロールバックの行数
+    pub scrollback: u32,
+    /// 東アジアの幅が曖昧な文字（○、※ など）を全角として扱う（接続先の設定と合わせる）
+    pub ambiguous_wide: bool,
+    /// SSH の接続先に知らせる端末の種類（TERM）
+    pub term: String,
+    /// 選択したら自動でコピーする
+    pub copy_on_select: bool,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        TerminalConfig {
+            shell: Vec::new(),
+            font_family: String::new(),
+            font_size: 0.0,
+            scrollback: 10_000,
+            ambiguous_wide: false,
+            term: "xterm-256color".into(),
+            copy_on_select: false,
         }
     }
 }
@@ -529,6 +567,8 @@ mod tests {
         .unwrap();
         assert!(c.remote.read_ssh_config);
         assert!(c.remote.remember_passwords);
+        assert_eq!(c.terminal.scrollback, 10_000);
+        assert_eq!(c.terminal.term, "xterm-256color");
         assert_eq!(c.remote.agent_dir, "/work/agent");
         let h = &c.remote.host["build"];
         assert_eq!(h.hostname.as_deref(), Some("build01.example.co.jp"));

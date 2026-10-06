@@ -1,0 +1,25 @@
+[package]
+name = "yyterm"
+description = "Terminal for Windows built from yyeditor's crates (ConPTY, built-in SSH, workspaces)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# マニフェストとアイコンの埋め込みは yyeditor と同じ処理（ファイルは res/yyterm.*）
+build = "../yyeditor/build.rs"
+
+[[bin]]
+name = "yyterm"
+path = "src/main.rs"
+
+[features]
+default = ["ssh"]
+# OpenSSH を使わない組み込みの SSH クライアント
+ssh = ["dep:yy-ssh"]
+
+[target.'cfg(windows)'.dependencies]
+yy-win.workspace = true
+yy-ssh = { workspace = true, optional = true }
+
+[lints]
+workspace = true

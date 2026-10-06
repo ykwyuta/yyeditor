@@ -65,7 +65,7 @@ jobs:
       - name: test
         run: cargo test --workspace
       - name: build release
-        run: cargo build --release -p yyeditor
+        run: cargo build --release -p yyeditor -p yyterm
       # エージェントは exe と同じフォルダの agents\ に置いて配布する（11 章 6.2）
       - uses: actions/download-artifact@v4
         with:
@@ -73,7 +73,9 @@ jobs:
           path: dist/agents
       - name: collect
         shell: pwsh
-        run: Copy-Item target/release/yyeditor.exe dist/
+        run: |
+          Copy-Item target/release/yyeditor.exe dist/
+          Copy-Item target/release/yyterm.exe dist/
       - uses: actions/upload-artifact@v4
         with:
           name: yyeditor-windows-x64
@@ -97,4 +99,4 @@ jobs:
           rustup target add x86_64-pc-windows-msvc
           # 組み込みの SSH（ring）は C のビルドに Windows SDK が要るので、ここでは外して確かめる
           # （SSH を含むビルドは Windows のジョブで行う）
-          cargo check -p yy-win -p yyeditor --no-default-features --target x86_64-pc-windows-msvc
+          cargo check -p yy-win -p yyeditor -p yyterm --no-default-features --target x86_64-pc-windows-msvc

@@ -54,6 +54,8 @@ pub struct Shell {
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
     /// 終わるまで待って結果を返す
     pub finish: Box<dyn FnOnce() -> io::Result<Exit> + Send>,
+    /// チャネルを閉じる（タブを閉じたとき。動いているプログラムには SIGHUP が届く）
+    pub close: Box<dyn Fn() + Send + Sync>,
 }
 
 /// 起動したコマンド。

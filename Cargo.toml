@@ -18,6 +18,7 @@ members = [
     "crates/yy-term",
     "crates/yy-win",
     "apps/yyeditor",
+    "apps/yyterm",
     "apps/yy-agent",
     "tools/gen-bigfile",
     "tools/gen-tables",

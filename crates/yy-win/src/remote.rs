@@ -24,7 +24,7 @@ use yy_remote::uri::{RemoteUri, Target};
 use yy_remote::{
     AgentFiles, ConnectLog, Connector, ConnectorFactory, ConnectorOptions, FileInfo, HostKeyCheck,
     HostKeyQuestion, PassphraseRequest, PasswordAnswer, PasswordRequest, Prompter, Session,
-    UploadOutcome,
+    Transport, UploadOutcome,
 };
 
 use crate::app::with_app;
@@ -43,6 +43,8 @@ pub(crate) struct RemoteState {
     factory: Option<ConnectorFactory>,
     connector: Option<Arc<dyn Connector>>,
     sessions: Vec<(Target, Arc<Session>)>,
+    /// エージェントを使わない接続（ターミナル）
+    transports: Vec<(Target, Arc<dyn Transport>)>,
     config: RemoteConfig,
     /// 最後に使った場所（ファイル選択の初期値）
     pub(crate) last: Option<RemoteUri>,
@@ -54,6 +56,7 @@ impl RemoteState {
             factory,
             connector: None,
             sessions: Vec::new(),
+            transports: Vec::new(),
             config,
             last: None,
         }
@@ -220,8 +223,52 @@ impl Work {
     }
 }
 
+/// リモート接続を使うアプリ（エディタ・ターミナル）。
+pub(crate) struct Host {
+    /// 問い合わせ・進みの知らせを受けるフレームのウィンドウ
+    pub frame: HWND,
+    /// ステータスバーに表示する
+    pub status: fn(&str),
+}
+
+thread_local! {
+    static STATE: std::cell::RefCell<Option<RemoteState>> = const { std::cell::RefCell::new(None) };
+    static HOST: std::cell::RefCell<Option<Host>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 接続先の状態とアプリを登録する（UI スレッドで 1 回）。
+pub(crate) fn install(state: RemoteState, host: Host) {
+    STATE.with(|s| *s.borrow_mut() = Some(state));
+    HOST.with(|h| *h.borrow_mut() = Some(host));
+}
+
+/// 接続先の状態を使う（モーダルな処理の間は借りたままにしないこと）。
+pub(crate) fn with_state<R>(f: impl FnOnce(&mut RemoteState) -> R) -> Option<R> {
+    STATE.with(|s| s.try_borrow_mut().ok()?.as_mut().map(f))
+}
+
+/// SSH の実装が組み込まれているか。
+pub(crate) fn available() -> bool {
+    with_state(|r| r.available()).unwrap_or(false)
+}
+
+/// 最後に使った場所。
+pub(crate) fn last() -> Option<RemoteUri> {
+    with_state(|r| r.last.clone()).flatten()
+}
+
+pub(crate) fn set_last(uri: RemoteUri) {
+    with_state(|r| r.last = Some(uri));
+}
+
+/// 接続済みなら `target` のセッション（接続はしない）。
+pub(crate) fn connected(target: &Target) -> Option<Arc<Session>> {
+    with_state(|r| r.connected(target)).flatten()
+}
+
 fn frame() -> HWND {
-    with_app(|a| a.frame_hwnd()).unwrap_or_default()
+    HOST.with(|h| h.borrow().as_ref().map(|h| h.frame))
+        .unwrap_or_default()
 }
 
 /// `f` をバックグラウンドで実行し、終わるまで UI のメッセージを処理しながら待つ。
@@ -294,7 +341,9 @@ pub(crate) fn wait<T: Send + 'static>(
 
 /// 進みをステータスバーに表示する。
 pub(crate) fn show_status(text: &str) {
-    with_app(|a| a.show_status_message(text));
+    if let Some(f) = HOST.with(|h| h.borrow().as_ref().map(|h| h.status)) {
+        f(text);
+    }
 }
 
 // ---- 接続中の問い合わせ -----------------------------------------------------------
@@ -569,7 +618,7 @@ fn message_box(owner: HWND, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_R
         MessageBoxW(
             Some(owner),
             &HSTRING::from(text),
-            &HSTRING::from("yyeditor"),
+            &HSTRING::from(crate::util::app_name()),
             style,
         )
     }
@@ -579,17 +628,61 @@ fn message_box(owner: HWND, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_R
 
 /// `target` のセッション。なければ接続してエージェントを起動する（接続中は `show` に表示）。
 pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Session>, String> {
-    enum Prepared {
-        Ready(Arc<Session>),
-        Connect(Arc<dyn Connector>, Box<yy_remote::HostSpec>),
-        Unavailable,
+    if let Some(s) = with_state(|r| r.live_session(target)).flatten() {
+        return Ok(s);
     }
-    let log = Arc::new(ConnectLog::new());
-    let prepared = with_app(|a| {
-        let r = &mut a.remote;
+    let files = AgentFiles::beside_exe();
+    let s = connect(target, show, move |connector, spec, prompter, log| {
+        Session::connect(connector.as_ref(), &spec, &prompter, &files, &log)
+    })?;
+    let s = Arc::new(s);
+    with_state(|r| r.sessions.push((target.clone(), s.clone())));
+    Ok(s)
+}
+
+/// `target` への SSH の接続（ターミナル用。エージェントは使わない）。接続済みのセッションが
+/// あればその接続を使い、なければ接続する（接続中は `show` に表示）。
+pub(crate) fn transport(
+    target: &Target,
+    show: &dyn Fn(&str),
+) -> Result<Arc<dyn Transport>, String> {
+    let live = with_state(|r| {
         if let Some(s) = r.live_session(target) {
-            return Prepared::Ready(s);
+            return Some(s.transport());
         }
+        r.transports.retain(|(_, t)| !t.is_closed());
+        r.transports
+            .iter()
+            .find(|(t, _)| t.same(target))
+            .map(|(_, t)| t.clone())
+    })
+    .flatten();
+    if let Some(t) = live {
+        return Ok(t);
+    }
+    let t = connect(target, show, move |connector, spec, prompter, log| {
+        connector.connect(&spec, &prompter, &log)
+    })?;
+    with_state(|r| r.transports.push((target.clone(), t.clone())));
+    Ok(t)
+}
+
+/// `target` に接続する（`op` を接続中の問い合わせを受けるスレッドで行う）。接続の記録を残し、
+/// 失敗したらその最後の部分を添えた説明を返す。
+fn connect<T: Send + 'static>(
+    target: &Target,
+    show: &dyn Fn(&str),
+    op: impl FnOnce(
+        Arc<dyn Connector>,
+        yy_remote::HostSpec,
+        UiPrompter,
+        Arc<ConnectLog>,
+    ) -> std::io::Result<T>
+    + Send
+    + 'static,
+) -> Result<T, String> {
+    let log = Arc::new(ConnectLog::new());
+    let prepared = with_state(|r| {
         log.note(format!(
             "yyeditor {}、~/.ssh/config: {}、~/.ssh/known_hosts: {}",
             env!("CARGO_PKG_VERSION"),
@@ -615,15 +708,11 @@ pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Sessio
             ));
         }
         let spec = r.resolver().resolve(target);
-        match r.connector() {
-            Some(c) => Prepared::Connect(c, Box::new(spec)),
-            None => Prepared::Unavailable,
-        }
+        r.connector().map(|c| (c, spec))
     });
     let (connector, spec) = match prepared {
-        Some(Prepared::Ready(s)) => return Ok(s),
-        Some(Prepared::Connect(c, spec)) => (c, *spec),
-        Some(Prepared::Unavailable) => {
+        Some(Some(p)) => p,
+        Some(None) => {
             return Err("この yyeditor には SSH の機能が組み込まれていません。".into());
         }
         None => return Err("処理中のため接続できません。".into()),
@@ -632,19 +721,14 @@ pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Sessio
     let prompter = UiPrompter {
         frame: SendHwnd(frame().0 as isize),
     };
-    let files = AgentFiles::beside_exe();
     let l = log.clone();
-    let r = wait(show, move |_| {
-        Session::connect(connector.as_ref(), &spec, &prompter, &files, &l)
-    });
+    let r = wait(show, move |_| op(connector, spec, prompter, l));
     match r {
-        Ok(s) => {
+        Ok(v) => {
             log.note("接続しました");
             save_log(target, &log);
-            let s = Arc::new(s);
-            with_app(|a| a.remote.sessions.push((target.clone(), s.clone())));
             show(&format!("{target} に接続しました"));
-            Ok(s)
+            Ok(v)
         }
         Err(e) => {
             log.note(format!("接続できませんでした: {e}"));
@@ -815,7 +899,7 @@ pub(crate) fn open(
             OpenAs::NewTab => a.add_document(doc),
             OpenAs::Replace => a.set_document(doc),
         }
-        a.remote.last = Some(uri.clone());
+        set_last(uri.clone());
         a.show_status_message("");
         Ok::<_, String>(())
     });

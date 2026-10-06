@@ -18,6 +18,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | R10 | 矩形選択、マルチカーソルによる複数行同時編集 | [09-multi-cursor-rectangle](09-multi-cursor-rectangle.md) |
 | R11 | ファイル種類別のシンタックスハイライト | [10-syntax-highlight](10-syntax-highlight.md) |
 | R12 | SSH 接続先のファイルのリモート編集（接続先にエージェントを置く方式。端末側は OpenSSH に依存しない） | [11-remote-ssh](11-remote-ssh.md) |
+| R13 | 同じクレートを使った別のアプリとしてのターミナル（ワークスペース、同じ同梱フォント、OpenSSH に依存しない SSH） | [12-terminal](12-terminal.md) |
 
 > 依頼文の「encdic」は、IBM メインフレーム系の **EBCDIC**（日本では EBCDIK / IBM CCSID 930・939・1390・1399、富士通 JEF、日立 KEIS などの EBCDIC 系漢字コード）を指すものと解釈しています。
 

@@ -965,6 +965,15 @@ impl Transport for SshTransport {
             true,
         )?;
         let half = o.half;
+        let h = half.clone();
+        let close = Box::new(move || {
+            if let Ok(rt) = runtime() {
+                let h = h.clone();
+                rt.spawn(async move {
+                    let _ = h.close().await;
+                });
+            }
+        });
         let resize = Box::new(move |cols: u16, rows: u16| {
             // 送るだけ（応答は待たない）。入力より先に届くよう、この場で送る
             if let Ok(rt) = runtime() {
@@ -976,6 +985,7 @@ impl Transport for SshTransport {
             output: Box::new(o.reader),
             resize,
             finish: o.finish,
+            close,
         })
     }
 

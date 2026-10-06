@@ -44,7 +44,7 @@ mod csvmode;
 mod hexmode;
 mod previewmode;
 mod syntaxmode;
-mod workspacemode;
+pub(crate) mod workspacemode;
 
 pub(crate) use csvmode::colhead_proc;
 use previewmode::ID_PREVIEW;
@@ -297,7 +297,6 @@ pub(crate) struct App {
     /// Markdown・HTML のプレビュー（右側）
     preview: previewmode::PreviewPane,
     /// SSH 接続先のファイルの編集（11 章）
-    pub(crate) remote: crate::remote::RemoteState,
     /// ワークスペースとサイドバー（左側）
     ws: WorkspacePane,
 }
@@ -776,7 +775,15 @@ impl App {
                 ambiguous_wide: config.editor.ambiguous_wide,
                 wide_box_line: renderer.wide_box_line(),
             };
-            let remote = crate::remote::RemoteState::new(ssh, config.remote.clone());
+            crate::remote::install(
+                crate::remote::RemoteState::new(ssh, config.remote.clone()),
+                crate::remote::Host {
+                    frame,
+                    status: |t| {
+                        with_app(|a| a.show_status_message(t));
+                    },
+                },
+            );
             let ws = create_pane(frame, hinstance)?;
             let app = App {
                 frame,
@@ -844,7 +851,6 @@ impl App {
                 colhead_h: 0,
                 ui_font: crate::util::ui_font(dpi),
                 preview: Default::default(),
-                remote,
                 ws,
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
@@ -2781,10 +2787,6 @@ impl App {
         }
     }
 
-    pub(crate) fn frame_hwnd(&self) -> HWND {
-        self.frame
-    }
-
     /// ステータスバーに案内を出す（空なら消す）。
     pub(crate) fn show_status_message(&mut self, text: &str) {
         self.status_msg = text.to_owned();
@@ -3915,8 +3917,8 @@ fn cmd_open_remote(hwnd: HWND) {
             .remote()
             .and_then(|r| yy_remote::RemoteUri::parse(&r.uri));
         (
-            a.remote.available(),
-            current.or_else(|| a.remote.last.clone()),
+            crate::remote::available(),
+            current.or_else(crate::remote::last),
         )
     }) else {
         return;
@@ -4066,13 +4068,10 @@ fn cmd_save_to(hwnd: HWND, as_new: bool, place: SaveWhere) -> bool {
             remote: None,
         },
         _ if to_remote => {
-            let initial = with_app(|a| {
-                remote
-                    .as_ref()
-                    .and_then(|f| yy_remote::RemoteUri::parse(&f.uri))
-                    .or_else(|| a.remote.last.clone())
-            })
-            .flatten();
+            let initial = remote
+                .as_ref()
+                .and_then(|f| yy_remote::RemoteUri::parse(&f.uri))
+                .or_else(crate::remote::last);
             let Some(p) = crate::remotedlg::show(
                 hwnd,
                 crate::remotedlg::Mode::Save,
@@ -4224,7 +4223,7 @@ fn handle_save_result(hwnd: HWND, flow: Option<SaveFlow>, done: yy_core::SaveDon
                     .remote()
                     .and_then(|r| yy_remote::RemoteUri::parse(&r.uri))
                 {
-                    a.remote.last = Some(u);
+                    crate::remote::set_last(u);
                 }
                 a.doc.location()
             });

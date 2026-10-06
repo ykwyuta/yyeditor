@@ -3,7 +3,9 @@
 //! マニフェストでは PerMonitorV2 DPI、長いパス、Common Controls v6、UTF-8 コードページを宣言する
 //! （MSVC リンカーのみ）。
 //!
-//! アイコン（`res/yyeditor.ico`、`tools/gen-icon` で生成）は、リソースコンパイラーを使わずに
+//! yyterm も同じスクリプトを使う（apps/yyterm/Cargo.toml の `build`）。
+//!
+//! アイコン（`res/<パッケージ名>.ico`、`tools/gen-icon` で生成）は、リソースコンパイラーを使わずに
 //! ここでリソースファイル（.res）に変換してリンクする（ID 1 の RT_GROUP_ICON。エクスプローラーと
 //! ウィンドウのアイコンになる）。
 
@@ -16,9 +18,11 @@ const RT_GROUP_ICON: u16 = 14;
 const APP_ICON_ID: u16 = 1;
 
 fn main() {
+    // ファイル名はパッケージ名から（yyeditor・yyterm）
+    let name = env!("CARGO_PKG_NAME");
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("res");
-    let manifest = dir.join("yyeditor.manifest");
-    let icon = dir.join("yyeditor.ico");
+    let manifest = dir.join(format!("{name}.manifest"));
+    let icon = dir.join(format!("{name}.ico"));
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed={}", icon.display());
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -33,9 +37,9 @@ fn main() {
             manifest.display()
         );
     }
-    let ico = std::fs::read(&icon).expect("res/yyeditor.ico");
-    let res = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("yyeditor.res");
-    std::fs::write(&res, icon_res(&ico)).expect("write yyeditor.res");
+    let ico = std::fs::read(&icon).expect("res/<name>.ico");
+    let res = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join(format!("{name}.res"));
+    std::fs::write(&res, icon_res(&ico)).expect("write .res");
     if target_env == "msvc" {
         // link.exe は .res をそのまま受け付ける
         println!("cargo:rustc-link-arg-bins={}", res.display());
