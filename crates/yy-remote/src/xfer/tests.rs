@@ -171,6 +171,16 @@ impl Harness {
     }
 
     fn run(&self, job: &mut Job, attempts: u32, scp_chunk: u64) {
+        self.run_with(job, attempts, scp_chunk, &mut |_| {});
+    }
+
+    fn run_with(
+        &self,
+        job: &mut Job,
+        attempts: u32,
+        scp_chunk: u64,
+        progress: &mut dyn FnMut(&Job),
+    ) {
         let connect = |_: &TransferLog, _: u64| -> io::Result<Arc<dyn Transport>> {
             self.connections.fetch_add(1, Ordering::Relaxed);
             let mut b = self.budgets.lock().unwrap();
@@ -178,13 +188,12 @@ impl Harness {
             Ok(Arc::new(Faulty::new(budget)) as Arc<dyn Transport>)
         };
         let cancel = AtomicBool::new(false);
-        let mut progress = |_: &Job| {};
         let mut cx = Context {
             connect: &connect,
             log: &self.log,
             journal: Some(&self.journal),
             cancel: &cancel,
-            progress: &mut progress,
+            progress,
             retry: Retry {
                 attempts,
                 delays: vec![Duration::ZERO],
@@ -404,4 +413,188 @@ fn journal_round_trip() {
     done.state = State::Done;
     j.save(&done).unwrap();
     assert!(j.load().is_empty());
+}
+
+/// 転送の途中でアプリが落ちた（進みの知らせの中で panic する。後片付けをせずに抜ける）。
+/// 進みをゆっくりにして、ジャーナルに確かな位置が書かれてから落とす。
+fn crash_midway(h: &Harness, job: &mut Job, scp_chunk: u64) {
+    let start = Instant::now();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.run_with(job, 0, scp_chunk, &mut |j: &Job| {
+            std::thread::sleep(Duration::from_millis(250));
+            if j.state == State::Running && start.elapsed() > Duration::from_millis(2500) {
+                panic!("（模擬）アプリが落ちました");
+            }
+        });
+    }));
+    assert!(r.is_err(), "落ちる前に終わりました: {}", h.dump());
+}
+
+fn resume_after_crash(protocol: Protocol, direction: Direction) {
+    if !tools(protocol) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let content = data(8_000_000);
+    let (src, dst) = match direction {
+        Direction::Upload => (
+            dir.path().join("local.bin"),
+            dir.path().join("remote/x.bin"),
+        ),
+        Direction::Download => (
+            dir.path().join("remote.bin"),
+            dir.path().join("local/x.bin"),
+        ),
+    };
+    std::fs::write(&src, &content).unwrap();
+    let chunk = 256 << 10;
+    let h = Harness::new(dir.path(), &[]);
+    let mut job = match direction {
+        Direction::Upload => upload_job(1, protocol, &src, uri(&dst), false).unwrap(),
+        Direction::Download => {
+            let m = std::fs::metadata(&src).unwrap();
+            download_job(1, protocol, uri(&src), m.len(), mtime_of(&m), &dst, false)
+        }
+    };
+    crash_midway(&h, &mut job, chunk);
+    // 次に起動したとき: ジャーナルには中断（再開できる）として、確かな位置が残っている
+    let h2 = Harness::new(dir.path(), &[]);
+    let saved = h2.journal.load();
+    assert_eq!(saved.len(), 1, "{}", h.dump());
+    assert_eq!(saved[0].state, State::Interrupted);
+    assert!(
+        saved[0].done > 0 && saved[0].done < 8_000_000,
+        "{}",
+        h.dump()
+    );
+    let mut job = saved.into_iter().next().unwrap();
+    h2.run(&mut job, 3, chunk);
+    assert_eq!(job.state, State::Done, "{}", h2.dump());
+    assert!(h2.logged("レジューム"), "{}", h2.dump());
+    assert_eq!(std::fs::read(&dst).unwrap(), content);
+    assert!(h2.journal.load().is_empty());
+}
+
+#[test]
+fn sftp_upload_resumes_after_the_app_crashes() {
+    resume_after_crash(Protocol::Sftp, Direction::Upload);
+}
+
+#[test]
+fn scp_upload_resumes_after_the_app_crashes() {
+    resume_after_crash(Protocol::Scp, Direction::Upload);
+}
+
+#[test]
+fn sftp_download_resumes_after_the_app_crashes() {
+    resume_after_crash(Protocol::Sftp, Direction::Download);
+}
+
+#[test]
+fn scp_download_resumes_after_the_app_crashes() {
+    resume_after_crash(Protocol::Scp, Direction::Download);
+}
+
+/// 名前を変えた直後（ジャーナルを消す前）に落ちた転送は、送り直さずに完了とする。
+fn finished_before_crash(protocol: Protocol, direction: Direction) {
+    if !tools(protocol) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let content = data(300_000);
+    let (src, dst) = match direction {
+        Direction::Upload => (dir.path().join("local.bin"), dir.path().join("remote.bin")),
+        Direction::Download => (dir.path().join("remote.bin"), dir.path().join("local.bin")),
+    };
+    std::fs::write(&src, &content).unwrap();
+    let h = Harness::new(dir.path(), &[]);
+    let mut job = match direction {
+        Direction::Upload => upload_job(4, protocol, &src, uri(&dst), false).unwrap(),
+        Direction::Download => {
+            let m = std::fs::metadata(&src).unwrap();
+            download_job(4, protocol, uri(&src), m.len(), mtime_of(&m), &dst, false)
+        }
+    };
+    h.run(&mut job, 3, 64 << 10);
+    assert_eq!(job.state, State::Done, "{}", h.dump());
+    // 名前を変える前に書いたジャーナル（すべて送った・転送中）が残っている状態
+    job.state = State::Running;
+    h.journal.save(&job).unwrap();
+    let h2 = Harness::new(dir.path(), &[]);
+    let mut job = h2.journal.load().remove(0);
+    assert_eq!(job.done, job.size);
+    h2.run(&mut job, 3, 64 << 10);
+    assert_eq!(job.state, State::Done, "{}", h2.dump());
+    assert!(h2.logged("完了とします"), "{}", h2.dump());
+    assert!(
+        !h2.logged("区切りを送ります") && !h2.logged("を開きました"),
+        "{}",
+        h2.dump()
+    );
+    assert_eq!(std::fs::read(&dst).unwrap(), content);
+    assert!(h2.journal.load().is_empty());
+
+    // 送り先の中身が違えば完了とはしない（送り直す）
+    let mut other = content.clone();
+    other[299_999] ^= 0xff;
+    let target = match direction {
+        Direction::Upload => &dst,
+        Direction::Download => &dst,
+    };
+    std::fs::write(target, &other).unwrap();
+    if direction == Direction::Download {
+        // 手元は大きさと更新日時で判断するので、更新日時をずらす
+        let f = std::fs::File::options().write(true).open(target).unwrap();
+        f.set_modified(UNIX_EPOCH + Duration::from_secs(1_000_000))
+            .unwrap();
+    }
+    let mut again = job.clone();
+    again.state = State::Running;
+    again.overwrite = true;
+    h2.journal.save(&again).unwrap();
+    let mut again = h2.journal.load().remove(0);
+    h2.run(&mut again, 3, 64 << 10);
+    assert_eq!(again.state, State::Done, "{}", h2.dump());
+    assert_eq!(std::fs::read(&dst).unwrap(), content);
+}
+
+#[test]
+fn sftp_upload_finished_before_a_crash_is_not_resent() {
+    finished_before_crash(Protocol::Sftp, Direction::Upload);
+}
+
+#[test]
+fn scp_upload_finished_before_a_crash_is_not_resent() {
+    finished_before_crash(Protocol::Scp, Direction::Upload);
+}
+
+#[test]
+fn sftp_download_finished_before_a_crash_is_not_resent() {
+    finished_before_crash(Protocol::Sftp, Direction::Download);
+}
+
+#[test]
+fn scp_download_finished_before_a_crash_is_not_resent() {
+    finished_before_crash(Protocol::Scp, Direction::Download);
+}
+
+#[test]
+fn journal_writes_are_atomic() {
+    let dir = tempfile::tempdir().unwrap();
+    let j = Journal::new(dir.path());
+    let src = dir.path().join("a");
+    std::fs::write(&src, b"x").unwrap();
+    let mut job = upload_job(9, Protocol::Sftp, &src, uri(Path::new("/r")), false).unwrap();
+    for done in [1u64, 2, 3] {
+        job.done = done;
+        j.save(&job).unwrap();
+    }
+    // 一時ファイルは残らない
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "a")
+        .collect();
+    assert_eq!(names, vec!["9.job".to_owned()]);
+    assert_eq!(j.load()[0].done, 3);
 }

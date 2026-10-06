@@ -120,6 +120,10 @@ pub(super) struct Queue {
     log_len: usize,
     /// 送り終えたファイル（表示しているフォルダなら一覧を読み直す）
     refresh: Vec<RemoteUri>,
+    /// ジャーナルの持ち主の印（開いている間は、ほかの yysftp はジャーナルから再開しない）
+    lock: Option<(PathBuf, std::fs::File)>,
+    /// 前回の yysftp が正常に終了しなかった（印が残っていた）ときの、その内容
+    crashed: Option<String>,
 }
 
 /// 転送の記録のファイル（設定のフォルダの `logs\transfer.log`）。
@@ -273,6 +277,11 @@ impl Queue {
             let journal =
                 yy_config::config_dir().map(|d| Arc::new(Journal::new(d.join("transfers"))));
             let next_id = journal.as_ref().map_or(1, |j| j.next_id());
+            let (lock, crashed) = match &journal {
+                Some(j) => take_lock(j.dir()),
+                None => (None, None),
+            };
+            install_panic_log(tlog.clone());
             let (wtx, wrx) = mpsc::channel::<Work>();
             let worker = {
                 let notify = notify.clone();
@@ -314,6 +323,8 @@ impl Queue {
                 next_run: 1,
                 log_len: 0,
                 refresh: Vec::new(),
+                lock,
+                crashed,
             })
         }
     }
@@ -392,6 +403,11 @@ impl Queue {
             }
         }
         self.tlog.line(None, "yysftp を終了しました");
+        // 正常に終了した印として、持ち主の印を消す
+        if let Some((path, file)) = self.lock.take() {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+        }
         unsafe {
             let _ = DeleteObject(self.log_font.into());
         }
@@ -621,6 +637,14 @@ impl Queue {
     // ---- 追加・再開・一時停止・取り消し ---------------------------------------------
 
     fn take_id(&mut self) -> u64 {
+        // ほかの yysftp が同じジャーナルに書いた番号は使わない
+        while self
+            .journal
+            .as_ref()
+            .is_some_and(|j| j.dir().join(format!("{}.job", self.next_id)).exists())
+        {
+            self.next_id += 1;
+        }
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -801,6 +825,70 @@ impl Queue {
     }
 }
 
+// ---- 異常終了への備え ---------------------------------------------------------------
+
+/// ジャーナルの持ち主の印（`yysftp.lock`）を、ほかから開けないように開く。
+///
+/// 開けなければ、ほかの yysftp が動いている（`None`）。開けたのに印が残っていたら、前回の
+/// yysftp は正常に終了しなかった（落ちた・強制終了された）ので、その内容を返す。印は
+/// 終了するときに消す。落ちたときは OS が閉じるので、次に起動したときに開ける。
+fn take_lock(dir: &Path) -> (Option<(PathBuf, std::fs::File)>, Option<String>) {
+    use std::io::{Read, Seek, Write};
+    use std::os::windows::fs::OpenOptionsExt;
+    let _ = std::fs::create_dir_all(dir);
+    let path = dir.join("yysftp.lock");
+    let existed = path.exists();
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(&path)
+    else {
+        return (None, None);
+    };
+    let mut before = String::new();
+    let _ = f.read_to_string(&mut before);
+    let crashed = existed.then(|| {
+        let b = before.trim();
+        if b.is_empty() {
+            "記録なし".to_owned()
+        } else {
+            b.to_owned()
+        }
+    });
+    let _ = f.set_len(0);
+    let _ = f.rewind();
+    let _ = write!(
+        f,
+        "プロセス {}、{} に起動",
+        std::process::id(),
+        crate::remote::local_clock()
+    );
+    let _ = f.sync_all();
+    (Some((path, f)), crashed)
+}
+
+/// panic を転送の記録に残す（UI のスレッドで落ちるときも、落ちる前に書く）。
+fn install_panic_log(tlog: Arc<TransferLog>) {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("（名前なし）")
+            .to_owned();
+        tlog.line(
+            None,
+            &format!(
+                "異常: スレッド {thread} で panic しました: {info}\n{}",
+                std::backtrace::Backtrace::force_capture()
+            ),
+        );
+        prev(info);
+    }));
+}
+
 // ---- 作業スレッド -----------------------------------------------------------------
 
 fn worker(
@@ -847,7 +935,32 @@ fn worker(
                 scp_chunk: w.scp_chunk,
                 transport: used.clone(),
             };
-            xfer::run(&mut job, &mut cx);
+            // 転送の中の思わぬ失敗（panic）で作業スレッドが止まらないようにする。ジャーナルは
+            // 確かな位置までしか進めていないので、その転送も後で再開できる
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                xfer::run(&mut job, &mut cx)
+            }));
+            if let Err(p) = r {
+                let msg = p
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_owned())
+                    .or_else(|| p.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "（不明）".into());
+                job.state = State::Failed;
+                job.message = format!("内部エラーで止まりました（再開できます）: {msg}");
+                job.current = job.done;
+                if let Some(j) = &journal {
+                    let _ = j.save(&job);
+                }
+                tlog.line(
+                    Some(job.id),
+                    &format!(
+                        "内部エラーで止まりました: {msg}。{} まで送り終えています（再開できます）",
+                        xfer::human(job.done)
+                    ),
+                );
+                used = None;
+            }
             if let Some(t) = cx.transport.take() {
                 used = Some(t.clone());
                 reuse = Some((target.clone(), t));
@@ -1108,13 +1221,26 @@ pub(super) fn command(hwnd: HWND, id: u16) {
 
 /// 起動したとき: ジャーナルに残っている転送を一覧に並べ、再開するか尋ねる。
 pub(super) fn offer_resume(frame: HWND) {
-    let Some(n) = with(|a| {
-        let jobs = a
-            .queue
-            .journal
-            .as_ref()
-            .map(|j| j.load())
-            .unwrap_or_default();
+    let Some((n, crashed)) = with(|a| {
+        let q = &mut a.queue;
+        if let Some(c) = &q.crashed {
+            q.tlog.line(
+                None,
+                &format!(
+                    "前回の yysftp（{c}）は正常に終了しませんでした。ジャーナルに残った転送は、確かに送り終えた位置から再開できます"
+                ),
+            );
+        }
+        if q.lock.is_none() {
+            if q.journal.is_some() {
+                q.tlog.line(
+                    None,
+                    "ほかの yysftp がジャーナルを使っているため、前回の転送はそちらで再開してください",
+                );
+            }
+            return (0, false);
+        }
+        let jobs = q.journal.as_ref().map(|j| j.load()).unwrap_or_default();
         let n = jobs.len();
         for mut job in jobs {
             if job.state == State::Queued || job.state == State::Running {
@@ -1133,15 +1259,20 @@ pub(super) fn offer_resume(frame: HWND) {
             );
             a.queue.add(job);
         }
-        n
+        (n, a.queue.crashed.is_some())
     }) else {
         return;
     };
     if n == 0 {
         return;
     }
+    let head = if crashed {
+        "前回の yysftp は正常に終了しませんでした。\n"
+    } else {
+        ""
+    };
     let text = format!(
-        "前回終わらなかった転送が {n} 件あります。続きから再開しますか？\n\
+        "{head}前回終わらなかった転送が {n} 件あります。続きから再開しますか？\n\
          （「いいえ」を選んでも、転送の一覧の右クリックの「再開」で後から続けられます）"
     );
     let r = unsafe {
@@ -1560,6 +1691,32 @@ mod tests {
         assert_eq!(sanitize("name. "), "name");
         assert_eq!(sanitize("..."), "_");
         assert_eq!(sanitize("日本語.csv"), "日本語.csv");
+    }
+
+    #[test]
+    fn lock_detects_other_instances_and_crashes() {
+        let dir = std::env::temp_dir().join(format!("yysftp-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // 初めて: 持ち主になり、落ちた記録はない
+        let (first, crashed) = take_lock(&dir);
+        assert!(first.is_some());
+        assert!(crashed.is_none());
+        // 動いている間は、ほかの yysftp は持ち主になれない
+        let (second, _) = take_lock(&dir);
+        assert!(second.is_none());
+        // 印を消さずに終わった（落ちた）: 次は持ち主になれ、前回の内容が分かる
+        drop(first);
+        let (third, crashed) = take_lock(&dir);
+        assert!(third.is_some());
+        assert!(crashed.unwrap().contains("プロセス"));
+        // 正常に終了した（印を消した）: 次は落ちた扱いにしない
+        let (path, file) = third.unwrap();
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+        let (fourth, crashed) = take_lock(&dir);
+        assert!(fourth.is_some() && crashed.is_none());
+        drop(fourth);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

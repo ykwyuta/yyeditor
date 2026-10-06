@@ -206,8 +206,14 @@ impl Journal {
             job.overwrite,
             escape(&job.message),
         );
+        // 書き切ってディスクに書き出してから置き換える（落ちても・電源が切れても、前の内容か
+        // 新しい内容のどちらかが残る）
         let tmp = self.dir.join(format!("{}.tmp", job.id));
-        std::fs::write(&tmp, text)?;
+        {
+            let mut f = File::create(&tmp)?;
+            f.write_all(text.as_bytes())?;
+            f.sync_all()?;
+        }
         std::fs::rename(&tmp, self.file(job.id))
     }
 
@@ -370,6 +376,8 @@ struct Meter {
     last_note_bytes: u64,
     last_save: Instant,
     last_progress: Instant,
+    /// 手元の途中のファイル（ジャーナルに書く前にディスクに書き出す。ダウンロード）
+    sync: Option<File>,
 }
 
 impl Meter {
@@ -382,6 +390,7 @@ impl Meter {
             last_note_bytes: offset,
             last_save: now,
             last_progress: now - Duration::from_secs(1),
+            sync: None,
         }
     }
 
@@ -394,6 +403,14 @@ impl Meter {
         }
         if confirmed && now - self.last_save >= Duration::from_secs(1) {
             self.last_save = now;
+            // ジャーナルの位置までの中身が必ずディスクにあるように、先に書き出す
+            // （アプリが落ちても OS が落ちても、ジャーナルが中身より先に進まない）
+            if let Some(f) = &self.sync
+                && let Err(e) = f.sync_data()
+            {
+                cx.note(job, &format!("途中のファイルを書き出せません: {e}"));
+                return;
+            }
             cx.save(job);
         }
         let moved = job.current.saturating_sub(self.last_note_bytes);
@@ -685,6 +702,28 @@ fn upload_sftp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::R
     let target = job.remote.path.clone();
     let part = job.remote_part();
     mkdir_all(&s, parent(&target))?;
+    if job.done > 0
+        && s.try_stat(&part)?.is_none()
+        && s.try_stat(&target)?.and_then(|a| a.size) == Some(job.size)
+    {
+        let n = VERIFY_TAIL.min(job.size);
+        let h = s.open(&target, sftp::open::READ, &Attrs::default())?;
+        let theirs = read_exact_at(&s, &h, job.size - n, n as usize);
+        let _ = s.close(&h);
+        if same_tail(&mut local, job.size, &theirs?)? {
+            note_upload_finished_before(job, cx, n);
+            let t32 = u32::try_from(job.mtime).unwrap_or(u32::MAX);
+            let _ = s.setstat(
+                &target,
+                &Attrs {
+                    atime: Some(t32),
+                    mtime: Some(t32),
+                    ..Attrs::default()
+                },
+            );
+            return Ok(());
+        }
+    }
     if job.done == 0
         && !job.overwrite
         && let Some(a) = s.try_stat(&target)?
@@ -838,6 +877,8 @@ fn upload_sftp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::R
         job,
         &format!("確認: 接続先の大きさ {got} バイトが一致しました"),
     );
+    // 名前を変える前に、すべて送ったことをジャーナルに書く
+    cx.save(job);
     s.rename(&part, &target, true)?;
     cx.note(
         job,
@@ -879,6 +920,9 @@ fn finish_local(job: &Job, cx: &Context, file: File) -> io::Result<()> {
         job,
         &format!("確認: 手元の大きさ {len} バイトが一致しました"),
     );
+    // 名前を変える前に、すべて受け取ったことをジャーナルに書く（名前を変えた直後に落ちても、
+    // 次に起動したときに完了と分かる）
+    cx.save(job);
     let part = job.local_part();
     if job.overwrite && job.local.exists() {
         std::fs::remove_file(&job.local)?;
@@ -893,6 +937,57 @@ fn finish_local(job: &Job, cx: &Context, file: File) -> io::Result<()> {
         ),
     );
     Ok(())
+}
+
+/// 前回、受け取り終えて名前を変えたところで（ジャーナルを消す前に）アプリが落ちていたか。
+/// 途中のファイルがなく、手元のファイルの大きさと更新日時（名前を変える前に合わせる）が
+/// 一致すれば、完了とする。
+fn local_finished_before(job: &mut Job, cx: &Context) -> bool {
+    if job.done == 0 || job.local_part().exists() {
+        return false;
+    }
+    let Ok(m) = std::fs::metadata(&job.local) else {
+        return false;
+    };
+    if m.len() != job.size || (job.mtime > 0 && mtime_of(&m) != job.mtime) {
+        return false;
+    }
+    cx.note(
+        job,
+        &format!(
+            "前回は受け取り終えて名前を変えたところで止まっていました（途中のファイルがなく、{} の大きさと更新日時が一致）。完了とします",
+            job.local.display()
+        ),
+    );
+    job.done = job.size;
+    job.current = job.size;
+    true
+}
+
+/// 末尾の `n` バイトが手元のファイルと同じか。
+fn same_tail(local: &mut File, size: u64, theirs: &[u8]) -> io::Result<bool> {
+    let n = theirs.len() as u64;
+    if n > size {
+        return Ok(false);
+    }
+    let mut ours = vec![0u8; n as usize];
+    local.seek(SeekFrom::Start(size - n))?;
+    local.read_exact(&mut ours)?;
+    Ok(ours == theirs)
+}
+
+/// 前回、送り終えて名前を変えたところで落ちていたときの記録。
+fn note_upload_finished_before(job: &mut Job, cx: &Context, n: u64) {
+    cx.note(
+        job,
+        &format!(
+            "前回は送り終えて名前を変えたところで止まっていました（途中のファイルがなく、{} の大きさと末尾の {} が手元と一致）。完了とします",
+            crate::display(&job.remote.path),
+            human(n)
+        ),
+    );
+    job.done = job.size;
+    job.current = job.size;
 }
 
 /// 手元の途中のファイルを `offset` の位置で開く（それより後ろは捨てる）。
@@ -956,6 +1051,9 @@ fn download_sftp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io:
         job.mtime = mtime;
         job.done = 0;
     }
+    if local_finished_before(job, cx) {
+        return Ok(());
+    }
     let (mut file, offset) = open_local_part(job, cx)?;
     let h = s.open(&job.remote.path, sftp::open::READ, &Attrs::default())?;
     cx.note(
@@ -967,6 +1065,7 @@ fn download_sftp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io:
         ),
     );
     let mut meter = Meter::new(offset);
+    meter.sync = file.try_clone().ok();
     let mut inflight: VecDeque<(u64, u32, sftp::ReadReply)> = VecDeque::new();
     let mut pos = offset;
     let result = (|| {
@@ -1020,6 +1119,20 @@ fn upload_scp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::Re
     let mut mkdir = b"mkdir -p ".to_vec();
     mkdir.extend_from_slice(&shell_quote(parent(&target)));
     scp::shell(t.as_ref(), &mkdir, "フォルダの作成")?;
+    if job.done > 0
+        && scp::remote_size(t.as_ref(), &part)?.is_none()
+        && scp::remote_size(t.as_ref(), &target)? == Some(job.size)
+    {
+        let n = VERIFY_TAIL.min(job.size);
+        let mut theirs = Vec::new();
+        scp::download(t.as_ref(), &target, job.size - n, &mut theirs, &mut |_| {
+            true
+        })?;
+        if same_tail(&mut local, job.size, &theirs)? {
+            note_upload_finished_before(job, cx, n);
+            return Ok(());
+        }
+    }
     let mut offset = 0;
     if job.done > 0 {
         let have = scp::remote_size(t.as_ref(), &part)?.unwrap_or(0);
@@ -1149,6 +1262,9 @@ fn download_scp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::
         job.size = size;
         job.done = 0;
     }
+    if local_finished_before(job, cx) {
+        return Ok(());
+    }
     let (mut file, offset) = open_local_part(job, cx)?;
     cx.note(
         job,
@@ -1163,6 +1279,7 @@ fn download_scp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::
         ),
     );
     let mut meter = Meter::new(offset);
+    meter.sync = file.try_clone().ok();
     let cancel = cx.cancel;
     let remote = job.remote.path.clone();
     let r = {
