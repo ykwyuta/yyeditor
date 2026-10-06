@@ -20,6 +20,7 @@ yy-preview.workspace = true
 yy-proto.workspace = true
 yy-remote.workspace = true
 yy-term.workspace = true
+yy-3270.workspace = true
 webview2-com.workspace = true
 crossbeam-channel.workspace = true
 windows-numerics.workspace = true
@@ -42,6 +43,7 @@ features = [
     "Win32_System_Console",
     "Win32_System_Pipes",
     "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Time",
     "Win32_System_Ole",
     "Win32_System_SystemInformation",

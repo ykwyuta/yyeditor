@@ -56,6 +56,14 @@ pub trait Transport: Send + Sync {
             "この接続では対話シェルを起動できません",
         ))
     }
+    /// 接続先から `host:port` への TCP の通り道（SSH の direct-tcpip。3270 のセッションの中継に使う。
+    /// 14 章 4.3）。`stdin` に書いたものが届き、`stdout` から読める。
+    fn direct_tcpip(&self, host: &str, port: u16) -> io::Result<Process> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("この接続では {host}:{port} への中継を使えません"),
+        ))
+    }
     /// ポートフォワーディングを始める（ターミナルだけが使う。[`forward`]）。返した値を drop すると
     /// 止める。転送の途中の出来事（転送先に接続できないなど）は `note` に知らせる。
     fn forward(&self, f: &Forward, _note: ForwardNote) -> io::Result<ActiveForward> {

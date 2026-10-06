@@ -42,6 +42,7 @@ pub struct Config {
     pub terminal: TerminalConfig,
     /// ファイル転送（yysftp。13 章）
     pub transfer: TransferConfig,
+    pub tn3270: Tn3270Config,
 }
 
 impl Default for Config {
@@ -55,8 +56,55 @@ impl Default for Config {
             remote: RemoteConfig::default(),
             terminal: TerminalConfig::default(),
             transfer: TransferConfig::default(),
+            tn3270: Tn3270Config::default(),
         }
     }
+}
+
+/// 3270 のセッション（yyterm。14 章）の設定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tn3270Config {
+    /// モデル（2: 24×80、3: 32×80、4: 43×80、5: 27×132）
+    pub model: u8,
+    /// 文字コード（CCSID。037・1047・930・939・1390・1399 など）
+    pub ccsid: u32,
+    /// 端末の種類（空なら IBM-3278-<model>-E）
+    pub terminal_type: String,
+    /// TN3270E を使う（断られたら TN3270）
+    pub tn3270e: bool,
+    /// ホストにしかないキー（PF13〜24・PA・Clear など）のボタンを画面の右に出す
+    pub keypad: bool,
+    /// 接続先ごとの設定（名前 → 値）
+    pub host: BTreeMap<String, Tn3270Host>,
+}
+
+impl Default for Tn3270Config {
+    fn default() -> Self {
+        Tn3270Config {
+            model: 2,
+            ccsid: 930,
+            terminal_type: String::new(),
+            tn3270e: true,
+            keypad: true,
+            host: BTreeMap::new(),
+        }
+    }
+}
+
+/// 3270 の接続先ごとの設定（書いていない項目は `[tn3270]` の値）。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tn3270Host {
+    pub host: String,
+    /// ポート（省略すると 23）
+    pub port: Option<u16>,
+    /// TN3270E で求める LU 名
+    pub lu: Option<String>,
+    pub model: Option<u8>,
+    pub ccsid: Option<u32>,
+    /// この SSH の接続（`~/.ssh/config` の Host・`ユーザー@ホスト`）を経由する
+    pub ssh: Option<String>,
 }
 
 /// ファイル転送（yysftp）の設定。

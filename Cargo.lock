@@ -2964,6 +2964,7 @@ dependencies = [
  "webview2-com",
  "windows",
  "windows-numerics",
+ "yy-3270",
  "yy-buffer",
  "yy-config",
  "yy-core",

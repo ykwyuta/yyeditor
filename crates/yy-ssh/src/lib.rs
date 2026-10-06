@@ -1041,6 +1041,61 @@ impl Transport for SshTransport {
         self.handle.is_closed() || self.jumps.iter().any(|h| h.is_closed())
     }
 
+    fn direct_tcpip(&self, host: &str, port: u16) -> io::Result<Process> {
+        let rt = runtime()?;
+        let ch = rt
+            .block_on(
+                self.handle
+                    .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0),
+            )
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    format!("接続先から {host}:{port} に接続できませんでした: {e}"),
+                )
+            })?;
+        let (mut read_half, write_half) = ch.split();
+        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel::<Exit>();
+        rt.spawn(async move {
+            let mut out = Some(out_tx);
+            while let Some(msg) = read_half.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } => {
+                        if let Some(tx) = &out
+                            && tx.send(data.to_vec()).await.is_err()
+                        {
+                            out = None;
+                        }
+                    }
+                    ChannelMsg::Eof | ChannelMsg::Close => break,
+                    _ => {}
+                }
+            }
+            drop(out);
+            let _ = exit_tx.send(Exit::default());
+        });
+        let half = Arc::new(write_half);
+        let writer = ChannelWriter {
+            inner: Some(Box::pin(half.make_writer())),
+            half: Some(half),
+        };
+        let reader = ChannelReader {
+            rx: out_rx,
+            buf: Vec::new(),
+            pos: 0,
+        };
+        Ok(Process::new(
+            Box::new(writer),
+            Box::new(reader),
+            Box::new(move || {
+                exit_rx
+                    .recv()
+                    .map_err(|_| io::Error::other("中継が終わりました"))
+            }),
+        ))
+    }
+
     fn forward(
         &self,
         f: &yy_remote::Forward,

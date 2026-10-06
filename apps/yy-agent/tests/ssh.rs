@@ -1400,4 +1400,15 @@ fn forwards_ports_and_reports_failures() {
     assert!(!t.is_closed());
     let out = yy_remote::run(t.as_ref(), b"echo ok", b"").unwrap();
     assert_eq!(out.stdout.trim_ascii(), b"ok");
+
+    // direct-tcpip の中継（3270 のセッションに使う）: 手元のポートを開かずに往復する
+    let p = t.direct_tcpip("127.0.0.1", echo).unwrap();
+    let (mut w, r, _finish) = p.into_parts();
+    w.write_all(b"relay\n").unwrap();
+    w.flush().unwrap();
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(r), &mut line).unwrap();
+    assert_eq!(line.trim_end(), "echo: relay");
+    let e = t.direct_tcpip("127.0.0.1", free_port()).err().unwrap();
+    assert!(e.to_string().contains("接続できませんでした"), "{e}");
 }

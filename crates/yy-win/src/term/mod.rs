@@ -14,6 +14,7 @@
 mod paint;
 mod pty;
 mod sidebar;
+mod tn3270;
 
 use std::cell::RefCell;
 use std::io::{Read, Write};
@@ -68,6 +69,7 @@ const ID_NEW_TAB: u16 = 3001;
 const ID_SSH: u16 = 3002;
 const ID_CLOSE_TAB: u16 = 3003;
 const ID_EXIT: u16 = 3004;
+const ID_TN3270: u16 = 3005;
 const ID_COPY: u16 = 3010;
 const ID_PASTE: u16 = 3011;
 const ID_CLEAR: u16 = 3012;
@@ -111,6 +113,8 @@ enum Place {
         target: Target,
         dir: Option<Vec<u8>>,
     },
+    /// 3270 のホスト（14 章）
+    Tn3270(tn3270::Target3270),
 }
 
 impl Place {
@@ -126,6 +130,10 @@ impl Place {
                 "{} [{target}]",
                 yy_proto::display_path(yy_proto::file_name(d))
             ),
+            Place::Tn3270(t) => match &t.lu {
+                Some(lu) => format!("{} [3270 {lu}]", t.label),
+                None => format!("{} [3270]", t.label),
+            },
         }
     }
 }
@@ -166,6 +174,8 @@ struct Tab {
     /// 終わった（終了コード）
     exited: Option<Option<u32>>,
     size: (u16, u16),
+    /// 3270 のタブ（`term` は 3270 の画面を写したもの）
+    tn: Option<Box<tn3270::Tn3270>>,
 }
 
 impl Tab {
@@ -210,6 +220,10 @@ struct TermApp {
     grid: (usize, usize),
     /// 表示しているステータスの案内
     status_text: String,
+    /// 3270 のキーパッド（ホストにしかないキーのボタン）
+    keypad: tn3270::Keypad,
+    /// 3270 の接続の記録（`logs\tn3270.log`）
+    tn_log: Option<std::sync::Arc<yy_remote::log::TransferLog>>,
 }
 
 thread_local! {
@@ -418,6 +432,11 @@ fn create(
         )
         .context("CreateWindowExW(status)")?;
         let sidebar = Sidebar::create(frame, instance)?;
+        let keypad = tn3270::Keypad::create(
+            frame,
+            instance,
+            crate::util::ui_font(GetDpiForWindow(frame).max(96)),
+        );
 
         let family = if config.terminal.font_family.trim().is_empty() {
             config.editor.font_family.clone()
@@ -467,6 +486,8 @@ fn create(
             high_surrogate: None,
             grid: (80, 24),
             status_text: String::new(),
+            keypad,
+            tn_log: None,
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         FRAME.with(|f| f.set(frame.0 as isize));
@@ -521,6 +542,7 @@ fn create_menu() -> Result<HMENU> {
         let file = CreatePopupMenu()?;
         item(file, ID_NEW_TAB, w!("新しいタブ(&T)\tCtrl+Shift+T"))?;
         item(file, ID_SSH, w!("SSH で接続(&S)...\tCtrl+Shift+O"))?;
+        item(file, ID_TN3270, w!("3270 で接続(&M)...\tCtrl+Shift+M"))?;
         sep(file)?;
         item(file, ID_CLOSE_TAB, w!("タブを閉じる(&C)\tCtrl+Shift+W"))?;
         item(file, ID_EXIT, w!("終了(&X)"))?;
@@ -573,11 +595,19 @@ fn create_menu() -> Result<HMENU> {
 
 /// 子ウィンドウを並べる（アプリの状態を借りずに呼ぶ）。
 fn layout() {
-    let Some((sidebar, rects)) = with(|a| a.layout_rects()) else {
+    let Some((sidebar, rects, keypad)) = with(|a| {
+        let (s, r) = a.layout_rects();
+        let k = a.keypad_visible();
+        (s, r, k)
+    }) else {
         retry_later(WM_APP_TERM_LAYOUT);
         return;
     };
+    let keypad_buttons = with(|a| a.keypad.buttons.clone()).unwrap_or_default();
     unsafe {
+        for b in keypad_buttons {
+            let _ = ShowWindow(b, if keypad { SW_SHOW } else { SW_HIDE });
+        }
         let _ = ShowWindow(rects[0].0, if sidebar { SW_SHOW } else { SW_HIDE });
         for (hwnd, r) in rects {
             let _ = MoveWindow(
@@ -626,6 +656,7 @@ fn shortcut(msg: &MSG) -> bool {
         (true, true, VK_V) => ID_PASTE,
         (true, true, VK_E) => ID_SIDEBAR,
         (true, true, VK_O) => ID_SSH,
+        (true, true, VK_M) => ID_TN3270,
         (true, false, VK_TAB) => ID_NEXT_TAB,
         (true, true, VK_TAB) => ID_PREV_TAB,
         (true, false, VK_OEM_PLUS | VK_ADD) => ID_ZOOM_IN,
@@ -666,6 +697,8 @@ fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
     };
     let mut reports: Vec<crate::remote::ForwardReport> = Vec::new();
     let backend = match &place {
+        Place::Tn3270(t) => tn3270::connect(t, &set_status)
+            .map_err(|e| format!("3270 のホスト {} に接続できませんでした。\n{e}", t.uri())),
         Place::Local(dir) => {
             let dir = dir.as_deref().filter(|d| d.is_dir());
             pty::spawn_local(&shell, dir, size)
@@ -841,7 +874,14 @@ impl TermApp {
             kill: Arc::from(kill),
             exited: None,
             size: (cols as u16, rows as u16),
+            tn: None,
         };
+        let mut tab = tab;
+        if let Place::Tn3270(target) = &tab.place {
+            let tn = tn3270::Tn3270::new(target.clone());
+            tab.term = tn3270::render(&tn, false);
+            tab.tn = Some(Box::new(tn));
+        }
         let label = crate::util::wide(&tab_label(&tab));
         self.tabs.push(tab);
         let index = self.tabs.len() - 1;
@@ -867,6 +907,8 @@ impl TermApp {
         }
         self.active = index;
         unsafe {
+            // 3270 のタブではキーパッドを出す（並べ直しは状態を借りずに行う）
+            let _ = PostMessageW(Some(self.frame), WM_APP_TERM_LAYOUT, WPARAM(0), LPARAM(0));
             SendMessageW(self.tabbar, TCM_SETCURSEL, Some(WPARAM(index)), None);
             // フォーカスは後で移す（ここで移すと通知が状態を借りられない）
             let _ = PostMessageW(Some(self.frame), WM_APP_TERM_FOCUS, WPARAM(0), LPARAM(0));
@@ -1016,7 +1058,12 @@ impl TermApp {
 
     /// 子ウィンドウの位置（サイドバー、タブ、画面）。並べるのは [`layout`] で、アプリの状態を
     /// 借りずに行う（大きさの変更の通知がすぐに届くため）。
-    fn layout_rects(&self) -> (bool, [(HWND, RECT); 3]) {
+    /// 3270 のキーパッドを出すか（3270 のタブを表示していて、設定で出す）。
+    fn keypad_visible(&self) -> bool {
+        self.config.tn3270.keypad && self.tab().is_some_and(|t| t.tn.is_some())
+    }
+
+    fn layout_rects(&self) -> (bool, Vec<(HWND, RECT)>) {
         let mut rc = RECT::default();
         let mut sr = RECT::default();
         unsafe {
@@ -1035,21 +1082,30 @@ impl TermApp {
         let gap = if side > 0 { 4 * dpi / 96 } else { 0 };
         let tab_h = 28 * dpi / 96;
         let x = side + gap;
-        let w = (rc.right - x).max(0);
+        let keypad_w = if self.keypad_visible() {
+            tn3270::Keypad::width(dpi).min(rc.right / 3)
+        } else {
+            0
+        };
+        let w = (rc.right - x - keypad_w).max(0);
         let r = |left: i32, top: i32, width: i32, height: i32| RECT {
             left,
             top,
             right: left + width,
             bottom: top + height,
         };
-        (
-            self.sidebar.visible,
-            [
-                (self.sidebar.tree, r(0, 0, side, height)),
-                (self.tabbar, r(x, 0, w, tab_h)),
-                (self.view, r(x, tab_h, w, (height - tab_h).max(0))),
-            ],
-        )
+        let mut rects = vec![
+            (self.sidebar.tree, r(0, 0, side, height)),
+            (self.tabbar, r(x, 0, w + keypad_w, tab_h)),
+            (self.view, r(x, tab_h, w, (height - tab_h).max(0))),
+        ];
+        if keypad_w > 0 {
+            rects.extend(
+                self.keypad
+                    .rects(r(x + w, tab_h, keypad_w, (height - tab_h).max(0)), dpi),
+            );
+        }
+        (self.sidebar.visible, rects)
     }
 
     /// 画面の大きさが変わった。
@@ -1058,6 +1114,10 @@ impl TermApp {
         let (cols, rows) = self.painter.grid_size(width, height);
         self.grid = (cols, rows);
         for t in &mut self.tabs {
+            // 3270 の画面の大きさはホストが決める
+            if t.tn.is_some() {
+                continue;
+            }
             t.term.resize(cols, rows);
             let size = (cols as u16, rows as u16);
             if size != t.size && t.exited.is_none() {
@@ -1108,6 +1168,13 @@ impl TermApp {
                     let Some(i) = self.tabs.iter().position(|t| t.id == id) else {
                         continue;
                     };
+                    if self.tabs[i].tn.is_some() {
+                        self.tn_receive(i, &data);
+                        if i == self.active {
+                            active_dirty = true;
+                        }
+                        continue;
+                    }
                     let t = &mut self.tabs[i];
                     t.term.feed(&data);
                     let resp = t.term.take_responses();
@@ -1160,6 +1227,15 @@ impl TermApp {
                     };
                     let t = &mut self.tabs[i];
                     t.exited = Some(code);
+                    if let Some(tn) = &t.tn {
+                        t.term = tn3270::render(tn, true);
+                        let label = t.place.label();
+                        self.tn_note(&format!("{label}: 切断されました"));
+                        if i == self.active {
+                            active_dirty = true;
+                        }
+                        continue;
+                    }
                     let code = code
                         .map(|c| format!("（終了コード {c}）"))
                         .unwrap_or_default();
@@ -1189,6 +1265,105 @@ impl TermApp {
             self.update_scrollbar();
             self.invalidate();
         }
+    }
+
+    // ---- 3270 のタブ -------------------------------------------------------------
+
+    /// 3270 の接続の記録に 1 行書く（`logs\tn3270.log`）。
+    fn tn_log_line(&mut self, text: &str) {
+        let log = self.tn_log.get_or_insert_with(|| {
+            let path = yy_config::config_dir().map(|d| d.join("logs").join("tn3270.log"));
+            std::sync::Arc::new(yy_remote::log::TransferLog::new(
+                path,
+                crate::remote::local_clock,
+            ))
+        });
+        log.line(None, text);
+    }
+
+    /// 知らせをステータスと記録に出す。
+    fn tn_note(&mut self, text: &str) {
+        self.tn_log_line(text);
+        self.status_text = text.to_owned();
+        self.update_status();
+    }
+
+    /// 3270 のセッションの出来事を記録・表示する。
+    fn tn_events(&mut self, i: usize, events: Vec<yy_3270::Event>) {
+        use yy_3270::Event as E;
+        let label = self.tabs[i].place.label();
+        for e in events {
+            match e {
+                E::Negotiation(s) => self.tn_log_line(&format!("{label}: {s}")),
+                E::Mode(m) => self.tn_note(&format!("{label}: {} で接続しました", m.label())),
+                E::Device(d) => {
+                    self.tn_log_line(&format!("{label}: LU {d} が割り当てられました"));
+                    self.update_tab_label(i);
+                }
+                E::DeviceRejected(r) => {
+                    if let Some(tn) = self.tabs[i].tn.as_mut() {
+                        tn.message = format!("LU を使えません: {r}");
+                    }
+                    self.tn_note(&format!("{label}: LU を使えません: {r}"));
+                }
+                E::Text(t) => {
+                    if let Some(tn) = self.tabs[i].tn.as_mut() {
+                        tn.message = t.clone();
+                    }
+                    self.tn_note(&format!("{label}: {t}"));
+                }
+                E::Alarm => unsafe {
+                    let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_OK);
+                },
+            }
+        }
+    }
+
+    /// 3270 のタブ `i` がホストからデータを受け取った。
+    fn tn_receive(&mut self, i: usize, data: &[u8]) {
+        let t = &mut self.tabs[i];
+        let Some(tn) = t.tn.as_mut() else { return };
+        let mut o = tn.session.receive(data);
+        let term = o.changed.then(|| tn3270::render(tn, false));
+        t.send(std::mem::take(&mut o.send));
+        if let Some(term) = term {
+            t.term = term;
+        }
+        self.tn_events(i, o.events);
+        if i == self.active {
+            // 画面の大きさ（モデル）が変わったらキーパッド・画面を並べ直す
+            self.invalidate();
+        }
+    }
+
+    /// 表示している 3270 のタブにキーを送る。
+    fn tn_key(&mut self, k: yy_3270::Key) {
+        let active = self.active;
+        let Some(t) = self.tabs.get_mut(active) else {
+            return;
+        };
+        // 切断したタブは Enter・Esc（Clear）で閉じる
+        if t.exited.is_some() {
+            if matches!(k, yy_3270::Key::Enter | yy_3270::Key::Clear) {
+                self.close_tab(active);
+            }
+            return;
+        }
+        let Some(tn) = t.tn.as_mut() else { return };
+        let mut o = tn.session.key(k);
+        let term = o.changed.then(|| tn3270::render(tn, false));
+        t.send(std::mem::take(&mut o.send));
+        if let Some(term) = term {
+            t.selection = None;
+            t.term = term;
+            self.invalidate();
+        }
+        self.tn_events(active, o.events);
+    }
+
+    /// 表示しているタブが 3270 か。
+    fn is_tn(&self) -> bool {
+        self.tab().is_some_and(|t| t.tn.is_some())
     }
 
     /// 入力をシェルに送る（最新の表示に戻し、選択を解く）。
@@ -1234,6 +1409,17 @@ impl TermApp {
         let Some((text, _)) = crate::clipboard::get_text(self.frame) else {
             return;
         };
+        if let Some(t) = self.tabs.get_mut(self.active)
+            && let Some(tn) = t.tn.as_mut()
+        {
+            let o = tn.session.paste(&text);
+            if o.changed {
+                t.selection = None;
+                t.term = tn3270::render(tn, t.exited.is_some());
+                self.invalidate();
+            }
+            return;
+        }
         let Some(t) = self.tab() else { return };
         let bytes = yy_term::keys::paste(&text, t.term.modes());
         self.send_input(bytes);
@@ -1432,12 +1618,21 @@ fn command(hwnd: HWND, id: u16) {
             let place = with(|a| match a.tab().map(|t| &t.place) {
                 Some(p @ Place::Remote { .. }) => p.clone(),
                 Some(p @ Place::Local(Some(_))) => p.clone(),
+                Some(p @ Place::Tn3270(_)) => p.clone(),
                 _ => initial_place(None),
             })
             .unwrap_or_else(|| initial_place(None));
             open_tab(place);
         }
         ID_SSH => cmd_ssh(hwnd),
+        ID_TN3270 => cmd_tn3270(hwnd),
+        id if tn3270::keypad_key(id).is_some() => {
+            if let Some(k) = tn3270::keypad_key(id) {
+                with(|a| a.tn_key(k));
+            }
+            // ボタンからフォーカスを画面に戻す
+            focus_view();
+        }
         ID_WS_USE_AGENT => {
             crate::remote::set_use_agent(!crate::remote::use_agent());
             check_use_agent(hwnd);
@@ -1715,6 +1910,31 @@ fn check_use_agent(frame: HWND) {
             u32::from(ID_WS_USE_AGENT),
             (MF_BYCOMMAND | if on { MF_CHECKED } else { MF_UNCHECKED }).0,
         );
+    }
+}
+
+/// 「3270 で接続」: 接続先を尋ねて 3270 のタブを開く。
+fn cmd_tn3270(hwnd: HWND) {
+    let names: Vec<String> =
+        with(|a| a.config.tn3270.host.keys().cloned().collect()).unwrap_or_default();
+    let hint = if names.is_empty() {
+        String::new()
+    } else {
+        format!("（設定の名前: {}）", names.join("、"))
+    };
+    let Some(input) = crate::goto::prompt_text(
+        hwnd,
+        "3270 で接続",
+        &format!("接続先（ホスト[:ポート]、tn3270://LU名@ホスト:ポート、または設定の名前）{hint}:"),
+        "",
+    ) else {
+        return;
+    };
+    let target = with(|a| tn3270::Target3270::parse(&input, &a.config));
+    match target {
+        Some(Ok(t)) => open_tab(Place::Tn3270(t)),
+        Some(Err(e)) => error_box(hwnd, &e),
+        None => {}
     }
 }
 
@@ -2035,6 +2255,14 @@ extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let vk = VIRTUAL_KEY(wparam.0 as u16);
             let m = mods();
+            // 3270 のタブは独自のキーの割り当て（14 章 7）
+            if with(|a| a.is_tn()) == Some(true) {
+                if let Some(k) = tn3270::map_key(vk, m) {
+                    with(|a| a.tn_key(k));
+                    return LRESULT(0);
+                }
+                return crate::default_proc(hwnd, msg, wparam, lparam);
+            }
             // Shift+PageUp などはスクロールバックを見る
             if m.shift && !m.ctrl && !m.alt {
                 let page = with(|a| a.grid.1 as isize).unwrap_or(24);
@@ -2087,6 +2315,13 @@ extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                     _ => char::from_u32(u32::from(unit)),
                 };
                 let Some(c) = c else { return };
+                // 3270 のタブ: 文字だけを入れる（Enter・Tab などは WM_KEYDOWN で処理した）
+                if a.is_tn() {
+                    if !c.is_control() && !alt {
+                        a.tn_key(yy_3270::Key::Char(c));
+                    }
+                    return;
+                }
                 let m = Mods { alt, ..mods() };
                 let key = match c {
                     '\r' => Key::Enter,
@@ -2213,6 +2448,18 @@ extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                 }
                 if let Some(t) = a.tab_mut() {
                     t.selecting = false;
+                }
+                // 3270: ドラッグしていなければ、クリックした位置にカーソルを移す
+                if a.is_tn() && a.tab().is_some_and(|t| t.selection.is_none()) {
+                    let (r, c) = a.painter.cell_at(x, y, false);
+                    let addr = a.tab().and_then(|t| {
+                        let s = t.tn.as_ref()?.session.screen();
+                        (r >= 0 && c >= 0 && (r as usize) < s.rows && (c as usize) < s.cols)
+                            .then(|| r as usize * s.cols + c as usize)
+                    });
+                    if let Some(addr) = addr {
+                        a.tn_key(yy_3270::Key::MoveTo(addr));
+                    }
                 }
                 if a.config.terminal.copy_on_select
                     && a.tab().is_some_and(|t| t.selection.is_some())

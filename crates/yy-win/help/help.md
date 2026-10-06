@@ -10,6 +10,7 @@ yyeditor は、数 GB のファイルもすぐに開ける Windows 向けの軽�
 - [リモート（SSH）のファイル](#remote)
 - [ワークスペース](#workspace)
 - [ターミナル（yyterm）](#terminal)
+- [3270（メインフレーム）](#tn3270)
 - [ファイル転送（yysftp）](#transfer)
 - [タブと比較](#tabs)
 - [編集](#editing)
@@ -247,6 +248,56 @@ yyeditor と共通に使います。
   します。SCP のアップロードは区切り（`scp_chunk_mb`）ごとに送ってつなげるので、切断で失うのは多くても 1 区切りです。
 - ファイルはエディタ（yyeditor）、フォルダはターミナル（yyterm）で開けます（ファイル メニュー・右クリック）。
 - **起動の引数**: `yysftp.exe [ssh://接続先/パス | ユーザー@ホスト:/パス | ユーザー@ホスト]`。
+
+## 3270（メインフレーム） {#tn3270}
+
+yyterm のタブで、IBM メインフレーム（z/OS など）に 3270 端末として接続できます（TN3270・TN3270E）。
+
+- **接続**（ファイル メニューの「3270 で接続」、Ctrl+Shift+M）: `ホスト[:ポート]`（既定のポートは 23）、
+  `tn3270://LU名@ホスト:ポート`、または設定の `[tn3270.host.名前]` の名前を入力します。設定に `ssh` を
+  書くと、その SSH の接続（踏み台・プロキシも使えます）を経由します（手元のポートは開きません）。
+- **日本語**: 既定の文字コードは CCSID 930（カタカナ＋漢字）。939・1390・1399・037・1047 も選べます
+  （設定の `ccsid`）。漢字は IME で入力でき、半角と全角の切り替え（SO/SI）は自動で入れます。
+- **画面の下の 1 行（OIA）**: 接続の種類（TN3270・TN3270E）、LU 名、キーボードの状態（`X SYSTEM` は
+  ホストの応答待ち、`X 保護` などは操作の誤りで Reset で解除）、挿入モード（INS）、カーソルの位置、文字コード。
+- **キー**:
+
+| 機能 | キー |
+|------|------|
+| Enter / New Line | Enter / Shift+Enter |
+| PF1〜PF12 / PF13〜PF24 | F1〜F12 / Shift+F1〜F12 |
+| PF7 / PF8（上下） | PageUp / PageDown |
+| PA1 / PA2 / PA3 | Alt+1 / Alt+2 / Alt+3 |
+| Clear | Esc |
+| Reset | Ctrl+R |
+| Erase EOF / Erase Input | End / Shift+End |
+| 挿入モード | Insert |
+| Tab / Back Tab | Tab / Shift+Tab |
+| Dup / Field Mark | Ctrl+D / Ctrl+M |
+| Attn / SysReq | Ctrl+Pause / Alt+PrintScreen |
+
+- **キーパッド**: 画面の右に、PF1〜PF24・PA1〜PA3・Clear・Reset・Attn・SysReq・Erase EOF・Erase Input・
+  Field Mark・Dup・Enter のボタンを出します（設定の `keypad = false` で消せます）。
+- マウスのクリックでカーソルを移し、ドラッグで選択してコピーします（非表示のフィールドはコピーしません）。
+  貼り付けは非保護のフィールドにだけ入れます（Tab で次のフィールド、改行で New Line）。
+- 接続の記録（交渉・LU・切断）は `%APPDATA%\yyeditor\logs\tn3270.log` に残します。
+- 設定（`config.toml`）:
+
+```toml
+[tn3270]
+model = 2            # 2（24×80）・3（32×80）・4（43×80）・5（27×132）
+ccsid = 930
+terminal_type = ""   # 空なら IBM-3278-<model>-E
+tn3270e = true
+keypad = true
+
+[tn3270.host.prod]
+host = "mvs01.example.co.jp"
+port = 23
+lu = "TCP00042"      # TN3270E で求める LU 名
+ccsid = 939
+ssh = "bastion"      # この SSH の接続を経由する
+```
 
 ## タブと比較 {#tabs}
 
