@@ -72,6 +72,13 @@ SSH は yyeditor に組み込んであるので、Windows の OpenSSH（ssh.exe�
   `%APPDATA%\yyeditor\known_hosts` に記録します。記録と違う鍵のホストには接続しません。
 - 認証は、秘密鍵（`~/.ssh/id_ed25519` など、または設定の `identity_file`）、ワンタイムパスワードなどの
   対話式の認証、パスワードの順に試します。パスワードとパスフレーズは記録しません。
+- **踏み台・プロキシ**: `~/.ssh/config` の `ProxyJump`（`踏み台1,踏み台2` の多段も可）か、設定の
+  `proxy_jump` で踏み台を経由して接続します。踏み台ごとにホスト鍵の確認と認証を行います。
+  HTTP（CONNECT）・SOCKS5・SOCKS4 のプロキシは設定の `proxy` で指定します（踏み台を使う場合は最初の踏み台への接続に使います）。
+  - `~/.ssh/config` の `ProxyCommand` は、yyeditor が外部のプログラムを起動しないため、次の形だけを読み替えます:
+    `ssh -W %h:%p 踏み台`（踏み台と同じ）、`nc -X 5|4|connect -x プロキシ %h %p`、`ncat --proxy プロキシ %h %p`、
+    `connect -S|-H プロキシ %h %p`。それ以外の `ProxyCommand` が当てはまる接続先には接続できないので、
+    yyeditor の設定で `proxy_jump` か `proxy`（`"none"` で直接接続）を指定してください。
 - 最初に接続したとき、接続先のホームの `~/.yyeditor/agent` に小さなプログラム（エージェント）を置きます。
   ファイルの一覧・読み出し・保存はエージェントが行います。インターネットへの接続は必要ありません。
 - **上書き保存**（Ctrl+S）は接続先のファイルを置き換えます（権限・所有者・シンボリックリンクは保ちます）。
@@ -478,14 +485,23 @@ read_ssh_config = true        # %USERPROFILE%\.ssh\config を読む（読むだ�
 read_ssh_known_hosts = true   # %USERPROFILE%\.ssh\known_hosts を読む（読むだけ）
 keepalive_secs = 15           # 接続の死活確認の間隔（秒）
 agent_dir = ""                # エージェントを置くフォルダ（空なら ~/.yyeditor/agent）
+proxy = ""                    # すべての接続先に使うプロキシ（例: "http://proxy:8080"、"socks5://user@socks:1080"）
 
 [remote.host.build]           # 接続先の名前ごとの設定（書いていない項目は ~/.ssh/config）
 hostname = "build01.example.co.jp"
 user = "yamada"
 port = 22
 identity_file = "~/.ssh/id_build"
+proxy_jump = "bastion"        # 踏み台（"a,admin@b:2022" の多段も可。"none" で ~/.ssh/config の指定も使わない）
+proxy = "none"                # この接続先のプロキシ（"none" で共通のプロキシも使わない）
 agent_dir = "/work/yamada/.yyeditor"   # ホームが noexec の場合など
 ```
+
+- `proxy_jump`・`proxy` のどちらかを書いた接続先では、`~/.ssh/config` の `ProxyJump`・`ProxyCommand` は使いません。
+- プロキシのパスワード認証（HTTP の Basic 認証、SOCKS5 のユーザー名・パスワード認証）に対応しています。
+  `http://ユーザー@ホスト:ポート` のようにユーザー名だけを書くと接続のときにパスワードを尋ね、何も書かなければ
+  プロキシに認証を求められたときにユーザー名とパスワードを尋ねます。間違えたら尋ね直します。パスワードは記録しません
+  （`http://ユーザー:パスワード@…` と設定に書くこともできますが、勧めません）。
 
 - `%APPDATA%\yyeditor\syntax\<名前>.toml`: シンタックスハイライトの定義を追加・置き換え。
 - `%APPDATA%\yyeditor\mappings\<名前>.map`: 独自の文字コードの対応表。

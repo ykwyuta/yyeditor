@@ -98,12 +98,14 @@ impl RemoteState {
                         port: h.port,
                         identity_file: h.identity_file.clone(),
                         proxy_jump: h.proxy_jump.clone(),
+                        proxy: h.proxy.clone(),
                         agent_dir: h.agent_dir.clone(),
                     },
                 )
             })
             .collect();
         r.agent_dir = Some(self.config.agent_dir.clone()).filter(|d| !d.trim().is_empty());
+        r.proxy = Some(self.config.proxy.clone()).filter(|p| !p.trim().is_empty());
         r
     }
 
@@ -494,7 +496,7 @@ fn message_box(owner: HWND, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_R
 pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Session>, String> {
     enum Prepared {
         Ready(Arc<Session>),
-        Connect(Arc<dyn Connector>, yy_remote::HostSpec),
+        Connect(Arc<dyn Connector>, Box<yy_remote::HostSpec>),
         Unavailable,
     }
     let prepared = with_app(|a| {
@@ -504,13 +506,13 @@ pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Sessio
         }
         let spec = r.resolver().resolve(target);
         match r.connector() {
-            Some(c) => Prepared::Connect(c, spec),
+            Some(c) => Prepared::Connect(c, Box::new(spec)),
             None => Prepared::Unavailable,
         }
     });
     let (connector, spec) = match prepared {
         Some(Prepared::Ready(s)) => return Ok(s),
-        Some(Prepared::Connect(c, spec)) => (c, spec),
+        Some(Prepared::Connect(c, spec)) => (c, *spec),
         Some(Prepared::Unavailable) => {
             return Err("この yyeditor には SSH の機能が組み込まれていません。".into());
         }

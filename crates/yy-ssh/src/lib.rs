@@ -7,6 +7,12 @@
 //! ホスト鍵は、鍵交換（サーバーの署名の検証）が済んだ時点で受け取っておき、認証の情報を
 //! 送る前に `known_hosts` と照合する。初めてのホストは利用者に確かめてから記録し、記録と
 //! 違う鍵なら認証せずに切断する。
+//!
+//! 踏み台（ProxyJump）を経由する場合は、踏み台ごとに同じ手順（ホスト鍵の照合と認証）で
+//! 接続し、次の接続先へは踏み台の `direct-tcpip` チャネルの上で SSH を話す。最初の接続先
+//! （踏み台がなければ接続先そのもの）への TCP 接続には HTTP・SOCKS のプロキシを使える。
+
+mod proxy;
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -17,7 +23,7 @@ use std::time::Duration;
 use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
 use russh::{ChannelMsg, MethodKind};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use yy_remote::known_hosts::{self, HostKeyStatus};
@@ -155,38 +161,62 @@ impl SshConnector {
     }
 }
 
-impl Connector for SshConnector {
-    fn connect(&self, spec: &HostSpec, prompter: &dyn Prompter) -> io::Result<Arc<dyn Transport>> {
-        if let Some(jump) = &spec.proxy_jump {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("踏み台（ProxyJump {jump}）経由の接続にはまだ対応していません"),
-            ));
-        }
-        let rt = runtime()?;
-        let config = Arc::new(client::Config {
-            keepalive_interval: Some(self.keepalive),
-            keepalive_max: 3,
-            inactivity_timeout: None,
-            nodelay: true,
-            ..client::Config::default()
-        });
+/// SSH を話す下の接続（TCP・プロキシ経由の TCP・踏み台のチャネル）。
+trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
+
+impl SshConnector {
+    /// 1 つのホストに接続し、ホスト鍵を照合して認証する。`via` があればその踏み台を経由する。
+    fn connect_hop(
+        &self,
+        rt: &Runtime,
+        config: &Arc<client::Config>,
+        spec: &HostSpec,
+        via: Option<&Handle<Client>>,
+        prompter: &dyn Prompter,
+    ) -> io::Result<Handle<Client>> {
+        let host = spec.hostname.as_str();
+        let port = spec.port;
+        // プロキシを使う場合は、先にプロキシを通した TCP 接続を作る（認証を尋ねてやり直せるように）
+        let mut proxied = match spec.proxy.as_ref().filter(|_| via.is_none()) {
+            Some(p) => Some(connect_proxy(rt, p, host, port, prompter)?),
+            None => None,
+        };
         let server_key = Arc::new(Mutex::new(None));
         let handler = Client {
             server_key: server_key.clone(),
         };
-        let addr = (spec.hostname.clone(), spec.port);
         let mut handle = rt.block_on(async {
-            match tokio::time::timeout(CONNECT_TIMEOUT, client::connect(config, addr, handler))
-                .await
-            {
-                Ok(r) => r.map_err(ssh_error),
+            let connect = async {
+                let stream: Box<dyn Stream> = match (via, proxied.take()) {
+                    (Some(jump), _) => {
+                        let ch = jump
+                            .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0)
+                            .await
+                            .map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::ConnectionRefused,
+                                    format!("踏み台から {host}:{port} に接続できませんでした: {e}"),
+                                )
+                            })?;
+                        Box::new(ch.into_stream())
+                    }
+                    (None, Some(tcp)) => Box::new(tcp),
+                    (None, None) => {
+                        let tcp = tokio::net::TcpStream::connect((host, port)).await?;
+                        tcp.set_nodelay(true)?;
+                        Box::new(tcp)
+                    }
+                };
+                client::connect_stream(config.clone(), stream, handler)
+                    .await
+                    .map_err(ssh_error)
+            };
+            match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+                Ok(r) => r,
                 Err(_) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!(
-                        "{}:{} に接続できませんでした（時間切れ）",
-                        spec.hostname, spec.port
-                    ),
+                    format!("{host}:{port} に接続できませんでした（時間切れ）"),
                 )),
             }
         })?;
@@ -203,9 +233,127 @@ impl Connector for SshConnector {
             disconnect(rt, &handle);
             return Err(e);
         }
+        Ok(handle)
+    }
+}
+
+impl Connector for SshConnector {
+    fn connect(&self, spec: &HostSpec, prompter: &dyn Prompter) -> io::Result<Arc<dyn Transport>> {
+        let hops: Vec<&HostSpec> = spec.jumps.iter().chain([spec]).collect();
+        if let Some(e) = hops.iter().find_map(|h| h.route_error.as_ref()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, e.clone()));
+        }
+        let rt = runtime()?;
+        let config = Arc::new(client::Config {
+            keepalive_interval: Some(self.keepalive),
+            keepalive_max: 3,
+            inactivity_timeout: None,
+            nodelay: true,
+            ..client::Config::default()
+        });
+        let mut handles: Vec<Arc<Handle<Client>>> = Vec::new();
+        for (i, hop) in hops.iter().enumerate() {
+            let via = handles.last().map(|h| h.as_ref());
+            match self.connect_hop(rt, &config, hop, via, prompter) {
+                Ok(h) => handles.push(Arc::new(h)),
+                Err(e) => {
+                    for h in handles.iter().rev() {
+                        disconnect(rt, h);
+                    }
+                    // 踏み台で失敗したことが分かるようにする（中止などの種類は保つ）
+                    return Err(if i + 1 < hops.len() {
+                        io::Error::new(e.kind(), format!("踏み台 {}: {e}", hop.user_host()))
+                    } else {
+                        e
+                    });
+                }
+            }
+        }
+        let handle = handles.pop().expect("at least one hop");
         Ok(Arc::new(SshTransport {
-            handle: Arc::new(handle),
+            handle,
+            jumps: handles,
         }))
+    }
+}
+
+/// プロキシを通して `host:port` への TCP 接続を作る。プロキシに認証を求められたり、認証に
+/// 失敗したりしたら、ユーザー名（設定に書いていなければ）とパスワードを尋ねてやり直す。
+fn connect_proxy(
+    rt: &Runtime,
+    p: &yy_remote::proxy::Proxy,
+    host: &str,
+    port: u16,
+    prompter: &dyn Prompter,
+) -> io::Result<tokio::net::TcpStream> {
+    let mut user = p.user.clone();
+    let mut password = p.password.clone();
+    // ユーザー名だけを書いた場合は、最初からパスワードを尋ねる
+    if user.is_some() && password.is_none() {
+        password = Some(ask_proxy_password(p, user.as_deref(), prompter)?.1);
+    }
+    let mut asked = 0;
+    loop {
+        let creds = match (&user, &password) {
+            (Some(u), Some(pw)) => Some(proxy::Credentials {
+                user: u,
+                password: pw,
+            }),
+            (Some(u), None) => Some(proxy::Credentials {
+                user: u,
+                password: "",
+            }),
+            _ => None,
+        };
+        let r = rt.block_on(async {
+            match tokio::time::timeout(CONNECT_TIMEOUT, proxy::connect(p, creds, host, port)).await
+            {
+                Ok(r) => r,
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("プロキシ {p} に接続できませんでした（時間切れ）"),
+                )),
+            }
+        });
+        match r {
+            Err(e) if proxy::needs_credentials(&e) && asked < RETRIES => {
+                asked += 1;
+                let (u, pw) = ask_proxy_password(p, user.as_deref(), prompter)?;
+                user = Some(u);
+                password = Some(pw);
+            }
+            r => return r,
+        }
+    }
+}
+
+/// プロキシのパスワード（ユーザー名が分からなければユーザー名も）を尋ねる。
+fn ask_proxy_password(
+    p: &yy_remote::proxy::Proxy,
+    user: Option<&str>,
+    prompter: &dyn Prompter,
+) -> io::Result<(String, String)> {
+    if let Some(u) = user {
+        let pw = prompter
+            .password(&format!("{u}（プロキシ {p}）"))
+            .ok_or_else(cancelled)?;
+        return Ok((u.to_owned(), pw));
+    }
+    let prompts = [
+        ("ユーザー名:".to_owned(), true),
+        ("パスワード:".to_owned(), false),
+    ];
+    let answers = prompter
+        .keyboard_interactive(
+            &format!("プロキシ {p}"),
+            "プロキシの認証",
+            "プロキシのユーザー名とパスワードを入力してください。",
+            &prompts,
+        )
+        .ok_or_else(cancelled)?;
+    match <[String; 2]>::try_from(answers) {
+        Ok([u, pw]) => Ok((u, pw)),
+        Err(_) => Err(cancelled()),
     }
 }
 
@@ -338,16 +486,23 @@ fn load_key(path: &Path, prompter: &dyn Prompter) -> io::Result<Option<PrivateKe
 /// 認証済みの SSH 接続。
 struct SshTransport {
     handle: Arc<Handle<Client>>,
+    /// 経由している踏み台の接続（最初の踏み台から順に）
+    jumps: Vec<Arc<Handle<Client>>>,
 }
 
 impl Drop for SshTransport {
     fn drop(&mut self) {
         if let Ok(rt) = runtime() {
-            let h = self.handle.clone();
+            // 接続先から順に、踏み台をさかのぼって切断する
+            let handles: Vec<_> = std::iter::once(self.handle.clone())
+                .chain(self.jumps.iter().rev().cloned())
+                .collect();
             rt.spawn(async move {
-                let _ = h
-                    .disconnect(russh::Disconnect::ByApplication, "", "en")
-                    .await;
+                for h in handles {
+                    let _ = h
+                        .disconnect(russh::Disconnect::ByApplication, "", "en")
+                        .await;
+                }
             });
         }
     }
@@ -416,7 +571,7 @@ impl Transport for SshTransport {
     }
 
     fn is_closed(&self) -> bool {
-        self.handle.is_closed()
+        self.handle.is_closed() || self.jumps.iter().any(|h| h.is_closed())
     }
 }
 

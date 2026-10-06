@@ -5,12 +5,22 @@
 //! OpenSSH のプログラムは使わない（16 で決定）。
 //!
 //! `~/.ssh/config` のうち解釈するのは `Host`・`HostName`・`User`・`Port`・`IdentityFile`・
-//! `ProxyJump` だけで、`Match` ブロックは読み飛ばす。値は OpenSSH と同じく最初に現れたものが
-//! 優先される（`IdentityFile` は重ねる）。外部プログラムを起動する `ProxyCommand` には対応しない。
+//! `ProxyJump`・`ProxyCommand` だけで、`Match` ブロックは読み飛ばす。値は OpenSSH と同じく
+//! 最初に現れたものが優先される（`IdentityFile` は重ねる）。外部プログラムを起動する
+//! `ProxyCommand` は、よく使われる形だけを踏み台・プロキシに読み替える（[`crate::proxy`]）。
+//!
+//! 踏み台（11 章 4.5）は接続先ごとに解決して、最初に接続するものから順に
+//! [`HostSpec::jumps`] に並べる。踏み台の指定は OpenSSH の `ProxyJump` と同じく
+//! `[ユーザー@]ホスト[:ポート]` のカンマ区切りで、最初の踏み台への接続にはその踏み台自身の
+//! 設定（踏み台・プロキシ）も使う。
 
 use std::path::{Path, PathBuf};
 
+use crate::proxy::{self, Proxy, Route};
 use crate::uri::Target;
+
+/// 踏み台をたどる深さの上限（設定の循環を止める）
+const MAX_JUMP_DEPTH: usize = 8;
 
 /// 接続に使う値。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,8 +33,12 @@ pub struct HostSpec {
     pub user: String,
     /// 試す秘密鍵（存在するものだけを使う）
     pub identity_files: Vec<PathBuf>,
-    /// 踏み台（M9.4 で対応）
-    pub proxy_jump: Option<String>,
+    /// 経由する踏み台（最初に接続するものから順に。踏み台自身の `jumps` は空）
+    pub jumps: Vec<HostSpec>,
+    /// このホストへの TCP 接続に使うプロキシ（踏み台を経由する場合は最初の踏み台のものを使う）
+    pub proxy: Option<Proxy>,
+    /// 踏み台・プロキシの設定の誤り（接続するときにこの説明で失敗する）
+    pub route_error: Option<String>,
     /// エージェントの配置先（`None` なら `~/.yyeditor/agent`）
     pub agent_dir: Option<String>,
 }
@@ -53,6 +67,8 @@ pub struct HostOverride {
     pub port: Option<u16>,
     pub identity_file: Option<String>,
     pub proxy_jump: Option<String>,
+    /// プロキシ（`http://…`・`socks5://…`・`none`）
+    pub proxy: Option<String>,
     pub agent_dir: Option<String>,
 }
 
@@ -63,6 +79,8 @@ pub struct Resolver {
     pub hosts: Vec<(String, HostOverride)>,
     /// すべての接続先に共通のエージェントの配置先
     pub agent_dir: Option<String>,
+    /// すべての接続先に共通のプロキシ（踏み台を経由しない接続、または最初の踏み台への接続に使う）
+    pub proxy: Option<String>,
     /// `~/.ssh/config` の内容（読まない設定なら空）
     pub ssh_config: String,
     /// 端末のホームフォルダ（`~` の展開に使う）
@@ -87,6 +105,7 @@ impl Resolver {
         Resolver {
             hosts: Vec::new(),
             agent_dir: None,
+            proxy: None,
             ssh_config,
             local_home,
             local_user,
@@ -95,6 +114,10 @@ impl Resolver {
 
     /// 接続先を解決する。
     pub fn resolve(&self, target: &Target) -> HostSpec {
+        self.resolve_at(target, 0)
+    }
+
+    fn resolve_at(&self, target: &Target, depth: usize) -> HostSpec {
         let own = self
             .hosts
             .iter()
@@ -128,14 +151,77 @@ impl Resolver {
                 identity_files.push(h.join(".ssh").join(name));
             }
         }
-        HostSpec {
+        let mut spec = HostSpec {
             target: target.clone(),
             hostname,
             port,
             user,
             identity_files,
-            proxy_jump: own.proxy_jump.clone().or(sc.proxy_jump),
+            jumps: Vec::new(),
+            proxy: None,
+            route_error: None,
             agent_dir: own.agent_dir.clone().or_else(|| self.agent_dir.clone()),
+        };
+
+        // yyeditor の設定（proxy_jump・proxy のどちらか）があれば ~/.ssh/config の
+        // ProxyJump・ProxyCommand は使わない
+        let own_route = own.proxy_jump.is_some() || own.proxy.is_some();
+        let route: Result<Option<Route>, String> = if own_route {
+            match (&own.proxy_jump, &own.proxy) {
+                (Some(j), _) if !proxy::is_none(j) => Ok(Some(Route::Jump(j.trim().to_owned()))),
+                (_, Some(p)) => Proxy::parse(p).map(|p| p.map(Route::Proxy)),
+                _ => Ok(None),
+            }
+        } else {
+            match sc.route {
+                Some(SshRoute::Jump(j)) => Ok(Some(Route::Jump(j))),
+                Some(SshRoute::Command(c)) => proxy::translate_command(&c).map(Some),
+                None => Ok(None),
+            }
+        };
+        match route {
+            Ok(Some(Route::Jump(j))) => self.resolve_jumps(&mut spec, &j, depth),
+            Ok(Some(Route::Proxy(p))) => spec.proxy = Some(p),
+            // 個別の proxy = "none" は共通のプロキシも使わない
+            Ok(None) if own.proxy.is_some() => {}
+            Ok(None) => match self.proxy.as_deref().map(Proxy::parse) {
+                Some(Ok(p)) => spec.proxy = p,
+                Some(Err(e)) => spec.route_error = Some(e),
+                None => {}
+            },
+            Err(e) => spec.route_error = Some(e),
+        }
+        spec
+    }
+
+    /// `a,b,c` の踏み台を解決して `spec.jumps` に並べる（OpenSSH の `-J a,b,c` と同じく、
+    /// 最初の踏み台 `a` だけが自身の踏み台・プロキシの設定を使う）。
+    fn resolve_jumps(&self, spec: &mut HostSpec, list: &str, depth: usize) {
+        if depth >= MAX_JUMP_DEPTH {
+            spec.route_error = Some(format!(
+                "踏み台の設定が循環しているか、多すぎます（{}）",
+                spec.target
+            ));
+            return;
+        }
+        for (i, entry) in list.split(',').enumerate() {
+            let entry = entry.trim();
+            let Some(t) = Target::parse(entry.strip_prefix("ssh://").unwrap_or(entry)) else {
+                spec.route_error = Some(format!("踏み台の指定（{entry}）を読めません"));
+                return;
+            };
+            let mut hop = self.resolve_at(&t, depth + 1);
+            if i == 0 {
+                spec.jumps.append(&mut hop.jumps);
+                if spec.route_error.is_none() {
+                    spec.route_error = hop.route_error.take();
+                }
+            } else {
+                hop.jumps.clear();
+                hop.proxy = None;
+                hop.route_error = None;
+            }
+            spec.jumps.push(hop);
         }
     }
 
@@ -185,12 +271,24 @@ pub struct SshConfigEntry {
     pub user: Option<String>,
     pub port: Option<u16>,
     pub identity_files: Vec<String>,
-    pub proxy_jump: Option<String>,
+    /// `ProxyJump`・`ProxyCommand` のうち先に現れたもの（`none` なら直接接続）
+    pub route: Option<SshRoute>,
+}
+
+/// `~/.ssh/config` の踏み台・プロキシの指定。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SshRoute {
+    /// `ProxyJump`（カンマ区切りの踏み台）
+    Jump(String),
+    /// `ProxyCommand`（コマンド全体）
+    Command(String),
 }
 
 /// `~/.ssh/config` の内容のうち、`host` に当てはまる値を集める。
 pub fn parse_for_host(text: &str, host: &str) -> SshConfigEntry {
     let mut out = SshConfigEntry::default();
+    // ProxyJump・ProxyCommand はどちらか先に現れたもの（none を含む）だけを使う
+    let mut route_seen = false;
     // 最初の Host 行より前は全ホストに当てはまる
     let mut active = true;
     for line in text.lines() {
@@ -214,9 +312,14 @@ pub fn parse_for_host(text: &str, host: &str) -> SshConfigEntry {
                 }
             }
             "identityfile" => out.identity_files.push(unquote(value.trim())),
-            "proxyjump" if out.proxy_jump.is_none() => {
+            "proxyjump" if !route_seen => {
+                route_seen = true;
                 let v = first_word(&value);
-                out.proxy_jump = Some(v).filter(|v| !v.eq_ignore_ascii_case("none"));
+                out.route = (!proxy::is_none(&value)).then_some(SshRoute::Jump(v));
+            }
+            "proxycommand" if !route_seen => {
+                route_seen = true;
+                out.route = (!proxy::is_none(&value)).then(|| SshRoute::Command(value.clone()));
             }
             _ => {}
         }
@@ -340,7 +443,7 @@ Host *
         assert_eq!(e.user.as_deref(), Some("yamada"));
         assert_eq!(e.port, Some(2222));
         assert_eq!(e.identity_files, ["~/.ssh/global_key", "~/.ssh/id_build"]);
-        assert_eq!(e.proxy_jump.as_deref(), Some("bastion"));
+        assert_eq!(e.route, Some(SshRoute::Jump("bastion".into())));
 
         let e = parse_for_host(CONFIG, "web.example.co.jp");
         assert_eq!(e.user.as_deref(), Some("ops"));
@@ -405,6 +508,132 @@ Host *
         );
         assert_eq!(s.identity_files.len(), 3);
         assert_eq!(s.known_hosts_name(), "10.0.0.5");
+    }
+
+    const ROUTES: &str = r#"
+Host target
+    ProxyJump gw1,admin@gw2:2022
+Host gw1
+    HostName gw1.example.com
+    User jumper
+    ProxyCommand nc -X connect -x proxy:3128 %h %p
+Host gw2
+    ProxyJump ignored
+Host viacmd
+    ProxyCommand ssh -W %h:%p -l ops gw1
+Host bad
+    ProxyCommand /usr/local/bin/my-proxy %h %p
+Host loop
+    ProxyJump loop
+Host direct
+    ProxyJump none
+    ProxyCommand nc -x socks %h %p
+Host broken
+    ProxyJump ssh://
+"#;
+
+    fn route_resolver() -> Resolver {
+        Resolver {
+            ssh_config: ROUTES.into(),
+            local_home: Some(PathBuf::from("/home/me")),
+            local_user: "me".into(),
+            ..Resolver::default()
+        }
+    }
+
+    fn resolve(r: &Resolver, host: &str) -> HostSpec {
+        r.resolve(&Target::parse(host).unwrap())
+    }
+
+    #[test]
+    fn resolves_jump_chains() {
+        let r = route_resolver();
+        let s = resolve(&r, "target");
+        assert_eq!(s.route_error, None);
+        assert_eq!(s.proxy, None);
+        let hops: Vec<String> = s
+            .jumps
+            .iter()
+            .map(|h| format!("{}:{}", h.user_host(), h.port))
+            .collect();
+        assert_eq!(hops, ["jumper@gw1.example.com:22", "admin@gw2:2022"]);
+        // 最初の踏み台は自身のプロキシを使い、2 番目の踏み台の ProxyJump は使わない
+        assert_eq!(
+            s.jumps[0].proxy.as_ref().map(|p| p.to_string()).as_deref(),
+            Some("http://proxy:3128")
+        );
+        assert!(s.jumps[1].jumps.is_empty());
+        assert_eq!(s.jumps[1].proxy, None);
+
+        // ProxyCommand ssh -W は踏み台と同じ
+        let s = resolve(&r, "viacmd");
+        assert_eq!(s.jumps.len(), 1);
+        assert_eq!(s.jumps[0].user_host(), "ops@gw1.example.com");
+        assert!(s.jumps[0].proxy.is_some());
+
+        // 先に現れた ProxyJump none が優先される
+        let s = resolve(&r, "direct");
+        assert!(s.jumps.is_empty() && s.proxy.is_none() && s.route_error.is_none());
+
+        assert!(resolve(&r, "bad").route_error.unwrap().contains("my-proxy"));
+        assert!(resolve(&r, "loop").route_error.unwrap().contains("循環"));
+        assert!(resolve(&r, "broken").route_error.is_some());
+    }
+
+    #[test]
+    fn own_settings_choose_the_route() {
+        let mut r = route_resolver();
+        r.proxy = Some("socks5://corp-socks:1080".into());
+        // ~/.ssh/config に経路の指定がなければ共通のプロキシを使う
+        let s = resolve(&r, "plain");
+        assert_eq!(
+            s.proxy.map(|p| p.to_string()).as_deref(),
+            Some("socks5://corp-socks:1080")
+        );
+        r.hosts = vec![
+            (
+                "target".into(),
+                HostOverride {
+                    proxy_jump: Some("none".into()),
+                    ..HostOverride::default()
+                },
+            ),
+            (
+                "viacmd".into(),
+                HostOverride {
+                    proxy: Some("none".into()),
+                    ..HostOverride::default()
+                },
+            ),
+            (
+                "plain".into(),
+                HostOverride {
+                    proxy_jump: Some("gw2".into()),
+                    ..HostOverride::default()
+                },
+            ),
+            (
+                "typo".into(),
+                HostOverride {
+                    proxy: Some("socks5:/x".into()),
+                    ..HostOverride::default()
+                },
+            ),
+        ];
+        // proxy_jump = "none" は ~/.ssh/config の踏み台を使わず、共通のプロキシで接続する
+        let s = resolve(&r, "target");
+        assert!(s.jumps.is_empty());
+        assert!(s.proxy.is_some());
+        // proxy = "none" は直接接続
+        let s = resolve(&r, "viacmd");
+        assert!(s.jumps.is_empty() && s.proxy.is_none());
+        // 踏み台 gw2 の ~/.ssh/config の ProxyJump（ignored）をたどる
+        let s = resolve(&r, "plain");
+        let hops: Vec<&str> = s.jumps.iter().map(|h| h.hostname.as_str()).collect();
+        assert_eq!(hops, ["ignored", "gw2"]);
+        assert!(s.jumps[0].proxy.is_some());
+        assert!(s.proxy.is_none());
+        assert!(resolve(&r, "typo").route_error.is_some());
     }
 
     #[test]

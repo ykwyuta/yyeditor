@@ -9,6 +9,7 @@ pub mod deploy;
 pub mod known_hosts;
 #[cfg(unix)]
 pub mod local;
+pub mod proxy;
 pub mod rpc;
 pub mod session;
 pub mod ssh_config;

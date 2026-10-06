@@ -299,6 +299,8 @@ pub struct RemoteConfig {
     pub keepalive_secs: u32,
     /// 接続先にエージェントを置くフォルダ（空なら `~/.yyeditor/agent`）
     pub agent_dir: String,
+    /// すべての接続先に使うプロキシ（`http://ホスト:ポート`・`socks5://ホスト:ポート`。空なら使わない）
+    pub proxy: String,
     /// 接続先ごとの設定（`[remote.host.<名前>]`）
     pub host: BTreeMap<String, RemoteHost>,
 }
@@ -310,6 +312,7 @@ impl Default for RemoteConfig {
             read_ssh_known_hosts: true,
             keepalive_secs: 15,
             agent_dir: String::new(),
+            proxy: String::new(),
             host: BTreeMap::new(),
         }
     }
@@ -325,8 +328,10 @@ pub struct RemoteHost {
     pub port: Option<u16>,
     /// 秘密鍵のファイル
     pub identity_file: Option<String>,
-    /// 踏み台（今後対応）
+    /// 踏み台（`[ユーザー@]ホスト[:ポート]` のカンマ区切り。`none` で ~/.ssh/config の指定も使わない）
     pub proxy_jump: Option<String>,
+    /// この接続先に使うプロキシ（`none` で共通のプロキシも使わない）
+    pub proxy: Option<String>,
     /// この接続先でエージェントを置くフォルダ（ホームが noexec の場合など）
     pub agent_dir: Option<String>,
 }
@@ -508,10 +513,14 @@ mod tests {
             r#"
             [remote]
             agent_dir = "/work/agent"
+            proxy = "socks5://socks.example.co.jp:1080"
             [remote.host.build]
             hostname = "build01.example.co.jp"
             user = "yamada"
             port = 2222
+            proxy_jump = "bastion,admin@gw:2022"
+            [remote.host.lab]
+            proxy = "none"
             "#,
         )
         .unwrap();
@@ -521,6 +530,9 @@ mod tests {
         assert_eq!(h.hostname.as_deref(), Some("build01.example.co.jp"));
         assert_eq!(h.port, Some(2222));
         assert_eq!(h.identity_file, None);
+        assert_eq!(h.proxy_jump.as_deref(), Some("bastion,admin@gw:2022"));
+        assert_eq!(c.remote.proxy, "socks5://socks.example.co.jp:1080");
+        assert_eq!(c.remote.host["lab"].proxy.as_deref(), Some("none"));
         assert!(
             Config::from_toml(
                 "[remote.host.x]

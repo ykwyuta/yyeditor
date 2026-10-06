@@ -91,6 +91,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 提案書 [11 章](docs/proposal/11-remote-ssh.md) の方式で、SSH 接続先（Linux x86_64）のファイルを編集できます。
 
 - SSH は Pure Rust の `russh`（暗号は `ring`）で yyeditor に組み込んであり、`ssh.exe` など OpenSSH のプログラムは使いません。`~/.ssh/config` と `~/.ssh/known_hosts` は読むだけで使います（承認したホスト鍵は `%APPDATA%\yyeditor\known_hosts` に記録します）。
+- 踏み台（`ProxyJump`、多段も可）は踏み台の SSH 接続の `direct-tcpip` チャネルの上で次の SSH を話し、HTTP CONNECT・SOCKS5・SOCKS4 のプロキシも組み込みで扱います（設定の `proxy_jump`・`proxy`）。`ProxyCommand` は外部のプログラムを起動しないため、`ssh -W`・`nc -X`・`ncat --proxy`・`connect -S/-H` の形だけを読み替えます。
 - 初めて接続するとき、接続先の `~/.yyeditor/agent/<版>-<ハッシュ>/yy-agent` にエージェント（静的リンクの Linux 用バイナリ、約 0.5 MB）を SSH 越しに置き、SHA-256 を照合します。`curl`・`sftp-server`・インターネット接続は使いません。エージェントはポートを待ち受けず、SSH のチャネルの標準入出力だけで通信します。
 - エージェントは配布物の `agents\yy-agent-x86_64-linux`（exe と同じフォルダ）を使います。開発中は環境変数 `YY_AGENT_DIR` でフォルダを指定できます。
 - 保存は、接続先の同じフォルダの一時ファイルに書いてから置き換えます（権限・所有者・シンボリックリンク・ハードリンクを保つ）。開いたあとで外部で変更されていれば、上書きするか尋ねます。
