@@ -11,31 +11,50 @@ env:
 
 jobs:
   agent:
-    # SSH 接続先に置くエージェント（11 章 6）。静的リンクの Linux 用バイナリを作る
-    name: Remote agent (Linux x86_64, musl)
-    runs-on: ubuntu-latest
+    # SSH 接続先に置くエージェント（11 章 6）。静的リンクの Linux 用バイナリを作る。
+    # aarch64 は Arm のランナーで（ネイティブに）作り、そこで結合テストも行う
+    name: Remote agent (Linux ${{ matrix.arch }}, musl)
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.arch }}-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: agent-${{ matrix.arch }}
       - name: build
         run: |
-          rustup target add x86_64-unknown-linux-musl
-          cargo build --release -p yy-agent --target x86_64-unknown-linux-musl
+          rustup target add ${{ matrix.arch }}-unknown-linux-musl
+          cargo build --release -p yy-agent --target ${{ matrix.arch }}-unknown-linux-musl
       - name: check the binary
         run: |
-          A=target/x86_64-unknown-linux-musl/release/yy-agent
+          A=target/${{ matrix.arch }}-unknown-linux-musl/release/yy-agent
           file "$A"
+          file "$A" | grep -q "statically linked"
           "$A" --version
           test "$("$A" --sha256)" = "$(sha256sum "$A" | cut -d' ' -f1)"
           mkdir -p agents
-          cp "$A" agents/yy-agent-x86_64-linux
+          cp "$A" agents/yy-agent-${{ matrix.arch }}-linux
+      # Arm の実機で、エージェント・組み込みの SSH・転送の結合テスト
+      - name: test on aarch64
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server
+          cargo test -p yy-proto -p yy-agent -p yy-remote
       - uses: actions/upload-artifact@v4
         with:
-          name: yy-agent-x86_64-linux
-          path: agents/yy-agent-x86_64-linux
+          name: yy-agent-${{ matrix.arch }}-linux
+          path: agents/yy-agent-${{ matrix.arch }}-linux
 
   windows:
     name: Windows (build, lint, test)
@@ -69,7 +88,8 @@ jobs:
       # エージェントは exe と同じフォルダの agents\ に置いて配布する（11 章 6.2）
       - uses: actions/download-artifact@v4
         with:
-          name: yy-agent-x86_64-linux
+          pattern: yy-agent-*-linux
+          merge-multiple: true
           path: dist/agents
       - name: collect
         shell: pwsh
@@ -77,6 +97,11 @@ jobs:
           Copy-Item target/release/yyeditor.exe dist/
           Copy-Item target/release/yyterm.exe dist/
           Copy-Item target/release/yysftp.exe dist/
+          # エージェントは x86_64 と aarch64 の両方を入れる
+          foreach ($a in 'x86_64', 'aarch64') {
+            if (-not (Test-Path "dist/agents/yy-agent-$a-linux")) { throw "yy-agent-$a-linux がありません" }
+          }
+          Get-ChildItem dist/agents
       - uses: actions/upload-artifact@v4
         with:
           name: yyeditor-windows-x64

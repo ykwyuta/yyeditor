@@ -484,6 +484,16 @@ CI の変更:
 - SSH を使わずに手元の `sh` でエージェントを配置・起動する結合テスト（`apps/yy-agent/tests/remote.rs`）。
 - russh のサーバーを同じプロセスで立てた SSH の結合テスト（`apps/yy-agent/tests/ssh.rs`。ホスト鍵の承認・拒否・不一致、暗号化された秘密鍵、パスワードの再入力、エージェント経由の取り寄せと保存）。OpenSSH は使わない。
 
+### 17.0 aarch64 のエージェント（2026-10-06 追加）
+
+- 16 の決定（aarch64 も必須）どおり、`aarch64-unknown-linux-musl` の静的リンクのエージェント
+  （約 0.5 MB）を作り、`agents\yy-agent-aarch64-linux` として x86_64 のものと一緒に配布する。
+  端末は接続先の `uname -m`（`aarch64`・`arm64`・`armv8l`）で選ぶ（M9.1 から対応済み）。
+- CI のエージェントのジョブを x86_64（`ubuntu-latest`）と aarch64（Arm のランナー
+  `ubuntu-24.04-arm`）の 2 つにし、aarch64 はネイティブに作って、そこで `yy-proto`・`yy-agent`
+  （組み込みの SSH でのエージェントの配置・編集・転送・ポートフォワーディングを含む）・`yy-remote` の
+  テストを行う。Windows のジョブは両方を `dist\agents\` に入れ、揃っていなければ失敗にする。
+
 ### 17.1 ワークスペースへのリモートのフォルダの登録（2026-10-05 追加）
 
 ワークスペース（`*.yyworkspace`）の起点のフォルダに、SSH 接続先のフォルダ（`ssh://接続先/パス`）も
