@@ -1212,14 +1212,25 @@ fn download_sftp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io:
     meter.sync = file.try_clone().ok();
     let mut inflight: VecDeque<(u64, u32, sftp::ReadReply)> = VecDeque::new();
     let mut pos = offset;
+    // 要求を送れなくなっても（回線が切れた）、届いている応答は書いてから終える
+    let mut send_error = None;
     let result = (|| {
         while job.done < job.size {
-            while inflight.len() < sftp::WINDOW && pos < job.size {
+            while send_error.is_none() && inflight.len() < sftp::WINDOW && pos < job.size {
                 let len = (sftp::CHUNK as u64).min(job.size - pos) as u32;
-                inflight.push_back((pos, len, s.send_read(&h, pos, len)?));
+                match s.send_read(&h, pos, len) {
+                    Ok(r) => inflight.push_back((pos, len, r)),
+                    Err(e) => {
+                        send_error = Some(e);
+                        break;
+                    }
+                }
                 pos += u64::from(len);
             }
             let Some((at, len, r)) = inflight.pop_front() else {
+                if let Some(e) = send_error.take() {
+                    return Err(e);
+                }
                 break;
             };
             let mut data = r.wait()?;
