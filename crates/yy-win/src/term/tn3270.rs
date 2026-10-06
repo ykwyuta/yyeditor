@@ -7,13 +7,15 @@
 
 use std::io;
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::HSTRING;
+use yy_3270::ind_file::{self, Direction, Local, Mode as FtMode};
 use yy_3270::{Config as SessionConfig, DisplayCell, Key, Lock, Mode, Session};
 use yy_config::Config;
 use yy_encoding::Ccsid;
@@ -21,6 +23,7 @@ use yy_remote::uri::Target;
 use yy_term::Terminal;
 use yy_term::keys::Mods;
 
+use super::ftdlg::Choice;
 use super::pty::Backend;
 
 /// 既定のポート
@@ -135,6 +138,8 @@ pub(crate) struct Tn3270 {
     pub target: Target3270,
     /// 最後の知らせ（OIA に出す。接続先が断った理由など）
     pub message: String,
+    /// 実行中のファイル転送
+    pub ft: Option<FtJob>,
 }
 
 impl Tn3270 {
@@ -143,8 +148,94 @@ impl Tn3270 {
             session: Session::new(target.session_config()),
             target,
             message: String::new(),
+            ft: None,
         }
     }
+}
+
+// ---- ファイル転送（IND$FILE） -------------------------------------------------------
+
+/// 実行中のファイル転送。
+pub(crate) struct FtJob {
+    pub choice: Choice,
+    /// 受け取っている途中のファイル（受け取るとき）
+    pub part: Option<PathBuf>,
+    pub started: Instant,
+}
+
+/// 受け取っている途中のファイルの名前（`名前.yy3270part`）。
+fn part_path(local: &Path) -> PathBuf {
+    let mut name = local.file_name().unwrap_or_default().to_os_string();
+    name.push(".yy3270part");
+    local.with_file_name(name)
+}
+
+/// 手元のテキストを読む（文字コードは自動判別）。
+fn read_local_text(bytes: &[u8]) -> String {
+    let d = yy_encoding::detect(bytes, true);
+    let (utf8, _) = yy_encoding::decode_all(d.encoding, &bytes[d.bom_len..], false);
+    String::from_utf8_lossy(&utf8).into_owned()
+}
+
+/// 転送の準備: 端末側のデータ（受け取るなら途中のファイル、送るなら読み口）。
+pub(crate) fn prepare(choice: &Choice) -> Result<(Local, Option<PathBuf>), String> {
+    let local = &choice.local;
+    match choice.request.direction {
+        Direction::Receive => {
+            if let Some(dir) = local.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("{} を作れません: {e}", dir.display()))?;
+            }
+            let part = part_path(local);
+            let f = std::fs::File::create(&part)
+                .map_err(|e| format!("{} を作れません: {e}", part.display()))?;
+            Ok((Local::Sink(Box::new(io::BufWriter::new(f))), Some(part)))
+        }
+        Direction::Send => {
+            let bytes = std::fs::read(local)
+                .map_err(|e| format!("{} を読めません: {e}", local.display()))?;
+            let data = match choice.request.mode {
+                FtMode::Text(ccsid) => ind_file::text_to_records(
+                    &read_local_text(&bytes),
+                    ccsid,
+                    choice.request.record_limit(),
+                )
+                .map_err(|e| format!("{}: {}", local.display(), e.describe(ccsid)))?,
+                FtMode::HostAscii | FtMode::Binary => bytes,
+            };
+            Ok((Local::Source(Box::new(io::Cursor::new(data))), None))
+        }
+    }
+}
+
+/// 転送の後始末。受け取ったデータを変換して手元のファイルにする。
+/// 成功なら手元のファイルの大きさを返す。
+pub(crate) fn finish(job: &FtJob, ok: bool) -> Result<u64, String> {
+    let local = &job.choice.local;
+    let Some(part) = &job.part else {
+        return std::fs::metadata(local)
+            .map(|m| m.len())
+            .map_err(|e| e.to_string());
+    };
+    if !ok {
+        let _ = std::fs::remove_file(part);
+        return Ok(0);
+    }
+    let result = (|| -> io::Result<u64> {
+        let mut raw = std::fs::read(part)?;
+        let out = match job.choice.request.mode {
+            FtMode::Text(ccsid) => ind_file::records_to_text(&raw, ccsid).into_bytes(),
+            FtMode::HostAscii => {
+                ind_file::strip_ascii_eof(&mut raw);
+                raw
+            }
+            FtMode::Binary => raw,
+        };
+        std::fs::write(local, &out)?;
+        Ok(out.len() as u64)
+    })();
+    let _ = std::fs::remove_file(part);
+    result.map_err(|e| format!("{} に書けません: {e}", local.display()))
 }
 
 /// 接続する（`show` に進みを表示する。接続中は呼び出し側の状態を借りないこと）。
@@ -534,5 +625,68 @@ mod tests {
         );
         assert_eq!(keypad_key(ID_KEYPAD + 23), Some(Key::Pf(24)));
         assert_eq!(keypad_key(ID_KEYPAD + 1000), None);
+    }
+
+    #[test]
+    fn prepares_and_finishes_transfers() {
+        use std::io::{Read, Write};
+        use yy_3270::ind_file::{HostKind, Recfm, Request};
+        let dir = std::env::temp_dir().join(format!("yy3270-ft-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut choice = Choice::initial(Ccsid::Ibm930);
+        choice.request = Request {
+            host: HostKind::Tso,
+            direction: Direction::Receive,
+            host_file: "'A.B'".into(),
+            mode: FtMode::Text(Ccsid::Ibm930),
+            recfm: Recfm::Default,
+            lrecl: 0,
+            space: 0,
+            append: false,
+        };
+        choice.local = dir.join("sub").join("a.txt");
+        // 受け取り: 途中のファイルに書き、終わったら変換して置く
+        let (local, part) = prepare(&choice).unwrap();
+        let part = part.unwrap();
+        assert!(part.ends_with("a.txt.yy3270part"));
+        let Local::Sink(mut w) = local else { panic!() };
+        let mut raw = vec![0x0E];
+        for c in "日本".chars() {
+            let Some(yy_encoding::EbcdicCode::Double(d)) = Ccsid::Ibm930.encode_char(c) else {
+                panic!()
+            };
+            raw.extend_from_slice(&d.to_be_bytes());
+        }
+        raw.extend_from_slice(&[0x0F, 0x0D, 0x25]);
+        w.write_all(&raw).unwrap();
+        drop(w);
+        let job = FtJob {
+            choice: choice.clone(),
+            part: Some(part.clone()),
+            started: Instant::now(),
+        };
+        assert_eq!(finish(&job, true).unwrap(), "日本\r\n".len() as u64);
+        assert_eq!(std::fs::read_to_string(&choice.local).unwrap(), "日本\r\n");
+        assert!(!part.exists());
+        // 失敗なら途中のファイルを消すだけ
+        let (_, part) = prepare(&choice).unwrap();
+        let job = FtJob { part, ..job };
+        assert_eq!(finish(&job, false).unwrap(), 0);
+        assert!(!job.part.as_ref().unwrap().exists());
+        // 送る: 手元のテキストを EBCDIC のレコードにする
+        choice.request.direction = Direction::Send;
+        let (local, part) = prepare(&choice).unwrap();
+        assert!(part.is_none());
+        let Local::Source(mut r) = local else {
+            panic!()
+        };
+        let mut sent = Vec::new();
+        r.read_to_end(&mut sent).unwrap();
+        assert_eq!(sent, raw);
+        // 変換できない文字は行番号つきで断る
+        std::fs::write(&choice.local, "ok\n😀\n").unwrap();
+        let err = prepare(&choice).err().unwrap();
+        assert!(err.contains("2 行目"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

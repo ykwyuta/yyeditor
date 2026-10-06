@@ -6,7 +6,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use yy_3270::codes::*;
-use yy_3270::{Config, Key, Lock, Mode, Session};
+use yy_3270::ind_file::{self, Direction, HostKind, Local, Recfm, Request};
+use yy_3270::{Config, Event, FtEvent, Key, Lock, Mode, Session};
 use yy_encoding::{Ccsid, EbcdicCode};
 
 fn e(s: &str) -> Vec<u8> {
@@ -194,5 +195,184 @@ fn round_trip_with_a_mock_tn3270e_host() {
     });
     let resp = rx.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(resp, vec![DT_RESPONSE, 0, RSP_POSITIVE, 0, 2, 0x00]);
+    h.join().unwrap();
+}
+
+/// 3270 のデータ（TN3270E のヘッダーつき）のレコード。
+fn data_rec(seq: u16, body: &[u8]) -> Vec<u8> {
+    let mut v = vec![DT_3270_DATA, 0, RSP_NO_RESPONSE];
+    v.extend_from_slice(&seq.to_be_bytes());
+    v.extend_from_slice(body);
+    rec(&v)
+}
+
+/// WSF の DFT（長さ・0xD0・要求・中身）。
+fn dft(code: u16, body: &[u8]) -> Vec<u8> {
+    let mut sf = vec![0, 0, SF_DATA_CHUNK];
+    sf.extend_from_slice(&code.to_be_bytes());
+    sf.extend_from_slice(body);
+    let len = sf.len() as u16;
+    sf[..2].copy_from_slice(&len.to_be_bytes());
+    let mut v = vec![0xF3];
+    v.extend(sf);
+    v
+}
+
+fn dft_open(name: &[u8; 7]) -> Vec<u8> {
+    let mut body = vec![0u8; 0x23 - 5 - 7];
+    body.extend_from_slice(name);
+    dft(0x0012, &body)
+}
+
+fn dft_insert(data: &[u8]) -> Vec<u8> {
+    let mut body = vec![0xC0, 0x80, 0x61];
+    body.extend_from_slice(&((data.len() + 5) as u16).to_be_bytes());
+    body.extend_from_slice(data);
+    dft(0x4704, &body)
+}
+
+/// TSO の READY の画面（フィールドなし）で IND$FILE GET を受け、日本語のレコードを送る。
+fn tso_host(listener: TcpListener, got: mpsc::Sender<Vec<u8>>) {
+    let (s, _) = listener.accept().unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut w = s.try_clone().unwrap();
+    let mut r = s;
+    let mut neg = vec![IAC, DO, OPT_TN3270E];
+    neg.extend([IAC, SB, OPT_TN3270E, E_DEVICE_TYPE, E_IS]);
+    neg.extend_from_slice(b"IBM-3278-2-E");
+    neg.extend([IAC, SE]);
+    neg.extend([IAC, SB, OPT_TN3270E, E_FUNCTIONS, E_IS, IAC, SE]);
+    w.write_all(&neg).unwrap();
+    let mut ready = vec![0xF5, WCC_RESTORE];
+    ready.extend(e("READY"));
+    ready.push(ORDER_SBA);
+    ready.extend_from_slice(&encode_address(80));
+    ready.push(ORDER_IC);
+    w.write_all(&data_rec(1, &ready)).unwrap();
+    // コマンド（Read Modified）
+    got.send(read_record(&mut r)).unwrap();
+    let mut send_and_ack = |w: &mut TcpStream, seq: u16, body: Vec<u8>| -> Vec<u8> {
+        w.write_all(&data_rec(seq, &body)).unwrap();
+        read_record(&mut r)
+    };
+    let mut acks = Vec::new();
+    acks.push(send_and_ack(&mut w, 2, dft_open(b"FT:DATA")));
+    w.write_all(&data_rec(3, &dft(0x4711, &[]))).unwrap();
+    let mut records = e("日本語のデータ");
+    records.extend([0x0D, 0x25]);
+    records.extend(e("ABC  "));
+    records.extend([0x0D, 0x25]);
+    acks.push(send_and_ack(&mut w, 4, dft_insert(&records)));
+    acks.push(send_and_ack(&mut w, 5, dft(0x4112, &[])));
+    acks.push(send_and_ack(&mut w, 6, dft_open(b"FT:MSG ")));
+    acks.push(send_and_ack(
+        &mut w,
+        7,
+        dft_insert(b"TRANS03 File transfer complete$"),
+    ));
+    acks.push(send_and_ack(&mut w, 8, dft(0x4112, &[])));
+    for a in acks {
+        got.send(a).unwrap();
+    }
+}
+
+#[derive(Clone, Default)]
+struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Write for Shared {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn ind_file_get_with_a_mock_tso_host() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::channel();
+    let h = std::thread::spawn(move || tso_host(listener, tx));
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut session = Session::new(Config {
+        ccsid: Ccsid::Ibm930,
+        ..Config::default()
+    });
+    let mut events = Vec::new();
+    let mut buf = [0u8; 4096];
+    let mut pump = |session: &mut Session,
+                    events: &mut Vec<Event>,
+                    until: &dyn Fn(&Session, &[Event]) -> bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !until(session, events) {
+            assert!(std::time::Instant::now() < deadline, "時間切れ");
+            match sock.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let o = session.receive(&buf[..n]);
+                    sock.write_all(&o.send).unwrap();
+                    events.extend(o.events);
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+        sock.try_clone().unwrap()
+    };
+    let mut w = pump(&mut session, &mut events, &|s, _| {
+        s.mode() == Mode::Tn3270e && s.oia().lock == Lock::None
+    });
+    let file = Shared::default();
+    let req = Request {
+        host: HostKind::Tso,
+        direction: Direction::Receive,
+        host_file: "'USER.DATA'".into(),
+        mode: ind_file::Mode::Text(Ccsid::Ibm930),
+        recfm: Recfm::Default,
+        lrecl: 0,
+        space: 0,
+        append: false,
+    };
+    let o = session
+        .transfer(&req, Local::Sink(Box::new(file.clone())))
+        .unwrap();
+    w.write_all(&o.send).unwrap();
+    // 2 回目は断る
+    assert!(
+        session
+            .transfer(&req, Local::Sink(Box::new(Shared::default())))
+            .is_err()
+    );
+    let cmd = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let want = e("IND$FILE GET 'USER.DATA' CRLF");
+    assert!(cmd.windows(want.len()).any(|x| x == want), "{cmd:02X?}");
+    pump(&mut session, &mut events, &|_, ev| {
+        ev.iter()
+            .any(|e| matches!(e, Event::Transfer(FtEvent::Done { .. })))
+    });
+    assert!(events.contains(&Event::Transfer(FtEvent::Started)));
+    assert!(events.contains(&Event::Transfer(FtEvent::Done {
+        ok: true,
+        message: "TRANS03 File transfer complete".into()
+    })));
+    assert!(!session.transferring());
+    // ホストへの応答: Open・Insert・Close・Open・Insert・Close
+    let acks: Vec<Vec<u8>> = (0..6)
+        .map(|_| rx.recv_timeout(Duration::from_secs(10)).unwrap())
+        .collect();
+    assert_eq!(&acks[0][5..], &[AID_SF, 0, 5, 0xD0, 0x00, 0x09]);
+    assert_eq!(&acks[1][5..9], &[AID_SF, 0, 11, 0xD0]);
+    assert_eq!(&acks[2][5..], &[AID_SF, 0, 5, 0xD0, 0x41, 0x09]);
+    let raw = file.0.lock().unwrap().clone();
+    assert_eq!(
+        ind_file::records_to_text(&raw, Ccsid::Ibm930),
+        "日本語のデータ\r\nABC\r\n"
+    );
     h.join().unwrap();
 }

@@ -10,6 +10,7 @@
 use yy_encoding::{Ccsid, EbcdicCode};
 
 use crate::codes::*;
+use crate::ind_file::Dft;
 use crate::query;
 use crate::screen::{Ext, Screen};
 
@@ -113,6 +114,8 @@ pub struct Emulator {
     pub reply_mode: ReplyMode,
     /// Query Reply に使う、端末の大きさなど
     pub model: u8,
+    /// IND$FILE の転送
+    pub ft: Dft,
 }
 
 /// フィールドの中身の 1 文字。
@@ -133,6 +136,7 @@ impl Emulator {
             aid: AID_NONE,
             reply_mode: ReplyMode::Field,
             model,
+            ft: Dft::default(),
         }
     }
 
@@ -400,6 +404,11 @@ impl Emulator {
                     r.alarm |= inner.alarm;
                     if inner.data.is_some() {
                         r.data = inner.data;
+                    }
+                }
+                SF_DATA_CHUNK => {
+                    if let Some(d) = self.ft.handle(sf) {
+                        r.data = Some(d);
                     }
                 }
                 _ => {}

@@ -6,6 +6,7 @@
 
 pub mod codes;
 pub mod emu;
+pub mod ind_file;
 pub mod query;
 pub mod screen;
 
@@ -13,6 +14,7 @@ use yy_encoding::Ccsid;
 
 use codes::*;
 pub use emu::{Key, Lock, OperatorError};
+pub use ind_file::FtEvent;
 pub use screen::{DisplayCell, Screen};
 
 /// 接続の設定。
@@ -86,6 +88,8 @@ pub enum Event {
     Alarm,
     /// 3270 になる前に届いた文字（NVT。サーバーのメッセージなど）
     Text(String),
+    /// IND$FILE の転送の進み具合・結果
+    Transfer(FtEvent),
 }
 
 /// 処理の結果。
@@ -506,6 +510,8 @@ impl Session {
         if let Some(d) = r.data {
             self.send_data(&d, out);
         }
+        out.events
+            .extend(self.emu.ft.take_events().into_iter().map(Event::Transfer));
     }
 
     /// 3270 のデータを送る（TN3270E ならヘッダーを付け、IAC を二重にして IAC EOR で終える）。
@@ -539,6 +545,67 @@ impl Session {
     }
 
     /// 文字列を貼り付ける。
+    /// IND$FILE の転送を始める: カーソルの位置にコマンドを入力して Enter を押す
+    /// （TSO の READY・CMS の Ready の後で使う）。
+    pub fn transfer(
+        &mut self,
+        req: &ind_file::Request,
+        local: ind_file::Local,
+    ) -> Result<Output, String> {
+        if self.mode == Mode::Negotiating {
+            return Err("3270 で接続していません".into());
+        }
+        if self.emu.ft.active() {
+            return Err("ほかの転送を実行中です".into());
+        }
+        if self.emu.lock != Lock::None {
+            return Err(
+                "キーボードがロックされています（応答を待つか、リセットしてください）".into(),
+            );
+        }
+        if self.emu.screen.is_protected(self.emu.screen.cursor) {
+            return Err("カーソルが入力できない位置にあります".into());
+        }
+        self.emu.key(Key::EraseEof);
+        for c in req.command().chars() {
+            self.emu.key(Key::Char(c));
+            if let Lock::Operator(e) = self.emu.lock {
+                self.emu.key(Key::Reset);
+                return Err(format!("コマンドを入力できません（{}）", e.label()));
+            }
+        }
+        self.emu.ft.start(local);
+        let mut out = self.key(Key::Enter);
+        out.changed = true;
+        Ok(out)
+    }
+
+    /// 転送を取り消す。
+    pub fn cancel_transfer(&mut self) -> Vec<Event> {
+        self.emu.ft.cancel();
+        self.emu
+            .ft
+            .take_events()
+            .into_iter()
+            .map(Event::Transfer)
+            .collect()
+    }
+
+    /// 接続が切れたときなど、転送をやめる。
+    pub fn abandon_transfer(&mut self, why: &str) -> Vec<Event> {
+        self.emu.ft.abandon(why);
+        self.emu
+            .ft
+            .take_events()
+            .into_iter()
+            .map(Event::Transfer)
+            .collect()
+    }
+
+    pub fn transferring(&self) -> bool {
+        self.emu.ft.active()
+    }
+
     pub fn paste(&mut self, text: &str) -> Output {
         let mut out = Output::default();
         if self.mode != Mode::Negotiating && self.emu.paste(text) > 0 {

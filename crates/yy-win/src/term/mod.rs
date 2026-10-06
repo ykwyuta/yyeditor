@@ -11,6 +11,7 @@
 //! （[`WM_APP_TERM_EVENT`]）。UI スレッドで端末に流し込んで描き直す。入力はタブごとの
 //! 書き込み用のスレッドが送る（UI スレッドを止めない）。
 
+mod ftdlg;
 mod paint;
 mod pty;
 mod sidebar;
@@ -70,6 +71,8 @@ const ID_SSH: u16 = 3002;
 const ID_CLOSE_TAB: u16 = 3003;
 const ID_EXIT: u16 = 3004;
 const ID_TN3270: u16 = 3005;
+const ID_TN_TRANSFER: u16 = 3006;
+const ID_TN_CANCEL: u16 = 3007;
 const ID_COPY: u16 = 3010;
 const ID_PASTE: u16 = 3011;
 const ID_CLEAR: u16 = 3012;
@@ -224,6 +227,10 @@ struct TermApp {
     keypad: tn3270::Keypad,
     /// 3270 の接続の記録（`logs\tn3270.log`）
     tn_log: Option<std::sync::Arc<yy_remote::log::TransferLog>>,
+    /// 3270 のファイル転送の記録（`logs\tn3270-transfer.log`）
+    ft_log: Option<std::sync::Arc<yy_remote::log::TransferLog>>,
+    /// 前回のファイル転送の指定（ダイアログの初期値）
+    ft_last: Option<ftdlg::Choice>,
 }
 
 thread_local! {
@@ -488,6 +495,8 @@ fn create(
             status_text: String::new(),
             keypad,
             tn_log: None,
+            ft_log: None,
+            ft_last: None,
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         FRAME.with(|f| f.set(frame.0 as isize));
@@ -543,6 +552,12 @@ fn create_menu() -> Result<HMENU> {
         item(file, ID_NEW_TAB, w!("新しいタブ(&T)\tCtrl+Shift+T"))?;
         item(file, ID_SSH, w!("SSH で接続(&S)...\tCtrl+Shift+O"))?;
         item(file, ID_TN3270, w!("3270 で接続(&M)...\tCtrl+Shift+M"))?;
+        item(
+            file,
+            ID_TN_TRANSFER,
+            w!("3270 のファイル転送(&I)...\tCtrl+Shift+I"),
+        )?;
+        item(file, ID_TN_CANCEL, w!("3270 のファイル転送を取り消す(&N)"))?;
         sep(file)?;
         item(file, ID_CLOSE_TAB, w!("タブを閉じる(&C)\tCtrl+Shift+W"))?;
         item(file, ID_EXIT, w!("終了(&X)"))?;
@@ -657,6 +672,7 @@ fn shortcut(msg: &MSG) -> bool {
         (true, true, VK_E) => ID_SIDEBAR,
         (true, true, VK_O) => ID_SSH,
         (true, true, VK_M) => ID_TN3270,
+        (true, true, VK_I) => ID_TN_TRANSFER,
         (true, false, VK_TAB) => ID_NEXT_TAB,
         (true, true, VK_TAB) => ID_PREV_TAB,
         (true, false, VK_OEM_PLUS | VK_ADD) => ID_ZOOM_IN,
@@ -1227,10 +1243,14 @@ impl TermApp {
                     };
                     let t = &mut self.tabs[i];
                     t.exited = Some(code);
-                    if let Some(tn) = &t.tn {
+                    if let Some(tn) = &mut t.tn {
+                        let events = tn.session.abandon_transfer(
+                            "切断されました（IND$FILE は途中から再開できません。接続し直して最初から転送してください）",
+                        );
                         t.term = tn3270::render(tn, true);
                         let label = t.place.label();
                         self.tn_note(&format!("{label}: 切断されました"));
+                        self.tn_events(i, events);
                         if i == self.active {
                             active_dirty = true;
                         }
@@ -1281,6 +1301,20 @@ impl TermApp {
         log.line(None, text);
     }
 
+    /// ファイル転送の記録に 1 行書き、ステータスに出す（`logs\tn3270-transfer.log`）。
+    fn ft_note(&mut self, text: &str) {
+        let log = self.ft_log.get_or_insert_with(|| {
+            let path = yy_config::config_dir().map(|d| d.join("logs").join("tn3270-transfer.log"));
+            std::sync::Arc::new(yy_remote::log::TransferLog::new(
+                path,
+                crate::remote::local_clock,
+            ))
+        });
+        log.line(None, text);
+        self.status_text = text.to_owned();
+        self.update_status();
+    }
+
     /// 知らせをステータスと記録に出す。
     fn tn_note(&mut self, text: &str) {
         self.tn_log_line(text);
@@ -1292,6 +1326,7 @@ impl TermApp {
     fn tn_events(&mut self, i: usize, events: Vec<yy_3270::Event>) {
         use yy_3270::Event as E;
         let label = self.tabs[i].place.label();
+        let mut rerender = false;
         for e in events {
             match e {
                 E::Negotiation(s) => self.tn_log_line(&format!("{label}: {s}")),
@@ -1315,8 +1350,137 @@ impl TermApp {
                 E::Alarm => unsafe {
                     let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_OK);
                 },
+                E::Transfer(ev) => {
+                    self.tn_transfer_event(i, ev);
+                    rerender = true;
+                }
             }
         }
+        if rerender {
+            let t = &mut self.tabs[i];
+            if let Some(tn) = &t.tn {
+                t.term = tn3270::render(tn, t.exited.is_some());
+            }
+            if i == self.active {
+                self.invalidate();
+            }
+        }
+    }
+
+    /// ファイル転送の進み具合・結果。
+    fn tn_transfer_event(&mut self, i: usize, ev: yy_3270::FtEvent) {
+        use yy_3270::FtEvent;
+        let label = self.tabs[i].place.label();
+        let Some(tn) = self.tabs[i].tn.as_mut() else {
+            return;
+        };
+        match ev {
+            FtEvent::Started => {
+                tn.message = "転送を始めました".into();
+                self.ft_note(&format!("{label}: ホストが転送を始めました"));
+            }
+            FtEvent::Progress(n) => {
+                let text = format!("転送中 {}", crate::util::human_size(n));
+                tn.message = text.clone();
+                self.status_text = format!("{label}: {text}");
+                self.update_status();
+            }
+            FtEvent::Done { ok, message } => {
+                let Some(job) = tn.ft.take() else {
+                    tn.message = message.clone();
+                    self.ft_note(&format!("{label}: {message}"));
+                    return;
+                };
+                let secs = job.started.elapsed().as_secs_f64();
+                let what = format!(
+                    "{} {} {}",
+                    job.choice.request.host_file,
+                    match job.choice.request.direction {
+                        yy_3270::ind_file::Direction::Receive => "→",
+                        yy_3270::ind_file::Direction::Send => "←",
+                    },
+                    job.choice.local.display()
+                );
+                let text = match tn3270::finish(&job, ok) {
+                    Ok(size) if ok => {
+                        let open = job.choice.open_after
+                            && job.choice.request.direction
+                                == yy_3270::ind_file::Direction::Receive;
+                        if open {
+                            open_in_editor(self.frame, &job.choice.local);
+                        }
+                        format!(
+                            "転送しました（{}、{secs:.1} 秒）: {what}  {message}",
+                            crate::util::human_size(size)
+                        )
+                    }
+                    Ok(_) => format!("転送できませんでした: {what}  {message}"),
+                    Err(e) => format!("転送の後始末に失敗しました: {what}  {e}"),
+                };
+                tn.message = message;
+                self.ft_note(&format!("{label}: {text}"));
+            }
+        }
+    }
+
+    /// 表示している 3270 のタブのファイル転送を始める。
+    fn tn_start_transfer(&mut self, choice: ftdlg::Choice) -> std::result::Result<(), String> {
+        let active = self.active;
+        let label = self
+            .tabs
+            .get(active)
+            .map(|t| t.place.label())
+            .unwrap_or_default();
+        let t = self.tabs.get_mut(active).ok_or("3270 のタブがありません")?;
+        if t.exited.is_some() {
+            return Err("切断されています".into());
+        }
+        let tn = t.tn.as_mut().ok_or("3270 のタブではありません")?;
+        let (local, part) = tn3270::prepare(&choice)?;
+        let mut o = match tn.session.transfer(&choice.request, local) {
+            Ok(o) => o,
+            Err(e) => {
+                if let Some(p) = &part {
+                    let _ = std::fs::remove_file(p);
+                }
+                return Err(e);
+            }
+        };
+        let command = choice.request.command();
+        tn.message = "転送のコマンドを送りました".into();
+        tn.ft = Some(tn3270::FtJob {
+            choice: choice.clone(),
+            part,
+            started: std::time::Instant::now(),
+        });
+        let term = tn3270::render(tn, false);
+        t.send(std::mem::take(&mut o.send));
+        t.selection = None;
+        t.term = term;
+        self.ft_last = Some(choice);
+        self.ft_note(&format!("{label}: 開始 {command}"));
+        self.invalidate();
+        Ok(())
+    }
+
+    /// 表示している 3270 のタブのファイル転送を取り消す。
+    fn tn_cancel_transfer(&mut self) {
+        let active = self.active;
+        let Some(tn) = self.tabs.get_mut(active).and_then(|t| t.tn.as_mut()) else {
+            return;
+        };
+        if !tn.session.transferring() {
+            self.tn_note("実行中のファイル転送はありません");
+            return;
+        }
+        let events = tn.session.cancel_transfer();
+        tn.message = "取り消しています…".into();
+        self.tn_events(active, events);
+        let t = &mut self.tabs[active];
+        if let Some(tn) = &t.tn {
+            t.term = tn3270::render(tn, t.exited.is_some());
+        }
+        self.invalidate();
     }
 
     /// 3270 のタブ `i` がホストからデータを受け取った。
@@ -1626,6 +1790,10 @@ fn command(hwnd: HWND, id: u16) {
         }
         ID_SSH => cmd_ssh(hwnd),
         ID_TN3270 => cmd_tn3270(hwnd),
+        ID_TN_TRANSFER => cmd_tn_transfer(hwnd),
+        ID_TN_CANCEL => {
+            with(|a| a.tn_cancel_transfer());
+        }
         id if tn3270::keypad_key(id).is_some() => {
             if let Some(k) = tn3270::keypad_key(id) {
                 with(|a| a.tn_key(k));
@@ -1936,6 +2104,41 @@ fn cmd_tn3270(hwnd: HWND) {
         Some(Err(e)) => error_box(hwnd, &e),
         None => {}
     }
+}
+
+/// 「3270 のファイル転送」: 転送の指定を尋ねて始める。
+fn cmd_tn_transfer(hwnd: HWND) {
+    let Some(Some((last, ccsid, busy))) = with(|a| {
+        let tn = a.tab()?.tn.as_ref()?;
+        let ccsid = tn.session.ccsid();
+        let last = a
+            .ft_last
+            .clone()
+            .unwrap_or_else(|| ftdlg::Choice::initial(ccsid));
+        Some((last, ccsid, tn.session.transferring()))
+    }) else {
+        info_box(hwnd, "3270 のタブを表示してから選んでください。");
+        return;
+    };
+    if busy {
+        info_box(
+            hwnd,
+            "ファイル転送を実行中です。終わるのを待つか、取り消してください。",
+        );
+        return;
+    }
+    // 前回の「端末で変換」は今のタブの CCSID で
+    let mut last = last;
+    if let yy_3270::ind_file::Mode::Text(_) = last.request.mode {
+        last.request.mode = yy_3270::ind_file::Mode::Text(ccsid);
+    }
+    let Some(choice) = ftdlg::show(hwnd, last, ccsid) else {
+        return;
+    };
+    if let Some(Err(e)) = with(|a| a.tn_start_transfer(choice)) {
+        error_box(hwnd, &format!("ファイル転送を始められません。\n{e}"));
+    }
+    focus_view();
 }
 
 fn cmd_add_remote_folder(hwnd: HWND) {

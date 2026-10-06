@@ -47,6 +47,7 @@ pub fn reply(e: &Emulator) -> Vec<u8> {
             QR_REPLY_MODES,
             QR_IMPLICIT_PART,
             QR_RPQ_NAMES,
+            QR_DDM,
         ];
         if db.is_some() {
             codes.push(QR_DBCS_ASIA);
@@ -129,6 +130,9 @@ pub fn reply(e: &Emulator) -> Vec<u8> {
     let mut rpq = vec![0, 0, 0, 0, 0, 0, 0, 0, (name.len() + 1) as u8];
     rpq.extend_from_slice(&name);
     out.extend(qr(QR_RPQ_NAMES, &rpq));
+
+    // ファイル転送（IND$FILE の DFT）
+    out.extend(qr(QR_DDM, &crate::ind_file::ddm_query_reply()));
 
     // 日本語: SO/SI を使える、2 バイト部の文字セット 0x80、入力の制御
     if dbcs_set.is_some() {
