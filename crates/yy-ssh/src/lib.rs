@@ -7,6 +7,12 @@
 //! ホスト鍵は、鍵交換（サーバーの署名の検証）が済んだ時点で受け取っておき、認証の情報を
 //! 送る前に `known_hosts` と照合する。初めてのホストは利用者に確かめてから記録し、記録と
 //! 違う鍵なら認証せずに切断する。
+//!
+//! 踏み台（ProxyJump）を経由する場合は、踏み台ごとに同じ手順（ホスト鍵の照合と認証）で
+//! 接続し、次の接続先へは踏み台の `direct-tcpip` チャネルの上で SSH を話す。最初の接続先
+//! （踏み台がなければ接続先そのもの）への TCP 接続には HTTP・SOCKS のプロキシを使える。
+
+mod proxy;
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -17,13 +23,14 @@ use std::time::Duration;
 use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
 use russh::{ChannelMsg, MethodKind};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use yy_remote::known_hosts::{self, HostKeyStatus};
 use yy_remote::{
-    Connector, ConnectorFactory, ConnectorOptions, Exit, HostKeyCheck, HostKeyQuestion, HostSpec,
-    Process, Prompter, STDERR_LIMIT, Transport,
+    ConnectLog, Connector, ConnectorFactory, ConnectorOptions, Exit, HostKeyCheck, HostKeyQuestion,
+    HostSpec, PasswordAnswer, PasswordRequest, PasswordStore, Process, Prompter, STDERR_LIMIT,
+    SavedPassword, Transport,
 };
 
 /// 接続を待つ時間の上限
@@ -39,6 +46,8 @@ pub struct SshConnector {
     pub extra_known_hosts: Vec<PathBuf>,
     /// 死活確認の間隔（応答が 3 回続けてなければ切断とみなす）
     pub keepalive: Duration,
+    /// パスワードの保存先（`None` なら保存しない・使わない）
+    pub passwords: Option<Arc<dyn PasswordStore>>,
 }
 
 /// 非同期実行の環境。接続するまで作らない（起動を遅くしない）。
@@ -90,6 +99,7 @@ impl SshConnector {
             known_hosts: opts.known_hosts.clone(),
             extra_known_hosts: opts.extra_known_hosts.clone(),
             keepalive: opts.keepalive,
+            passwords: opts.passwords.clone(),
         }
     }
 
@@ -112,6 +122,7 @@ impl SshConnector {
         spec: &HostSpec,
         key: &PublicKey,
         prompter: &dyn Prompter,
+        log: &ConnectLog,
     ) -> io::Result<()> {
         let openssh = key
             .to_openssh()
@@ -121,17 +132,38 @@ impl SshConnector {
             return Err(io::Error::other("ホスト鍵を読めません"));
         };
         let name = spec.known_hosts_name();
-        let status = known_hosts::check(&self.known_hosts_files(), &name, algorithm, b64);
+        let fingerprint = known_hosts::fingerprint(b64).unwrap_or_default();
+        log.note(format!(
+            "ホスト鍵: {algorithm} {fingerprint}（known_hosts での名前 {name}）"
+        ));
+        let files = self.known_hosts_files();
+        let status = known_hosts::check(&files, &name, algorithm, b64);
         let check = match status {
-            HostKeyStatus::Known => return Ok(()),
-            HostKeyStatus::Unknown => HostKeyCheck::Unknown,
-            HostKeyStatus::Changed { file, line } => HostKeyCheck::Changed { file, line },
+            HostKeyStatus::Known => {
+                log.note("ホスト鍵は known_hosts の記録と一致しました");
+                return Ok(());
+            }
+            HostKeyStatus::Unknown => {
+                let looked: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+                log.note(format!(
+                    "ホスト鍵の記録がありません（{}）。利用者に確かめます",
+                    looked.join(", ")
+                ));
+                HostKeyCheck::Unknown
+            }
+            HostKeyStatus::Changed { file, line } => {
+                log.note(format!(
+                    "ホスト鍵が記録（{} の {line} 行目）と違います",
+                    file.display()
+                ));
+                HostKeyCheck::Changed { file, line }
+            }
         };
         let question = HostKeyQuestion {
             host: spec.hostname.clone(),
             port: spec.port,
             algorithm: algorithm.to_owned(),
-            fingerprint: known_hosts::fingerprint(b64).unwrap_or_default(),
+            fingerprint,
             check: check.clone(),
         };
         let accepted = prompter.confirm_host_key(&question);
@@ -145,6 +177,10 @@ impl SshConnector {
                 ),
             )),
             HostKeyCheck::Unknown if accepted => {
+                log.note(format!(
+                    "ホスト鍵を承認しました（{} に記録）",
+                    self.known_hosts.display()
+                ));
                 known_hosts::learn(&self.known_hosts, &name, algorithm, b64)
             }
             HostKeyCheck::Unknown => Err(io::Error::new(
@@ -155,37 +191,99 @@ impl SshConnector {
     }
 }
 
-impl Connector for SshConnector {
-    fn connect(&self, spec: &HostSpec, prompter: &dyn Prompter) -> io::Result<Arc<dyn Transport>> {
-        if let Some(jump) = &spec.proxy_jump {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("踏み台（ProxyJump {jump}）経由の接続にはまだ対応していません"),
-            ));
-        }
-        let rt = runtime()?;
-        let config = Arc::new(client::Config {
-            keepalive_interval: Some(self.keepalive),
-            keepalive_max: 3,
-            inactivity_timeout: None,
-            nodelay: true,
-            ..client::Config::default()
-        });
+/// SSH を話す下の接続（TCP・プロキシ経由の TCP・踏み台のチャネル）。
+trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
+
+impl SshConnector {
+    /// 1 つのホストに接続し、ホスト鍵を照合して認証する。`via` があればその踏み台を経由する。
+    fn connect_hop(
+        &self,
+        rt: &Runtime,
+        config: &Arc<client::Config>,
+        spec: &HostSpec,
+        via: Option<&Handle<Client>>,
+        prompter: &dyn Prompter,
+        log: &ConnectLog,
+    ) -> io::Result<Handle<Client>> {
+        let host = spec.hostname.as_str();
+        let port = spec.port;
+        let proxy = spec.proxy.as_ref().filter(|_| via.is_none());
+        let how = match (via, proxy) {
+            (Some(_), _) => "踏み台経由".to_owned(),
+            (None, Some(p)) => format!("プロキシ {p} 経由"),
+            (None, None) => "直接".to_owned(),
+        };
+        log.note(format!("{} に接続します（{how}）", spec.address()));
+        // プロキシを使う場合は、先にプロキシを通した TCP 接続を作る（認証を尋ねてやり直せるように）
+        let mut proxied = match proxy {
+            Some(p) => Some(connect_proxy(
+                rt,
+                p,
+                host,
+                port,
+                prompter,
+                self.passwords.as_deref(),
+                log,
+            )?),
+            None => None,
+        };
         let server_key = Arc::new(Mutex::new(None));
         let handler = Client {
             server_key: server_key.clone(),
         };
-        let addr = (spec.hostname.clone(), spec.port);
         let mut handle = rt.block_on(async {
-            match tokio::time::timeout(CONNECT_TIMEOUT, client::connect(config, addr, handler))
-                .await
-            {
-                Ok(r) => r.map_err(ssh_error),
+            let connect = async {
+                let stream: Box<dyn Stream> = match (via, proxied.take()) {
+                    (Some(jump), _) => {
+                        let ch = jump
+                            .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0)
+                            .await
+                            .map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::ConnectionRefused,
+                                    format!("踏み台から {host}:{port} に接続できませんでした: {e}"),
+                                )
+                            })?;
+                        log.note(format!(
+                            "踏み台の上で {host}:{port} へのチャネル（direct-tcpip）を開きました"
+                        ));
+                        Box::new(ch.into_stream())
+                    }
+                    (None, Some(tcp)) => Box::new(tcp),
+                    (None, None) => {
+                        let tcp =
+                            tokio::net::TcpStream::connect((host, port))
+                                .await
+                                .map_err(|e| {
+                                    io::Error::new(
+                                        e.kind(),
+                                        format!("{host}:{port} に接続できませんでした: {e}"),
+                                    )
+                                })?;
+                        tcp.set_nodelay(true)?;
+                        if let Ok(addr) = tcp.peer_addr() {
+                            log.note(format!("TCP で接続しました（{addr}）"));
+                        }
+                        Box::new(tcp)
+                    }
+                };
+                let handle = client::connect_stream(config.clone(), stream, handler)
+                    .await
+                    .map_err(|e| {
+                        let e = ssh_error(e);
+                        io::Error::new(e.kind(), format!("SSH の接続の確立に失敗しました: {e}"))
+                    })?;
+                log.note("SSH の鍵交換が済みました");
+                Ok(handle)
+            };
+            match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+                Ok(r) => r,
                 Err(_) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
-                        "{}:{} に接続できませんでした（時間切れ）",
-                        spec.hostname, spec.port
+                        "{host}:{port} に接続できませんでした（{} 秒で時間切れ）",
+                        CONNECT_TIMEOUT.as_secs()
                     ),
                 )),
             }
@@ -195,18 +293,263 @@ impl Connector for SshConnector {
             .unwrap()
             .take()
             .ok_or_else(|| io::Error::other("ホスト鍵を受け取れませんでした"))?;
-        if let Err(e) = self.verify_host_key(spec, &key, prompter) {
+        if let Err(e) = self.verify_host_key(spec, &key, prompter, log) {
             disconnect(rt, &handle);
             return Err(e);
         }
-        if let Err(e) = authenticate(rt, &mut handle, spec, prompter) {
+        if let Err(e) = authenticate(
+            rt,
+            &mut handle,
+            spec,
+            prompter,
+            self.passwords.as_deref(),
+            log,
+        ) {
             disconnect(rt, &handle);
             return Err(e);
         }
+        Ok(handle)
+    }
+}
+
+impl Connector for SshConnector {
+    fn connect(
+        &self,
+        spec: &HostSpec,
+        prompter: &dyn Prompter,
+        log: &ConnectLog,
+    ) -> io::Result<Arc<dyn Transport>> {
+        for l in spec.describe() {
+            log.note(l);
+        }
+        let hops: Vec<&HostSpec> = spec.jumps.iter().chain([spec]).collect();
+        if let Some(e) = hops.iter().find_map(|h| h.route_error.as_ref()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, e.clone()));
+        }
+        let rt = runtime()?;
+        let config = Arc::new(client::Config {
+            keepalive_interval: Some(self.keepalive),
+            keepalive_max: 3,
+            inactivity_timeout: None,
+            nodelay: true,
+            ..client::Config::default()
+        });
+        let mut handles: Vec<Arc<Handle<Client>>> = Vec::new();
+        for (i, hop) in hops.iter().enumerate() {
+            let via = handles.last().map(|h| h.as_ref());
+            match self.connect_hop(rt, &config, hop, via, prompter, log) {
+                Ok(h) => handles.push(Arc::new(h)),
+                Err(e) => {
+                    for h in handles.iter().rev() {
+                        disconnect(rt, h);
+                    }
+                    // 踏み台で失敗したことが分かるようにする（中止などの種類は保つ）
+                    return Err(if i + 1 < hops.len() {
+                        io::Error::new(e.kind(), format!("踏み台 {}: {e}", hop.user_host()))
+                    } else {
+                        e
+                    });
+                }
+            }
+        }
+        log.note("SSH の接続と認証が済みました");
+        let handle = handles.pop().expect("at least one hop");
         Ok(Arc::new(SshTransport {
-            handle: Arc::new(handle),
+            handle,
+            jumps: handles,
         }))
     }
+}
+
+/// プロキシの認証の情報と、その出どころ。
+struct ProxyCreds {
+    user: String,
+    password: String,
+    from: CredsFrom,
+}
+
+#[derive(PartialEq)]
+enum CredsFrom {
+    /// 設定に書いてあった
+    Config,
+    /// 保存してあった
+    Saved,
+    /// 尋ねた（`true` なら成功したら保存する）
+    Asked(bool),
+}
+
+/// プロキシを通して `host:port` への TCP 接続を作る。プロキシに認証を求められたり、認証に
+/// 失敗したりしたら、保存したパスワード、なければユーザー名（設定に書いていなければ）と
+/// パスワードを尋ねてやり直す。
+fn connect_proxy(
+    rt: &Runtime,
+    p: &yy_remote::proxy::Proxy,
+    host: &str,
+    port: u16,
+    prompter: &dyn Prompter,
+    store: Option<&dyn PasswordStore>,
+    log: &ConnectLog,
+) -> io::Result<tokio::net::TcpStream> {
+    let key = yy_remote::proxy_password_key(p);
+    let mut ask = ProxyAsk {
+        proxy: p,
+        key: &key,
+        store,
+        prompter,
+        log,
+        saved_tried: false,
+        note: None,
+    };
+    let mut creds = match (&p.user, &p.password) {
+        (Some(u), Some(pw)) => Some(ProxyCreds {
+            user: u.clone(),
+            password: pw.clone(),
+            from: CredsFrom::Config,
+        }),
+        // ユーザー名だけを書いた場合は、最初からパスワードを用意する
+        (Some(u), None) => Some(ask.obtain(Some(u))?),
+        _ => None,
+    };
+    let mut asked = 0;
+    loop {
+        let c = creds.as_ref().map(|c| proxy::Credentials {
+            user: &c.user,
+            password: &c.password,
+        });
+        let r = rt.block_on(async {
+            match tokio::time::timeout(CONNECT_TIMEOUT, proxy::connect(p, c, host, port)).await {
+                Ok(r) => r,
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("プロキシ {p} に接続できませんでした（時間切れ）"),
+                )),
+            }
+        });
+        match r {
+            Ok(tcp) => {
+                log.note(format!(
+                    "プロキシ {p} が {host}:{port} への中継を始めました{}",
+                    match creds.as_ref().map(|c| &c.from) {
+                        None => "",
+                        Some(CredsFrom::Saved) => "（保存したパスワードで認証）",
+                        Some(_) => "（認証あり）",
+                    }
+                ));
+                if let (Some(c), Some(store)) = (&creds, store)
+                    && c.from == CredsFrom::Asked(true)
+                {
+                    save_password(store, &key, &c.user, &c.password, log);
+                }
+                return Ok(tcp);
+            }
+            Err(e) if proxy::needs_credentials(&e) && asked < RETRIES => {
+                log.note(format!("{e}"));
+                if let (Some(c), Some(store)) = (&creds, store)
+                    && c.from == CredsFrom::Saved
+                {
+                    forget_password(store, &key, log);
+                    ask.note = Some(REJECTED_NOTE);
+                } else {
+                    asked += 1;
+                }
+                let hint = creds.as_ref().map(|c| c.user.clone()).or(p.user.clone());
+                creds = Some(ask.obtain(hint.as_deref())?);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// 保存したパスワードが受け付けられなかったときの説明
+const REJECTED_NOTE: &str = "保存したパスワードは受け付けられませんでした（保存を削除しました）。";
+
+/// プロキシの認証の情報を用意する。
+struct ProxyAsk<'a> {
+    proxy: &'a yy_remote::proxy::Proxy,
+    key: &'a str,
+    store: Option<&'a dyn PasswordStore>,
+    prompter: &'a dyn Prompter,
+    log: &'a ConnectLog,
+    saved_tried: bool,
+    note: Option<&'static str>,
+}
+
+impl ProxyAsk<'_> {
+    /// 保存したパスワード（まだ試していなければ）、なければ尋ねる。
+    fn obtain(&mut self, user: Option<&str>) -> io::Result<ProxyCreds> {
+        if !self.saved_tried {
+            self.saved_tried = true;
+            if let Some(saved) = self.store.and_then(|s| s.load(self.key))
+                && user.is_none_or(|u| u == saved.user)
+            {
+                self.log.note(format!(
+                    "プロキシ {} のパスワードは保存したもの（ユーザー {}）を使います",
+                    self.proxy, saved.user
+                ));
+                return Ok(ProxyCreds {
+                    user: saved.user,
+                    password: saved.password,
+                    from: CredsFrom::Saved,
+                });
+            }
+        }
+        let user = match user {
+            Some(u) => u.to_owned(),
+            None => {
+                let prompts = [("ユーザー名:".to_owned(), true)];
+                let answers = self
+                    .prompter
+                    .keyboard_interactive(
+                        &format!("プロキシ {}", self.proxy),
+                        "プロキシの認証",
+                        "",
+                        &prompts,
+                    )
+                    .ok_or_else(cancelled)?;
+                answers.into_iter().next().ok_or_else(cancelled)?
+            }
+        };
+        let label = format!("{user}（プロキシ {}）", self.proxy);
+        let a = self
+            .prompter
+            .ask_password(&PasswordRequest {
+                label: &label,
+                can_save: self.store.is_some(),
+                note: self.note.take(),
+            })
+            .ok_or_else(cancelled)?;
+        Ok(ProxyCreds {
+            user,
+            password: a.password,
+            from: CredsFrom::Asked(a.save),
+        })
+    }
+}
+
+/// 認証に成功したパスワードを保存する（失敗しても接続は続ける）。
+fn save_password(
+    store: &dyn PasswordStore,
+    key: &str,
+    user: &str,
+    password: &str,
+    log: &ConnectLog,
+) {
+    let saved = SavedPassword {
+        user: user.to_owned(),
+        password: password.to_owned(),
+    };
+    match store.save(key, &saved) {
+        Ok(()) => log.note(format!("パスワードを保存しました（{key}）")),
+        Err(e) => log.note(format!("パスワードを保存できませんでした（{key}）: {e}")),
+    }
+}
+
+/// 受け付けられなかった保存済みのパスワードを消す。
+fn forget_password(store: &dyn PasswordStore, key: &str, log: &ConnectLog) {
+    store.delete(key);
+    log.note(format!(
+        "保存したパスワードが受け付けられなかったため、保存を削除しました（{key}）"
+    ));
 }
 
 fn disconnect(rt: &Runtime, handle: &Handle<Client>) {
@@ -219,28 +562,44 @@ fn authenticate(
     handle: &mut Handle<Client>,
     spec: &HostSpec,
     prompter: &dyn Prompter,
+    store: Option<&dyn PasswordStore>,
+    log: &ConnectLog,
 ) -> io::Result<()> {
     let user = spec.user.clone();
+    log.note(format!("ユーザー {user} で認証します"));
     // サーバーが受け付ける方法（最初は分からないので、すべて試す）
     let mut methods: Option<Vec<MethodKind>> = None;
     let allowed =
         |m: &Option<Vec<MethodKind>>, k: MethodKind| m.as_ref().is_none_or(|v| v.contains(&k));
-    let note = |r: &AuthResult, m: &mut Option<Vec<MethodKind>>| {
+    let note = |what: &str, r: &AuthResult, m: &mut Option<Vec<MethodKind>>| {
         if let AuthResult::Failure {
             remaining_methods, ..
         } = r
         {
             *m = Some(remaining_methods.iter().copied().collect());
+            log.note(format!(
+                "{what}: 受け付けられませんでした（サーバーが受け付ける方法: {}）",
+                method_names(m)
+            ));
         }
     };
+    let succeeded = |what: &str| {
+        log.note(format!("{what}で認証しました"));
+        Ok(())
+    };
 
-    for path in spec.identity_files.iter().filter(|p| p.is_file()) {
+    for path in &spec.identity_files {
+        if !path.is_file() {
+            continue;
+        }
         if !allowed(&methods, MethodKind::PublicKey) {
+            log.note("サーバーが公開鍵認証を受け付けないため、残りの秘密鍵は使いません");
             break;
         }
-        let Some(key) = load_key(path, prompter)? else {
+        let Some(key) = load_key(path, prompter, log)? else {
             continue;
         };
+        let what = format!("公開鍵（{}、{}）", path.display(), key.algorithm());
         let hash = rt
             .block_on(handle.best_supported_rsa_hash())
             .map_err(ssh_error)?
@@ -250,23 +609,33 @@ fn authenticate(
             .block_on(handle.authenticate_publickey(user.clone(), key))
             .map_err(ssh_error)?;
         if r.success() {
-            return Ok(());
+            return succeeded(&what);
         }
-        note(&r, &mut methods);
+        note(&what, &r, &mut methods);
+    }
+    if !spec.identity_files.iter().any(|p| p.is_file()) {
+        log.note("使える秘密鍵のファイルがありません");
     }
 
     if allowed(&methods, MethodKind::KeyboardInteractive) {
+        log.note("keyboard-interactive 認証を試します");
         let user_host = spec.user_host();
         let mut r = rt
             .block_on(handle.authenticate_keyboard_interactive_start(user.clone(), None))
             .map_err(ssh_error)?;
         loop {
             match r {
-                KeyboardInteractiveAuthResponse::Success => return Ok(()),
+                KeyboardInteractiveAuthResponse::Success => {
+                    return succeeded("keyboard-interactive 認証");
+                }
                 KeyboardInteractiveAuthResponse::Failure {
                     remaining_methods, ..
                 } => {
                     methods = Some(remaining_methods.iter().copied().collect());
+                    log.note(format!(
+                        "keyboard-interactive 認証: 受け付けられませんでした（サーバーが受け付ける方法: {}）",
+                        method_names(&methods)
+                    ));
                     break;
                 }
                 KeyboardInteractiveAuthResponse::InfoRequest {
@@ -277,11 +646,20 @@ fn authenticate(
                     let answers = if prompts.is_empty() {
                         Vec::new()
                     } else {
+                        // 質問は記録するが、答えは記録しない
                         let q: Vec<(String, bool)> =
                             prompts.iter().map(|p| (p.prompt.clone(), p.echo)).collect();
+                        let asked: Vec<&str> = q.iter().map(|(p, _)| p.trim()).collect();
+                        log.note(format!(
+                            "keyboard-interactive の質問: {}",
+                            asked.join(" / ")
+                        ));
                         prompter
                             .keyboard_interactive(&user_host, &name, &instructions, &q)
-                            .ok_or_else(cancelled)?
+                            .ok_or_else(|| {
+                                log.note("keyboard-interactive の入力が中止されました");
+                                cancelled()
+                            })?
                     };
                     r = rt
                         .block_on(handle.authenticate_keyboard_interactive_respond(answers))
@@ -292,15 +670,48 @@ fn authenticate(
     }
 
     if allowed(&methods, MethodKind::Password) {
-        for _ in 0..RETRIES {
-            let password = prompter.password(&spec.user_host()).ok_or_else(cancelled)?;
+        let key = yy_remote::ssh_password_key(spec);
+        let mut notice = None;
+        // 保存したパスワードがあれば、尋ねずに使う
+        if let Some(store) = store
+            && let Some(saved) = store.load(&key)
+        {
+            log.note(format!("保存したパスワードを使います（{key}）"));
             let r = rt
-                .block_on(handle.authenticate_password(user.clone(), password))
+                .block_on(handle.authenticate_password(user.clone(), saved.password))
                 .map_err(ssh_error)?;
             if r.success() {
-                return Ok(());
+                return succeeded("パスワード認証（保存したパスワード）");
             }
-            note(&r, &mut methods);
+            note("保存したパスワード", &r, &mut methods);
+            forget_password(store, &key, log);
+            notice = Some(REJECTED_NOTE);
+        }
+        for i in 1..=RETRIES {
+            if !allowed(&methods, MethodKind::Password) {
+                break;
+            }
+            let label = spec.user_host();
+            let PasswordAnswer { password, save } = prompter
+                .ask_password(&PasswordRequest {
+                    label: &label,
+                    can_save: store.is_some(),
+                    note: notice.take(),
+                })
+                .ok_or_else(|| {
+                    log.note("パスワードの入力が中止されました");
+                    cancelled()
+                })?;
+            let r = rt
+                .block_on(handle.authenticate_password(user.clone(), password.clone()))
+                .map_err(ssh_error)?;
+            if r.success() {
+                if save && let Some(store) = store {
+                    save_password(store, &key, &user, &password, log);
+                }
+                return succeeded("パスワード認証");
+            }
+            note(&format!("パスワード認証（{i} 回目）"), &r, &mut methods);
             if !allowed(&methods, MethodKind::Password) {
                 break;
             }
@@ -308,8 +719,21 @@ fn authenticate(
     }
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
-        format!("{} に認証できませんでした", spec.user_host()),
+        format!(
+            "{} に認証できませんでした（サーバーが受け付ける方法: {}）",
+            spec.user_host(),
+            method_names(&methods)
+        ),
     ))
+}
+
+/// 認証方式の名前の並び（分からなければ「不明」）。
+fn method_names(m: &Option<Vec<MethodKind>>) -> String {
+    match m {
+        Some(v) if !v.is_empty() => v.iter().map(<&str>::from).collect::<Vec<_>>().join(", "),
+        Some(_) => "なし".into(),
+        None => "不明".into(),
+    }
 }
 
 fn cancelled() -> io::Error {
@@ -317,20 +741,38 @@ fn cancelled() -> io::Error {
 }
 
 /// 秘密鍵を読む。暗号化されていればパスフレーズを尋ねる（答えなければ `None`）。
-fn load_key(path: &Path, prompter: &dyn Prompter) -> io::Result<Option<PrivateKey>> {
+fn load_key(
+    path: &Path,
+    prompter: &dyn Prompter,
+    log: &ConnectLog,
+) -> io::Result<Option<PrivateKey>> {
     match russh::keys::load_secret_key(path, None) {
         Ok(k) => return Ok(Some(k)),
         Err(russh::keys::Error::KeyIsEncrypted) => {}
         // 読めない鍵（対応していない形式など）は使わない
-        Err(_) => return Ok(None),
+        Err(e) => {
+            log.note(format!(
+                "秘密鍵 {} を読めないため使いません: {e}",
+                path.display()
+            ));
+            return Ok(None);
+        }
     }
     for _ in 0..RETRIES {
         let Some(pass) = prompter.passphrase(path) else {
+            log.note(format!(
+                "秘密鍵 {} のパスフレーズが入力されなかったため使いません",
+                path.display()
+            ));
             return Ok(None);
         };
         if let Ok(k) = russh::keys::load_secret_key(path, Some(&pass)) {
             return Ok(Some(k));
         }
+        log.note(format!(
+            "秘密鍵 {} のパスフレーズが違います",
+            path.display()
+        ));
     }
     Ok(None)
 }
@@ -338,16 +780,23 @@ fn load_key(path: &Path, prompter: &dyn Prompter) -> io::Result<Option<PrivateKe
 /// 認証済みの SSH 接続。
 struct SshTransport {
     handle: Arc<Handle<Client>>,
+    /// 経由している踏み台の接続（最初の踏み台から順に）
+    jumps: Vec<Arc<Handle<Client>>>,
 }
 
 impl Drop for SshTransport {
     fn drop(&mut self) {
         if let Ok(rt) = runtime() {
-            let h = self.handle.clone();
+            // 接続先から順に、踏み台をさかのぼって切断する
+            let handles: Vec<_> = std::iter::once(self.handle.clone())
+                .chain(self.jumps.iter().rev().cloned())
+                .collect();
             rt.spawn(async move {
-                let _ = h
-                    .disconnect(russh::Disconnect::ByApplication, "", "en")
-                    .await;
+                for h in handles {
+                    let _ = h
+                        .disconnect(russh::Disconnect::ByApplication, "", "en")
+                        .await;
+                }
             });
         }
     }
@@ -416,7 +865,7 @@ impl Transport for SshTransport {
     }
 
     fn is_closed(&self) -> bool {
-        self.handle.is_closed()
+        self.handle.is_closed() || self.jumps.iter().any(|h| h.is_closed())
     }
 }
 

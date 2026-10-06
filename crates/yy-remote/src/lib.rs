@@ -9,6 +9,8 @@ pub mod deploy;
 pub mod known_hosts;
 #[cfg(unix)]
 pub mod local;
+pub mod log;
+pub mod proxy;
 pub mod rpc;
 pub mod session;
 pub mod ssh_config;
@@ -20,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use deploy::AgentFiles;
+pub use log::ConnectLog;
 pub use session::{Session, UploadOutcome};
 pub use ssh_config::HostSpec;
 pub use uri::RemoteUri;
@@ -131,7 +134,7 @@ pub fn run(t: &dyn Transport, command: &[u8], input: &[u8]) -> io::Result<Output
 }
 
 /// [`Connector`] を作るときの設定。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ConnectorOptions {
     /// yyeditor 自身のホスト鍵の記録（承認した鍵を書き込む）
     pub known_hosts: PathBuf,
@@ -139,6 +142,80 @@ pub struct ConnectorOptions {
     pub extra_known_hosts: Vec<PathBuf>,
     /// 死活確認の間隔
     pub keepalive: std::time::Duration,
+    /// パスワードの保存先（`None` なら保存しない・使わない）
+    pub passwords: Option<Arc<dyn PasswordStore>>,
+}
+
+/// 保存したパスワード（11 章 4.7）。
+#[derive(Clone, PartialEq, Eq)]
+pub struct SavedPassword {
+    pub user: String,
+    pub password: String,
+}
+
+/// パスワードの保存先（Windows では資格情報マネージャー。実装は UI が用意する）。
+///
+/// 名前（`key`）は [`ssh_password_key`]・[`proxy_password_key`] で作る。認証に成功したパスワードだけを
+/// 保存し、保存したパスワードが受け付けられなかったら消す。
+pub trait PasswordStore: Send + Sync {
+    fn load(&self, key: &str) -> Option<SavedPassword>;
+    fn save(&self, key: &str, saved: &SavedPassword) -> io::Result<()>;
+    fn delete(&self, key: &str);
+}
+
+/// SSH の接続先のパスワードの名前（`ssh/ユーザー@ホスト:ポート`）。
+pub fn ssh_password_key(spec: &HostSpec) -> String {
+    format!("ssh/{}", spec.address())
+}
+
+/// プロキシのパスワードの名前（`proxy/http://ホスト:ポート` など。ユーザー名は保存した値に持つ）。
+pub fn proxy_password_key(proxy: &proxy::Proxy) -> String {
+    let p = proxy::Proxy {
+        user: None,
+        password: None,
+        ..proxy.clone()
+    };
+    format!("proxy/{p}")
+}
+
+/// メモリに置くだけの [`PasswordStore`]（テスト用）。
+#[derive(Default)]
+pub struct MemoryPasswords(std::sync::Mutex<std::collections::BTreeMap<String, SavedPassword>>);
+
+impl MemoryPasswords {
+    pub fn keys(&self) -> Vec<String> {
+        self.0.lock().unwrap().keys().cloned().collect()
+    }
+}
+
+impl PasswordStore for MemoryPasswords {
+    fn load(&self, key: &str) -> Option<SavedPassword> {
+        self.0.lock().unwrap().get(key).cloned()
+    }
+    fn save(&self, key: &str, saved: &SavedPassword) -> io::Result<()> {
+        self.0.lock().unwrap().insert(key.to_owned(), saved.clone());
+        Ok(())
+    }
+    fn delete(&self, key: &str) {
+        self.0.lock().unwrap().remove(key);
+    }
+}
+
+/// パスワードの問い合わせ。
+pub struct PasswordRequest<'a> {
+    /// 何のパスワードか（`ユーザー@ホスト` や `ユーザー（プロキシ …）`）
+    pub label: &'a str,
+    /// 「保存する」を選べるようにするか
+    pub can_save: bool,
+    /// 添える説明（保存したパスワードが受け付けられなかった、など）
+    pub note: Option<&'a str>,
+}
+
+/// パスワードの問い合わせへの答え。
+pub struct PasswordAnswer {
+    pub password: String,
+    /// 認証に成功したら保存する
+    pub save: bool,
 }
 
 /// 設定から [`Connector`] を作る関数（UI は SSH の実装を知らずに、起動時に受け取る）。
@@ -147,7 +224,13 @@ pub type ConnectorFactory = Arc<dyn Fn(&ConnectorOptions) -> Arc<dyn Connector> 
 /// SSH の接続を作るもの（実装は `yy-ssh`）。
 pub trait Connector: Send + Sync {
     /// `spec` に接続して認証する。ホスト鍵の確認や、パスワードなどの入力は `prompter` に尋ねる。
-    fn connect(&self, spec: &HostSpec, prompter: &dyn Prompter) -> io::Result<Arc<dyn Transport>>;
+    /// 各段階を `log` に記録する（失敗したときに原因を調べるため）。
+    fn connect(
+        &self,
+        spec: &HostSpec,
+        prompter: &dyn Prompter,
+        log: &ConnectLog,
+    ) -> io::Result<Arc<dyn Transport>>;
 }
 
 /// ホスト鍵の確認の種類。
@@ -177,6 +260,13 @@ pub trait Prompter: Send + Sync {
     fn confirm_host_key(&self, q: &HostKeyQuestion) -> bool;
     /// パスワード。`None` なら中止
     fn password(&self, user_host: &str) -> Option<String>;
+    /// 「保存する」を選べるパスワードの問い合わせ（既定は [`Prompter::password`] で、保存しない）。
+    fn ask_password(&self, req: &PasswordRequest<'_>) -> Option<PasswordAnswer> {
+        self.password(req.label).map(|password| PasswordAnswer {
+            password,
+            save: false,
+        })
+    }
     /// 秘密鍵のパスフレーズ。`None` ならこの鍵を使わない
     fn passphrase(&self, key: &Path) -> Option<String>;
     /// keyboard-interactive 認証の質問（`(質問, 入力を表示するか)` の並び）への答え。
@@ -231,6 +321,20 @@ pub fn shell_quote(arg: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_keys() {
+        let r = ssh_config::Resolver {
+            local_user: "me".into(),
+            ..Default::default()
+        };
+        let spec = r.resolve(&uri::Target::parse("root@[::1]:2222").unwrap());
+        assert_eq!(ssh_password_key(&spec), "ssh/root@[::1]:2222");
+        let p = proxy::Proxy::parse("http://alice:pw@proxy:3128")
+            .unwrap()
+            .unwrap();
+        assert_eq!(proxy_password_key(&p), "proxy/http://proxy:3128");
+    }
 
     #[test]
     fn quotes_for_the_shell() {

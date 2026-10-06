@@ -43,7 +43,15 @@ fn setup() -> Setup {
 
 fn start(s: &Setup) -> Arc<Session> {
     let t: Arc<dyn Transport> = Arc::new(LocalTransport::new());
-    Arc::new(Session::start(t, &s.files, Some(&s.agent_dir)).unwrap())
+    Arc::new(
+        Session::start(
+            t,
+            &s.files,
+            Some(&s.agent_dir),
+            &yy_remote::ConnectLog::new(),
+        )
+        .unwrap(),
+    )
 }
 
 fn bytes(p: &Path) -> Vec<u8> {

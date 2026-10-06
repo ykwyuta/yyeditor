@@ -11,7 +11,7 @@ use yy_proto::{Block, DirEntry, FileId, FileInfo, Request, Response, VERSION};
 
 use crate::deploy::{self, AgentFiles, AgentImage};
 use crate::rpc::{Client, Reply};
-use crate::{Connector, HostSpec, Prompter, Transport};
+use crate::{ConnectLog, Connector, HostSpec, Prompter, Transport};
 
 /// 応答を待たずに送っておく読み出し・書き込みの数
 const WINDOW: usize = 8;
@@ -82,15 +82,16 @@ fn cancelled() -> io::Error {
 }
 
 impl Session {
-    /// `spec` に接続し、エージェントを配置して起動する。
+    /// `spec` に接続し、エージェントを配置して起動する。各段階を `log` に記録する。
     pub fn connect(
         connector: &dyn Connector,
         spec: &HostSpec,
         prompter: &dyn Prompter,
         files: &AgentFiles,
+        log: &ConnectLog,
     ) -> io::Result<Session> {
-        let transport = connector.connect(spec, prompter)?;
-        Session::start(transport, files, spec.agent_dir.as_deref())
+        let transport = connector.connect(spec, prompter, log)?;
+        Session::start(transport, files, spec.agent_dir.as_deref(), log)
     }
 
     /// 接続済みの `transport` でエージェントを配置して起動する。
@@ -98,14 +99,35 @@ impl Session {
         transport: Arc<dyn Transport>,
         files: &AgentFiles,
         agent_dir: Option<&str>,
+        log: &ConnectLog,
     ) -> io::Result<Session> {
-        let platform = deploy::probe(transport.as_ref())?;
-        let image = AgentImage::load(files, &platform.arch)?;
-        let exe = deploy::install(transport.as_ref(), &image, &platform, agent_dir)?;
-        let process = deploy::launch(transport.as_ref(), &exe)?;
+        let t = transport.as_ref();
+        let platform = step(log, "接続先の環境の確認", || deploy::probe(t))?;
+        log.note(format!(
+            "接続先の環境: {} {}、ホーム {}",
+            platform.os,
+            platform.arch,
+            yy_proto::display_path(&platform.home)
+        ));
+        let image = step(log, "エージェントの用意", || {
+            AgentImage::load(files, &platform.arch)
+        })?;
+        log.note(format!(
+            "エージェント: {}（SHA-256 {}…）",
+            image.local.display(),
+            &image.sha256[..16]
+        ));
+        let exe = step(log, "エージェントの配置", || {
+            deploy::install(t, &image, &platform, agent_dir, log)
+        })?;
+        let process = step(log, "エージェントの起動", || {
+            deploy::launch(t, &exe)
+        })?;
         let (stdin, stdout, finish) = process.into_parts();
         let client = Client::new(stdout, stdin, finish);
-        let r = client.call(&Request::Hello { version: VERSION })?;
+        let r = step(log, "エージェントとの通信", || {
+            client.call(&Request::Hello { version: VERSION })
+        })?;
         let Response::Hello {
             version,
             agent_version,
@@ -115,10 +137,15 @@ impl Session {
         else {
             return Err(unexpected(r));
         };
+        log.note(format!(
+            "エージェントが起動しました（版 {agent_version}、プロトコル {version}）"
+        ));
         if version != VERSION {
-            return Err(io::Error::other(format!(
+            let e = io::Error::other(format!(
                 "エージェントのプロトコルの版が違います（{version}。期待する版は {VERSION}）"
-            )));
+            ));
+            log.note(format!("失敗: {e}"));
+            return Err(e);
         }
         Ok(Session {
             client,
@@ -359,6 +386,11 @@ impl Session {
             }
         }
     }
+}
+
+/// `f` を行い、失敗したら何をしていたかと一緒に記録する。
+fn step<T>(log: &ConnectLog, what: &str, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    f().inspect_err(|e| log.note(format!("{what}に失敗しました: {e}")))
 }
 
 fn check_done(r: Response) -> io::Result<()> {

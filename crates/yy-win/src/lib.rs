@@ -15,6 +15,7 @@
 
 mod app;
 mod clipboard;
+mod credstore;
 mod diffstream;
 mod diffview;
 mod findbar;

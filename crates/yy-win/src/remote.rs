@@ -22,8 +22,8 @@ use yy_core::{Document, Encoding, FileId, RemoteFile, SaveError, Upload};
 use yy_remote::ssh_config::{HostOverride, Resolver};
 use yy_remote::uri::{RemoteUri, Target};
 use yy_remote::{
-    AgentFiles, Connector, ConnectorFactory, ConnectorOptions, FileInfo, HostKeyCheck,
-    HostKeyQuestion, Prompter, Session, UploadOutcome,
+    AgentFiles, ConnectLog, Connector, ConnectorFactory, ConnectorOptions, FileInfo, HostKeyCheck,
+    HostKeyQuestion, PasswordAnswer, PasswordRequest, Prompter, Session, UploadOutcome,
 };
 
 use crate::app::with_app;
@@ -77,6 +77,10 @@ impl RemoteState {
                 known_hosts: dir.join("known_hosts"),
                 extra_known_hosts: extra,
                 keepalive: Duration::from_secs(u64::from(self.config.keepalive_secs.max(1))),
+                passwords: self.config.remember_passwords.then(|| {
+                    Arc::new(crate::credstore::WindowsCredentials)
+                        as Arc<dyn yy_remote::PasswordStore>
+                }),
             };
             self.connector = Some(factory(&opts));
         }
@@ -98,12 +102,14 @@ impl RemoteState {
                         port: h.port,
                         identity_file: h.identity_file.clone(),
                         proxy_jump: h.proxy_jump.clone(),
+                        proxy: h.proxy.clone(),
                         agent_dir: h.agent_dir.clone(),
                     },
                 )
             })
             .collect();
         r.agent_dir = Some(self.config.agent_dir.clone()).filter(|d| !d.trim().is_empty());
+        r.proxy = Some(self.config.proxy.clone()).filter(|p| !p.trim().is_empty());
         r
     }
 
@@ -295,6 +301,12 @@ pub(crate) fn show_status(text: &str) {
 enum Question {
     HostKey(HostKeyQuestion),
     Password(String),
+    /// 保存を選べるパスワード（保存したものが受け付けられなかった場合はその説明つき）
+    SavablePassword {
+        label: String,
+        can_save: bool,
+        note: Option<String>,
+    },
     Passphrase(PathBuf),
     Keyboard {
         user_host: String,
@@ -306,6 +318,8 @@ enum Question {
 
 enum Answer {
     Yes(bool),
+    /// パスワードと「保存する」の選択
+    Secret(Option<(String, bool)>),
     Text(Option<String>),
     Texts(Option<Vec<String>>),
 }
@@ -347,6 +361,23 @@ impl Prompter for UiPrompter {
     fn password(&self, user_host: &str) -> Option<String> {
         match self.ask(Question::Password(user_host.to_owned())) {
             Some(Answer::Text(t)) => t,
+            _ => None,
+        }
+    }
+
+    fn ask_password(&self, req: &PasswordRequest<'_>) -> Option<PasswordAnswer> {
+        if !req.can_save && req.note.is_none() {
+            return self.password(req.label).map(|password| PasswordAnswer {
+                password,
+                save: false,
+            });
+        }
+        match self.ask(Question::SavablePassword {
+            label: req.label.to_owned(),
+            can_save: req.can_save,
+            note: req.note.map(str::to_owned),
+        }) {
+            Some(Answer::Secret(Some((password, save)))) => Some(PasswordAnswer { password, save }),
             _ => None,
         }
     }
@@ -396,6 +427,30 @@ pub(crate) fn on_prompt(frame: HWND, lparam: LPARAM) {
             "パスワード",
             &format!("{user_host} のパスワード:"),
         )),
+        Question::SavablePassword {
+            label,
+            can_save,
+            note,
+        } => {
+            let mut prompt = String::new();
+            if let Some(n) = &note {
+                prompt.push_str(n);
+                prompt.push('\n');
+            }
+            prompt.push_str(&format!("{label} のパスワード:"));
+            if can_save {
+                Answer::Secret(crate::goto::prompt_secret_with_check(
+                    owner,
+                    "パスワード",
+                    &prompt,
+                    "このパスワードを保存する（Windows の資格情報マネージャー）",
+                ))
+            } else {
+                Answer::Secret(
+                    crate::goto::prompt_secret(owner, "パスワード", &prompt).map(|p| (p, false)),
+                )
+            }
+        }
         Question::Passphrase(key) => {
             let name = key.file_name().map_or_else(
                 || key.display().to_string(),
@@ -494,23 +549,48 @@ fn message_box(owner: HWND, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_R
 pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Session>, String> {
     enum Prepared {
         Ready(Arc<Session>),
-        Connect(Arc<dyn Connector>, yy_remote::HostSpec),
+        Connect(Arc<dyn Connector>, Box<yy_remote::HostSpec>),
         Unavailable,
     }
+    let log = Arc::new(ConnectLog::new());
     let prepared = with_app(|a| {
         let r = &mut a.remote;
         if let Some(s) = r.live_session(target) {
             return Prepared::Ready(s);
         }
+        log.note(format!(
+            "yyeditor {}、~/.ssh/config: {}、~/.ssh/known_hosts: {}",
+            env!("CARGO_PKG_VERSION"),
+            if r.config.read_ssh_config {
+                "読む"
+            } else {
+                "読まない"
+            },
+            if r.config.read_ssh_known_hosts {
+                "読む"
+            } else {
+                "読まない"
+            }
+        ));
+        if let Some(name) = r
+            .config
+            .host
+            .keys()
+            .find(|n| n.eq_ignore_ascii_case(&target.host))
+        {
+            log.note(format!(
+                "yyeditor の接続設定 [remote.host.{name}] を使います"
+            ));
+        }
         let spec = r.resolver().resolve(target);
         match r.connector() {
-            Some(c) => Prepared::Connect(c, spec),
+            Some(c) => Prepared::Connect(c, Box::new(spec)),
             None => Prepared::Unavailable,
         }
     });
     let (connector, spec) = match prepared {
         Some(Prepared::Ready(s)) => return Ok(s),
-        Some(Prepared::Connect(c, spec)) => (c, spec),
+        Some(Prepared::Connect(c, spec)) => (c, *spec),
         Some(Prepared::Unavailable) => {
             return Err("この yyeditor には SSH の機能が組み込まれていません。".into());
         }
@@ -521,21 +601,97 @@ pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Sessio
         frame: SendHwnd(frame().0 as isize),
     };
     let files = AgentFiles::beside_exe();
+    let l = log.clone();
     let r = wait(show, move |_| {
-        Session::connect(connector.as_ref(), &spec, &prompter, &files)
+        Session::connect(connector.as_ref(), &spec, &prompter, &files, &l)
     });
     match r {
         Ok(s) => {
+            log.note("接続しました");
+            save_log(target, &log);
             let s = Arc::new(s);
             with_app(|a| a.remote.sessions.push((target.clone(), s.clone())));
             show(&format!("{target} に接続しました"));
             Ok(s)
         }
         Err(e) => {
+            log.note(format!("接続できませんでした: {e}"));
+            let saved = save_log(target, &log);
             show("");
-            Err(format!("{target} に接続できませんでした。\n\n{e}"))
+            let mut text = format!("{target} に接続できませんでした。\n\n{e}");
+            if e.kind() != std::io::ErrorKind::Interrupted {
+                text.push_str("\n\n―― 接続の記録（最後の部分）――\n");
+                text.push_str(&log.tail(LOG_TAIL).join("\n"));
+                if let Some(path) = saved {
+                    text.push_str(&format!(
+                        "\n\n記録の全体: {}\n（ヘルプ メニューの「リモート接続の記録を開く」でも開けます）",
+                        path.display()
+                    ));
+                }
+            }
+            Err(text)
         }
     }
+}
+
+/// 資格情報マネージャーに保存したパスワードを確かめて削除する（ヘルプ メニュー）。
+pub(crate) fn forget_passwords(owner: HWND) {
+    use yy_remote::PasswordStore;
+    let store = crate::credstore::WindowsCredentials;
+    let keys = store.keys();
+    if keys.is_empty() {
+        crate::util::info_box(owner, "保存したリモート接続のパスワードはありません。");
+        return;
+    }
+    let shown: Vec<&str> = keys.iter().take(20).map(String::as_str).collect();
+    let more = if keys.len() > shown.len() {
+        format!("\n…ほか {} 件", keys.len() - shown.len())
+    } else {
+        String::new()
+    };
+    let text = format!(
+        "Windows の資格情報マネージャーに保存した、次の {} 件のパスワードを削除しますか？\n\n{}{more}\n\n\
+         削除すると、次に接続するときにパスワードを尋ねます。",
+        keys.len(),
+        shown.join("\n")
+    );
+    if message_box(owner, &text, MB_OKCANCEL | MB_ICONQUESTION) != IDOK {
+        return;
+    }
+    for k in &keys {
+        store.delete(k);
+    }
+    let left = store.keys().len();
+    if left == 0 {
+        crate::util::info_box(owner, "保存したパスワードを削除しました。");
+    } else {
+        message_box(
+            owner,
+            &format!("{left} 件のパスワードを削除できませんでした。"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+/// 接続に失敗したときに知らせる、接続の記録の行数
+const LOG_TAIL: usize = 12;
+
+/// 接続の記録のファイル（`%APPDATA%\yyeditor\logs\remote-ssh.log`）。
+pub(crate) fn log_path() -> Option<PathBuf> {
+    Some(yy_config::config_dir()?.join("logs").join("remote-ssh.log"))
+}
+
+/// 接続の記録をファイルに追記する。書けたらファイルのパスを返す（書けなくても接続は続ける）。
+fn save_log(target: &Target, log: &ConnectLog) -> Option<PathBuf> {
+    let path = log_path()?;
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    let header = format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} {target}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+    );
+    yy_remote::log::append_to_file(&path, &header, log)
+        .ok()
+        .map(|()| path)
 }
 
 // ---- 開く ---------------------------------------------------------------------------

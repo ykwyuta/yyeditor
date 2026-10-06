@@ -116,11 +116,65 @@ user = "yamada"
 port = 22
 identity_file = "~/.ssh/id_ed25519"
 proxy_jump = "bastion"          # 踏み台。組み込み実装で direct-tcpip チャネルを中継
+proxy = "socks5://socks:1080"   # プロキシ（4.5）
 agent_dir = "/work/yamada/.yyeditor"   # ホームが noexec の場合など
 ```
 
-- `~/.ssh/config` は `Host`（ワイルドカード）・`HostName`・`User`・`Port`・`IdentityFile`・`ProxyJump` だけを解釈します。**`ProxyCommand` は外部プログラムの起動が前提なので対応しません**（踏み台は `ProxyJump` で組み込み実装が中継する）。
+- `~/.ssh/config` は `Host`（ワイルドカード）・`HostName`・`User`・`Port`・`IdentityFile`・`ProxyJump`・`ProxyCommand` だけを解釈します。**`ProxyCommand` は外部プログラムの起動が前提なので、よく使われる形だけを組み込みの踏み台・プロキシに読み替えます**（4.5）。
 - 踏み台（`ProxyJump`）は、1 段目の SSH 接続上で `direct-tcpip` チャネルを開き、その上で 2 段目の SSH を話します（多段も同様）。すべて exe 内で完結します。
+
+### 4.5 踏み台とプロキシ（2026-10-06 追加）
+
+- **踏み台**: `ProxyJump`（`~/.ssh/config`）・`proxy_jump`（yyeditor の設定）に `[ユーザー@]ホスト[:ポート]` を
+  カンマ区切りで書く（`ssh://` も可）。接続設定の解決（`yy_remote::ssh_config`）で踏み台ごとに `HostSpec` を作り、
+  最初に接続するものから順に `HostSpec::jumps` に並べる。OpenSSH の `-J a,b` と同じく、最初の踏み台だけが自身の
+  踏み台・プロキシの設定をたどる（循環は 8 段で止める）。
+- 接続（`yy-ssh`）は踏み台ごとに **ホスト鍵の照合（known_hosts の名前は各踏み台のもの）→ 認証** を行い、
+  次の接続先へは前の接続の `direct-tcpip` チャネルを `russh::client::connect_stream` に渡して SSH を話す。
+  途中の接続は最後の接続と一緒に保持し、閉じるときは接続先から順に切断する。どれかが切れたら切断とみなす。
+- **プロキシ**: `proxy`（全体の既定と接続先ごと）に `http://`・`socks5://`（`socks5h`・`socks` も同じ）・`socks4://` を書く。
+  最初の接続（踏み台がなければ接続先）の TCP 接続だけに使う。HTTP は `CONNECT`（Basic 認証）、SOCKS5 はホスト名を
+  プロキシで解決させ、ユーザー名・パスワード認証に対応する。ユーザー名だけを書いた場合はパスワードを尋ね、
+  何も書いていなければプロキシに認証を求められた（HTTP 407、SOCKS5 で方式 2 を選ばれた）ときにユーザー名とパスワードを尋ねる。
+  認証に失敗したら 3 回まで尋ね直す。
+- **`ProxyCommand` の読み替え**（`yy_remote::proxy::translate_command`）: `ssh [-q] [-p] [-l] -W %h:%p 踏み台` は踏み台、
+  `nc [-X 5|4|connect] -x`・`ncat --proxy [--proxy-type] [--proxy-auth]`・`connect -S|-H` はプロキシにする。
+  それ以外（`-o` などの選択肢、`socat`、クラウドの CLI など）は、接続するときに「対応していない」と知らせて接続しない
+  （外部プログラムは起動しない。C1）。yyeditor の設定で `proxy_jump`・`proxy` を書けば、`~/.ssh/config` の指定より優先する。
+- 優先順位: yyeditor の接続先ごとの `proxy_jump`・`proxy` ＞ `~/.ssh/config` の `ProxyJump`・`ProxyCommand`（先に現れたもの）
+  ＞ 全体の `proxy`。`none` はそれぞれの段で「使わない」。
+
+### 4.6 接続の記録（2026-10-06 追加）
+
+- 接続に失敗したときに原因を調べられるよう、1 回の接続ごとに `yy_remote::ConnectLog` に経過時間つきで記録する。
+  `Connector::connect`・`Session::connect`/`start`・`deploy::install` が受け取り、次を書く。
+  - 解決した接続設定（接続先、秘密鍵の候補と有無、踏み台、プロキシ、経路の設定の誤り、エージェントの配置先）と、
+    `~/.ssh/config`・`~/.ssh/known_hosts` を読むか、yyeditor の接続設定を使ったか（UI が書く）
+  - 段ごとの接続（直接・プロキシ経由・踏み台経由）、TCP の接続先アドレス、プロキシの中継の開始・認証の要求、
+    踏み台の direct-tcpip チャネル、SSH の鍵交換の完了
+  - ホスト鍵の種類と指紋、known_hosts での名前、照合の結果（一致・記録なし（探したファイル）・不一致（ファイルと行））
+  - 試した認証方式とその結果、サーバーが受け付ける方式、使えなかった秘密鍵とその理由、keyboard-interactive の質問
+  - 接続先の環境（OS・アーキテクチャ・ホーム）、エージェントの配置（配置済み・置き換え）と起動、プロトコルの版
+  - 失敗した段階とエラー
+- パスワード・パスフレーズ・keyboard-interactive の答えは記録しない（プロキシの URL もパスワードを除いて表示する）。
+- UI は接続のたびに `%APPDATA%\yyeditor\logs\remote-ssh.log` に日時と接続先の見出しをつけて追記する（1 MiB を超えたら
+  `remote-ssh.old.log` に移して 1 世代残す）。失敗したときはエラーの下に記録の最後の 12 行とファイルの場所を出す
+  （利用者が中止した場合は出さない）。ヘルプ メニューの「リモート接続の記録を開く」で記録をエディタで開ける。
+
+### 4.7 パスワードの保存（2026-10-06 追加）
+
+- パスワード（SSH の接続先・プロキシ）は、入力欄の「このパスワードを保存する」を選んだ場合だけ、**認証に成功してから**
+  Windows の資格情報マネージャーに保存する（汎用資格情報、名前は `yyeditor/ssh/ユーザー@ホスト:ポート`・
+  `yyeditor/proxy/http://ホスト:ポート`、`CRED_PERSIST_LOCAL_MACHINE`）。設定ファイルには書かない。
+- 次の接続では、パスワード認証の前に保存したものを尋ねずに試す。プロキシは認証を求められたとき（ユーザー名だけを
+  書いた場合は最初）に使い、保存したユーザー名も使う。**受け付けられなければ保存を消し**、その旨を添えて尋ね直す。
+- 保存先は `yy_remote::PasswordStore`（`load`・`save`・`delete`）で、UI が `ConnectorOptions::passwords` で渡す
+  （`yy-ssh` は保存先の実装を知らない。テストではメモリに置く `MemoryPasswords` を使う）。
+  `Prompter::ask_password` は「保存を選べるか」と説明を受け取り、パスワードと「保存する」の選択を返す。
+- 設定 `[remote] remember_passwords = false` で保存も保存したものの利用もしない。ヘルプ メニューの
+  「保存したリモート接続のパスワードを削除」で `yyeditor/` の資格情報をまとめて削除する。
+- 秘密鍵のパスフレーズ・keyboard-interactive の答え（ワンタイムパスワードなど）は保存しない。接続の記録（4.6）には
+  保存したパスワードを使ったか・保存したか・消したかだけを書き、パスワードそのものは書かない。
 
 ## 5. 端末側のバッファ：疎キャッシュ付きリモートソース
 
@@ -386,7 +440,7 @@ CI の変更:
 | **M9.1 接続基盤**（実装済み） | `yy-proto`・`yy-remote`・`yy-ssh`（russh、公開鍵・パスワード・keyboard-interactive、known_hosts）・`yy-agent`（stat / readdir / open / read / save）、エージェントの配置、リモートのファイル選択、`ssh://` の履歴。ファイルは全体を取り寄せて開く（全文字コード。256 MiB を超えるときは確かめる） | OpenSSH のない Windows から Linux のファイルを開いて編集・保存でき、外部変更の競合を検出できる |
 | **M9.2 巨大ファイル・ARM 対応** | **エージェントの Linux aarch64 対応（必須）**、疎キャッシュ（`ByteSource::missing`）、表示範囲の取り寄せと先読み、エージェントでの行数カウント、ピースの並びと Add の複製による保存、切断と再接続 | 10 GB のリモートファイルを 0.3 秒以内に表示し、1 行の修正を 100 KB 未満の転送で保存できる。aarch64 の Linux でも同じ試験に合格 |
 | **M9.3 リモートジョブ** | 文字コード変換、検索・すべて置換、Grep、CSV インデックス、ハイライトのチェックポイントをエージェントで実行 | 03〜05・10 章の機能がリモートの文書で使え、結果がローカルと一致する |
-| **M9.4 拡張** | ProxyJump、Pageant / Windows 標準の SSH エージェントへの対応（任意）、`.ppk`、比較・プレビューのリモート対応 | 踏み台経由の接続、`.ppk` の鍵での接続、リモートの文書どうしの比較 |
+| **M9.4 拡張** | ProxyJump・プロキシ（実装済み、4.5）、Pageant / Windows 標準の SSH エージェントへの対応（任意）、`.ppk`、比較・プレビューのリモート対応 | 踏み台経由の接続、`.ppk` の鍵での接続、リモートの文書どうしの比較 |
 
 ## 15. リスクと対策
 

@@ -1,7 +1,8 @@
 //! 組み込みの SSH クライアント（yy-ssh）の結合テスト。
 //!
 //! russh のサーバーを同じプロセスで立て（exec 要求は手元の `sh -c` で実行）、OpenSSH を使わずに
-//! ホスト鍵の確認・認証・コマンド実行・エージェントの配置と保存までを確かめる。
+//! ホスト鍵の確認・認証・コマンド実行・エージェントの配置と保存、踏み台（direct-tcpip）と
+//! プロキシ（HTTP CONNECT・SOCKS5）を経由した接続までを確かめる。
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -14,11 +15,13 @@ use std::time::Duration;
 
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
 use russh::server::{self, Auth, Msg, Session};
-use russh::{Channel, ChannelId, ChannelMsg, MethodKind, MethodSet};
+use russh::{Channel, ChannelId, ChannelMsg, ChannelOpenFailure, MethodKind, MethodSet};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use yy_remote::proxy::Proxy;
 use yy_remote::uri::Target;
 use yy_remote::{
-    AgentFiles, Connector, HostKeyCheck, HostKeyQuestion, HostSpec, Prompter, Session as Remote,
+    AgentFiles, ConnectLog, Connector, HostKeyCheck, HostKeyQuestion, HostSpec, MemoryPasswords,
+    PasswordAnswer, PasswordRequest, PasswordStore, Prompter, SavedPassword, Session as Remote,
     UploadOutcome,
 };
 use yy_ssh::SshConnector;
@@ -36,6 +39,8 @@ struct TestServer {
     host_key: PublicKey,
     /// 認証の試行回数
     auth_attempts: Arc<AtomicUsize>,
+    /// 踏み台として中継を頼まれた接続先
+    forwards: Arc<Mutex<Vec<String>>>,
     _rt: tokio::runtime::Runtime,
 }
 
@@ -44,6 +49,7 @@ struct Handler {
     allowed_keys: Arc<Vec<PublicKey>>,
     auth_attempts: Arc<AtomicUsize>,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    forwards: Arc<Mutex<Vec<String>>>,
 }
 
 impl server::Handler for Handler {
@@ -81,6 +87,30 @@ impl server::Handler for Handler {
     ) -> Result<(), Self::Error> {
         self.channels.lock().unwrap().insert(channel.id(), channel);
         reply.accept().await;
+        Ok(())
+    }
+
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host: &str,
+        port: u32,
+        _: &str,
+        _: u32,
+        reply: server::ChannelOpenHandle,
+        _: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.forwards.lock().unwrap().push(format!("{host}:{port}"));
+        match tokio::net::TcpStream::connect((host, port as u16)).await {
+            Ok(mut tcp) => {
+                reply.accept().await;
+                tokio::spawn(async move {
+                    let mut ch = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut ch, &mut tcp).await;
+                });
+            }
+            Err(_) => reply.reject(ChannelOpenFailure::ConnectFailed).await,
+        }
         Ok(())
     }
 
@@ -169,10 +199,12 @@ impl TestServer {
             ..server::Config::default()
         });
         let auth_attempts = Arc::new(AtomicUsize::new(0));
+        let forwards = Arc::new(Mutex::new(Vec::new()));
         let handler = Handler {
             allowed_keys: Arc::new(allowed_keys),
             auth_attempts: auth_attempts.clone(),
             channels: Arc::default(),
+            forwards: forwards.clone(),
         };
         let listener = rt
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -193,6 +225,7 @@ impl TestServer {
             port,
             host_key,
             auth_attempts,
+            forwards,
             _rt: rt,
         }
     }
@@ -204,7 +237,9 @@ impl TestServer {
             port: self.port,
             user: "tester".into(),
             identity_files,
-            proxy_jump: None,
+            jumps: Vec::new(),
+            proxy: None,
+            route_error: None,
             agent_dir: None,
         }
     }
@@ -216,6 +251,12 @@ struct Answers {
     accept_host: bool,
     passwords: Mutex<Vec<String>>,
     passphrase: Option<String>,
+    /// keyboard-interactive の答え
+    interactive: Option<Vec<String>>,
+    /// パスワードを「保存する」と答える
+    save: bool,
+    /// パスワードの問い合わせに添えられた説明
+    notes: Mutex<Vec<String>>,
     log: Mutex<Vec<String>>,
 }
 
@@ -236,6 +277,17 @@ impl Prompter for Answers {
         (!p.is_empty()).then(|| p.remove(0))
     }
 
+    fn ask_password(&self, req: &PasswordRequest<'_>) -> Option<PasswordAnswer> {
+        if let Some(n) = req.note {
+            self.notes.lock().unwrap().push(n.to_owned());
+        }
+        assert!(req.can_save || !self.save);
+        self.password(req.label).map(|password| PasswordAnswer {
+            password,
+            save: self.save,
+        })
+    }
+
     fn passphrase(&self, _: &Path) -> Option<String> {
         self.log.lock().unwrap().push("passphrase".into());
         self.passphrase.clone()
@@ -246,10 +298,12 @@ impl Prompter for Answers {
         _: &str,
         _: &str,
         _: &str,
-        _: &[(String, bool)],
+        prompts: &[(String, bool)],
     ) -> Option<Vec<String>> {
         self.log.lock().unwrap().push("keyboard-interactive".into());
-        None
+        let a = self.interactive.clone()?;
+        assert_eq!(a.len(), prompts.len());
+        Some(a)
     }
 }
 
@@ -264,6 +318,7 @@ fn connector(dir: &Path) -> SshConnector {
         known_hosts: dir.join("known_hosts"),
         extra_known_hosts: vec![dir.join("user_known_hosts")],
         keepalive: Duration::from_secs(15),
+        passwords: None,
     }
 }
 
@@ -283,7 +338,10 @@ fn asks_for_unknown_host_keys_and_remembers_them() {
         passwords: Mutex::new(vec![PASSWORD.into()]),
         ..Answers::default()
     };
-    let e = c.connect(&server.spec(vec![]), &p).err().unwrap();
+    let e = c
+        .connect(&server.spec(vec![]), &p, &ConnectLog::new())
+        .err()
+        .unwrap();
     assert_eq!(e.kind(), std::io::ErrorKind::Interrupted, "{e}");
     assert_eq!(p.log(), ["host:unknown"]);
     assert_eq!(server.auth_attempts.load(Ordering::SeqCst), 0);
@@ -295,15 +353,25 @@ fn asks_for_unknown_host_keys_and_remembers_them() {
         passwords: Mutex::new(vec!["wrong".into(), PASSWORD.into()]),
         ..Answers::default()
     };
-    let t = c.connect(&server.spec(vec![]), &p).unwrap();
+    let log = ConnectLog::new();
+    let t = c.connect(&server.spec(vec![]), &p, &log).unwrap();
     assert_eq!(p.log(), ["host:unknown", "password", "password"]);
+    assert!(
+        log.contains("ホスト鍵の記録がありません"),
+        "{:#?}",
+        log.lines()
+    );
+    assert!(log.contains("ホスト鍵を承認しました"));
+    assert!(log.contains("パスワード認証（1 回目）: 受け付けられませんでした"));
+    assert!(!log.contains("wrong"));
     let out = yy_remote::run(t.as_ref(), b"echo hello", b"").unwrap();
     assert_eq!(out.stdout, b"hello\n");
     let p = Answers {
         passwords: Mutex::new(vec![PASSWORD.into()]),
         ..Answers::default()
     };
-    c.connect(&server.spec(vec![]), &p).unwrap();
+    c.connect(&server.spec(vec![]), &p, &ConnectLog::new())
+        .unwrap();
     assert!(!p.log().iter().any(|l| l.starts_with("host:")));
 }
 
@@ -323,10 +391,12 @@ fn refuses_changed_host_keys_before_authenticating() {
         passwords: Mutex::new(vec![PASSWORD.into()]),
         ..Answers::default()
     };
+    let log = ConnectLog::new();
     let e = connector(dir.path())
-        .connect(&server.spec(vec![]), &p)
+        .connect(&server.spec(vec![]), &p, &log)
         .err()
         .unwrap();
+    assert!(log.contains("ホスト鍵が記録（"), "{:#?}", log.lines());
     assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
     assert!(e.to_string().contains("ホスト鍵が記録"), "{e}");
     assert_eq!(p.log(), ["host:changed"]);
@@ -354,7 +424,9 @@ fn authenticates_with_an_encrypted_key() {
         ..Answers::default()
     };
     let spec = server.spec(vec![dir.path().join("missing"), key_file]);
-    let t = connector(dir.path()).connect(&spec, &p).unwrap();
+    let t = connector(dir.path())
+        .connect(&spec, &p, &ConnectLog::new())
+        .unwrap();
     assert_eq!(p.log(), ["passphrase"]);
     // 標準入力・標準エラー出力・終了コード
     let out = yy_remote::run(t.as_ref(), b"cat; echo oops >&2; exit 3", b"from stdin").unwrap();
@@ -383,7 +455,22 @@ fn edits_a_file_through_the_agent_over_ssh() {
         ..Answers::default()
     };
     let c = connector(dir.path());
-    let session = Arc::new(Remote::connect(&c, &spec, &p, &AgentFiles::new(&agents)).unwrap());
+    let log = ConnectLog::new();
+    let session =
+        Arc::new(Remote::connect(&c, &spec, &p, &AgentFiles::new(&agents), &log).unwrap());
+    // 接続の各段階が記録される
+    for step in [
+        "経路: 直接接続",
+        "TCP で接続しました",
+        "ホスト鍵は known_hosts の記録と一致しました",
+        "パスワード認証で認証しました",
+        "接続先の環境: Linux",
+        "エージェントを配置します",
+        "エージェントが起動しました",
+    ] {
+        assert!(log.contains(step), "{step}: {:#?}", log.lines());
+    }
+    assert!(!log.contains(PASSWORD));
 
     let file = dir.path().join("remote.txt");
     let original = "日本語のテキスト\n".repeat(200_000);
@@ -400,4 +487,382 @@ fn edits_a_file_through_the_agent_over_ssh() {
     assert!(matches!(r, UploadOutcome::Saved(_)));
     assert_eq!(fs::read_to_string(&file).unwrap(), edited);
     assert!(!session.is_closed());
+}
+
+#[test]
+fn connects_through_jump_hosts() {
+    let jump = TestServer::start(vec![]);
+    let target = TestServer::start(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let c = connector(dir.path());
+    // 踏み台は名前を変えて、ホスト鍵を別々に確かめることを見る
+    let mut hop = jump.spec(vec![]);
+    hop.hostname = "localhost".into();
+    let mut spec = target.spec(vec![]);
+    spec.jumps = vec![hop];
+    let p = Answers {
+        accept_host: true,
+        passwords: Mutex::new(vec![PASSWORD.into(), PASSWORD.into()]),
+        ..Answers::default()
+    };
+    let log = ConnectLog::new();
+    let t = c.connect(&spec, &p, &log).unwrap();
+    assert_eq!(
+        p.log(),
+        ["host:unknown", "password", "host:unknown", "password"]
+    );
+    for step in [
+        "踏み台 1: tester@localhost:",
+        "（踏み台経由）",
+        "踏み台の上で 127.0.0.1:",
+        "SSH の接続と認証が済みました",
+    ] {
+        assert!(log.contains(step), "{step}: {:#?}", log.lines());
+    }
+    assert_eq!(
+        *jump.forwards.lock().unwrap(),
+        [format!("127.0.0.1:{}", target.port)]
+    );
+    let out = yy_remote::run(t.as_ref(), b"echo via jump", b"").unwrap();
+    assert_eq!(out.stdout, b"via jump\n");
+    assert!(!t.is_closed());
+    let known = fs::read_to_string(dir.path().join("known_hosts")).unwrap();
+    assert!(
+        known.contains(&format!("[localhost]:{}", jump.port)),
+        "{known}"
+    );
+    assert!(
+        known.contains(&format!("[127.0.0.1]:{}", target.port)),
+        "{known}"
+    );
+
+    // 踏み台から先に接続できない
+    let mut spec = target.spec(vec![]);
+    spec.port = closed_port();
+    let mut hop = jump.spec(vec![]);
+    hop.hostname = "localhost".into();
+    spec.jumps = vec![hop];
+    let p = Answers {
+        passwords: Mutex::new(vec![PASSWORD.into()]),
+        ..Answers::default()
+    };
+    let e = c.connect(&spec, &p, &ConnectLog::new()).err().unwrap();
+    assert!(e.to_string().contains("踏み台から"), "{e}");
+
+    // 踏み台の認証を中止した
+    let mut spec = target.spec(vec![]);
+    spec.jumps = vec![jump.spec(vec![])];
+    record_host_key(&dir.path().join("known_hosts"), &jump, &jump.host_key);
+    let e = c
+        .connect(&spec, &Answers::default(), &ConnectLog::new())
+        .err()
+        .unwrap();
+    assert_eq!(e.kind(), std::io::ErrorKind::Interrupted, "{e}");
+    assert!(e.to_string().starts_with("踏み台 tester@127.0.0.1"), "{e}");
+
+    // 設定の誤りは接続せずに知らせる
+    let mut spec = target.spec(vec![]);
+    spec.route_error = Some("ProxyCommand（x）には対応していません".into());
+    let e = c
+        .connect(&spec, &Answers::default(), &ConnectLog::new())
+        .err()
+        .unwrap();
+    assert!(e.to_string().contains("ProxyCommand"), "{e}");
+}
+
+/// 使われていないポート。
+fn closed_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// テスト用のプロキシ（HTTP CONNECT と、認証なしの SOCKS5）。中継を頼まれた接続先を記録する。
+struct TestProxy {
+    port: u16,
+    requests: Arc<Mutex<Vec<String>>>,
+    _rt: tokio::runtime::Runtime,
+}
+
+impl TestProxy {
+    /// `credentials` は HTTP の `Proxy-Authorization` に期待する値。
+    fn start(credentials: Option<&'static str>) -> TestProxy {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let listener = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let log = requests.clone();
+        rt.spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let Some((host, port)) = accept_proxy(&mut s, credentials).await else {
+                        return;
+                    };
+                    log.lock().unwrap().push(format!("{host}:{port}"));
+                    if let Ok(mut out) = tokio::net::TcpStream::connect((host, port)).await {
+                        let _ = tokio::io::copy_bidirectional(&mut s, &mut out).await;
+                    }
+                });
+            }
+        });
+        TestProxy {
+            port,
+            requests,
+            _rt: rt,
+        }
+    }
+}
+
+async fn accept_proxy(
+    s: &mut tokio::net::TcpStream,
+    credentials: Option<&str>,
+) -> Option<(String, u16)> {
+    let first = s.read_u8().await.ok()?;
+    if first == 5 {
+        let n = s.read_u8().await.ok()?;
+        let mut methods = vec![0u8; usize::from(n)];
+        s.read_exact(&mut methods).await.ok()?;
+        s.write_all(&[5, 0]).await.ok()?;
+        let mut head = [0u8; 4];
+        s.read_exact(&mut head).await.ok()?;
+        let host = match head[3] {
+            1 => {
+                let mut ip = [0u8; 4];
+                s.read_exact(&mut ip).await.ok()?;
+                std::net::Ipv4Addr::from(ip).to_string()
+            }
+            3 => {
+                let len = s.read_u8().await.ok()?;
+                let mut host = vec![0u8; usize::from(len)];
+                s.read_exact(&mut host).await.ok()?;
+                String::from_utf8(host).ok()?
+            }
+            _ => return None,
+        };
+        let port = s.read_u16().await.ok()?;
+        s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.ok()?;
+        return Some((host, port));
+    }
+    let mut head = vec![first];
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(s.read_u8().await.ok()?);
+    }
+    let head = String::from_utf8(head).ok()?;
+    let target = head.strip_prefix("CONNECT ")?.split(' ').next()?.to_owned();
+    if let Some(c) = credentials
+        && !head.contains(&format!("Proxy-Authorization: Basic {c}\r\n"))
+    {
+        s.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+            .await
+            .ok()?;
+        return None;
+    }
+    s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        .await
+        .ok()?;
+    let (host, port) = target.rsplit_once(':')?;
+    Some((host.to_owned(), port.parse().ok()?))
+}
+
+#[test]
+fn connects_through_proxies() {
+    let server = TestServer::start(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let c = connector(dir.path());
+    let password = || Answers {
+        passwords: Mutex::new(vec![PASSWORD.into()]),
+        ..Answers::default()
+    };
+
+    // SOCKS5
+    let socks = TestProxy::start(None);
+    let mut spec = server.spec(vec![]);
+    spec.proxy = Proxy::parse(&format!("socks5://127.0.0.1:{}", socks.port)).unwrap();
+    let t = c.connect(&spec, &password(), &ConnectLog::new()).unwrap();
+    let out = yy_remote::run(t.as_ref(), b"echo socks", b"").unwrap();
+    assert_eq!(out.stdout, b"socks\n");
+    assert_eq!(
+        *socks.requests.lock().unwrap(),
+        [format!("127.0.0.1:{}", server.port)]
+    );
+
+    // HTTP CONNECT（ユーザー名だけを書いたのでパスワードを尋ねる）
+    let http = TestProxy::start(Some("YWxpY2U6c2VjcmV0"));
+    let mut spec = server.spec(vec![]);
+    spec.proxy = Proxy::parse(&format!("http://alice@127.0.0.1:{}", http.port)).unwrap();
+    let p = Answers {
+        passwords: Mutex::new(vec!["secret".into(), PASSWORD.into()]),
+        ..Answers::default()
+    };
+    let t = c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert_eq!(p.log(), ["password", "password"]);
+    let out = yy_remote::run(t.as_ref(), b"echo http", b"").unwrap();
+    assert_eq!(out.stdout, b"http\n");
+
+    // プロキシのパスワードを間違えたら尋ね直す
+    let p = Answers {
+        passwords: Mutex::new(vec!["wrong".into(), "secret".into(), PASSWORD.into()]),
+        ..Answers::default()
+    };
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert_eq!(p.log(), ["password", "password", "password"]);
+    // 何度も間違えたらあきらめる
+    let p = Answers {
+        passwords: Mutex::new(vec!["wrong".into(); 4]),
+        ..Answers::default()
+    };
+    let e = c.connect(&spec, &p, &ConnectLog::new()).err().unwrap();
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
+    assert!(e.to_string().contains("プロキシの認証"), "{e}");
+    assert_eq!(p.log().len(), 4);
+
+    // ユーザー名を書いていなければ、プロキシに求められたときにユーザー名とパスワードを尋ねる
+    let mut spec = server.spec(vec![]);
+    spec.proxy = Proxy::parse(&format!("http://127.0.0.1:{}", http.port)).unwrap();
+    let p = Answers {
+        passwords: Mutex::new(vec!["secret".into(), PASSWORD.into()]),
+        interactive: Some(vec!["alice".into()]),
+        ..Answers::default()
+    };
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert_eq!(p.log(), ["keyboard-interactive", "password", "password"]);
+    // 答えなければ中止
+    let e = c
+        .connect(&spec, &Answers::default(), &ConnectLog::new())
+        .err()
+        .unwrap();
+    assert_eq!(e.kind(), std::io::ErrorKind::Interrupted, "{e}");
+
+    // プロキシは最初の踏み台への接続にだけ使う
+    let target = TestServer::start(vec![]);
+    record_host_key(
+        &dir.path().join("user_known_hosts"),
+        &target,
+        &target.host_key,
+    );
+    let mut hop = server.spec(vec![]);
+    hop.proxy = Proxy::parse(&format!("socks5://127.0.0.1:{}", socks.port)).unwrap();
+    let mut spec = target.spec(vec![]);
+    spec.jumps = vec![hop];
+    let p = Answers {
+        passwords: Mutex::new(vec![PASSWORD.into(), PASSWORD.into()]),
+        ..Answers::default()
+    };
+    let t = c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert_eq!(socks.requests.lock().unwrap().len(), 2);
+    assert_eq!(
+        *server.forwards.lock().unwrap(),
+        [format!("127.0.0.1:{}", target.port)]
+    );
+    assert_eq!(
+        yy_remote::run(t.as_ref(), b"true", b"").unwrap().status,
+        Some(0)
+    );
+}
+
+#[test]
+fn logs_why_a_connection_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = connector(dir.path());
+    let mut spec = TestServer::start(vec![]).spec(vec![dir.path().join("id_missing")]);
+    spec.port = closed_port();
+    let log = ConnectLog::new();
+    let e = c.connect(&spec, &Answers::default(), &log).err().unwrap();
+    assert!(e.to_string().contains("に接続できませんでした"), "{e}");
+    assert!(log.contains("id_missing（なし）"), "{:#?}", log.lines());
+    assert!(log.contains("に接続します（直接）"));
+
+    // 読めない秘密鍵と、受け付けられない認証
+    let server = TestServer::start(vec![]);
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let bad = dir.path().join("id_bad");
+    fs::write(&bad, "not a key").unwrap();
+    let log = ConnectLog::new();
+    let p = Answers {
+        passwords: Mutex::new(vec!["x".into(); 3]),
+        ..Answers::default()
+    };
+    let e = c.connect(&server.spec(vec![bad]), &p, &log).err().unwrap();
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(e.to_string().contains("サーバーが受け付ける方法"), "{e}");
+    assert!(
+        log.contains("id_bad を読めないため使いません"),
+        "{:#?}",
+        log.lines()
+    );
+    assert!(log.contains("パスワード認証（3 回目）: 受け付けられませんでした"));
+}
+
+#[test]
+fn remembers_passwords() {
+    let server = TestServer::start(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let store = Arc::new(MemoryPasswords::default());
+    let mut c = connector(dir.path());
+    c.passwords = Some(store.clone());
+    let key = format!("ssh/tester@127.0.0.1:{}", server.port);
+
+    // 認証に成功したパスワードだけを保存する
+    let p = Answers {
+        passwords: Mutex::new(vec!["wrong".into(), PASSWORD.into()]),
+        save: true,
+        ..Answers::default()
+    };
+    c.connect(&server.spec(vec![]), &p, &ConnectLog::new())
+        .unwrap();
+    assert_eq!(p.log(), ["password", "password"]);
+    assert_eq!(store.load(&key).unwrap().password, PASSWORD);
+
+    // 次からは尋ねない
+    let p = Answers::default();
+    let log = ConnectLog::new();
+    c.connect(&server.spec(vec![]), &p, &log).unwrap();
+    assert!(p.log().is_empty(), "{:?}", p.log());
+    assert!(log.contains("パスワード認証（保存したパスワード）で認証しました"));
+    assert!(!log.contains(PASSWORD));
+
+    // 受け付けられなかった保存は消して尋ねる
+    store
+        .save(
+            &key,
+            &SavedPassword {
+                user: "tester".into(),
+                password: "old".into(),
+            },
+        )
+        .unwrap();
+    let p = Answers {
+        passwords: Mutex::new(vec![PASSWORD.into()]),
+        ..Answers::default()
+    };
+    let log = ConnectLog::new();
+    c.connect(&server.spec(vec![]), &p, &log).unwrap();
+    assert_eq!(p.log(), ["password"]);
+    assert!(p.notes.lock().unwrap()[0].contains("保存したパスワードは受け付けられませんでした"));
+    assert!(log.contains("保存を削除しました"));
+    assert!(store.keys().is_empty());
+
+    // プロキシのユーザー名とパスワードも保存できる
+    let http = TestProxy::start(Some("YWxpY2U6c2VjcmV0"));
+    let mut spec = server.spec(vec![]);
+    spec.proxy = Proxy::parse(&format!("http://127.0.0.1:{}", http.port)).unwrap();
+    let p = Answers {
+        passwords: Mutex::new(vec!["secret".into(), PASSWORD.into()]),
+        interactive: Some(vec!["alice".into()]),
+        save: true,
+        ..Answers::default()
+    };
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    let proxy_key = format!("proxy/http://127.0.0.1:{}", http.port);
+    assert_eq!(store.load(&proxy_key).unwrap().user, "alice");
+    let p = Answers::default();
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert!(p.log().is_empty(), "{:?}", p.log());
 }
