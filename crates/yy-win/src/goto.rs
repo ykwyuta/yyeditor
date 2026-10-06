@@ -169,13 +169,13 @@ pub(crate) fn prompt_secret_with_check(
     prompt: &str,
     check: &str,
 ) -> Option<(String, bool)> {
-    let mut t = Template::dialog(title, 230, 86);
-    t.item(0, 7, 7, 216, 20, ID_LABEL, CLASS_STATIC, "");
+    let mut t = Template::dialog(title, 270, 86);
+    t.item(0, 7, 7, 256, 20, ID_LABEL, CLASS_STATIC, "");
     t.item(
         (WS_BORDER | WS_TABSTOP).0 | (ES_PASSWORD | ES_AUTOHSCROLL) as u32,
         7,
         29,
-        216,
+        256,
         13,
         ID_EDIT,
         CLASS_EDIT,
@@ -185,7 +185,7 @@ pub(crate) fn prompt_secret_with_check(
         WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32,
         7,
         47,
-        216,
+        256,
         12,
         ID_CHECK,
         CLASS_BUTTON,
@@ -193,7 +193,7 @@ pub(crate) fn prompt_secret_with_check(
     );
     t.item(
         WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32,
-        119,
+        159,
         65,
         50,
         14,
@@ -203,7 +203,7 @@ pub(crate) fn prompt_secret_with_check(
     );
     t.item(
         WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
-        173,
+        213,
         65,
         50,
         14,

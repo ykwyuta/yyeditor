@@ -1,6 +1,7 @@
 //! リモート接続のパスワードを Windows の資格情報マネージャーに保存する（11 章 4.7）。
 //!
-//! 「汎用資格情報」として、名前 `yyeditor/<キー>`（例: `yyeditor/ssh/yamada@build01:22`）で
+//! 「汎用資格情報」として、名前 `yyeditor/<キー>`（例: `yyeditor/ssh/yamada@build01:22`、
+//! `yyeditor/proxy/http://proxy:8080`、`yyeditor/key/C:\Users\…\.ssh\id_ed25519`）で
 //! このパソコンのこのユーザーにだけ保存する（`CRED_PERSIST_LOCAL_MACHINE`。ほかのパソコンへは
 //! 移らない）。中身は Windows が利用者の資格で暗号化して持つ。コントロール パネルの
 //! 「資格情報マネージャー」→「Windows 資格情報」からも確認・削除できる。

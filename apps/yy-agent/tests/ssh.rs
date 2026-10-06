@@ -21,8 +21,8 @@ use yy_remote::proxy::Proxy;
 use yy_remote::uri::Target;
 use yy_remote::{
     AgentFiles, ConnectLog, Connector, HostKeyCheck, HostKeyQuestion, HostSpec, MemoryPasswords,
-    PasswordAnswer, PasswordRequest, PasswordStore, Prompter, SavedPassword, Session as Remote,
-    UploadOutcome,
+    PassphraseRequest, PasswordAnswer, PasswordRequest, PasswordStore, Prompter, SavedPassword,
+    Session as Remote, UploadOutcome,
 };
 use yy_ssh::SshConnector;
 
@@ -286,6 +286,18 @@ impl Prompter for Answers {
             password,
             save: self.save,
         })
+    }
+
+    fn ask_passphrase(&self, req: &PassphraseRequest<'_>) -> Option<PasswordAnswer> {
+        if let Some(n) = req.note {
+            self.notes.lock().unwrap().push(n.to_owned());
+        }
+        assert!(req.can_save || !self.save);
+        self.passphrase(req.key_file)
+            .map(|password| PasswordAnswer {
+                password,
+                save: self.save,
+            })
     }
 
     fn passphrase(&self, _: &Path) -> Option<String> {
@@ -865,4 +877,73 @@ fn remembers_passwords() {
     let p = Answers::default();
     c.connect(&spec, &p, &ConnectLog::new()).unwrap();
     assert!(p.log().is_empty(), "{:?}", p.log());
+}
+
+#[test]
+fn remembers_passphrases_when_asked() {
+    let key = random_key();
+    let server = TestServer::start(vec![key.public_key().clone()]);
+    let dir = tempfile::tempdir().unwrap();
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let key_file = dir.path().join("id_ed25519");
+    let encrypted = key.encrypt(&mut rand::rng(), PASSPHRASE).unwrap();
+    fs::write(
+        &key_file,
+        encrypted
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    let store = Arc::new(MemoryPasswords::default());
+    let mut c = connector(dir.path());
+    c.passwords = Some(store.clone());
+    let spec = server.spec(vec![key_file.clone()]);
+    let saved_key = yy_remote::passphrase_key(&key_file);
+
+    // 選ばなければ保存しない
+    let p = Answers {
+        passphrase: Some(PASSPHRASE.into()),
+        ..Answers::default()
+    };
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert!(store.keys().is_empty());
+
+    // 選べば、鍵を開けたパスフレーズを保存し、次からは尋ねない
+    let p = Answers {
+        passphrase: Some(PASSPHRASE.into()),
+        save: true,
+        ..Answers::default()
+    };
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert_eq!(store.load(&saved_key).unwrap().password, PASSPHRASE);
+    let p = Answers::default();
+    let log = ConnectLog::new();
+    c.connect(&spec, &p, &log).unwrap();
+    assert!(p.log().is_empty(), "{:?}", p.log());
+    assert!(
+        log.contains("保存したパスフレーズで開きました"),
+        "{:#?}",
+        log.lines()
+    );
+    assert!(!log.contains(PASSPHRASE));
+
+    // 開けなければ保存を消して尋ねる
+    store
+        .save(
+            &saved_key,
+            &SavedPassword {
+                user: String::new(),
+                password: "old".into(),
+            },
+        )
+        .unwrap();
+    let p = Answers {
+        passphrase: Some(PASSPHRASE.into()),
+        ..Answers::default()
+    };
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert_eq!(p.log(), ["passphrase"]);
+    assert!(p.notes.lock().unwrap()[0].contains("保存したパスフレーズでは開けませんでした"));
+    assert!(store.keys().is_empty());
 }

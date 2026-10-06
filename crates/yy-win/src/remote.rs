@@ -23,7 +23,8 @@ use yy_remote::ssh_config::{HostOverride, Resolver};
 use yy_remote::uri::{RemoteUri, Target};
 use yy_remote::{
     AgentFiles, ConnectLog, Connector, ConnectorFactory, ConnectorOptions, FileInfo, HostKeyCheck,
-    HostKeyQuestion, PasswordAnswer, PasswordRequest, Prompter, Session, UploadOutcome,
+    HostKeyQuestion, PassphraseRequest, PasswordAnswer, PasswordRequest, Prompter, Session,
+    UploadOutcome,
 };
 
 use crate::app::with_app;
@@ -301,11 +302,12 @@ pub(crate) fn show_status(text: &str) {
 enum Question {
     HostKey(HostKeyQuestion),
     Password(String),
-    /// 保存を選べるパスワード（保存したものが受け付けられなかった場合はその説明つき）
-    SavablePassword {
-        label: String,
-        can_save: bool,
-        note: Option<String>,
+    /// 保存を選べるパスワード・パスフレーズ（`check` は「保存する」のチェックボックスの文言。
+    /// `None` ならチェックボックスを出さない）
+    SavableSecret {
+        title: &'static str,
+        prompt: String,
+        check: Option<&'static str>,
     },
     Passphrase(PathBuf),
     Keyboard {
@@ -372,14 +374,31 @@ impl Prompter for UiPrompter {
                 save: false,
             });
         }
-        match self.ask(Question::SavablePassword {
-            label: req.label.to_owned(),
-            can_save: req.can_save,
-            note: req.note.map(str::to_owned),
-        }) {
-            Some(Answer::Secret(Some((password, save)))) => Some(PasswordAnswer { password, save }),
-            _ => None,
+        self.ask_secret(
+            "パスワード",
+            req.note,
+            &format!("{} のパスワード:", req.label),
+            req.can_save
+                .then_some("このパスワードを保存する（Windows の資格情報マネージャー）"),
+        )
+    }
+
+    fn ask_passphrase(&self, req: &PassphraseRequest<'_>) -> Option<PasswordAnswer> {
+        if !req.can_save && req.note.is_none() {
+            return self
+                .passphrase(req.key_file)
+                .map(|password| PasswordAnswer {
+                    password,
+                    save: false,
+                });
         }
+        self.ask_secret(
+            "秘密鍵のパスフレーズ",
+            req.note,
+            &format!("秘密鍵 {} のパスフレーズ:", key_name(req.key_file)),
+            req.can_save
+                .then_some("このパスフレーズを保存する（Windows の資格情報マネージャー）"),
+        )
     }
 
     fn passphrase(&self, key: &Path) -> Option<String> {
@@ -408,6 +427,38 @@ impl Prompter for UiPrompter {
     }
 }
 
+impl UiPrompter {
+    /// 保存を選べるパスワード・パスフレーズを尋ねる（`note` は問いの前に添える）。
+    fn ask_secret(
+        &self,
+        title: &'static str,
+        note: Option<&str>,
+        prompt: &str,
+        check: Option<&'static str>,
+    ) -> Option<PasswordAnswer> {
+        let prompt = match note {
+            Some(n) => format!("{n}\n{prompt}"),
+            None => prompt.to_owned(),
+        };
+        match self.ask(Question::SavableSecret {
+            title,
+            prompt,
+            check,
+        }) {
+            Some(Answer::Secret(Some((password, save)))) => Some(PasswordAnswer { password, save }),
+            _ => None,
+        }
+    }
+}
+
+/// 秘密鍵のファイル名（表示用）。
+fn key_name(key: &Path) -> String {
+    key.file_name().map_or_else(
+        || key.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
 /// 問い合わせのダイアログの持ち主（ファイル選択などのダイアログを開いていればそれ）。
 fn prompt_owner(frame: HWND) -> HWND {
     unsafe {
@@ -427,35 +478,16 @@ pub(crate) fn on_prompt(frame: HWND, lparam: LPARAM) {
             "パスワード",
             &format!("{user_host} のパスワード:"),
         )),
-        Question::SavablePassword {
-            label,
-            can_save,
-            note,
-        } => {
-            let mut prompt = String::new();
-            if let Some(n) = &note {
-                prompt.push_str(n);
-                prompt.push('\n');
-            }
-            prompt.push_str(&format!("{label} のパスワード:"));
-            if can_save {
-                Answer::Secret(crate::goto::prompt_secret_with_check(
-                    owner,
-                    "パスワード",
-                    &prompt,
-                    "このパスワードを保存する（Windows の資格情報マネージャー）",
-                ))
-            } else {
-                Answer::Secret(
-                    crate::goto::prompt_secret(owner, "パスワード", &prompt).map(|p| (p, false)),
-                )
-            }
-        }
+        Question::SavableSecret {
+            title,
+            prompt,
+            check,
+        } => Answer::Secret(match check {
+            Some(check) => crate::goto::prompt_secret_with_check(owner, title, &prompt, check),
+            None => crate::goto::prompt_secret(owner, title, &prompt).map(|p| (p, false)),
+        }),
         Question::Passphrase(key) => {
-            let name = key.file_name().map_or_else(
-                || key.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            );
+            let name = key_name(&key);
             Answer::Text(crate::goto::prompt_secret(
                 owner,
                 "秘密鍵のパスフレーズ",
@@ -640,7 +672,10 @@ pub(crate) fn forget_passwords(owner: HWND) {
     let store = crate::credstore::WindowsCredentials;
     let keys = store.keys();
     if keys.is_empty() {
-        crate::util::info_box(owner, "保存したリモート接続のパスワードはありません。");
+        crate::util::info_box(
+            owner,
+            "保存したリモート接続のパスワード・パスフレーズはありません。",
+        );
         return;
     }
     let shown: Vec<&str> = keys.iter().take(20).map(String::as_str).collect();
@@ -650,8 +685,8 @@ pub(crate) fn forget_passwords(owner: HWND) {
         String::new()
     };
     let text = format!(
-        "Windows の資格情報マネージャーに保存した、次の {} 件のパスワードを削除しますか？\n\n{}{more}\n\n\
-         削除すると、次に接続するときにパスワードを尋ねます。",
+        "Windows の資格情報マネージャーに保存した、次の {} 件のパスワード・パスフレーズを削除しますか？\n\n{}{more}\n\n\
+         削除すると、次に接続するときに尋ねます。",
         keys.len(),
         shown.join("\n")
     );
@@ -663,11 +698,11 @@ pub(crate) fn forget_passwords(owner: HWND) {
     }
     let left = store.keys().len();
     if left == 0 {
-        crate::util::info_box(owner, "保存したパスワードを削除しました。");
+        crate::util::info_box(owner, "保存したパスワード・パスフレーズを削除しました。");
     } else {
         message_box(
             owner,
-            &format!("{left} 件のパスワードを削除できませんでした。"),
+            &format!("{left} 件を削除できませんでした。"),
             MB_OK | MB_ICONERROR,
         );
     }

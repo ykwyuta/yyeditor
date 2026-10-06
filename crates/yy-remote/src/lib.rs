@@ -168,6 +168,12 @@ pub fn ssh_password_key(spec: &HostSpec) -> String {
     format!("ssh/{}", spec.address())
 }
 
+/// 秘密鍵のパスフレーズの名前（`key/秘密鍵のファイルの絶対パス`）。
+pub fn passphrase_key(key_file: &Path) -> String {
+    let path = std::path::absolute(key_file).unwrap_or_else(|_| key_file.to_owned());
+    format!("key/{}", path.display())
+}
+
 /// プロキシのパスワードの名前（`proxy/http://ホスト:ポート` など。ユーザー名は保存した値に持つ）。
 pub fn proxy_password_key(proxy: &proxy::Proxy) -> String {
     let p = proxy::Proxy {
@@ -211,7 +217,16 @@ pub struct PasswordRequest<'a> {
     pub note: Option<&'a str>,
 }
 
-/// パスワードの問い合わせへの答え。
+/// 秘密鍵のパスフレーズの問い合わせ。
+pub struct PassphraseRequest<'a> {
+    pub key_file: &'a Path,
+    /// 「保存する」を選べるようにするか
+    pub can_save: bool,
+    /// 添える説明（保存したパスフレーズで開けなかった、など）
+    pub note: Option<&'a str>,
+}
+
+/// パスワード・パスフレーズの問い合わせへの答え。
 pub struct PasswordAnswer {
     pub password: String,
     /// 認証に成功したら保存する
@@ -269,6 +284,14 @@ pub trait Prompter: Send + Sync {
     }
     /// 秘密鍵のパスフレーズ。`None` ならこの鍵を使わない
     fn passphrase(&self, key: &Path) -> Option<String>;
+    /// 「保存する」を選べるパスフレーズの問い合わせ（既定は [`Prompter::passphrase`] で、保存しない）。
+    fn ask_passphrase(&self, req: &PassphraseRequest<'_>) -> Option<PasswordAnswer> {
+        self.passphrase(req.key_file)
+            .map(|password| PasswordAnswer {
+                password,
+                save: false,
+            })
+    }
     /// keyboard-interactive 認証の質問（`(質問, 入力を表示するか)` の並び）への答え。
     /// `None` なら中止
     fn keyboard_interactive(
@@ -334,6 +357,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(proxy_password_key(&p), "proxy/http://proxy:3128");
+        let k = passphrase_key(Path::new("id_ed25519"));
+        assert!(k.starts_with("key/") && k.ends_with("id_ed25519"), "{k}");
+        assert!(Path::new(&k[4..]).is_absolute(), "{k}");
     }
 
     #[test]

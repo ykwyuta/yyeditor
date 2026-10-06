@@ -29,8 +29,8 @@ use tokio::sync::mpsc;
 use yy_remote::known_hosts::{self, HostKeyStatus};
 use yy_remote::{
     ConnectLog, Connector, ConnectorFactory, ConnectorOptions, Exit, HostKeyCheck, HostKeyQuestion,
-    HostSpec, PasswordAnswer, PasswordRequest, PasswordStore, Process, Prompter, STDERR_LIMIT,
-    SavedPassword, Transport,
+    HostSpec, PassphraseRequest, PasswordAnswer, PasswordRequest, PasswordStore, Process, Prompter,
+    STDERR_LIMIT, SavedPassword, Transport,
 };
 
 /// 接続を待つ時間の上限
@@ -526,7 +526,7 @@ impl ProxyAsk<'_> {
     }
 }
 
-/// 認証に成功したパスワードを保存する（失敗しても接続は続ける）。
+/// 使えたパスワード・パスフレーズを保存する（失敗しても接続は続ける）。
 fn save_password(
     store: &dyn PasswordStore,
     key: &str,
@@ -539,8 +539,8 @@ fn save_password(
         password: password.to_owned(),
     };
     match store.save(key, &saved) {
-        Ok(()) => log.note(format!("パスワードを保存しました（{key}）")),
-        Err(e) => log.note(format!("パスワードを保存できませんでした（{key}）: {e}")),
+        Ok(()) => log.note(format!("保存しました（{key}）")),
+        Err(e) => log.note(format!("保存できませんでした（{key}）: {e}")),
     }
 }
 
@@ -596,7 +596,7 @@ fn authenticate(
             log.note("サーバーが公開鍵認証を受け付けないため、残りの秘密鍵は使いません");
             break;
         }
-        let Some(key) = load_key(path, prompter, log)? else {
+        let Some(key) = load_key(path, prompter, store, log)? else {
             continue;
         };
         let what = format!("公開鍵（{}、{}）", path.display(), key.algorithm());
@@ -740,10 +740,12 @@ fn cancelled() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "接続を中止しました")
 }
 
-/// 秘密鍵を読む。暗号化されていればパスフレーズを尋ねる（答えなければ `None`）。
+/// 秘密鍵を読む。暗号化されていれば、保存したパスフレーズ、なければ尋ねたパスフレーズで開く
+/// （答えなければ `None`）。保存を選んだパスフレーズは、鍵を開けたら保存する。
 fn load_key(
     path: &Path,
     prompter: &dyn Prompter,
+    store: Option<&dyn PasswordStore>,
     log: &ConnectLog,
 ) -> io::Result<Option<PrivateKey>> {
     match russh::keys::load_secret_key(path, None) {
@@ -758,15 +760,43 @@ fn load_key(
             return Ok(None);
         }
     }
+    let key = yy_remote::passphrase_key(path);
+    let mut notice = None;
+    if let Some(store) = store
+        && let Some(saved) = store.load(&key)
+    {
+        if let Ok(k) = russh::keys::load_secret_key(path, Some(&saved.password)) {
+            log.note(format!(
+                "秘密鍵 {} を保存したパスフレーズで開きました",
+                path.display()
+            ));
+            return Ok(Some(k));
+        }
+        store.delete(&key);
+        log.note(format!(
+            "保存したパスフレーズで秘密鍵 {} を開けなかったため、保存を削除しました",
+            path.display()
+        ));
+        notice = Some("保存したパスフレーズでは開けませんでした（保存を削除しました）。");
+    }
     for _ in 0..RETRIES {
-        let Some(pass) = prompter.passphrase(path) else {
+        let Some(answer) = prompter.ask_passphrase(&PassphraseRequest {
+            key_file: path,
+            can_save: store.is_some(),
+            note: notice.take(),
+        }) else {
             log.note(format!(
                 "秘密鍵 {} のパスフレーズが入力されなかったため使いません",
                 path.display()
             ));
             return Ok(None);
         };
-        if let Ok(k) = russh::keys::load_secret_key(path, Some(&pass)) {
+        if let Ok(k) = russh::keys::load_secret_key(path, Some(&answer.password)) {
+            if answer.save
+                && let Some(store) = store
+            {
+                save_password(store, &key, "", &answer.password, log);
+            }
             return Ok(Some(k));
         }
         log.note(format!(
