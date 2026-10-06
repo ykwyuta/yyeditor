@@ -5,12 +5,13 @@
 //! ダイアログマネージャーに任せる）。
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::Controls::EM_SETSEL;
+use windows::Win32::UI::Controls::{BST_CHECKED, CheckDlgButton, EM_SETSEL, IsDlgButtonChecked};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::HSTRING;
 
 const ID_EDIT: u16 = 100;
 const ID_LABEL: u16 = 101;
+const ID_CHECK: u16 = 102;
 const IDOK_: u16 = 1;
 const IDCANCEL_: u16 = 2;
 
@@ -18,6 +19,8 @@ const IDCANCEL_: u16 = 2;
 struct State {
     prompt: String,
     text: String,
+    /// チェックボックスの状態（チェックボックスのないダイアログでは `None`）
+    check: Option<bool>,
 }
 
 /// DLGTEMPLATE の中のコントロールの数（`cdit`）の位置（u16 単位）
@@ -158,6 +161,74 @@ pub(crate) fn prompt_secret(owner: HWND, title: &str, prompt: &str) -> Option<St
     prompt_with(owner, title, prompt, "", ES_PASSWORD)
 }
 
+/// パスワードの入力を求め、`check` のチェックボックス（初めは外す）の状態も返す。
+/// 説明（`prompt`）は 2 行まで表示する。キャンセルされたら `None`。
+pub(crate) fn prompt_secret_with_check(
+    owner: HWND,
+    title: &str,
+    prompt: &str,
+    check: &str,
+) -> Option<(String, bool)> {
+    let mut t = Template::dialog(title, 230, 86);
+    t.item(0, 7, 7, 216, 20, ID_LABEL, CLASS_STATIC, "");
+    t.item(
+        (WS_BORDER | WS_TABSTOP).0 | (ES_PASSWORD | ES_AUTOHSCROLL) as u32,
+        7,
+        29,
+        216,
+        13,
+        ID_EDIT,
+        CLASS_EDIT,
+        "",
+    );
+    t.item(
+        WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32,
+        7,
+        47,
+        216,
+        12,
+        ID_CHECK,
+        CLASS_BUTTON,
+        check,
+    );
+    t.item(
+        WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32,
+        119,
+        65,
+        50,
+        14,
+        IDOK_,
+        CLASS_BUTTON,
+        "OK",
+    );
+    t.item(
+        WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
+        173,
+        65,
+        50,
+        14,
+        IDCANCEL_,
+        CLASS_BUTTON,
+        "キャンセル",
+    );
+    let aligned = t.aligned();
+    let mut state = State {
+        prompt: prompt.to_owned(),
+        text: String::new(),
+        check: Some(false),
+    };
+    let r = unsafe {
+        DialogBoxIndirectParamW(
+            None,
+            aligned.as_ptr() as *const DLGTEMPLATE,
+            Some(owner),
+            Some(dialog_proc),
+            LPARAM(&mut state as *mut State as isize),
+        )
+    };
+    (r == IDOK_ as isize).then(|| (state.text, state.check == Some(true)))
+}
+
 fn prompt_with(
     owner: HWND,
     title: &str,
@@ -169,6 +240,7 @@ fn prompt_with(
     let mut state = State {
         prompt: prompt.to_owned(),
         text: initial.to_owned(),
+        check: None,
     };
     let r = unsafe {
         DialogBoxIndirectParamW(
@@ -189,6 +261,7 @@ pub(crate) fn prompt_line(owner: HWND, prompt: &str, initial: u64) -> Option<u64
     let mut state = State {
         prompt: prompt.to_owned(),
         text: initial.to_string(),
+        check: None,
     };
     let r = unsafe {
         DialogBoxIndirectParamW(
@@ -214,6 +287,9 @@ extern "system" fn dialog_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 let _ =
                     SetDlgItemTextW(hwnd, ID_LABEL as i32, &HSTRING::from(state.prompt.as_str()));
                 let _ = SetDlgItemTextW(hwnd, ID_EDIT as i32, &HSTRING::from(state.text.as_str()));
+                if state.check == Some(true) {
+                    let _ = CheckDlgButton(hwnd, ID_CHECK as i32, BST_CHECKED);
+                }
                 if let Ok(edit) = GetDlgItem(Some(hwnd), ID_EDIT as i32) {
                     SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
                 }
@@ -227,6 +303,10 @@ extern "system" fn dialog_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     let mut buf = [0u16; 1024];
                     let n = GetDlgItemTextW(hwnd, ID_EDIT as i32, &mut buf) as usize;
                     state.text = String::from_utf16_lossy(&buf[..n]);
+                    if state.check.is_some() {
+                        state.check =
+                            Some(IsDlgButtonChecked(hwnd, ID_CHECK as i32) == BST_CHECKED.0);
+                    }
                     let _ = EndDialog(hwnd, IDOK_ as isize);
                     1
                 } else if id == IDCANCEL_ {

@@ -301,6 +301,8 @@ pub struct RemoteConfig {
     pub agent_dir: String,
     /// すべての接続先に使うプロキシ（`http://ホスト:ポート`・`socks5://ホスト:ポート`。空なら使わない）
     pub proxy: String,
+    /// パスワードを Windows の資格情報マネージャーに保存できるようにする（保存するかは入力のたびに選ぶ）
+    pub remember_passwords: bool,
     /// 接続先ごとの設定（`[remote.host.<名前>]`）
     pub host: BTreeMap<String, RemoteHost>,
 }
@@ -313,6 +315,7 @@ impl Default for RemoteConfig {
             keepalive_secs: 15,
             agent_dir: String::new(),
             proxy: String::new(),
+            remember_passwords: true,
             host: BTreeMap::new(),
         }
     }
@@ -525,6 +528,7 @@ mod tests {
         )
         .unwrap();
         assert!(c.remote.read_ssh_config);
+        assert!(c.remote.remember_passwords);
         assert_eq!(c.remote.agent_dir, "/work/agent");
         let h = &c.remote.host["build"];
         assert_eq!(h.hostname.as_deref(), Some("build01.example.co.jp"));

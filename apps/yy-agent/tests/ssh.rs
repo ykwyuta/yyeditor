@@ -20,8 +20,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use yy_remote::proxy::Proxy;
 use yy_remote::uri::Target;
 use yy_remote::{
-    AgentFiles, ConnectLog, Connector, HostKeyCheck, HostKeyQuestion, HostSpec, Prompter,
-    Session as Remote, UploadOutcome,
+    AgentFiles, ConnectLog, Connector, HostKeyCheck, HostKeyQuestion, HostSpec, MemoryPasswords,
+    PasswordAnswer, PasswordRequest, PasswordStore, Prompter, SavedPassword, Session as Remote,
+    UploadOutcome,
 };
 use yy_ssh::SshConnector;
 
@@ -252,6 +253,10 @@ struct Answers {
     passphrase: Option<String>,
     /// keyboard-interactive の答え
     interactive: Option<Vec<String>>,
+    /// パスワードを「保存する」と答える
+    save: bool,
+    /// パスワードの問い合わせに添えられた説明
+    notes: Mutex<Vec<String>>,
     log: Mutex<Vec<String>>,
 }
 
@@ -270,6 +275,17 @@ impl Prompter for Answers {
         self.log.lock().unwrap().push("password".into());
         let mut p = self.passwords.lock().unwrap();
         (!p.is_empty()).then(|| p.remove(0))
+    }
+
+    fn ask_password(&self, req: &PasswordRequest<'_>) -> Option<PasswordAnswer> {
+        if let Some(n) = req.note {
+            self.notes.lock().unwrap().push(n.to_owned());
+        }
+        assert!(req.can_save || !self.save);
+        self.password(req.label).map(|password| PasswordAnswer {
+            password,
+            save: self.save,
+        })
     }
 
     fn passphrase(&self, _: &Path) -> Option<String> {
@@ -302,6 +318,7 @@ fn connector(dir: &Path) -> SshConnector {
         known_hosts: dir.join("known_hosts"),
         extra_known_hosts: vec![dir.join("user_known_hosts")],
         keepalive: Duration::from_secs(15),
+        passwords: None,
     }
 }
 
@@ -709,12 +726,12 @@ fn connects_through_proxies() {
     let mut spec = server.spec(vec![]);
     spec.proxy = Proxy::parse(&format!("http://127.0.0.1:{}", http.port)).unwrap();
     let p = Answers {
-        passwords: Mutex::new(vec![PASSWORD.into()]),
-        interactive: Some(vec!["alice".into(), "secret".into()]),
+        passwords: Mutex::new(vec!["secret".into(), PASSWORD.into()]),
+        interactive: Some(vec!["alice".into()]),
         ..Answers::default()
     };
     c.connect(&spec, &p, &ConnectLog::new()).unwrap();
-    assert_eq!(p.log(), ["keyboard-interactive", "password"]);
+    assert_eq!(p.log(), ["keyboard-interactive", "password", "password"]);
     // 答えなければ中止
     let e = c
         .connect(&spec, &Answers::default(), &ConnectLog::new())
@@ -780,4 +797,72 @@ fn logs_why_a_connection_failed() {
         log.lines()
     );
     assert!(log.contains("パスワード認証（3 回目）: 受け付けられませんでした"));
+}
+
+#[test]
+fn remembers_passwords() {
+    let server = TestServer::start(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let store = Arc::new(MemoryPasswords::default());
+    let mut c = connector(dir.path());
+    c.passwords = Some(store.clone());
+    let key = format!("ssh/tester@127.0.0.1:{}", server.port);
+
+    // 認証に成功したパスワードだけを保存する
+    let p = Answers {
+        passwords: Mutex::new(vec!["wrong".into(), PASSWORD.into()]),
+        save: true,
+        ..Answers::default()
+    };
+    c.connect(&server.spec(vec![]), &p, &ConnectLog::new())
+        .unwrap();
+    assert_eq!(p.log(), ["password", "password"]);
+    assert_eq!(store.load(&key).unwrap().password, PASSWORD);
+
+    // 次からは尋ねない
+    let p = Answers::default();
+    let log = ConnectLog::new();
+    c.connect(&server.spec(vec![]), &p, &log).unwrap();
+    assert!(p.log().is_empty(), "{:?}", p.log());
+    assert!(log.contains("パスワード認証（保存したパスワード）で認証しました"));
+    assert!(!log.contains(PASSWORD));
+
+    // 受け付けられなかった保存は消して尋ねる
+    store
+        .save(
+            &key,
+            &SavedPassword {
+                user: "tester".into(),
+                password: "old".into(),
+            },
+        )
+        .unwrap();
+    let p = Answers {
+        passwords: Mutex::new(vec![PASSWORD.into()]),
+        ..Answers::default()
+    };
+    let log = ConnectLog::new();
+    c.connect(&server.spec(vec![]), &p, &log).unwrap();
+    assert_eq!(p.log(), ["password"]);
+    assert!(p.notes.lock().unwrap()[0].contains("保存したパスワードは受け付けられませんでした"));
+    assert!(log.contains("保存を削除しました"));
+    assert!(store.keys().is_empty());
+
+    // プロキシのユーザー名とパスワードも保存できる
+    let http = TestProxy::start(Some("YWxpY2U6c2VjcmV0"));
+    let mut spec = server.spec(vec![]);
+    spec.proxy = Proxy::parse(&format!("http://127.0.0.1:{}", http.port)).unwrap();
+    let p = Answers {
+        passwords: Mutex::new(vec!["secret".into(), PASSWORD.into()]),
+        interactive: Some(vec!["alice".into()]),
+        save: true,
+        ..Answers::default()
+    };
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    let proxy_key = format!("proxy/http://127.0.0.1:{}", http.port);
+    assert_eq!(store.load(&proxy_key).unwrap().user, "alice");
+    let p = Answers::default();
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert!(p.log().is_empty(), "{:?}", p.log());
 }

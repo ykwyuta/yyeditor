@@ -29,7 +29,8 @@ use tokio::sync::mpsc;
 use yy_remote::known_hosts::{self, HostKeyStatus};
 use yy_remote::{
     ConnectLog, Connector, ConnectorFactory, ConnectorOptions, Exit, HostKeyCheck, HostKeyQuestion,
-    HostSpec, Process, Prompter, STDERR_LIMIT, Transport,
+    HostSpec, PasswordAnswer, PasswordRequest, PasswordStore, Process, Prompter, STDERR_LIMIT,
+    SavedPassword, Transport,
 };
 
 /// 接続を待つ時間の上限
@@ -45,6 +46,8 @@ pub struct SshConnector {
     pub extra_known_hosts: Vec<PathBuf>,
     /// 死活確認の間隔（応答が 3 回続けてなければ切断とみなす）
     pub keepalive: Duration,
+    /// パスワードの保存先（`None` なら保存しない・使わない）
+    pub passwords: Option<Arc<dyn PasswordStore>>,
 }
 
 /// 非同期実行の環境。接続するまで作らない（起動を遅くしない）。
@@ -96,6 +99,7 @@ impl SshConnector {
             known_hosts: opts.known_hosts.clone(),
             extra_known_hosts: opts.extra_known_hosts.clone(),
             keepalive: opts.keepalive,
+            passwords: opts.passwords.clone(),
         }
     }
 
@@ -213,7 +217,15 @@ impl SshConnector {
         log.note(format!("{} に接続します（{how}）", spec.address()));
         // プロキシを使う場合は、先にプロキシを通した TCP 接続を作る（認証を尋ねてやり直せるように）
         let mut proxied = match proxy {
-            Some(p) => Some(connect_proxy(rt, p, host, port, prompter, log)?),
+            Some(p) => Some(connect_proxy(
+                rt,
+                p,
+                host,
+                port,
+                prompter,
+                self.passwords.as_deref(),
+                log,
+            )?),
             None => None,
         };
         let server_key = Arc::new(Mutex::new(None));
@@ -285,7 +297,14 @@ impl SshConnector {
             disconnect(rt, &handle);
             return Err(e);
         }
-        if let Err(e) = authenticate(rt, &mut handle, spec, prompter, log) {
+        if let Err(e) = authenticate(
+            rt,
+            &mut handle,
+            spec,
+            prompter,
+            self.passwords.as_deref(),
+            log,
+        ) {
             disconnect(rt, &handle);
             return Err(e);
         }
@@ -342,38 +361,63 @@ impl Connector for SshConnector {
     }
 }
 
+/// プロキシの認証の情報と、その出どころ。
+struct ProxyCreds {
+    user: String,
+    password: String,
+    from: CredsFrom,
+}
+
+#[derive(PartialEq)]
+enum CredsFrom {
+    /// 設定に書いてあった
+    Config,
+    /// 保存してあった
+    Saved,
+    /// 尋ねた（`true` なら成功したら保存する）
+    Asked(bool),
+}
+
 /// プロキシを通して `host:port` への TCP 接続を作る。プロキシに認証を求められたり、認証に
-/// 失敗したりしたら、ユーザー名（設定に書いていなければ）とパスワードを尋ねてやり直す。
+/// 失敗したりしたら、保存したパスワード、なければユーザー名（設定に書いていなければ）と
+/// パスワードを尋ねてやり直す。
 fn connect_proxy(
     rt: &Runtime,
     p: &yy_remote::proxy::Proxy,
     host: &str,
     port: u16,
     prompter: &dyn Prompter,
+    store: Option<&dyn PasswordStore>,
     log: &ConnectLog,
 ) -> io::Result<tokio::net::TcpStream> {
-    let mut user = p.user.clone();
-    let mut password = p.password.clone();
-    // ユーザー名だけを書いた場合は、最初からパスワードを尋ねる
-    if user.is_some() && password.is_none() {
-        password = Some(ask_proxy_password(p, user.as_deref(), prompter)?.1);
-    }
+    let key = yy_remote::proxy_password_key(p);
+    let mut ask = ProxyAsk {
+        proxy: p,
+        key: &key,
+        store,
+        prompter,
+        log,
+        saved_tried: false,
+        note: None,
+    };
+    let mut creds = match (&p.user, &p.password) {
+        (Some(u), Some(pw)) => Some(ProxyCreds {
+            user: u.clone(),
+            password: pw.clone(),
+            from: CredsFrom::Config,
+        }),
+        // ユーザー名だけを書いた場合は、最初からパスワードを用意する
+        (Some(u), None) => Some(ask.obtain(Some(u))?),
+        _ => None,
+    };
     let mut asked = 0;
     loop {
-        let creds = match (&user, &password) {
-            (Some(u), Some(pw)) => Some(proxy::Credentials {
-                user: u,
-                password: pw,
-            }),
-            (Some(u), None) => Some(proxy::Credentials {
-                user: u,
-                password: "",
-            }),
-            _ => None,
-        };
+        let c = creds.as_ref().map(|c| proxy::Credentials {
+            user: &c.user,
+            password: &c.password,
+        });
         let r = rt.block_on(async {
-            match tokio::time::timeout(CONNECT_TIMEOUT, proxy::connect(p, creds, host, port)).await
-            {
+            match tokio::time::timeout(CONNECT_TIMEOUT, proxy::connect(p, c, host, port)).await {
                 Ok(r) => r,
                 Err(_) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -385,54 +429,127 @@ fn connect_proxy(
             Ok(tcp) => {
                 log.note(format!(
                     "プロキシ {p} が {host}:{port} への中継を始めました{}",
-                    if creds.is_some() {
-                        "（認証あり）"
-                    } else {
-                        ""
+                    match creds.as_ref().map(|c| &c.from) {
+                        None => "",
+                        Some(CredsFrom::Saved) => "（保存したパスワードで認証）",
+                        Some(_) => "（認証あり）",
                     }
                 ));
+                if let (Some(c), Some(store)) = (&creds, store)
+                    && c.from == CredsFrom::Asked(true)
+                {
+                    save_password(store, &key, &c.user, &c.password, log);
+                }
                 return Ok(tcp);
             }
             Err(e) if proxy::needs_credentials(&e) && asked < RETRIES => {
-                log.note(format!("{e}。認証の情報を尋ねます"));
-                asked += 1;
-                let (u, pw) = ask_proxy_password(p, user.as_deref(), prompter)?;
-                user = Some(u);
-                password = Some(pw);
+                log.note(format!("{e}"));
+                if let (Some(c), Some(store)) = (&creds, store)
+                    && c.from == CredsFrom::Saved
+                {
+                    forget_password(store, &key, log);
+                    ask.note = Some(REJECTED_NOTE);
+                } else {
+                    asked += 1;
+                }
+                let hint = creds.as_ref().map(|c| c.user.clone()).or(p.user.clone());
+                creds = Some(ask.obtain(hint.as_deref())?);
             }
             Err(e) => return Err(e),
         }
     }
 }
 
-/// プロキシのパスワード（ユーザー名が分からなければユーザー名も）を尋ねる。
-fn ask_proxy_password(
-    p: &yy_remote::proxy::Proxy,
-    user: Option<&str>,
-    prompter: &dyn Prompter,
-) -> io::Result<(String, String)> {
-    if let Some(u) = user {
-        let pw = prompter
-            .password(&format!("{u}（プロキシ {p}）"))
+/// 保存したパスワードが受け付けられなかったときの説明
+const REJECTED_NOTE: &str = "保存したパスワードは受け付けられませんでした（保存を削除しました）。";
+
+/// プロキシの認証の情報を用意する。
+struct ProxyAsk<'a> {
+    proxy: &'a yy_remote::proxy::Proxy,
+    key: &'a str,
+    store: Option<&'a dyn PasswordStore>,
+    prompter: &'a dyn Prompter,
+    log: &'a ConnectLog,
+    saved_tried: bool,
+    note: Option<&'static str>,
+}
+
+impl ProxyAsk<'_> {
+    /// 保存したパスワード（まだ試していなければ）、なければ尋ねる。
+    fn obtain(&mut self, user: Option<&str>) -> io::Result<ProxyCreds> {
+        if !self.saved_tried {
+            self.saved_tried = true;
+            if let Some(saved) = self.store.and_then(|s| s.load(self.key))
+                && user.is_none_or(|u| u == saved.user)
+            {
+                self.log.note(format!(
+                    "プロキシ {} のパスワードは保存したもの（ユーザー {}）を使います",
+                    self.proxy, saved.user
+                ));
+                return Ok(ProxyCreds {
+                    user: saved.user,
+                    password: saved.password,
+                    from: CredsFrom::Saved,
+                });
+            }
+        }
+        let user = match user {
+            Some(u) => u.to_owned(),
+            None => {
+                let prompts = [("ユーザー名:".to_owned(), true)];
+                let answers = self
+                    .prompter
+                    .keyboard_interactive(
+                        &format!("プロキシ {}", self.proxy),
+                        "プロキシの認証",
+                        "",
+                        &prompts,
+                    )
+                    .ok_or_else(cancelled)?;
+                answers.into_iter().next().ok_or_else(cancelled)?
+            }
+        };
+        let label = format!("{user}（プロキシ {}）", self.proxy);
+        let a = self
+            .prompter
+            .ask_password(&PasswordRequest {
+                label: &label,
+                can_save: self.store.is_some(),
+                note: self.note.take(),
+            })
             .ok_or_else(cancelled)?;
-        return Ok((u.to_owned(), pw));
+        Ok(ProxyCreds {
+            user,
+            password: a.password,
+            from: CredsFrom::Asked(a.save),
+        })
     }
-    let prompts = [
-        ("ユーザー名:".to_owned(), true),
-        ("パスワード:".to_owned(), false),
-    ];
-    let answers = prompter
-        .keyboard_interactive(
-            &format!("プロキシ {p}"),
-            "プロキシの認証",
-            "プロキシのユーザー名とパスワードを入力してください。",
-            &prompts,
-        )
-        .ok_or_else(cancelled)?;
-    match <[String; 2]>::try_from(answers) {
-        Ok([u, pw]) => Ok((u, pw)),
-        Err(_) => Err(cancelled()),
+}
+
+/// 認証に成功したパスワードを保存する（失敗しても接続は続ける）。
+fn save_password(
+    store: &dyn PasswordStore,
+    key: &str,
+    user: &str,
+    password: &str,
+    log: &ConnectLog,
+) {
+    let saved = SavedPassword {
+        user: user.to_owned(),
+        password: password.to_owned(),
+    };
+    match store.save(key, &saved) {
+        Ok(()) => log.note(format!("パスワードを保存しました（{key}）")),
+        Err(e) => log.note(format!("パスワードを保存できませんでした（{key}）: {e}")),
     }
+}
+
+/// 受け付けられなかった保存済みのパスワードを消す。
+fn forget_password(store: &dyn PasswordStore, key: &str, log: &ConnectLog) {
+    store.delete(key);
+    log.note(format!(
+        "保存したパスワードが受け付けられなかったため、保存を削除しました（{key}）"
+    ));
 }
 
 fn disconnect(rt: &Runtime, handle: &Handle<Client>) {
@@ -445,6 +562,7 @@ fn authenticate(
     handle: &mut Handle<Client>,
     spec: &HostSpec,
     prompter: &dyn Prompter,
+    store: Option<&dyn PasswordStore>,
     log: &ConnectLog,
 ) -> io::Result<()> {
     let user = spec.user.clone();
@@ -552,15 +670,45 @@ fn authenticate(
     }
 
     if allowed(&methods, MethodKind::Password) {
-        for i in 1..=RETRIES {
-            let password = prompter.password(&spec.user_host()).ok_or_else(|| {
-                log.note("パスワードの入力が中止されました");
-                cancelled()
-            })?;
+        let key = yy_remote::ssh_password_key(spec);
+        let mut notice = None;
+        // 保存したパスワードがあれば、尋ねずに使う
+        if let Some(store) = store
+            && let Some(saved) = store.load(&key)
+        {
+            log.note(format!("保存したパスワードを使います（{key}）"));
             let r = rt
-                .block_on(handle.authenticate_password(user.clone(), password))
+                .block_on(handle.authenticate_password(user.clone(), saved.password))
                 .map_err(ssh_error)?;
             if r.success() {
+                return succeeded("パスワード認証（保存したパスワード）");
+            }
+            note("保存したパスワード", &r, &mut methods);
+            forget_password(store, &key, log);
+            notice = Some(REJECTED_NOTE);
+        }
+        for i in 1..=RETRIES {
+            if !allowed(&methods, MethodKind::Password) {
+                break;
+            }
+            let label = spec.user_host();
+            let PasswordAnswer { password, save } = prompter
+                .ask_password(&PasswordRequest {
+                    label: &label,
+                    can_save: store.is_some(),
+                    note: notice.take(),
+                })
+                .ok_or_else(|| {
+                    log.note("パスワードの入力が中止されました");
+                    cancelled()
+                })?;
+            let r = rt
+                .block_on(handle.authenticate_password(user.clone(), password.clone()))
+                .map_err(ssh_error)?;
+            if r.success() {
+                if save && let Some(store) = store {
+                    save_password(store, &key, &user, &password, log);
+                }
                 return succeeded("パスワード認証");
             }
             note(&format!("パスワード認証（{i} 回目）"), &r, &mut methods);

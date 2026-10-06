@@ -89,6 +89,7 @@ const ID_HELP: u16 = 302;
 const ID_HELP_KEYS: u16 = 303;
 const ID_OPEN_SETTINGS: u16 = 304;
 const ID_OPEN_REMOTE_LOG: u16 = 305;
+const ID_FORGET_PASSWORDS: u16 = 306;
 const ID_UNDO: u16 = 401;
 const ID_REDO: u16 = 402;
 const ID_CUT: u16 = 403;
@@ -634,6 +635,11 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         item(help, ID_HELP_KEYS, w!("キーボードショートカット(&K)"))?;
         item(help, ID_OPEN_SETTINGS, w!("設定ファイルを開く(&S)"))?;
         item(help, ID_OPEN_REMOTE_LOG, w!("リモート接続の記録を開く(&R)"))?;
+        item(
+            help,
+            ID_FORGET_PASSWORDS,
+            w!("保存したリモート接続のパスワードを削除(&P)..."),
+        )?;
         sep(help)?;
         item(help, ID_ABOUT, w!("バージョン情報(&A)"))?;
         AppendMenuW(bar, MF_POPUP, file.0 as usize, w!("ファイル(&F)"))?;
@@ -5037,6 +5043,7 @@ fn on_command(hwnd: HWND, id: u16) {
         }
         ID_OPEN_SETTINGS => open_settings(hwnd),
         ID_OPEN_REMOTE_LOG => open_remote_log(hwnd),
+        ID_FORGET_PASSWORDS => crate::remote::forget_passwords(hwnd),
         ID_ABOUT => info_box(
             hwnd,
             &format!(

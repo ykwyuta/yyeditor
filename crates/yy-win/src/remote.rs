@@ -23,7 +23,7 @@ use yy_remote::ssh_config::{HostOverride, Resolver};
 use yy_remote::uri::{RemoteUri, Target};
 use yy_remote::{
     AgentFiles, ConnectLog, Connector, ConnectorFactory, ConnectorOptions, FileInfo, HostKeyCheck,
-    HostKeyQuestion, Prompter, Session, UploadOutcome,
+    HostKeyQuestion, PasswordAnswer, PasswordRequest, Prompter, Session, UploadOutcome,
 };
 
 use crate::app::with_app;
@@ -77,6 +77,10 @@ impl RemoteState {
                 known_hosts: dir.join("known_hosts"),
                 extra_known_hosts: extra,
                 keepalive: Duration::from_secs(u64::from(self.config.keepalive_secs.max(1))),
+                passwords: self.config.remember_passwords.then(|| {
+                    Arc::new(crate::credstore::WindowsCredentials)
+                        as Arc<dyn yy_remote::PasswordStore>
+                }),
             };
             self.connector = Some(factory(&opts));
         }
@@ -297,6 +301,12 @@ pub(crate) fn show_status(text: &str) {
 enum Question {
     HostKey(HostKeyQuestion),
     Password(String),
+    /// 保存を選べるパスワード（保存したものが受け付けられなかった場合はその説明つき）
+    SavablePassword {
+        label: String,
+        can_save: bool,
+        note: Option<String>,
+    },
     Passphrase(PathBuf),
     Keyboard {
         user_host: String,
@@ -308,6 +318,8 @@ enum Question {
 
 enum Answer {
     Yes(bool),
+    /// パスワードと「保存する」の選択
+    Secret(Option<(String, bool)>),
     Text(Option<String>),
     Texts(Option<Vec<String>>),
 }
@@ -349,6 +361,23 @@ impl Prompter for UiPrompter {
     fn password(&self, user_host: &str) -> Option<String> {
         match self.ask(Question::Password(user_host.to_owned())) {
             Some(Answer::Text(t)) => t,
+            _ => None,
+        }
+    }
+
+    fn ask_password(&self, req: &PasswordRequest<'_>) -> Option<PasswordAnswer> {
+        if !req.can_save && req.note.is_none() {
+            return self.password(req.label).map(|password| PasswordAnswer {
+                password,
+                save: false,
+            });
+        }
+        match self.ask(Question::SavablePassword {
+            label: req.label.to_owned(),
+            can_save: req.can_save,
+            note: req.note.map(str::to_owned),
+        }) {
+            Some(Answer::Secret(Some((password, save)))) => Some(PasswordAnswer { password, save }),
             _ => None,
         }
     }
@@ -398,6 +427,30 @@ pub(crate) fn on_prompt(frame: HWND, lparam: LPARAM) {
             "パスワード",
             &format!("{user_host} のパスワード:"),
         )),
+        Question::SavablePassword {
+            label,
+            can_save,
+            note,
+        } => {
+            let mut prompt = String::new();
+            if let Some(n) = &note {
+                prompt.push_str(n);
+                prompt.push('\n');
+            }
+            prompt.push_str(&format!("{label} のパスワード:"));
+            if can_save {
+                Answer::Secret(crate::goto::prompt_secret_with_check(
+                    owner,
+                    "パスワード",
+                    &prompt,
+                    "このパスワードを保存する（Windows の資格情報マネージャー）",
+                ))
+            } else {
+                Answer::Secret(
+                    crate::goto::prompt_secret(owner, "パスワード", &prompt).map(|p| (p, false)),
+                )
+            }
+        }
         Question::Passphrase(key) => {
             let name = key.file_name().map_or_else(
                 || key.display().to_string(),
@@ -578,6 +631,45 @@ pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Sessio
             }
             Err(text)
         }
+    }
+}
+
+/// 資格情報マネージャーに保存したパスワードを確かめて削除する（ヘルプ メニュー）。
+pub(crate) fn forget_passwords(owner: HWND) {
+    use yy_remote::PasswordStore;
+    let store = crate::credstore::WindowsCredentials;
+    let keys = store.keys();
+    if keys.is_empty() {
+        crate::util::info_box(owner, "保存したリモート接続のパスワードはありません。");
+        return;
+    }
+    let shown: Vec<&str> = keys.iter().take(20).map(String::as_str).collect();
+    let more = if keys.len() > shown.len() {
+        format!("\n…ほか {} 件", keys.len() - shown.len())
+    } else {
+        String::new()
+    };
+    let text = format!(
+        "Windows の資格情報マネージャーに保存した、次の {} 件のパスワードを削除しますか？\n\n{}{more}\n\n\
+         削除すると、次に接続するときにパスワードを尋ねます。",
+        keys.len(),
+        shown.join("\n")
+    );
+    if message_box(owner, &text, MB_OKCANCEL | MB_ICONQUESTION) != IDOK {
+        return;
+    }
+    for k in &keys {
+        store.delete(k);
+    }
+    let left = store.keys().len();
+    if left == 0 {
+        crate::util::info_box(owner, "保存したパスワードを削除しました。");
+    } else {
+        message_box(
+            owner,
+            &format!("{left} 件のパスワードを削除できませんでした。"),
+            MB_OK | MB_ICONERROR,
+        );
     }
 }
 
