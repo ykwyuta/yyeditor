@@ -6,6 +6,7 @@
 //! 依存しないので、UI からも、SSH を使わないテスト（[`local`]）からも使える。
 
 pub mod deploy;
+pub mod fs;
 pub mod known_hosts;
 #[cfg(unix)]
 pub mod local;
@@ -25,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use deploy::AgentFiles;
+pub use fs::{RemoteFs, SftpFs};
 pub use log::ConnectLog;
 pub use session::{Session, UploadOutcome};
 pub use ssh_config::HostSpec;

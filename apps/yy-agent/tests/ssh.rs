@@ -1106,6 +1106,23 @@ fn transfers_files_over_sftp_with_the_journal() {
         l.connect_log(Some(id), &cl);
         r
     };
+    // エージェントを使う設定: 送り終えたら接続先のエージェントで SHA-256 を計算して照合する
+    let agents = dir.path().join("agents");
+    fs::create_dir_all(&agents).unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_yy-agent"),
+        agents.join(format!("yy-agent-{}-linux", std::env::consts::ARCH)),
+    )
+    .unwrap();
+    let files = AgentFiles::new(&agents);
+    let agent_dir = dir.path().join("remote").to_string_lossy().into_owned();
+    let hasher = |t: &Arc<dyn yy_remote::Transport>, path: &[u8], len: u64| {
+        let s = yy_remote::Session::start(t.clone(), &files, Some(&agent_dir), &ConnectLog::new())?;
+        s.hash(path, len)
+    };
+    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    let l = lines.clone();
+    log.set_sink(Box::new(move |s| l.lock().unwrap().push(s.to_owned())));
     let journal = xfer::Journal::new(dir.path().join("journal"));
     let cancel = std::sync::atomic::AtomicBool::new(false);
     let mut progress = |_: &xfer::Job| {};
@@ -1118,6 +1135,7 @@ fn transfers_files_over_sftp_with_the_journal() {
         retry: xfer::Retry::default(),
         scp_chunk: 1 << 20,
         transport: None,
+        hasher: Some(&hasher),
     };
     let mut job = xfer::upload_job(1, xfer::Protocol::Sftp, &src, remote.clone(), false).unwrap();
     xfer::run(&mut job, &mut cx);
@@ -1140,4 +1158,10 @@ fn transfers_files_over_sftp_with_the_journal() {
     assert_eq!(job.state, xfer::State::Done, "{}", job.message);
     assert_eq!(fs::read(&back).unwrap(), content);
     assert!(journal.load().is_empty());
+    let lines = lines.lock().unwrap();
+    let verified = lines
+        .iter()
+        .filter(|l| l.contains("照合: SHA-256") && l.contains("が一致しました"))
+        .count();
+    assert_eq!(verified, 2, "{lines:#?}");
 }

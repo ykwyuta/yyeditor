@@ -4121,7 +4121,7 @@ fn cmd_save_to(hwnd: HWND, as_new: bool, place: SaveWhere) -> bool {
                 encoding: enc,
                 bom: p.bom && enc.supports_bom(),
                 eol: None,
-                remote: Some(p.dest()),
+                remote: p.dest(),
             }
         }
         (_, current) => match show_save_dialog(hwnd, current.as_deref(), encoding, bom, eol) {

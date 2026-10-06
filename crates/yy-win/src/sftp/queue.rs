@@ -20,9 +20,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, PWSTR, Result, w};
 use yy_config::TransferConfig;
 use yy_remote::log::TransferLog;
-use yy_remote::sftp::Sftp;
 use yy_remote::xfer::{self, Direction, Job, Journal, State};
-use yy_remote::{RemoteUri, Transport};
+use yy_remote::{RemoteFs, RemoteUri, Transport};
 
 use super::{
     ID_BOTTOM_TABS, ID_CANCEL_JOB, ID_CLEAR_DONE, ID_JOBS, ID_LOG, ID_OPEN_LOCAL, ID_PAUSE,
@@ -56,6 +55,8 @@ struct Work {
     transport: Option<Arc<dyn Transport>>,
     retry: xfer::Retry,
     scp_chunk: u64,
+    /// 送り終えた内容を接続先のエージェントで SHA-256 を計算して照合する（エージェントを使うとき）
+    hasher: Option<crate::remote::BackgroundHasher>,
 }
 
 /// UI への知らせの口（溜まっている間はフレームに 1 回だけ知らせる）。
@@ -703,10 +704,19 @@ impl Queue {
             transport,
             retry,
             scp_chunk: u64::from(cfg.scp_chunk_mb.max(1)) << 20,
+            hasher: crate::remote::use_agent().then(|| crate::remote::background_hasher(&target)),
         };
         self.tlog.line(
             Some(work.job.id),
-            &format!("待ち行列に入れました: {}", work.job.label()),
+            &format!(
+                "待ち行列に入れました: {}{}",
+                work.job.label(),
+                if work.hasher.is_some() {
+                    "（送り終えたら、接続先のエージェントで SHA-256 を計算して照合します）"
+                } else {
+                    ""
+                }
+            ),
         );
         self.update_row(i);
         self.tx
@@ -795,6 +805,7 @@ impl Queue {
                 connect: None,
                 retry: xfer::Retry::default(),
                 scp_chunk: 0,
+                hasher: None,
             };
             if let Some(tx) = &self.tx {
                 let _ = tx.send(work);
@@ -934,6 +945,7 @@ fn worker(
                 retry: w.retry.clone(),
                 scp_chunk: w.scp_chunk,
                 transport: used.clone(),
+                hasher: w.hasher.as_deref().map(|h| h as &xfer::Hasher),
             };
             // 転送の中の思わぬ失敗（panic）で作業スレッドが止まらないようにする。ジャーナルは
             // 確かな位置までしか進めていないので、その転送も後で再開できる
@@ -1401,7 +1413,7 @@ pub(super) fn upload(hwnd: HWND, paths: Vec<PathBuf>) {
     } else {
         "送り先のフォルダを作っています…（Esc で中止）"
     };
-    let exists = match super::remote_op(&loc.target, label, move |s: &Sftp| {
+    let exists = match super::remote_op(&loc.target, label, move |s: &dyn RemoteFs| {
         for d in &mk {
             match s.try_stat(d)? {
                 Some(a) if a.is_dir() => {}
@@ -1411,7 +1423,7 @@ pub(super) fn upload(hwnd: HWND, paths: Vec<PathBuf>) {
                         format!("{} はフォルダではありません", yy_remote::display(d)),
                     ));
                 }
-                None => s.mkdir(d)?,
+                None => s.make_dir(d)?,
             }
         }
         check
@@ -1453,7 +1465,7 @@ pub(super) fn upload(hwnd: HWND, paths: Vec<PathBuf>) {
 type RemoteFile = (Vec<u8>, Vec<u8>, u64, u64);
 
 fn walk_remote(
-    s: &Sftp,
+    s: &dyn RemoteFs,
     path: &[u8],
     rel: &[u8],
     depth: usize,
@@ -1464,7 +1476,7 @@ fn walk_remote(
     if depth > MAX_DEPTH {
         return Ok(());
     }
-    let mut entries = s.read_dir(path)?;
+    let mut entries = s.entries(path)?;
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     for e in entries {
         if e.name == b"." || e.name == b".." {
@@ -1474,7 +1486,7 @@ fn walk_remote(
         let child = yy_remote::join_remote(rel, &e.name);
         let attrs = if e.attrs.is_symlink() {
             // リンク先がフォルダなら（輪にならないよう）たどらない
-            match s.try_stat(&full)? {
+            match s.try_attrs(&full)? {
                 Some(a) if a.is_dir() => continue,
                 Some(a) => a,
                 None => continue,
@@ -1530,13 +1542,13 @@ pub(super) fn download_selected(dest: Option<PathBuf>) {
     let listed = super::remote_op(
         &loc.target,
         "受け取るものを調べています…（Esc で中止）",
-        move |s: &Sftp| {
+        move |s: &dyn RemoteFs| {
             let mut dirs = Vec::new();
             let mut files = Vec::new();
             for (name, item) in &picked {
                 let full = yy_remote::join_remote(&base, name);
                 let attrs = if item.attrs.is_symlink() {
-                    s.stat(&full)?
+                    s.attrs(&full)?
                 } else {
                     item.attrs.clone()
                 };

@@ -465,3 +465,36 @@ fn copies_without_overwriting() {
     assert!(matches!(r, Response::Error(_)), "{r:?}");
     assert!(!a.join("sub").join("a").exists());
 }
+
+#[test]
+fn hashes_a_prefix_of_a_file() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("h.bin");
+    let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    fs::write(&path, &data).unwrap();
+    let mut agent = Agent::default();
+    for len in [0u64, 10, 3_000_000] {
+        let Response::Hash(h) = run(
+            &mut agent,
+            Request::Hash {
+                path: bytes(&path),
+                len,
+            },
+        ) else {
+            panic!();
+        };
+        assert_eq!(h, Sha256::digest(&data[..len as usize]).to_vec());
+    }
+    // ファイルより長くは計算しない
+    let Response::Error(e) = run(
+        &mut agent,
+        Request::Hash {
+            path: bytes(&path),
+            len: 3_000_001,
+        },
+    ) else {
+        panic!();
+    };
+    assert_eq!(e.kind, yy_proto::ErrorKind::InvalidInput);
+}

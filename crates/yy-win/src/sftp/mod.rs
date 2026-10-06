@@ -30,8 +30,9 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, PWSTR, Result, w};
 use yy_config::Config;
+use yy_remote::RemoteFs;
 use yy_remote::RemoteUri;
-use yy_remote::sftp::{Attrs, Sftp};
+use yy_remote::sftp::Attrs;
 use yy_remote::uri::Target;
 use yy_remote::xfer::Protocol;
 
@@ -95,6 +96,7 @@ const ID_SHOW_LOG: u16 = 4224;
 const ID_FOCUS_ADDRESS: u16 = 4225;
 const ID_DISCONNECT: u16 = 4226;
 const ID_OPEN_LOCAL: u16 = 4227;
+const ID_USE_AGENT: u16 = 4228;
 
 /// ツールバーのボタン（番号, 文字）
 const BUTTONS: [(u16, &str); 8] = [
@@ -178,7 +180,8 @@ struct Node {
 /// 接続先ごとの一覧用の SFTP。
 struct Browser {
     target: Target,
-    sftp: Arc<Sftp>,
+    /// 一覧・ファイル操作（エージェントか SFTP）
+    fs: Arc<dyn RemoteFs>,
     transport: Arc<dyn yy_remote::Transport>,
     home: Vec<u8>,
 }
@@ -493,6 +496,8 @@ fn create(ssh: Option<yy_remote::ConnectorFactory>) -> Result<HWND> {
                 status: set_status,
             },
         );
+        // エージェントを使うか（設定。メニューで切り替えられる）
+        crate::remote::set_use_agent(config.transfer.use_agent);
         DragAcceptFiles(frame, true);
         let protocol = if config.transfer.protocol.eq_ignore_ascii_case("scp") {
             Protocol::Scp
@@ -585,6 +590,12 @@ fn create_menu() -> Result<HMENU> {
         sep(xfer)?;
         item(xfer, ID_PROTO_SFTP, w!("SFTP で転送する"))?;
         item(xfer, ID_PROTO_SCP, w!("SCP で転送する"))?;
+        sep(xfer)?;
+        item(
+            xfer,
+            ID_USE_AGENT,
+            w!("接続先にエージェントを置いて使う(&G)（一覧と SHA-256 の照合）"),
+        )?;
         sep(xfer)?;
         item(xfer, ID_PAUSE, w!("一時停止(&P)"))?;
         item(xfer, ID_RESUME, w!("再開(&R)"))?;
@@ -761,10 +772,15 @@ impl App {
                         )
                     };
                     format!(
-                        "{}　{} 個の項目{sel}　転送: {}",
+                        "{}　{} 個の項目{sel}　転送: {}　エージェント: {}",
                         l.target,
                         self.items.len(),
-                        self.protocol.name()
+                        self.protocol.name(),
+                        if crate::remote::use_agent() {
+                            "使う"
+                        } else {
+                            "使わない（SFTP）"
+                        }
                     )
                 }
                 None => {
@@ -798,6 +814,7 @@ impl App {
             check(ID_PROTO_SFTP, self.protocol == Protocol::Sftp);
             check(ID_PROTO_SCP, self.protocol == Protocol::Scp);
             check(ID_HIDDEN, self.show_hidden);
+            check(ID_USE_AGENT, crate::remote::use_agent());
         }
     }
 
@@ -834,7 +851,7 @@ impl App {
     fn browser(&self, target: &Target) -> Option<&Browser> {
         self.browsers
             .iter()
-            .find(|b| b.target.same(target) && !b.sftp.is_closed() && !b.transport.is_closed())
+            .find(|b| b.target.same(target) && !b.fs.is_closed() && !b.transport.is_closed())
     }
 
     /// 選んでいる項目（一覧の並び順）。
@@ -1135,54 +1152,46 @@ fn local_time(secs: u64) -> String {
 
 // ---- 接続と移動 -------------------------------------------------------------------
 
-/// `target` の一覧用の SFTP（なければ接続する。接続中はアプリの状態を借りない）。
-fn browser(target: &Target) -> std::result::Result<(Arc<Sftp>, Vec<u8>), String> {
-    if let Some(b) = with(|a| a.browser(target).map(|b| (b.sftp.clone(), b.home.clone()))).flatten()
-    {
+/// `target` の一覧・ファイル操作（エージェントを使う設定ならエージェント、でなければ SFTP。
+/// なければ接続する。接続中はアプリの状態を借りない）。
+fn browser(target: &Target) -> std::result::Result<(Arc<dyn RemoteFs>, Vec<u8>), String> {
+    if let Some(b) = with(|a| a.browser(target).map(|b| (b.fs.clone(), b.home.clone()))).flatten() {
         return Ok(b);
     }
+    let fs = crate::remote::fs(target, &set_status)?;
+    // 転送に使う接続（エージェントのセッションの接続か、同じ SSH の接続）
     let t = crate::remote::transport(target, &set_status)?;
-    let t2 = t.clone();
-    set_status(&format!("{target} で SFTP を始めています…（Esc で中止）"));
-    let r = crate::remote::wait(&set_status, move |_| {
-        let s = Sftp::connect(t2.as_ref())?;
-        let home = s.realpath(b".")?;
-        Ok::<_, std::io::Error>((s, home))
-    });
-    set_status("");
-    let (sftp, home) = r.map_err(|e| format!("{target} で SFTP を使えません。\n{e}"))?;
-    let sftp = Arc::new(sftp);
+    let home = fs.home().to_vec();
     with(|a| {
         a.browsers.retain(|b| !b.target.same(target));
         a.browsers.push(Browser {
             target: target.clone(),
-            sftp: sftp.clone(),
+            fs: fs.clone(),
             transport: t,
             home: home.clone(),
         });
+        a.set_status("");
     });
-    Ok((sftp, home))
+    Ok((fs, home))
 }
 
-/// 接続先で SFTP の操作をする（待つ間は進みを表示する。接続が切れていたら 1 回だけ接続し直す）。
+/// 接続先でファイル操作をする（待つ間は進みを表示する。接続が切れていたら 1 回だけ接続し直す）。
 fn remote_op<T: Send + 'static>(
     target: &Target,
     label: &str,
-    f: impl Fn(&Sftp) -> std::io::Result<T> + Send + Sync + 'static,
+    f: impl Fn(&dyn RemoteFs) -> std::io::Result<T> + Send + Sync + 'static,
 ) -> std::result::Result<T, String> {
     let f = Arc::new(f);
     for attempt in 0..2 {
-        let (sftp, _) = browser(target)?;
+        let (fs, _) = browser(target)?;
         set_status(label);
         let g = f.clone();
-        let s = sftp.clone();
-        let r = crate::remote::wait(&set_status, move |_| g(&s));
+        let s = fs.clone();
+        let r = crate::remote::wait(&set_status, move |_| g(s.as_ref()));
         set_status("");
         match r {
             Ok(v) => return Ok(v),
-            Err(e)
-                if attempt == 0 && (sftp.is_closed() || yy_remote::xfer::retryable(&e, None)) =>
-            {
+            Err(e) if attempt == 0 && (fs.is_closed() || yy_remote::xfer::retryable(&e, None)) => {
                 // 切れた接続を捨てて、もう一度
                 with(|a| a.browsers.retain(|b| !b.target.same(target)));
                 crate::remote::with_state(|_| ());
@@ -1212,8 +1221,8 @@ fn go(mut loc: Loc, push: bool) {
         &loc.target,
         "フォルダを読んでいます…（Esc で中止）",
         move |s| {
-            let real = s.realpath(&path)?;
-            let entries = s.read_dir(&real)?;
+            let real = s.real_path(&path)?;
+            let entries = s.entries(&real)?;
             Ok((real, entries))
         },
     );
@@ -1524,6 +1533,20 @@ fn command(hwnd: HWND, id: u16) {
             });
             refresh();
         }
+        ID_USE_AGENT => {
+            let on = !crate::remote::use_agent();
+            crate::remote::set_use_agent(on);
+            with(|a| {
+                // 一覧の接続を作り直す（エージェントか SFTP か）
+                a.browsers.clear();
+                a.update_menu();
+            });
+            if with(|a| a.loc.is_some()) == Some(true) {
+                refresh();
+            } else {
+                set_status("");
+            }
+        }
         ID_PROTO_SFTP | ID_PROTO_SCP => {
             with(|a| {
                 a.protocol = if id == ID_PROTO_SCP {
@@ -1667,7 +1690,7 @@ fn cmd_delete(hwnd: HWND) {
         "削除しています…（Esc で中止）",
         move |s| {
             for p in &paths {
-                s.remove_all(p)?;
+                s.remove(p, true)?;
             }
             Ok(())
         },
@@ -1696,7 +1719,7 @@ fn cmd_new_folder(hwnd: HWND) {
     if let Err(e) = remote_op(
         &loc.target,
         "フォルダを作っています…",
-        move |s| s.mkdir(&path),
+        move |s| s.make_dir(&path),
     ) {
         error_box(hwnd, &format!("フォルダを作れませんでした。\n{e}"));
     }
@@ -1726,7 +1749,7 @@ fn rename_item(hwnd: HWND, index: usize, new_name: &str) {
                 "同じ名前の項目があります",
             ));
         }
-        s.rename(&from, &to, false)
+        s.rename(&from, &to)
     }) {
         error_box(hwnd, &format!("名前を変えられませんでした。\n{e}"));
     }
@@ -2003,7 +2026,7 @@ fn load_tree(hwnd: HWND, generation: usize, index: usize) {
             let p = p.clone();
             let show_hidden = with(|a| a.show_hidden).unwrap_or(false);
             match remote_op(&target, "フォルダを読んでいます…", move |s| {
-                s.read_dir(&p)
+                s.entries(&p)
             }) {
                 Ok(entries) => {
                     let mut dirs: Vec<(String, Vec<u8>)> = entries

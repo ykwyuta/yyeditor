@@ -70,7 +70,7 @@ apps/yyterm ──► yy-win::run_terminal ──┬─ term/mod.rs     フレ�
 - `Transport::shell(term, (桁, 行), command)` を追加した（`yy-ssh` は `pty-req`・`shell`／`exec`、
   大きさの変更は `window-change`、タブを閉じたらチャネルを閉じる）。標準エラー出力もまとめて流す。
 - 接続はエディタと同じ（接続設定・踏み台・プロキシ・ホスト鍵・認証・接続の記録・パスワードの保存）。
-  ターミナルだけの接続ではエージェントを置かない（`remote::transport`。Linux 以外の接続先にも使える）。
+  シェルにはエージェントを使わない（`remote::transport`。Linux 以外の接続先にも使える）。
   エディタのセッション（エージェント）があれば、その接続にチャネルを足す。
 - フォルダを指定して開くときは `cd '<フォルダ>' && exec "${SHELL:-/bin/sh}" -l` を端末つきで実行する。
 - `TERM` は設定 `term`（既定は `xterm-256color`）。
@@ -107,6 +107,16 @@ apps/yyterm ──► yy-win::run_terminal ──┬─ term/mod.rs     フレ�
 - エディタのワークスペースの「ターミナルで開く」は、`yyterm.exe` が同じフォルダにあれば yyterm で開く
   （リモートのフォルダも開ける）。
 
+### 6.1 エージェントは任意（2026-10-06 追加）
+
+- ワークスペースのリモートのフォルダの一覧（とフォルダの選択）に接続先のエージェントを使うかを選べる
+  （設定 `use_agent`、ワークスペース メニューの「リモートのフォルダの一覧に接続先のエージェントを使う」。
+  既定は使わない）。
+- 使わなければ SFTP（`yy_remote::fs::SftpFs`。接続先の sftp-server）で一覧を読み、接続先に何も置かない。
+  使えば、エディタと同じエージェント（11 章）で読む（sftp-server を止めている接続先でも一覧を出せる）。
+- 一覧・フォルダの選択は、エージェントと SFTP の共通の口（`yy_remote::RemoteFs`）で書いてあり、エディタと
+  同じ部品（`remote::fs`・`remote::list_dir`・`remotedlg`）を使う。エディタは常にエージェント。
+
 ## 7. 設定（`[terminal]`）
 
 ```toml
@@ -118,6 +128,7 @@ scrollback = 10000
 ambiguous_wide = false     # ○ ※ などを全角とする（接続先の設定と合わせる）
 term = "xterm-256color"    # SSH の接続先に知らせる TERM
 copy_on_select = false
+use_agent = false          # ワークスペースのリモートのフォルダの一覧に接続先のエージェントを使う
 ```
 
 ## 8. テスト

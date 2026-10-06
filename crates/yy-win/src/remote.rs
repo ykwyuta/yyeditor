@@ -23,8 +23,8 @@ use yy_remote::ssh_config::{HostOverride, Resolver};
 use yy_remote::uri::{RemoteUri, Target};
 use yy_remote::{
     AgentFiles, ConnectLog, Connector, ConnectorFactory, ConnectorOptions, FileInfo, HostKeyCheck,
-    HostKeyQuestion, PassphraseRequest, PasswordAnswer, PasswordRequest, Prompter, Session,
-    Transport, UploadOutcome,
+    HostKeyQuestion, PassphraseRequest, PasswordAnswer, PasswordRequest, Prompter, RemoteFs,
+    Session, SftpFs, Transport, UploadOutcome,
 };
 
 use crate::app::with_app;
@@ -48,6 +48,11 @@ pub(crate) struct RemoteState {
     config: RemoteConfig,
     /// 最後に使った場所（ファイル選択の初期値）
     pub(crate) last: Option<RemoteUri>,
+    /// 接続先にエージェントを置いて使う（エディタは常に。ターミナルとファイル転送は設定・メニュー）。
+    /// 使わなければ、一覧・ファイル操作は SFTP（[`fs`]）
+    pub(crate) use_agent: bool,
+    /// エージェントを使わないときの一覧・ファイル操作（SFTP）
+    sftps: Vec<(Target, Arc<SftpFs>)>,
 }
 
 impl RemoteState {
@@ -59,6 +64,8 @@ impl RemoteState {
             transports: Vec::new(),
             config,
             last: None,
+            use_agent: true,
+            sftps: Vec::new(),
         }
     }
 
@@ -640,6 +647,76 @@ pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Sessio
     Ok(s)
 }
 
+/// 接続先にエージェントを置いて使うか（エディタは常に。ターミナル・ファイル転送は設定・メニュー）。
+pub(crate) fn use_agent() -> bool {
+    with_state(|r| r.use_agent).unwrap_or(true)
+}
+
+/// エージェントを使うかを変える（変えた後の一覧・ファイル操作から）。
+pub(crate) fn set_use_agent(on: bool) {
+    with_state(|r| r.use_agent = on);
+}
+
+/// `target` のファイル操作（一覧・情報・作成・名前の変更・削除）。エージェントを使う設定なら
+/// エージェント（[`session`]）、でなければ SFTP（接続先に何も置かない）。
+pub(crate) fn fs(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<dyn RemoteFs>, String> {
+    if use_agent() {
+        return session(target, show).map(|s| s as Arc<dyn RemoteFs>);
+    }
+    let cached = with_state(|r| {
+        r.sftps.retain(|(_, f)| !f.is_closed());
+        r.sftps
+            .iter()
+            .find(|(t, _)| t.same(target))
+            .map(|(_, f)| f.clone())
+    })
+    .flatten();
+    if let Some(f) = cached {
+        return Ok(f);
+    }
+    let t = transport(target, show)?;
+    show(&format!("{target} で SFTP を始めています…（Esc で中止）"));
+    let r = wait(show, move |_| SftpFs::connect(t.as_ref()));
+    show("");
+    let f = Arc::new(r.map_err(|e| {
+        format!(
+            "{target} で SFTP を使えません（接続先で sftp-server が使えないなど）。\n\
+             エージェントを使う設定にすると、SFTP がなくても一覧を表示できます。\n{e}"
+        )
+    })?);
+    with_state(|r| r.sftps.push((target.clone(), f.clone())));
+    Ok(f)
+}
+
+/// 転送の照合に使う、接続先のエージェントで SHA-256 を計算する関数（どのスレッドからでも
+/// 呼べる）。転送に使っている接続にエージェントを配置して起動する（接続ごとに 1 つ）。
+pub(crate) type BackgroundHasher =
+    Arc<dyn Fn(&Arc<dyn Transport>, &[u8], u64) -> std::io::Result<Vec<u8>> + Send + Sync>;
+
+pub(crate) fn background_hasher(target: &Target) -> BackgroundHasher {
+    let agent_dir = with_state(|r| r.resolver().resolve(target).agent_dir).flatten();
+    let files = AgentFiles::beside_exe();
+    let target = target.clone();
+    let cache: Mutex<Option<(usize, Arc<Session>)>> = Mutex::new(None);
+    Arc::new(move |t, path, len| {
+        let key = Arc::as_ptr(t) as *const () as usize;
+        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        let s = match &*c {
+            Some((k, s)) if *k == key && !s.is_closed() => s.clone(),
+            _ => {
+                let log = ConnectLog::new();
+                let r = Session::start(t.clone(), &files, agent_dir.as_deref(), &log);
+                save_log(&target, &log);
+                let s = Arc::new(r?);
+                *c = Some((key, s.clone()));
+                s
+            }
+        };
+        drop(c);
+        s.hash(path, len)
+    })
+}
+
 /// `target` への SSH の接続（ターミナル用。エージェントは使わない）。接続済みのセッションが
 /// あればその接続を使い、なければ接続する（接続中は `show` に表示）。
 pub(crate) fn transport(
@@ -1031,9 +1108,9 @@ pub(crate) fn current_dest(file: &RemoteFile) -> Result<RemoteDest, String> {
 /// リモートのフォルダの中身（ワークスペースのサイドバー用）。項目のパスは `ssh://…`。
 /// フォルダを先に名前順、[`workspace::EXCLUDED`] を除き、[`workspace::MAX_ENTRIES`] を超えた数も返す。
 pub(crate) fn list_dir(dir: &RemoteUri) -> Result<(Vec<workspace::Entry>, usize), String> {
-    let session = session(&dir.target(), &show_status)?;
+    let fs = fs(&dir.target(), &show_status)?;
     let path = dir.path.clone();
-    let listed = wait(&show_status, move |_| session.read_dir(&path));
+    let listed = wait(&show_status, move |_| fs.read_dir(&path));
     show_status("");
     let items = listed.map_err(|e| describe(dir, &e))?;
     let mut entries = Vec::new();

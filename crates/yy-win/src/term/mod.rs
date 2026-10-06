@@ -82,6 +82,7 @@ const ID_WS_OPEN: u16 = 3031;
 const ID_WS_SAVE_AS: u16 = 3032;
 const ID_WS_ADD: u16 = 3033;
 const ID_WS_ADD_REMOTE: u16 = 3034;
+const ID_WS_USE_AGENT: u16 = 3035;
 const ID_HELP_KEYS: u16 = 3040;
 const ID_SETTINGS: u16 = 3041;
 const ID_REMOTE_LOG: u16 = 3042;
@@ -428,6 +429,10 @@ fn create(
                 status: set_status,
             },
         );
+        // ワークスペースのリモートのフォルダの一覧にエージェントを使うか（設定。メニューで切り替える）。
+        // 使わなければ SFTP（接続先に何も置かない）。シェルにはどちらでもエージェントを使わない
+        crate::remote::set_use_agent(config.terminal.use_agent);
+        check_use_agent(frame);
         let shell = if let Some(s) = shell {
             s
         } else if config.terminal.shell.is_empty() {
@@ -532,6 +537,12 @@ fn create_menu() -> Result<HMENU> {
         sep(ws)?;
         item(ws, ID_WS_ADD, w!("フォルダを追加(&F)..."))?;
         item(ws, ID_WS_ADD_REMOTE, w!("リモートのフォルダを追加(&R)..."))?;
+        sep(ws)?;
+        item(
+            ws,
+            ID_WS_USE_AGENT,
+            w!("リモートのフォルダの一覧に接続先のエージェントを使う(&G)"),
+        )?;
         let help = CreatePopupMenu()?;
         item(help, ID_HELP_KEYS, w!("キーボードショートカット(&K)"))?;
         item(help, ID_SETTINGS, w!("設定ファイルを開く(&S)"))?;
@@ -1353,6 +1364,15 @@ fn command(hwnd: HWND, id: u16) {
             open_tab(place);
         }
         ID_SSH => cmd_ssh(hwnd),
+        ID_WS_USE_AGENT => {
+            crate::remote::set_use_agent(!crate::remote::use_agent());
+            check_use_agent(hwnd);
+            set_status(if crate::remote::use_agent() {
+                "リモートのフォルダの一覧に、接続先のエージェントを使います（次に開くフォルダから）"
+            } else {
+                "リモートのフォルダの一覧に SFTP を使います（接続先に何も置きません。次に開くフォルダから）"
+            });
+        }
         ID_CLOSE_TAB => {
             with(|a| a.close_tab(a.active));
         }
@@ -1602,6 +1622,18 @@ fn tab_menu(hwnd: HWND, index: usize) {
         }
     }
     with(|a| a.close_tabs(index, &targets));
+}
+
+/// メニューの「エージェントを使う」の印を今の設定に合わせる。
+fn check_use_agent(frame: HWND) {
+    unsafe {
+        let on = crate::remote::use_agent();
+        CheckMenuItem(
+            GetMenu(frame),
+            u32::from(ID_WS_USE_AGENT),
+            (MF_BYCOMMAND | if on { MF_CHECKED } else { MF_UNCHECKED }).0,
+        );
+    }
 }
 
 fn cmd_add_remote_folder(hwnd: HWND) {

@@ -291,6 +291,11 @@ fn parse_job(id: u64, text: &str) -> Option<Job> {
 pub type Connect<'a> =
     dyn Fn(&TransferLog, u64) -> io::Result<Arc<dyn Transport>> + Send + Sync + 'a;
 
+/// 接続先のファイルの先頭から `len` バイトの SHA-256 を計算する関数（エージェントを使うとき。
+/// 13 章 5.2）。転送に使っている接続を渡す。
+pub type Hasher<'a> =
+    dyn Fn(&Arc<dyn Transport>, &[u8], u64) -> io::Result<Vec<u8>> + Send + Sync + 'a;
+
 /// 再接続の決まり。
 #[derive(Clone, Debug)]
 pub struct Retry {
@@ -326,6 +331,8 @@ pub struct Context<'a> {
     pub scp_chunk: u64,
     /// 最初に使う接続（なければ接続する）
     pub transport: Option<Arc<dyn Transport>>,
+    /// 送り終えた内容を SHA-256 で照合する（`None` なら大きさと末尾の照合だけ）
+    pub hasher: Option<&'a Hasher<'a>>,
 }
 
 impl Context<'_> {
@@ -474,6 +481,8 @@ pub fn run(job: &mut Job, cx: &mut Context) {
     );
     let mut transport = cx.transport.take();
     let mut failures = 0u32;
+    // SHA-256 が一致せずに最初から送り直したか（2 回目は失敗にする）
+    let mut restarted = false;
     loop {
         if cx.cancelled() {
             return finish_interrupted(job, cx, "一時停止しました");
@@ -532,6 +541,15 @@ pub fn run(job: &mut Job, cx: &mut Context) {
             Err(_) if cx.cancelled() => {
                 return finish_interrupted(job, cx, "一時停止しました");
             }
+            Err(e) if is_mismatch(&e) && !restarted => {
+                restarted = true;
+                discard_part(job, &t, cx);
+                job.done = 0;
+                job.current = 0;
+                cx.save(job);
+                cx.note(job, "途中のファイルを消して、最初から送り直します");
+                transport = Some(t);
+            }
             Err(e) if retryable(&e, Some(t.as_ref())) => {
                 transport = None;
                 if job.done > before {
@@ -555,6 +573,21 @@ pub fn run(job: &mut Job, cx: &mut Context) {
                 return;
             }
         }
+    }
+}
+
+/// 途中のファイルを消す（照合が一致しなかったとき）。
+fn discard_part(job: &Job, t: &Arc<dyn Transport>, cx: &Context) {
+    let r = match job.direction {
+        Direction::Download => std::fs::remove_file(job.local_part()),
+        Direction::Upload => {
+            let mut cmd = b"rm -f -- ".to_vec();
+            cmd.extend_from_slice(&shell_quote(&job.remote_part()));
+            scp::shell(t.as_ref(), &cmd, "途中のファイルの削除")
+        }
+    };
+    if let Err(e) = r {
+        cx.note(job, &format!("途中のファイルを消せません: {e}"));
     }
 }
 
@@ -688,6 +721,115 @@ fn read_exact_at(
     Ok(out)
 }
 
+/// SHA-256 が一致しなかった（途中のファイルを捨てて最初から送り直す）。
+#[derive(Debug)]
+struct Mismatch;
+
+impl std::fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("照合: SHA-256 が一致しません")
+    }
+}
+
+impl std::error::Error for Mismatch {}
+
+fn is_mismatch(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|r| r.is::<Mismatch>())
+}
+
+fn hex(h: &[u8]) -> String {
+    h.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 手元のファイルの先頭から `len` バイトの SHA-256。
+fn sha256_local(path: &Path, len: u64) -> io::Result<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let f = File::open(path)?;
+    let mut r = std::io::BufReader::with_capacity(1 << 20, f.take(len));
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut total = 0u64;
+    loop {
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        h.update(&buf[..n]);
+    }
+    if total != len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} が短すぎます（{total} / {len} バイト）", path.display()),
+        ));
+    }
+    Ok(h.finalize().to_vec())
+}
+
+/// 送り終えた内容を SHA-256 で照合する（[`Context::hasher`] があるとき）。接続先で計算
+/// できなければ（エージェントを置けないなど）記録して飛ばす。一致しなければ [`Mismatch`]。
+fn verify_hash(
+    job: &Job,
+    cx: &Context,
+    t: &Arc<dyn Transport>,
+    remote: &[u8],
+    local: &Path,
+) -> io::Result<()> {
+    let Some(hasher) = cx.hasher else {
+        return Ok(());
+    };
+    cx.note(
+        job,
+        &format!(
+            "照合: SHA-256 を計算しています（{}。接続先はエージェント、手元はこのアプリ）",
+            human(job.size)
+        ),
+    );
+    let start = Instant::now();
+    let theirs = match hasher(t, remote, job.size) {
+        Ok(h) => h,
+        Err(e) if retryable(&e, Some(t.as_ref())) || cx.cancelled() => return Err(e),
+        Err(e) => {
+            cx.note(
+                job,
+                &format!("照合: 接続先で SHA-256 を計算できないため、照合を飛ばします: {e}"),
+            );
+            return Ok(());
+        }
+    };
+    let ours = sha256_local(local, job.size)?;
+    if theirs == ours {
+        cx.note(
+            job,
+            &format!(
+                "照合: SHA-256 {} が一致しました（{:.1} 秒）",
+                hex(&ours),
+                start.elapsed().as_secs_f64()
+            ),
+        );
+        Ok(())
+    } else {
+        cx.note(
+            job,
+            &format!(
+                "照合: SHA-256 が一致しません（接続先 {}、手元 {}）",
+                hex(&theirs),
+                hex(&ours)
+            ),
+        );
+        Err(io::Error::new(io::ErrorKind::InvalidData, Mismatch))
+    }
+}
+
+/// 前回送り終えた送り先が手元と同じか（SHA-256 で照合できなければ `true`）。
+fn same_hash(job: &Job, cx: &Context, t: &Arc<dyn Transport>, target: &[u8]) -> io::Result<bool> {
+    match verify_hash(job, cx, t, target, &job.local) {
+        Ok(()) => Ok(true),
+        Err(e) if is_mismatch(&e) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// 照合に使う、続ける位置の直前の量
 const VERIFY_TAIL: u64 = 64 << 10;
 
@@ -710,7 +852,7 @@ fn upload_sftp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::R
         let h = s.open(&target, sftp::open::READ, &Attrs::default())?;
         let theirs = read_exact_at(&s, &h, job.size - n, n as usize);
         let _ = s.close(&h);
-        if same_tail(&mut local, job.size, &theirs?)? {
+        if same_tail(&mut local, job.size, &theirs?)? && same_hash(job, cx, t, &target)? {
             note_upload_finished_before(job, cx, n);
             let t32 = u32::try_from(job.mtime).unwrap_or(u32::MAX);
             let _ = s.setstat(
@@ -877,6 +1019,7 @@ fn upload_sftp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::R
         job,
         &format!("確認: 接続先の大きさ {got} バイトが一致しました"),
     );
+    verify_hash(job, cx, t, &part, &job.local)?;
     // 名前を変える前に、すべて送ったことをジャーナルに書く
     cx.save(job);
     s.rename(&part, &target, true)?;
@@ -903,7 +1046,7 @@ fn upload_sftp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::R
 }
 
 /// 書き終えた手元の途中のファイルを本来の名前にする。
-fn finish_local(job: &Job, cx: &Context, file: File) -> io::Result<()> {
+fn finish_local(job: &Job, cx: &Context, t: &Arc<dyn Transport>, file: File) -> io::Result<()> {
     file.sync_all()?;
     let len = file.metadata()?.len();
     if len != job.size {
@@ -920,6 +1063,7 @@ fn finish_local(job: &Job, cx: &Context, file: File) -> io::Result<()> {
         job,
         &format!("確認: 手元の大きさ {len} バイトが一致しました"),
     );
+    verify_hash(job, cx, t, &job.remote.path, &job.local_part())?;
     // 名前を変える前に、すべて受け取ったことをジャーナルに書く（名前を変えた直後に落ちても、
     // 次に起動したときに完了と分かる）
     cx.save(job);
@@ -1107,7 +1251,7 @@ fn download_sftp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io:
         job,
         &format!("受け取り終えました: {}", meter.average(job.size)),
     );
-    finish_local(job, cx, file)
+    finish_local(job, cx, t, file)
 }
 
 fn upload_scp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::Result<()> {
@@ -1128,7 +1272,7 @@ fn upload_scp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::Re
         scp::download(t.as_ref(), &target, job.size - n, &mut theirs, &mut |_| {
             true
         })?;
-        if same_tail(&mut local, job.size, &theirs)? {
+        if same_tail(&mut local, job.size, &theirs)? && same_hash(job, cx, t, &target)? {
             note_upload_finished_before(job, cx, n);
             return Ok(());
         }
@@ -1226,6 +1370,7 @@ fn upload_scp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::Re
         job,
         &format!("確認: 接続先の大きさ {got} バイトが一致しました"),
     );
+    verify_hash(job, cx, t, &part, &job.local)?;
     let mut cmd = b"mv -f ".to_vec();
     cmd.extend_from_slice(&shell_quote(&part));
     cmd.push(b' ');
@@ -1308,7 +1453,7 @@ fn download_scp(job: &mut Job, t: &Arc<dyn Transport>, cx: &mut Context) -> io::
         job,
         &format!("受け取り終えました: {}", meter.average(job.size)),
     );
-    finish_local(job, cx, file)
+    finish_local(job, cx, t, file)
 }
 
 /// 送るファイルの大きさと更新日時を、ジョブに書く（アップロード）。

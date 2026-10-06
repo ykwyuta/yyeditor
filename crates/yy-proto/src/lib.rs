@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// プロトコルの版。メッセージの形を変えたら増やす。
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// エージェントが起動直後に出す印。ログインシェルの初期化ファイルが標準出力に文字を出しても、
 /// 端末はこれより前を読み捨てて同期する（11 章 6.2）。
@@ -130,6 +130,9 @@ pub enum Request {
     /// ファイル・フォルダを中身ごとコピーする（接続先の中で。転送はしない）。`to` が既にあれば
     /// エラー。フォルダをその中へはコピーしない。応答は [`Response::Done`]
     Copy { from: Vec<u8>, to: Vec<u8> },
+    /// ファイルの先頭から `len` バイトの SHA-256（転送の照合。13 章）。ファイルが `len` より
+    /// 短ければエラー。応答は [`Response::Hash`]
+    Hash { path: Vec<u8>, len: u64 },
 }
 
 /// エージェントからの応答。
@@ -157,6 +160,8 @@ pub enum Response {
     Committed(FileInfo),
     /// 置き換えなかった。保存先の現在の情報（なければ `None`）
     Conflict(Option<FileInfo>),
+    /// SHA-256（32 バイト）
+    Hash(Vec<u8>),
     Error(RemoteError),
 }
 

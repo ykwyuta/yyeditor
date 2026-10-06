@@ -73,6 +73,9 @@ pub struct TransferConfig {
     pub show_hidden: bool,
     /// ダウンロードの既定の保存先（空ならダウンロード フォルダ）
     pub download_dir: String,
+    /// 接続先にエージェントを置いて使う（一覧・ファイル操作と、送り終えた内容の SHA-256 の照合）。
+    /// 使わなければ SFTP だけ（接続先に何も置かない）
+    pub use_agent: bool,
 }
 
 impl Default for TransferConfig {
@@ -83,6 +86,7 @@ impl Default for TransferConfig {
             scp_chunk_mb: 32,
             show_hidden: false,
             download_dir: String::new(),
+            use_agent: false,
         }
     }
 }
@@ -106,6 +110,9 @@ pub struct TerminalConfig {
     pub term: String,
     /// 選択したら自動でコピーする
     pub copy_on_select: bool,
+    /// ワークスペースのリモートのフォルダの一覧に、接続先のエージェントを使う（使わなければ SFTP。
+    /// 接続先に何も置かない）。シェルにはエージェントを使わない
+    pub use_agent: bool,
 }
 
 impl Default for TerminalConfig {
@@ -118,6 +125,7 @@ impl Default for TerminalConfig {
             ambiguous_wide: false,
             term: "xterm-256color".into(),
             copy_on_select: false,
+            use_agent: false,
         }
     }
 }

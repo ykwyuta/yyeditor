@@ -181,6 +181,17 @@ impl Harness {
         scp_chunk: u64,
         progress: &mut dyn FnMut(&Job),
     ) {
+        self.run_full(job, attempts, scp_chunk, progress, None);
+    }
+
+    fn run_full(
+        &self,
+        job: &mut Job,
+        attempts: u32,
+        scp_chunk: u64,
+        progress: &mut dyn FnMut(&Job),
+        hasher: Option<&Hasher>,
+    ) {
         let connect = |_: &TransferLog, _: u64| -> io::Result<Arc<dyn Transport>> {
             self.connections.fetch_add(1, Ordering::Relaxed);
             let mut b = self.budgets.lock().unwrap();
@@ -200,6 +211,7 @@ impl Harness {
             },
             scp_chunk,
             transport: None,
+            hasher,
         };
         run(job, &mut cx);
     }
@@ -597,4 +609,88 @@ fn journal_writes_are_atomic() {
         .collect();
     assert_eq!(names, vec!["9.job".to_owned()]);
     assert_eq!(j.load()[0].done, 3);
+}
+
+/// 接続先の SHA-256 を（接続先のファイルを直接読んで）計算する。`corrupt` 回目までは違う値を返す。
+fn fake_hasher(corrupt: usize) -> impl Fn(&Arc<dyn Transport>, &[u8], u64) -> io::Result<Vec<u8>> {
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    move |_t, path, len| {
+        let p = Path::new(std::ffi::OsStr::from_bytes(path));
+        let mut h = sha256_local(p, len)?;
+        if calls.fetch_add(1, Ordering::Relaxed) < corrupt {
+            h[0] ^= 0xff;
+        }
+        Ok(h)
+    }
+}
+
+fn verify_with(
+    protocol: Protocol,
+    direction: Direction,
+    corrupt: usize,
+) -> (Job, Harness, Vec<u8>, PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let content = data(700_000);
+    let (src, dst) = match direction {
+        Direction::Upload => (dir.path().join("local.bin"), dir.path().join("remote.bin")),
+        Direction::Download => (dir.path().join("remote.bin"), dir.path().join("local.bin")),
+    };
+    std::fs::write(&src, &content).unwrap();
+    let h = Harness::new(dir.path(), &[]);
+    let mut job = match direction {
+        Direction::Upload => upload_job(8, protocol, &src, uri(&dst), false).unwrap(),
+        Direction::Download => {
+            let m = std::fs::metadata(&src).unwrap();
+            download_job(8, protocol, uri(&src), m.len(), mtime_of(&m), &dst, false)
+        }
+    };
+    let hasher = fake_hasher(corrupt);
+    h.run_full(&mut job, 3, 128 << 10, &mut |_| {}, Some(&hasher));
+    (job, h, content, dst, dir)
+}
+
+#[test]
+fn verifies_with_sha256_and_resends_on_mismatch() {
+    for protocol in [Protocol::Sftp, Protocol::Scp] {
+        if !tools(protocol) {
+            continue;
+        }
+        for direction in [Direction::Upload, Direction::Download] {
+            // 一致する
+            let (job, h, content, dst, _dir) = verify_with(protocol, direction, 0);
+            assert_eq!(job.state, State::Done, "{}", h.dump());
+            assert!(h.logged("が一致しました（"), "{}", h.dump());
+            assert_eq!(std::fs::read(&dst).unwrap(), content);
+            // 1 回目は一致しない: 途中のファイルを捨てて送り直す
+            let (job, h, content, dst, _dir) = verify_with(protocol, direction, 1);
+            assert_eq!(job.state, State::Done, "{}", h.dump());
+            assert!(h.logged("SHA-256 が一致しません"), "{}", h.dump());
+            assert!(h.logged("最初から送り直します"), "{}", h.dump());
+            assert_eq!(std::fs::read(&dst).unwrap(), content);
+            // 送り直しても一致しない: 失敗にして、本来の名前にはしない
+            let (job, h, _content, dst, _dir) = verify_with(protocol, direction, 2);
+            assert_eq!(job.state, State::Failed, "{}", h.dump());
+            assert!(job.message.contains("SHA-256"), "{}", job.message);
+            assert!(!dst.exists());
+        }
+    }
+}
+
+#[test]
+fn skips_sha256_when_the_remote_cannot_compute_it() {
+    if !tools(Protocol::Sftp) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("a.bin");
+    std::fs::write(&src, data(10_000)).unwrap();
+    let dst = dir.path().join("b.bin");
+    let h = Harness::new(dir.path(), &[]);
+    let mut job = upload_job(3, Protocol::Sftp, &src, uri(&dst), false).unwrap();
+    let hasher = |_: &Arc<dyn Transport>, _: &[u8], _: u64| -> io::Result<Vec<u8>> {
+        Err(io::Error::other("エージェントを置けません（模擬）"))
+    };
+    h.run_full(&mut job, 3, 0, &mut |_| {}, Some(&hasher));
+    assert_eq!(job.state, State::Done, "{}", h.dump());
+    assert!(h.logged("照合を飛ばします"), "{}", h.dump());
 }

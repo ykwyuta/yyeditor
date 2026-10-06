@@ -243,6 +243,17 @@ impl Session {
         })?)
     }
 
+    /// ファイルの先頭から `len` バイトの SHA-256（接続先のエージェントで計算する）。
+    pub fn hash(&self, path: &[u8], len: u64) -> io::Result<Vec<u8>> {
+        match self.client.call(&Request::Hash {
+            path: path.to_vec(),
+            len,
+        })? {
+            Response::Hash(h) => Ok(h),
+            r => Err(unexpected(r)),
+        }
+    }
+
     /// 空のファイルを作る（既にあればエラー）。
     pub fn create_file(self: &Arc<Self>, path: &[u8]) -> io::Result<FileInfo> {
         match self.upload(&mut io::empty(), path, None, &mut |_| true)? {
