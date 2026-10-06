@@ -176,6 +176,12 @@ yyeditor と共通に使います。
   入力します。yyeditor と同じ組み込みの SSH を使い、OpenSSH（ssh.exe）は使いません。踏み台・プロキシ・
   パスワードの保存・接続の記録も [リモート（SSH）のファイル](#remote) と同じです。ターミナルだけの接続では
   エージェントを使わないので、Linux 以外の接続先にも接続できます。
+- **ポートフォワーディング**: 「SSH で接続」の入力で、接続先に続けて `-L 8080:localhost:80`（手元の
+  8080 番 → 接続先から localhost:80）、`-R 9000:localhost:3000`（接続先の 9000 番 → 手元の 3000 番）、
+  `-D 1080`（手元の 1080 番を SOCKS のプロキシに）を書けます。接続設定の `forward` と `~/.ssh/config` の
+  `LocalForward`・`RemoteForward`・`DynamicForward` も使います。始めたものと、始められなかったもの
+  （ポートの使用中など）はタブの先頭に表示します。始められなくても SSH の接続はそのまま使えます。
+  yyeditor と yysftp はポートフォワーディングの指定を無視します。
 - **エージェント**: ワークスペースのリモートのフォルダの一覧に、接続先のエージェントを使うかを選べます
   （ワークスペース メニュー、設定の `[terminal]` の `use_agent`。既定は使わない＝SFTP で読み、接続先に
   何も置きません）。シェルにはどちらでもエージェントを使いません。
@@ -607,6 +613,7 @@ identity_file = "~/.ssh/id_build"
 proxy_jump = "bastion"        # 踏み台（"a,admin@b:2022" の多段も可。"none" で ~/.ssh/config の指定も使わない）
 proxy = "none"                # この接続先のプロキシ（"none" で共通のプロキシも使わない）
 agent_dir = "/work/yamada/.yyeditor"   # ホームが noexec の場合など
+forward = ["L 5432:localhost:5432", "D 1080"]   # ポートフォワーディング（yyterm だけが使う）
 ```
 
 - `proxy_jump`・`proxy` のどちらかを書いた接続先では、`~/.ssh/config` の `ProxyJump`・`ProxyCommand` は使いません。

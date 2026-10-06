@@ -53,6 +53,16 @@ pub(crate) struct RemoteState {
     pub(crate) use_agent: bool,
     /// エージェントを使わないときの一覧・ファイル操作（SFTP）
     sftps: Vec<(Target, Arc<SftpFs>)>,
+    /// 接続ごとのポートフォワーディング（ターミナル）
+    forwards: Vec<ForwardSet>,
+}
+
+/// 1 つの接続のポートフォワーディング。試した指定を覚えて、同じものは二度始めない。
+struct ForwardSet {
+    transport: std::sync::Weak<dyn Transport>,
+    tried: Vec<yy_remote::Forward>,
+    /// drop すると止まる
+    _active: Vec<yy_remote::ActiveForward>,
 }
 
 impl RemoteState {
@@ -66,6 +76,7 @@ impl RemoteState {
             last: None,
             use_agent: true,
             sftps: Vec::new(),
+            forwards: Vec::new(),
         }
     }
 
@@ -115,6 +126,7 @@ impl RemoteState {
                         proxy_jump: h.proxy_jump.clone(),
                         proxy: h.proxy.clone(),
                         agent_dir: h.agent_dir.clone(),
+                        forward: h.forward.clone(),
                     },
                 )
             })
@@ -715,6 +727,97 @@ pub(crate) fn background_hasher(target: &Target) -> BackgroundHasher {
         drop(c);
         s.hash(path, len)
     })
+}
+
+/// ポートフォワーディングの結果の 1 行（`true` なら始めた、`false` なら警告）。
+pub(crate) type ForwardReport = (bool, String);
+
+/// 接続 `t`（`target` への）でポートフォワーディングを始める（ターミナルだけが呼ぶ。エディタと
+/// ファイル転送は呼ばないので、指定があっても無視される）。指定は接続設定・`~/.ssh/config` と
+/// `extra`（「SSH で接続」の入力）。同じ接続で試した指定は二度は始めない。始められなかったものは
+/// 警告の行にするだけで、接続はそのまま使う。結果は接続の記録にも残す。
+pub(crate) fn start_forwards(
+    target: &Target,
+    t: &Arc<dyn Transport>,
+    extra: &[yy_remote::Forward],
+    note: yy_remote::ForwardNote,
+) -> Vec<ForwardReport> {
+    let Some(spec) = with_state(|r| r.resolver().resolve(target)) else {
+        return Vec::new();
+    };
+    // この接続で試したもの（接続が切れたものは止めて忘れる）
+    let (first, tried) = with_state(|r| {
+        r.forwards
+            .retain(|s| s.transport.upgrade().is_some_and(|t| !t.is_closed()));
+        match r
+            .forwards
+            .iter()
+            .find(|s| s.transport.upgrade().is_some_and(|x| Arc::ptr_eq(&x, t)))
+        {
+            Some(s) => (false, s.tried.clone()),
+            None => (true, Vec::new()),
+        }
+    })
+    .unwrap_or((true, Vec::new()));
+    let mut wanted: Vec<yy_remote::Forward> = Vec::new();
+    for f in spec.forwards.iter().chain(extra) {
+        if !tried.contains(f) && !wanted.contains(f) {
+            wanted.push(f.clone());
+        }
+    }
+    let mut out = Vec::new();
+    if first {
+        for e in &spec.forward_errors {
+            out.push((
+                false,
+                format!("ポートフォワーディングの指定を読めません: {e}"),
+            ));
+        }
+    }
+    let log = ConnectLog::new();
+    let mut active = Vec::new();
+    for f in &wanted {
+        match t.forward(f, note.clone()) {
+            Ok(a) => {
+                log.note(format!(
+                    "ポートフォワーディングを始めました: {}",
+                    a.description
+                ));
+                out.push((true, format!("ポートフォワーディング: {}", a.description)));
+                active.push(a);
+            }
+            Err(e) => {
+                log.note(format!("ポートフォワーディング {f} を始められません: {e}"));
+                out.push((
+                    false,
+                    format!(
+                        "警告: ポートフォワーディング {f} を始められません: {e}（SSH の接続はそのまま使えます）"
+                    ),
+                ));
+            }
+        }
+    }
+    if !wanted.is_empty() || !out.is_empty() {
+        save_log(target, &log);
+    }
+    with_state(|r| {
+        match r
+            .forwards
+            .iter_mut()
+            .find(|s| s.transport.upgrade().is_some_and(|x| Arc::ptr_eq(&x, t)))
+        {
+            Some(s) => {
+                s.tried.extend(wanted);
+                s._active.extend(active);
+            }
+            None => r.forwards.push(ForwardSet {
+                transport: Arc::downgrade(t),
+                tried: wanted,
+                _active: active,
+            }),
+        }
+    });
+    out
 }
 
 /// `target` への SSH の接続（ターミナル用。エージェントは使わない）。接続済みのセッションが

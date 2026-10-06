@@ -414,6 +414,9 @@ pub struct RemoteHost {
     pub proxy: Option<String>,
     /// この接続先でエージェントを置くフォルダ（ホームが noexec の場合など）
     pub agent_dir: Option<String>,
+    /// ポートフォワーディング（ターミナルだけが使う。`L 8080:localhost:80`・`R 9000:localhost:3000`・
+    /// `D 1080`。`~/.ssh/config` の LocalForward なども使う）
+    pub forward: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

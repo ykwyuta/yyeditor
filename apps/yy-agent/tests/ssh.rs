@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Read as _, Write as _};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -115,6 +116,52 @@ impl server::Handler for Handler {
             Err(_) => reply.reject(ChannelOpenFailure::ConnectFailed).await,
         }
         Ok(())
+    }
+
+    /// `-R`: 接続先（このサーバー）で待ち受け、来た接続を forwarded-tcpip で端末に渡す。
+    /// ポート 1 は断る（失敗の確認用）。
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        if *port == 1 {
+            return Ok(false);
+        }
+        let bind = if address.is_empty() || address == "localhost" {
+            "127.0.0.1"
+        } else {
+            address
+        };
+        let Ok(listener) = tokio::net::TcpListener::bind((bind, *port as u16)).await else {
+            return Ok(false);
+        };
+        let actual = listener.local_addr().unwrap().port();
+        *port = u32::from(actual);
+        let handle = session.handle();
+        let address = address.to_owned();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, peer)) = listener.accept().await {
+                let h = handle.clone();
+                let address = address.clone();
+                tokio::spawn(async move {
+                    if let Ok(ch) = h
+                        .channel_open_forwarded_tcpip(
+                            address,
+                            u32::from(actual),
+                            peer.ip().to_string(),
+                            u32::from(peer.port()),
+                        )
+                        .await
+                    {
+                        let mut s = ch.into_stream();
+                        let _ = tokio::io::copy_bidirectional(&mut s, &mut tcp).await;
+                    }
+                });
+            }
+        });
+        Ok(true)
     }
 
     async fn pty_request(
@@ -318,6 +365,8 @@ impl TestServer {
             proxy: None,
             route_error: None,
             agent_dir: None,
+            forwards: Vec::new(),
+            forward_errors: Vec::new(),
         }
     }
 }
@@ -1164,4 +1213,191 @@ fn transfers_files_over_sftp_with_the_journal() {
         .filter(|l| l.contains("照合: SHA-256") && l.contains("が一致しました"))
         .count();
     assert_eq!(verified, 2, "{lines:#?}");
+}
+
+/// 1 行ずつ「echo: 」を付けて返すサーバー（転送先）。ポートを返す。
+fn echo_server() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut r = std::io::BufReader::new(s.try_clone().unwrap());
+                let mut w = s;
+                let mut line = String::new();
+                while std::io::BufRead::read_line(&mut r, &mut line).unwrap_or(0) > 0 {
+                    let _ = w.write_all(format!("echo: {line}").as_bytes());
+                    line.clear();
+                }
+            });
+        }
+    });
+    port
+}
+
+/// 空いている手元のポート。
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// `stream` に 1 行送って、返ってきた 1 行を返す。
+fn round_trip(stream: &mut std::net::TcpStream, text: &str) -> String {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream.write_all(format!("{text}\n").as_bytes()).unwrap();
+    let mut r = std::io::BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut r, &mut line).unwrap();
+    line.trim_end().to_owned()
+}
+
+#[test]
+fn forwards_ports_and_reports_failures() {
+    use yy_remote::Forward;
+    let server = TestServer::start(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let p = Answers {
+        passwords: Mutex::new(vec![PASSWORD.into()]),
+        ..Answers::default()
+    };
+    let c = connector(dir.path());
+    let t = c
+        .connect(&server.spec(vec![]), &p, &ConnectLog::new())
+        .unwrap();
+    let notes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let n = notes.clone();
+    let note: yy_remote::ForwardNote =
+        Arc::new(move |s: &str| n.lock().unwrap().push(s.to_owned()));
+    let echo = echo_server();
+
+    // -L: 手元のポート → 接続先から転送先へ
+    let lport = free_port();
+    let l = t
+        .forward(
+            &Forward::parse_option('L', &format!("{lport}:127.0.0.1:{echo}")).unwrap(),
+            note.clone(),
+        )
+        .unwrap();
+    assert_eq!(l.port, lport);
+    assert!(
+        l.description
+            .contains(&format!("-L {lport}:127.0.0.1:{echo}")),
+        "{}",
+        l.description
+    );
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", lport)).unwrap();
+    assert_eq!(round_trip(&mut s, "hello"), "echo: hello");
+    assert!(
+        server
+            .forwards
+            .lock()
+            .unwrap()
+            .contains(&format!("127.0.0.1:{echo}"))
+    );
+
+    // 同じポートはもう使えない（警告にするだけ。接続はそのまま）
+    let e = t
+        .forward(
+            &Forward::parse_option('L', &format!("{lport}:127.0.0.1:{echo}")).unwrap(),
+            note.clone(),
+        )
+        .unwrap_err();
+    assert!(e.to_string().contains("待ち受けられません"), "{e}");
+    assert!(!t.is_closed());
+
+    // 転送先に接続できない: 手元の接続は閉じ、出来事を知らせる
+    let closed = free_port();
+    let bad = t
+        .forward(
+            &Forward::parse_option('L', &format!("{}:127.0.0.1:{closed}", free_port())).unwrap(),
+            note.clone(),
+        )
+        .unwrap();
+    let mut s2 = std::net::TcpStream::connect(("127.0.0.1", bad.port)).unwrap();
+    s2.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut buf = [0u8; 1];
+    assert_eq!(s2.read(&mut buf).unwrap_or(0), 0);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !notes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|n| n.contains("接続できません"))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{:?}",
+            notes.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // -D: SOCKS5（ホスト名）と SOCKS4a
+    let dport = free_port();
+    let d = t
+        .forward(
+            &Forward::parse_option('D', &dport.to_string()).unwrap(),
+            note.clone(),
+        )
+        .unwrap();
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", d.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.write_all(&[5, 1, 0]).unwrap();
+    let mut hello = [0u8; 2];
+    s.read_exact(&mut hello).unwrap();
+    assert_eq!(hello, [5, 0]);
+    let host = b"localhost";
+    let mut req = vec![5, 1, 0, 3, host.len() as u8];
+    req.extend_from_slice(host);
+    req.extend_from_slice(&echo.to_be_bytes());
+    s.write_all(&req).unwrap();
+    let mut rep = [0u8; 10];
+    s.read_exact(&mut rep).unwrap();
+    assert_eq!(rep[1], 0, "{rep:?}");
+    assert_eq!(round_trip(&mut s, "socks5"), "echo: socks5");
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", d.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut req = vec![4, 1];
+    req.extend_from_slice(&echo.to_be_bytes());
+    req.extend_from_slice(&[0, 0, 0, 1, b'u', 0]);
+    req.extend_from_slice(b"127.0.0.1\0");
+    s.write_all(&req).unwrap();
+    let mut rep = [0u8; 8];
+    s.read_exact(&mut rep).unwrap();
+    assert_eq!(rep[1], 0x5a, "{rep:?}");
+    assert_eq!(round_trip(&mut s, "socks4a"), "echo: socks4a");
+
+    // -R: 接続先のポート（0 なら接続先が選ぶ）→ 手元から転送先へ
+    let r = t
+        .forward(
+            &Forward::parse_option('R', &format!("0:127.0.0.1:{echo}")).unwrap(),
+            note.clone(),
+        )
+        .unwrap();
+    assert!(r.port > 0);
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", r.port)).unwrap();
+    assert_eq!(round_trip(&mut s, "remote"), "echo: remote");
+    // 接続先が断った
+    let e = t
+        .forward(
+            &Forward::parse_option('R', &format!("1:127.0.0.1:{echo}")).unwrap(),
+            note.clone(),
+        )
+        .unwrap_err();
+    assert!(e.to_string().contains("接続先が断りました"), "{e}");
+
+    // 止めたら待ち受けない
+    drop(l);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(std::net::TcpStream::connect(("127.0.0.1", lport)).is_err());
+    // 接続はそのまま使える
+    assert!(!t.is_closed());
+    let out = yy_remote::run(t.as_ref(), b"echo ok", b"").unwrap();
+    assert_eq!(out.stdout.trim_ascii(), b"ok");
 }

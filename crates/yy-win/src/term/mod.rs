@@ -134,6 +134,14 @@ impl Place {
 enum Event {
     Output(u64, Vec<u8>),
     Exit(u64, Option<u32>),
+    /// ポートフォワーディングの中の出来事（その接続先のタブに表示する）
+    Notice(Target, String),
+}
+
+/// ポートフォワーディングの知らせをタブに表示する形（OpenSSH が端末に出す警告のように）。
+fn notice_bytes(ok: bool, text: &str) -> Vec<u8> {
+    let color = if ok { "36" } else { "33" };
+    format!("\x1b[{color}m[yyterm] {text}\x1b[0m\r\n").into_bytes()
 }
 
 /// 1 つのタブ（1 つのシェル）。
@@ -637,16 +645,26 @@ fn shortcut(msg: &MSG) -> bool {
 
 /// `place` で新しいタブを開く（接続中の問い合わせのため、アプリの状態を借りずに呼ぶ）。
 fn open_tab(place: Place) {
-    let Some((frame, size, shell, term)) = with(|a| {
+    open_tab_forwarding(place, &[]);
+}
+
+/// `place` で新しいタブを開く。SSH の接続先なら、接続設定・`~/.ssh/config` と `extra` の
+/// ポートフォワーディングを（その接続でまだ始めていなければ）始め、結果をタブの先頭に表示する。
+/// 始められなくても警告を表示するだけで、シェルはそのまま使う。
+fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
+    let Some((frame, size, shell, term, tx, pending)) = with(|a| {
         (
             a.frame,
             (a.grid.0 as u16, a.grid.1 as u16),
             a.shell.clone(),
             a.config.terminal.term.clone(),
+            a.tx.clone(),
+            a.pending.clone(),
         )
     }) else {
         return;
     };
+    let mut reports: Vec<crate::remote::ForwardReport> = Vec::new();
     let backend = match &place {
         Place::Local(dir) => {
             let dir = dir.as_deref().filter(|d| d.is_dir());
@@ -670,6 +688,28 @@ fn open_tab(place: Place) {
                             .map(Backend::from)
                             .map_err(|e| format!("{target} でシェルを起動できませんでした。\n{e}"));
                         set_status("");
+                        if r.is_ok() {
+                            // フォワーディングの中の出来事は、その接続先のタブに表示する
+                            let frame_raw = frame.0 as isize;
+                            let target2 = target.clone();
+                            let note: yy_remote::ForwardNote = Arc::new(move |text: &str| {
+                                if tx
+                                    .send(Event::Notice(target2.clone(), text.to_owned()))
+                                    .is_ok()
+                                    && !pending.swap(true, Ordering::AcqRel)
+                                {
+                                    unsafe {
+                                        let _ = PostMessageW(
+                                            Some(HWND(frame_raw as *mut _)),
+                                            WM_APP_TERM_EVENT,
+                                            WPARAM(0),
+                                            LPARAM(0),
+                                        );
+                                    }
+                                }
+                            });
+                            reports = crate::remote::start_forwards(target, &t, extra, note);
+                        }
                         r
                     }
                     Err(e) => Err(e),
@@ -679,7 +719,17 @@ fn open_tab(place: Place) {
     };
     match backend {
         Ok(b) => {
-            with(|a| a.add_tab(place, b));
+            with(|a| {
+                a.add_tab(place, b);
+                if let Some(t) = a.tabs.last_mut() {
+                    for (ok, text) in &reports {
+                        t.term.feed(&notice_bytes(*ok, text));
+                    }
+                }
+            });
+            if let Some((_, w)) = reports.iter().find(|(ok, _)| !ok) {
+                set_status(w);
+            }
         }
         Err(e) => {
             if QUIET.with(|q| q.get()) {
@@ -1078,6 +1128,30 @@ impl TermApp {
                     }
                     if i == self.active {
                         active_dirty = true;
+                    }
+                }
+                Event::Notice(target, text) => {
+                    // 表示しているタブが同じ接続先ならそこに、でなければ最初のその接続先のタブに
+                    let same = |t: &Tab| matches!(&t.place, Place::Remote { target: x, .. } if x.same(&target));
+                    let i = self
+                        .tabs
+                        .get(self.active)
+                        .filter(|t| same(t))
+                        .map(|_| self.active)
+                        .or_else(|| self.tabs.iter().position(same));
+                    match i {
+                        Some(i) => {
+                            let t = &mut self.tabs[i];
+                            t.term.feed(b"\r\n");
+                            t.term.feed(&notice_bytes(false, &text));
+                            if i == self.active {
+                                active_dirty = true;
+                            }
+                        }
+                        None => {
+                            self.status_text = text;
+                            self.update_status();
+                        }
                     }
                 }
                 Event::Exit(id, code) => {
@@ -1537,13 +1611,21 @@ fn cmd_ssh(hwnd: HWND) {
     let initial = crate::remote::last()
         .map(|u| u.target().to_string())
         .unwrap_or_default();
-    let Some(text) = crate::goto::prompt_text(
+    let Some(input) = crate::goto::prompt_text(
         hwnd,
         "SSH で接続",
-        "接続先（ユーザー@ホスト:ポート、または ~/.ssh/config の Host の名前）:",
+        "接続先（ユーザー@ホスト:ポート、または ~/.ssh/config の Host の名前）。\
+         ポートフォワーディングは -L 8080:localhost:80・-R 9000:localhost:3000・-D 1080 を続けて書けます:",
         &initial,
     ) else {
         return;
+    };
+    let (text, forwards) = match yy_remote::forward::split_target_and_forwards(&input) {
+        Ok(v) => v,
+        Err(e) => {
+            error_box(hwnd, &format!("入力を読めません。\n{e}"));
+            return;
+        }
     };
     let text = text.trim();
     let place = if let Some(u) = RemoteUri::parse(text) {
@@ -1560,7 +1642,7 @@ fn cmd_ssh(hwnd: HWND) {
         error_box(hwnd, &format!("接続先（{text}）を読めません。"));
         return;
     };
-    open_tab(place);
+    open_tab_forwarding(place, &forwards);
 }
 
 fn cmd_add_folder(hwnd: HWND) {

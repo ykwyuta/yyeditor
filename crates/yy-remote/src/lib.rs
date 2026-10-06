@@ -6,6 +6,7 @@
 //! 依存しないので、UI からも、SSH を使わないテスト（[`local`]）からも使える。
 
 pub mod deploy;
+pub mod forward;
 pub mod fs;
 pub mod known_hosts;
 #[cfg(unix)]
@@ -26,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use deploy::AgentFiles;
+pub use forward::{ActiveForward, Forward, ForwardNote};
 pub use fs::{RemoteFs, SftpFs};
 pub use log::ConnectLog;
 pub use session::{Session, UploadOutcome};
@@ -52,6 +54,14 @@ pub trait Transport: Send + Sync {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "この接続では対話シェルを起動できません",
+        ))
+    }
+    /// ポートフォワーディングを始める（ターミナルだけが使う。[`forward`]）。返した値を drop すると
+    /// 止める。転送の途中の出来事（転送先に接続できないなど）は `note` に知らせる。
+    fn forward(&self, f: &Forward, _note: ForwardNote) -> io::Result<ActiveForward> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("この接続ではポートフォワーディング（{f}）を使えません"),
         ))
     }
 }

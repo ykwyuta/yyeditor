@@ -12,6 +12,7 @@
 //! 接続し、次の接続先へは踏み台の `direct-tcpip` チャネルの上で SSH を話す。最初の接続先
 //! （踏み台がなければ接続先そのもの）への TCP 接続には HTTP・SOCKS のプロキシを使える。
 
+mod forward;
 mod proxy;
 
 use std::io::{self, Read, Write};
@@ -74,6 +75,8 @@ fn ssh_error(e: russh::Error) -> io::Error {
 /// russh から呼ばれる処理。ホスト鍵は受け取っておくだけで、照合は認証の前に行う。
 struct Client {
     server_key: Arc<Mutex<Option<PublicKey>>>,
+    /// `-R` の振り分け表（接続先から開かれた forwarded-tcpip チャネル）
+    routes: forward::Routes,
 }
 
 impl client::Handler for Client {
@@ -90,6 +93,26 @@ impl client::Handler for Client {
         };
         *self.server_key.lock().unwrap() = Some(key);
         Ok(true)
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        originator_address: &str,
+        originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        forward::on_forwarded(
+            &self.routes,
+            channel,
+            connected_port,
+            format!("{originator_address}:{originator_port}"),
+            reply,
+        );
+        Ok(())
     }
 }
 
@@ -197,12 +220,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
 impl SshConnector {
     /// 1 つのホストに接続し、ホスト鍵を照合して認証する。`via` があればその踏み台を経由する。
+    #[allow(clippy::too_many_arguments)]
     fn connect_hop(
         &self,
         rt: &Runtime,
         config: &Arc<client::Config>,
         spec: &HostSpec,
         via: Option<&Handle<Client>>,
+        routes: forward::Routes,
         prompter: &dyn Prompter,
         log: &ConnectLog,
     ) -> io::Result<Handle<Client>> {
@@ -231,6 +256,7 @@ impl SshConnector {
         let server_key = Arc::new(Mutex::new(None));
         let handler = Client {
             server_key: server_key.clone(),
+            routes,
         };
         let mut handle = rt.block_on(async {
             let connect = async {
@@ -335,9 +361,16 @@ impl Connector for SshConnector {
             ..client::Config::default()
         });
         let mut handles: Vec<Arc<Handle<Client>>> = Vec::new();
+        // 接続先（最後のホップ）の -R の振り分け表
+        let routes = forward::Routes::default();
         for (i, hop) in hops.iter().enumerate() {
             let via = handles.last().map(|h| h.as_ref());
-            match self.connect_hop(rt, &config, hop, via, prompter, log) {
+            let r = if i + 1 == hops.len() {
+                routes.clone()
+            } else {
+                forward::Routes::default()
+            };
+            match self.connect_hop(rt, &config, hop, via, r, prompter, log) {
                 Ok(h) => handles.push(Arc::new(h)),
                 Err(e) => {
                     for h in handles.iter().rev() {
@@ -357,6 +390,7 @@ impl Connector for SshConnector {
         Ok(Arc::new(SshTransport {
             handle,
             jumps: handles,
+            routes,
         }))
     }
 }
@@ -812,6 +846,8 @@ struct SshTransport {
     handle: Arc<Handle<Client>>,
     /// 経由している踏み台の接続（最初の踏み台から順に）
     jumps: Vec<Arc<Handle<Client>>>,
+    /// `-R` の振り分け表
+    routes: forward::Routes,
 }
 
 impl Drop for SshTransport {
@@ -1003,6 +1039,14 @@ impl Transport for SshTransport {
 
     fn is_closed(&self) -> bool {
         self.handle.is_closed() || self.jumps.iter().any(|h| h.is_closed())
+    }
+
+    fn forward(
+        &self,
+        f: &yy_remote::Forward,
+        note: yy_remote::ForwardNote,
+    ) -> io::Result<yy_remote::ActiveForward> {
+        forward::start(runtime()?, &self.handle, &self.routes, f, note)
     }
 }
 
