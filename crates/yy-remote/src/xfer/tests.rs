@@ -208,13 +208,13 @@ impl Harness {
     }
 }
 
-fn upload(protocol: Protocol, budgets: &[i64], chunk: u64) {
+fn upload(protocol: Protocol, size: usize, budgets: &[i64], chunk: u64) {
     if !tools(protocol) {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("big.bin");
-    let content = data(3_000_000);
+    let content = data(size);
     std::fs::write(&src, &content).unwrap();
     let dst = dir.path().join("remote/sub/big.bin");
     let h = Harness::new(dir.path(), budgets);
@@ -225,7 +225,7 @@ fn upload(protocol: Protocol, budgets: &[i64], chunk: u64) {
     assert!(!dir.path().join("remote/sub/big.bin.yypart").exists());
     assert!(h.logged("接続が切れました"), "{}", h.dump());
     assert!(h.logged("レジューム"), "{}", h.dump());
-    assert!(h.logged("確認: 接続先の大きさ 3000000 バイトが一致しました"));
+    assert!(h.logged(&format!("確認: 接続先の大きさ {size} バイトが一致しました")));
     assert!(h.connections.load(Ordering::Relaxed) as usize > budgets.len());
     // 完了したらジャーナルから消える
     assert!(h.journal.load().is_empty());
@@ -239,12 +239,13 @@ fn upload(protocol: Protocol, budgets: &[i64], chunk: u64) {
 
 #[test]
 fn sftp_upload_resumes_after_disconnects() {
-    upload(Protocol::Sftp, &[700_000, 900_000], 0);
+    // SFTP は 2 MiB まで応答を待たずに送るので、それより後で切る（切れる前の応答で位置が確定する）
+    upload(Protocol::Sftp, 9_000_000, &[3_000_000, 3_000_000], 0);
 }
 
 #[test]
 fn scp_upload_resumes_after_disconnects() {
-    upload(Protocol::Scp, &[700_000, 900_000], 256 << 10);
+    upload(Protocol::Scp, 3_000_000, &[700_000, 900_000], 256 << 10);
 }
 
 fn download(protocol: Protocol) {
@@ -295,17 +296,23 @@ fn resumes_from_the_journal_after_a_restart_and_checks_the_tail() {
     }
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("a.bin");
-    let content = data(2_000_000);
+    // 並べて送る量（32 KiB × 64 = 2 MiB）より後で切る: 切れたときには、それより前の分の応答が
+    // 必ず届いている（確定した位置が 0 にならない）
+    let content = data(8_000_000);
     std::fs::write(&src, &content).unwrap();
     let dst = dir.path().join("a-remote.bin");
     // 再接続しない設定で切れる → 中断としてジャーナルに残る
-    let h = Harness::new(dir.path(), &[1_000_000]);
+    let h = Harness::new(dir.path(), &[6_000_000]);
     let mut job = upload_job(1, Protocol::Sftp, &src, uri(&dst), false).unwrap();
     h.run(&mut job, 0, 0);
     assert_eq!(job.state, State::Interrupted, "{}", h.dump());
     let saved = h.journal.load();
     assert_eq!(saved.len(), 1);
-    assert!(saved[0].done > 0 && saved[0].done < 2_000_000);
+    assert!(
+        saved[0].done > 0 && saved[0].done < 8_000_000,
+        "{}",
+        h.dump()
+    );
     assert_eq!(saved[0].state, State::Interrupted);
 
     // アプリを起動し直した: ジャーナルから続ける
@@ -318,7 +325,7 @@ fn resumes_from_the_journal_after_a_restart_and_checks_the_tail() {
 
     // 途中のファイルの中身が違えば最初から送る
     std::fs::remove_file(&dst).unwrap();
-    let h3 = Harness::new(dir.path(), &[1_000_000]);
+    let h3 = Harness::new(dir.path(), &[6_000_000]);
     let mut job = upload_job(2, Protocol::Sftp, &src, uri(&dst), false).unwrap();
     h3.run(&mut job, 0, 0);
     let mut job = h3.journal.load().into_iter().find(|j| j.id == 2).unwrap();
