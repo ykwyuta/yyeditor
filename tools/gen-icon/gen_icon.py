@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""yyeditor と yyterm のアイコン（apps/yyeditor/res/yyeditor.ico、apps/yyterm/res/yyterm.ico）を作る。
+"""yyeditor・yyterm・yysftp のアイコン（apps/<アプリ>/res/<アプリ>.ico）を作る。
 
     python3 tools/gen-icon/gen_icon.py
 
 角丸の四角に白の「YY」を描く。エディタは青地にテキストの行を表す線、ターミナルは黒地に
-プロンプト（`>_`）。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
+プロンプト（`>_`）、ファイル転送は緑地に上下の矢印。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
 Pillow が必要。
 """
 
@@ -18,6 +18,7 @@ SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256]
 SCALE = 4
 EDITOR = ((0x3B, 0x82, 0xF6), (0x1D, 0x4E, 0xD8))
 TERMINAL = ((0x37, 0x41, 0x51), (0x11, 0x18, 0x27))
+TRANSFER = ((0x10, 0xB9, 0x81), (0x04, 0x78, 0x57))
 PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
@@ -36,8 +37,9 @@ def draw_y(d, x, y, w, h, t, a):
     )
 
 
-def render(size, terminal=False):
-    top_c, bottom_c = TERMINAL if terminal else EDITOR
+def render(size, kind="editor"):
+    terminal = kind == "terminal"
+    top_c, bottom_c = {"editor": EDITOR, "terminal": TERMINAL, "transfer": TRANSFER}[kind]
     n = size * SCALE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     # 縦のグラデーション
@@ -77,6 +79,15 @@ def render(size, terminal=False):
         d.line([(left, yy), (left + size_p * 0.7, yy + size_p / 2), (left, yy + size_p)], fill=PROMPT, width=round(lt))
         ux = left + size_p * 0.95
         d.rectangle([ux, yy + size_p - lt, ux + size_p * 0.9, yy + size_p], fill=PROMPT)
+    elif not small and kind == "transfer":
+        # 上向きと下向きの矢印
+        lt = n * 0.06
+        ah = n * 0.2
+        for cx, up in [(n * 0.38, True), (n * 0.62, False)]:
+            y0, y1 = n * 0.64, n * 0.88
+            d.rectangle([cx - lt / 2, y0 + (lt if up else 0), cx + lt / 2, y1 - (0 if up else lt)], fill=WHITE)
+            tip, base = (y0, y0 + ah * 0.6) if up else (y1, y1 - ah * 0.6)
+            d.polygon([(cx, tip), (cx - ah / 2, base), (cx + ah / 2, base)], fill=WHITE)
     elif not small:
         # テキストの行
         lt = n * 0.055
@@ -120,10 +131,10 @@ def write_ico(path, images):
 
 def main():
     root = Path(__file__).resolve().parents[2]
-    for app, terminal in [("yyeditor", False), ("yyterm", True)]:
+    for app, kind in [("yyeditor", "editor"), ("yyterm", "terminal"), ("yysftp", "transfer")]:
         res = root / "apps" / app / "res"
         res.mkdir(parents=True, exist_ok=True)
-        images = [render(s, terminal) for s in SIZES]
+        images = [render(s, kind) for s in SIZES]
         write_ico(res / f"{app}.ico", images)
         images[-1].save(res / f"{app}-256.png")
         print(res / f"{app}.ico")

@@ -40,6 +40,8 @@ pub struct Config {
     pub remote: RemoteConfig,
     /// ターミナル（yyterm。12 章）
     pub terminal: TerminalConfig,
+    /// ファイル転送（yysftp。13 章）
+    pub transfer: TransferConfig,
 }
 
 impl Default for Config {
@@ -52,6 +54,35 @@ impl Default for Config {
             filetype: default_filetypes(),
             remote: RemoteConfig::default(),
             terminal: TerminalConfig::default(),
+            transfer: TransferConfig::default(),
+        }
+    }
+}
+
+/// ファイル転送（yysftp）の設定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TransferConfig {
+    /// 転送の方式（`sftp` か `scp`）
+    pub protocol: String,
+    /// 進みがないまま再接続してよい回数
+    pub retries: u32,
+    /// SCP のアップロードで 1 回に送る量（MiB。切断で失うのは多くてもこの量）
+    pub scp_chunk_mb: u32,
+    /// 名前が `.` で始まるファイルも表示する
+    pub show_hidden: bool,
+    /// ダウンロードの既定の保存先（空ならダウンロード フォルダ）
+    pub download_dir: String,
+}
+
+impl Default for TransferConfig {
+    fn default() -> Self {
+        TransferConfig {
+            protocol: "sftp".into(),
+            retries: 10,
+            scp_chunk_mb: 32,
+            show_hidden: false,
+            download_dir: String::new(),
         }
     }
 }
@@ -569,6 +600,8 @@ mod tests {
         assert!(c.remote.remember_passwords);
         assert_eq!(c.terminal.scrollback, 10_000);
         assert_eq!(c.terminal.term, "xterm-256color");
+        assert_eq!(c.transfer.protocol, "sftp");
+        assert_eq!(c.transfer.retries, 10);
         assert_eq!(c.remote.agent_dir, "/work/agent");
         let h = &c.remote.host["build"];
         assert_eq!(h.hostname.as_deref(), Some("build01.example.co.jp"));

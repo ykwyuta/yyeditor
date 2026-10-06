@@ -109,6 +109,17 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 - ワークスペースはエディタと同じ `*.yyworkspace`。サイドバー（Ctrl+Shift+E）のフォルダをダブルクリックするとそこでターミナルを開き（リモートのフォルダは SSH）、ファイルはエディタで開きます。エディタのワークスペースの「ターミナルで開く」は、yyterm.exe が同じフォルダにあれば yyterm で開きます。
 - タブ（Ctrl+Shift+T・Ctrl+Shift+W・Ctrl+Tab）、コピー・貼り付け（Ctrl+Shift+C/V、右クリック）、スクロールバック（Shift+PageUp/PageDown、ホイール）、文字の大きさ（Ctrl++/-/0）。
 
+### ファイル転送（yysftp）
+
+提案書 [13 章](docs/proposal/13-transfer.md) の方式で、エディタ・ターミナルと同じクレートを使った別のアプリとして SFTP・SCP のファイル転送（`yysftp.exe`）を作っています。
+
+- エクスプローラー風の画面です。左に接続先とフォルダのツリー、右にフォルダの中身（名前・更新日時・種類・サイズ・属性。エクスプローラーと同じアイコン）、上に戻る・進む・上へとアドレスバー（`ユーザー@ホスト:/パス`）、下に転送の一覧と記録。
+- エクスプローラーからドラッグ＆ドロップ（ファイル・フォルダ）でアップロード、選んだ項目を Ctrl+D でダウンロード。名前の変更（F2）、削除（Del）、新しいフォルダ（Ctrl+Shift+N）。
+- 数十 GB のファイルも送れます（SFTP は要求を並べて送り、回線の遅延を隠します）。送り先には `<名前>.yypart` に書き、大きさを確かめてから本来の名前にします。
+- 途中で切断されたら、間を空けて自動で接続し直し、続きから送ります（レジューム）。送り終えた位置はジャーナルに書くので、一時停止やアプリの終了の後でも（次の起動で）続きから送れます。SFTP のアップロードでは続ける位置の直前を照合します。
+- 転送の様子（接続、続ける位置の決め方、進みと速さ、切断と再接続、確認、名前の変更）を `%APPDATA%\yyeditor\logs\transfer.log` と画面の「記録」に細かく残します。
+- 接続（組み込みの SSH、踏み台・プロキシ・ホスト鍵・保存したパスワード・接続の記録）、設定ファイル、同梱フォントはエディタ・ターミナルと共通です。接続先にエージェントは置かず、sftp-server（SFTP）か scp（SCP）を使います（`sudo` は使いません）。
+
 ### 対応している文字コード
 
 | 文字コード | 備考 |
@@ -253,17 +264,19 @@ crates/
   yy-syntax/   シンタックスハイライト（TOML の定義、複数パターンの正規表現、行の開始状態の記録、ファイル種類の判定）
   yy-preview/  Markdown・HTML のプレビュー（Markdown → HTML、ページ、同梱の Mermaid・KaTeX・d3）
   yy-proto/    リモート編集のプロトコル（端末とエージェントで共有するメッセージとフレーム）
-  yy-remote/   リモート編集の端末側（エージェントの配置、要求と応答、~/.ssh/config・known_hosts の読み取り）
+  yy-remote/   リモート編集の端末側（エージェントの配置、要求と応答、~/.ssh/config・known_hosts の読み取り）、
+               ファイル転送の中核（SFTP v3・SCP・ジャーナル付きのレジューム・転送の記録）
   yy-ssh/      組み込みの SSH クライアント（russh + ring。OpenSSH を使わない）
   yy-term/     ターミナルの中核（制御シーケンスの解釈、画面、スクロールバック、キーの送り方。OS 非依存）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
 apps/yyterm/   ターミナルの実行ファイル（yy-win の term モジュール。ビルドスクリプトは yyeditor と共通）
+apps/yysftp/   ファイル転送の実行ファイル（yy-win の sftp モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yy-agent/ SSH 接続先に置くエージェント（Linux 用、musl で静的リンク）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
                     ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
-tools/gen-icon/     アイコン（apps/yyeditor/res/yyeditor.ico・apps/yyterm/res/yyterm.ico）の生成（Python + Pillow）
+tools/gen-icon/     アイコン（apps/yyeditor・yyterm・yysftp の res/*.ico）の生成（Python + Pillow）
 tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の取得（npm から）
 ```
 
@@ -274,9 +287,10 @@ tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の�
 Windows（MSVC）:
 
 ```sh
-cargo build --release -p yyeditor -p yyterm
+cargo build --release -p yyeditor -p yyterm -p yysftp
 target\release\yyeditor.exe [開くファイル]
 target\release\yyterm.exe [フォルダ | ssh://接続先/パス | ユーザー@ホスト]
+target\release\yysftp.exe [ssh://接続先/パス | ユーザー@ホスト:/パス | ユーザー@ホスト]
 ```
 
 リモート編集のエージェント（Linux 用。exe と同じフォルダの `agents\yy-agent-x86_64-linux` に置く）:
@@ -294,7 +308,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Linux から Windows UI 層の型検査のみ行う場合
 rustup target add x86_64-pc-windows-msvc
 # （組み込みの SSH が使う ring は Windows SDK がないと C のビルドができないので外す）
-cargo check -p yy-win -p yyeditor -p yyterm --no-default-features --target x86_64-pc-windows-msvc
+cargo check -p yy-win -p yyeditor -p yyterm -p yysftp --no-default-features --target x86_64-pc-windows-msvc
 ```
 
 巨大ファイルでの性能確認:

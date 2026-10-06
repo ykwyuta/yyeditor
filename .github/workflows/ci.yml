@@ -65,7 +65,7 @@ jobs:
       - name: test
         run: cargo test --workspace
       - name: build release
-        run: cargo build --release -p yyeditor -p yyterm
+        run: cargo build --release -p yyeditor -p yyterm -p yysftp
       # エージェントは exe と同じフォルダの agents\ に置いて配布する（11 章 6.2）
       - uses: actions/download-artifact@v4
         with:
@@ -76,6 +76,7 @@ jobs:
         run: |
           Copy-Item target/release/yyeditor.exe dist/
           Copy-Item target/release/yyterm.exe dist/
+          Copy-Item target/release/yysftp.exe dist/
       - uses: actions/upload-artifact@v4
         with:
           name: yyeditor-windows-x64
@@ -90,6 +91,11 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # ファイル転送のテスト（13 章 9）は本物の sftp-server・scp を使う
+      - name: OpenSSH (sftp-server, scp)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
@@ -99,4 +105,4 @@ jobs:
           rustup target add x86_64-pc-windows-msvc
           # 組み込みの SSH（ring）は C のビルドに Windows SDK が要るので、ここでは外して確かめる
           # （SSH を含むビルドは Windows のジョブで行う）
-          cargo check -p yy-win -p yyeditor -p yyterm --no-default-features --target x86_64-pc-windows-msvc
+          cargo check -p yy-win -p yyeditor -p yyterm -p yysftp --no-default-features --target x86_64-pc-windows-msvc

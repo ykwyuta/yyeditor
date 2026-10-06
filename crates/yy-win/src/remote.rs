@@ -750,6 +750,49 @@ fn connect<T: Send + 'static>(
     }
 }
 
+/// バックグラウンドのスレッドから接続する関数（転送の再接続に使う。13 章）。
+pub(crate) type BackgroundConnect = Arc<
+    dyn Fn(&yy_remote::log::TransferLog, u64) -> std::io::Result<Arc<dyn Transport>> + Send + Sync,
+>;
+
+/// `target` に、どのスレッドからでも接続できる関数を作る（UI スレッドで呼ぶ）。接続中の
+/// 問い合わせ（パスワードなど）は UI スレッドのダイアログで尋ね、接続の記録は
+/// `remote-ssh.log` と転送の記録の両方に残す。
+pub(crate) fn background_connector(target: &Target) -> Result<BackgroundConnect, String> {
+    let prepared = with_state(|r| {
+        let spec = r.resolver().resolve(target);
+        r.connector().map(|c| (c, spec))
+    })
+    .flatten();
+    let Some((connector, spec)) = prepared else {
+        return Err("SSH の機能が組み込まれていません。".into());
+    };
+    let prompter = UiPrompter {
+        frame: SendHwnd(frame().0 as isize),
+    };
+    let target = target.clone();
+    Ok(Arc::new(move |tlog, id| {
+        let log = ConnectLog::new();
+        let r = connector.connect(&spec, &prompter, &log);
+        match &r {
+            Ok(_) => log.note("接続しました"),
+            Err(e) => log.note(format!("接続できませんでした: {e}")),
+        }
+        save_log(&target, &log);
+        tlog.connect_log(Some(id), &log);
+        r
+    }))
+}
+
+/// 手元の日時（記録の行の先頭。`2026-10-06 12:34:56.789`）。
+pub(crate) fn local_clock() -> String {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
+    )
+}
+
 /// 資格情報マネージャーに保存したパスワードを確かめて削除する（ヘルプ メニュー）。
 pub(crate) fn forget_passwords(owner: HWND) {
     use yy_remote::PasswordStore;

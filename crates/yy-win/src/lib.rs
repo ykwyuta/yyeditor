@@ -31,6 +31,7 @@ mod recorddlg;
 mod remote;
 mod remotedlg;
 mod render;
+mod sftp;
 mod tabclose;
 mod term;
 mod util;
@@ -44,6 +45,8 @@ use windows::core::{PCWSTR, Result, w};
 
 use crate::util::Context;
 
+/// ファイル転送（yysftp）を起動する
+pub use sftp::run_sftp;
 /// ターミナル（yyterm）を起動する
 pub use term::run_terminal;
 /// SSH の接続の実装を作る関数（`yy-ssh`。実行ファイルが [`run`] に渡す）
