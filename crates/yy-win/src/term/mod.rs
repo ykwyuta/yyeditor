@@ -1928,7 +1928,22 @@ fn load_remote_dir(hwnd: HWND, generation: usize, index: usize) {
     let Some(uri) = with(|a| a.sidebar.pending_remote(generation, index)).flatten() else {
         return;
     };
-    let listed = crate::remote::list_dir(&uri);
+    let mut listed = crate::remote::list_dir(&uri);
+    // 中身がフォルダ 1 つだけなら束ねて（`a/b`。VS Code と同じ）、その中を読む
+    for _ in 0..workspace::COMPACT_DEPTH {
+        let only = match &listed {
+            Ok((entries, 0)) => match entries.as_slice() {
+                [e] if e.is_dir => e.clone(),
+                _ => break,
+            },
+            _ => break,
+        };
+        let Some(next) = with(|a| a.sidebar.merge_single(generation, index, &only)).flatten()
+        else {
+            break;
+        };
+        listed = crate::remote::list_dir(&next);
+    }
     match listed {
         Ok((entries, _)) => {
             with(|a| {

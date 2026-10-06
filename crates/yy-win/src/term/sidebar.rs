@@ -25,7 +25,10 @@ pub(crate) const ID_TREE: u16 = 2100;
 
 /// ツリーの 1 項目。
 pub(crate) struct Node {
+    /// 束ねたフォルダ（`a/b/c`。VS Code と同じ）では、いちばん奥のフォルダ
     pub path: PathBuf,
+    /// 表示している名前
+    label: String,
     pub is_dir: bool,
     pub root: bool,
     loaded: bool,
@@ -154,7 +157,8 @@ impl Sidebar {
         Ok(s)
     }
 
-    fn insert(&mut self, parent: HTREEITEM, node: Node, label: &str) {
+    fn insert(&mut self, parent: HTREEITEM, mut node: Node, label: &str) {
+        node.label = label.to_owned();
         let (image, selected) = if node.is_dir {
             (self.icons.0, self.icons.1)
         } else {
@@ -211,6 +215,7 @@ impl Sidebar {
                 TVI_ROOT,
                 Node {
                     path: f,
+                    label: String::new(),
                     is_dir: true,
                     root: true,
                     loaded: false,
@@ -275,9 +280,11 @@ impl Sidebar {
         }
         self.nodes[i].loaded = true;
         let dir = self.nodes[i].path.clone();
-        let entries = workspace::list_dir(&dir)
+        let mut entries = workspace::list_dir(&dir)
             .map(|(e, _)| e)
             .unwrap_or_default();
+        // 中身がフォルダ 1 つだけのフォルダは束ねる（VS Code と同じ）
+        workspace::compact_local(&mut entries);
         self.add_children(i, entries);
         None
     }
@@ -308,6 +315,7 @@ impl Sidebar {
                 item,
                 Node {
                     path: e.path,
+                    label: String::new(),
                     is_dir: e.is_dir,
                     root: false,
                     loaded: false,
@@ -316,6 +324,40 @@ impl Sidebar {
                 &e.name,
             );
         }
+    }
+
+    /// まだ読んでいないリモートのフォルダ `index` の中身がフォルダ `only` 1 つだけだったとき、
+    /// 束ねて（`a/b`）、その中のフォルダを読むよう返す（起点のフォルダは束ねない）。
+    pub(crate) fn merge_single(
+        &mut self,
+        generation: usize,
+        index: usize,
+        only: &workspace::Entry,
+    ) -> Option<RemoteUri> {
+        self.pending_remote(generation, index)?;
+        let n = &mut self.nodes[index];
+        if n.root || !only.is_dir {
+            return None;
+        }
+        let next = remote_uri(&only.path)?;
+        n.path = only.path.clone();
+        n.label = format!("{}/{}", n.label, only.name);
+        let mut text: Vec<u16> = n.label.encode_utf16().chain([0]).collect();
+        let tv = TVITEMEXW {
+            mask: TVIF_TEXT | TVIF_HANDLE,
+            hItem: n.item,
+            pszText: PWSTR(text.as_mut_ptr()),
+            ..Default::default()
+        };
+        unsafe {
+            SendMessageW(
+                self.tree,
+                TVM_SETITEMW,
+                None,
+                Some(LPARAM(&tv as *const _ as isize)),
+            );
+        }
+        Some(next)
     }
 
     /// 項目を開く。
