@@ -88,6 +88,7 @@ const ID_ABOUT: u16 = 301;
 const ID_HELP: u16 = 302;
 const ID_HELP_KEYS: u16 = 303;
 const ID_OPEN_SETTINGS: u16 = 304;
+const ID_OPEN_REMOTE_LOG: u16 = 305;
 const ID_UNDO: u16 = 401;
 const ID_REDO: u16 = 402;
 const ID_CUT: u16 = 403;
@@ -632,6 +633,7 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         item(help, ID_HELP, w!("ヘルプ(&H)\tF1"))?;
         item(help, ID_HELP_KEYS, w!("キーボードショートカット(&K)"))?;
         item(help, ID_OPEN_SETTINGS, w!("設定ファイルを開く(&S)"))?;
+        item(help, ID_OPEN_REMOTE_LOG, w!("リモート接続の記録を開く(&R)"))?;
         sep(help)?;
         item(help, ID_ABOUT, w!("バージョン情報(&A)"))?;
         AppendMenuW(bar, MF_POPUP, file.0 as usize, w!("ファイル(&F)"))?;
@@ -3848,6 +3850,17 @@ fn open_settings(hwnd: HWND) {
     });
 }
 
+/// リモート接続の記録（接続のたびに追記する）を開く。
+fn open_remote_log(hwnd: HWND) {
+    match crate::remote::log_path() {
+        Some(path) if path.exists() => open_path(hwnd, path, None, false),
+        _ => info_box(
+            hwnd,
+            "リモート接続の記録はまだありません。SSH の接続先に接続すると記録します。",
+        ),
+    }
+}
+
 /// `wparam`（WM_COMMAND）が「閉じる」か（ヘルプのウィンドウで Ctrl+W を受けるため）。
 pub(crate) fn is_close_command(wparam: WPARAM) -> bool {
     loword(wparam.0) as u16 == ID_CLOSE
@@ -5023,6 +5036,7 @@ fn on_command(hwnd: HWND, id: u16) {
             }
         }
         ID_OPEN_SETTINGS => open_settings(hwnd),
+        ID_OPEN_REMOTE_LOG => open_remote_log(hwnd),
         ID_ABOUT => info_box(
             hwnd,
             &format!(

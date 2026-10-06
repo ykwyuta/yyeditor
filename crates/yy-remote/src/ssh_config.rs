@@ -57,6 +57,60 @@ impl HostSpec {
     pub fn user_host(&self) -> String {
         format!("{}@{}", self.user, self.hostname)
     }
+
+    /// `ユーザー@ホスト:ポート` の表示。
+    pub fn address(&self) -> String {
+        if self.hostname.contains(':') {
+            format!("{}@[{}]:{}", self.user, self.hostname, self.port)
+        } else {
+            format!("{}@{}:{}", self.user, self.hostname, self.port)
+        }
+    }
+
+    /// 解決した接続設定の説明（接続の記録に使う。パスワードは含めない）。
+    pub fn describe(&self) -> Vec<String> {
+        let mut out = vec![format!(
+            "接続先: {}（入力: {}）",
+            self.address(),
+            self.target
+        )];
+        let keys: Vec<String> = self
+            .identity_files
+            .iter()
+            .map(|f| {
+                let state = if f.is_file() { "あり" } else { "なし" };
+                format!("{}（{state}）", f.display())
+            })
+            .collect();
+        if keys.is_empty() {
+            out.push("秘密鍵: 指定なし".into());
+        } else {
+            out.push(format!("秘密鍵: {}", keys.join(", ")));
+        }
+        for (i, j) in self.jumps.iter().enumerate() {
+            let via = match &j.proxy {
+                Some(p) if i == 0 => format!("（プロキシ {p} 経由）"),
+                _ => String::new(),
+            };
+            out.push(format!("踏み台 {}: {}{via}", i + 1, j.address()));
+        }
+        if let Some(p) = self.proxy.as_ref().filter(|_| self.jumps.is_empty()) {
+            out.push(format!("プロキシ: {p}"));
+        }
+        if self.jumps.is_empty() && self.proxy.is_none() {
+            out.push("経路: 直接接続".into());
+        }
+        for e in std::iter::once(self)
+            .chain(&self.jumps)
+            .filter_map(|h| h.route_error.as_ref())
+        {
+            out.push(format!("経路の設定の誤り: {e}"));
+        }
+        if let Some(d) = &self.agent_dir {
+            out.push(format!("エージェントの配置先: {d}"));
+        }
+        out
+    }
 }
 
 /// yyeditor の接続設定（`config.toml` の `[remote.host.<名前>]`）の 1 項目。

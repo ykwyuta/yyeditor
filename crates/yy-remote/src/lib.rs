@@ -9,6 +9,7 @@ pub mod deploy;
 pub mod known_hosts;
 #[cfg(unix)]
 pub mod local;
+pub mod log;
 pub mod proxy;
 pub mod rpc;
 pub mod session;
@@ -21,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use deploy::AgentFiles;
+pub use log::ConnectLog;
 pub use session::{Session, UploadOutcome};
 pub use ssh_config::HostSpec;
 pub use uri::RemoteUri;
@@ -148,7 +150,13 @@ pub type ConnectorFactory = Arc<dyn Fn(&ConnectorOptions) -> Arc<dyn Connector> 
 /// SSH の接続を作るもの（実装は `yy-ssh`）。
 pub trait Connector: Send + Sync {
     /// `spec` に接続して認証する。ホスト鍵の確認や、パスワードなどの入力は `prompter` に尋ねる。
-    fn connect(&self, spec: &HostSpec, prompter: &dyn Prompter) -> io::Result<Arc<dyn Transport>>;
+    /// 各段階を `log` に記録する（失敗したときに原因を調べるため）。
+    fn connect(
+        &self,
+        spec: &HostSpec,
+        prompter: &dyn Prompter,
+        log: &ConnectLog,
+    ) -> io::Result<Arc<dyn Transport>>;
 }
 
 /// ホスト鍵の確認の種類。

@@ -191,15 +191,30 @@ pub fn install(
     image: &AgentImage,
     platform: &Platform,
     agent_dir: Option<&str>,
+    log: &crate::ConnectLog,
 ) -> io::Result<Vec<u8>> {
     let dir = yy_proto::join_path(
         &agent_root(platform, agent_dir),
         image.version_dir().as_bytes(),
     );
     let exe = yy_proto::join_path(&dir, b"yy-agent");
-    if installed_hash(t, &exe)?.as_deref() == Some(image.sha256.as_str()) {
+    let installed = installed_hash(t, &exe)?;
+    if installed.as_deref() == Some(image.sha256.as_str()) {
+        log.note(format!(
+            "エージェントは配置済みです（{}）",
+            yy_proto::display_path(&exe)
+        ));
         return Ok(exe);
     }
+    log.note(format!(
+        "エージェントを配置します（{}、{}）",
+        yy_proto::display_path(&exe),
+        if installed.is_some() {
+            "ハッシュが違うため置き換え"
+        } else {
+            "未配置"
+        }
+    ));
     let data = std::fs::read(&image.local)?;
     let mut cmd = b"D=".to_vec();
     cmd.extend_from_slice(&shell_quote(&dir));

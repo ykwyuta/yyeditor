@@ -28,8 +28,8 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use yy_remote::known_hosts::{self, HostKeyStatus};
 use yy_remote::{
-    Connector, ConnectorFactory, ConnectorOptions, Exit, HostKeyCheck, HostKeyQuestion, HostSpec,
-    Process, Prompter, STDERR_LIMIT, Transport,
+    ConnectLog, Connector, ConnectorFactory, ConnectorOptions, Exit, HostKeyCheck, HostKeyQuestion,
+    HostSpec, Process, Prompter, STDERR_LIMIT, Transport,
 };
 
 /// 接続を待つ時間の上限
@@ -118,6 +118,7 @@ impl SshConnector {
         spec: &HostSpec,
         key: &PublicKey,
         prompter: &dyn Prompter,
+        log: &ConnectLog,
     ) -> io::Result<()> {
         let openssh = key
             .to_openssh()
@@ -127,17 +128,38 @@ impl SshConnector {
             return Err(io::Error::other("ホスト鍵を読めません"));
         };
         let name = spec.known_hosts_name();
-        let status = known_hosts::check(&self.known_hosts_files(), &name, algorithm, b64);
+        let fingerprint = known_hosts::fingerprint(b64).unwrap_or_default();
+        log.note(format!(
+            "ホスト鍵: {algorithm} {fingerprint}（known_hosts での名前 {name}）"
+        ));
+        let files = self.known_hosts_files();
+        let status = known_hosts::check(&files, &name, algorithm, b64);
         let check = match status {
-            HostKeyStatus::Known => return Ok(()),
-            HostKeyStatus::Unknown => HostKeyCheck::Unknown,
-            HostKeyStatus::Changed { file, line } => HostKeyCheck::Changed { file, line },
+            HostKeyStatus::Known => {
+                log.note("ホスト鍵は known_hosts の記録と一致しました");
+                return Ok(());
+            }
+            HostKeyStatus::Unknown => {
+                let looked: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+                log.note(format!(
+                    "ホスト鍵の記録がありません（{}）。利用者に確かめます",
+                    looked.join(", ")
+                ));
+                HostKeyCheck::Unknown
+            }
+            HostKeyStatus::Changed { file, line } => {
+                log.note(format!(
+                    "ホスト鍵が記録（{} の {line} 行目）と違います",
+                    file.display()
+                ));
+                HostKeyCheck::Changed { file, line }
+            }
         };
         let question = HostKeyQuestion {
             host: spec.hostname.clone(),
             port: spec.port,
             algorithm: algorithm.to_owned(),
-            fingerprint: known_hosts::fingerprint(b64).unwrap_or_default(),
+            fingerprint,
             check: check.clone(),
         };
         let accepted = prompter.confirm_host_key(&question);
@@ -151,6 +173,10 @@ impl SshConnector {
                 ),
             )),
             HostKeyCheck::Unknown if accepted => {
+                log.note(format!(
+                    "ホスト鍵を承認しました（{} に記録）",
+                    self.known_hosts.display()
+                ));
                 known_hosts::learn(&self.known_hosts, &name, algorithm, b64)
             }
             HostKeyCheck::Unknown => Err(io::Error::new(
@@ -174,12 +200,20 @@ impl SshConnector {
         spec: &HostSpec,
         via: Option<&Handle<Client>>,
         prompter: &dyn Prompter,
+        log: &ConnectLog,
     ) -> io::Result<Handle<Client>> {
         let host = spec.hostname.as_str();
         let port = spec.port;
+        let proxy = spec.proxy.as_ref().filter(|_| via.is_none());
+        let how = match (via, proxy) {
+            (Some(_), _) => "踏み台経由".to_owned(),
+            (None, Some(p)) => format!("プロキシ {p} 経由"),
+            (None, None) => "直接".to_owned(),
+        };
+        log.note(format!("{} に接続します（{how}）", spec.address()));
         // プロキシを使う場合は、先にプロキシを通した TCP 接続を作る（認証を尋ねてやり直せるように）
-        let mut proxied = match spec.proxy.as_ref().filter(|_| via.is_none()) {
-            Some(p) => Some(connect_proxy(rt, p, host, port, prompter)?),
+        let mut proxied = match proxy {
+            Some(p) => Some(connect_proxy(rt, p, host, port, prompter, log)?),
             None => None,
         };
         let server_key = Arc::new(Mutex::new(None));
@@ -199,24 +233,46 @@ impl SshConnector {
                                     format!("踏み台から {host}:{port} に接続できませんでした: {e}"),
                                 )
                             })?;
+                        log.note(format!(
+                            "踏み台の上で {host}:{port} へのチャネル（direct-tcpip）を開きました"
+                        ));
                         Box::new(ch.into_stream())
                     }
                     (None, Some(tcp)) => Box::new(tcp),
                     (None, None) => {
-                        let tcp = tokio::net::TcpStream::connect((host, port)).await?;
+                        let tcp =
+                            tokio::net::TcpStream::connect((host, port))
+                                .await
+                                .map_err(|e| {
+                                    io::Error::new(
+                                        e.kind(),
+                                        format!("{host}:{port} に接続できませんでした: {e}"),
+                                    )
+                                })?;
                         tcp.set_nodelay(true)?;
+                        if let Ok(addr) = tcp.peer_addr() {
+                            log.note(format!("TCP で接続しました（{addr}）"));
+                        }
                         Box::new(tcp)
                     }
                 };
-                client::connect_stream(config.clone(), stream, handler)
+                let handle = client::connect_stream(config.clone(), stream, handler)
                     .await
-                    .map_err(ssh_error)
+                    .map_err(|e| {
+                        let e = ssh_error(e);
+                        io::Error::new(e.kind(), format!("SSH の接続の確立に失敗しました: {e}"))
+                    })?;
+                log.note("SSH の鍵交換が済みました");
+                Ok(handle)
             };
             match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
                 Ok(r) => r,
                 Err(_) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("{host}:{port} に接続できませんでした（時間切れ）"),
+                    format!(
+                        "{host}:{port} に接続できませんでした（{} 秒で時間切れ）",
+                        CONNECT_TIMEOUT.as_secs()
+                    ),
                 )),
             }
         })?;
@@ -225,11 +281,11 @@ impl SshConnector {
             .unwrap()
             .take()
             .ok_or_else(|| io::Error::other("ホスト鍵を受け取れませんでした"))?;
-        if let Err(e) = self.verify_host_key(spec, &key, prompter) {
+        if let Err(e) = self.verify_host_key(spec, &key, prompter, log) {
             disconnect(rt, &handle);
             return Err(e);
         }
-        if let Err(e) = authenticate(rt, &mut handle, spec, prompter) {
+        if let Err(e) = authenticate(rt, &mut handle, spec, prompter, log) {
             disconnect(rt, &handle);
             return Err(e);
         }
@@ -238,7 +294,15 @@ impl SshConnector {
 }
 
 impl Connector for SshConnector {
-    fn connect(&self, spec: &HostSpec, prompter: &dyn Prompter) -> io::Result<Arc<dyn Transport>> {
+    fn connect(
+        &self,
+        spec: &HostSpec,
+        prompter: &dyn Prompter,
+        log: &ConnectLog,
+    ) -> io::Result<Arc<dyn Transport>> {
+        for l in spec.describe() {
+            log.note(l);
+        }
         let hops: Vec<&HostSpec> = spec.jumps.iter().chain([spec]).collect();
         if let Some(e) = hops.iter().find_map(|h| h.route_error.as_ref()) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, e.clone()));
@@ -254,7 +318,7 @@ impl Connector for SshConnector {
         let mut handles: Vec<Arc<Handle<Client>>> = Vec::new();
         for (i, hop) in hops.iter().enumerate() {
             let via = handles.last().map(|h| h.as_ref());
-            match self.connect_hop(rt, &config, hop, via, prompter) {
+            match self.connect_hop(rt, &config, hop, via, prompter, log) {
                 Ok(h) => handles.push(Arc::new(h)),
                 Err(e) => {
                     for h in handles.iter().rev() {
@@ -269,6 +333,7 @@ impl Connector for SshConnector {
                 }
             }
         }
+        log.note("SSH の接続と認証が済みました");
         let handle = handles.pop().expect("at least one hop");
         Ok(Arc::new(SshTransport {
             handle,
@@ -285,6 +350,7 @@ fn connect_proxy(
     host: &str,
     port: u16,
     prompter: &dyn Prompter,
+    log: &ConnectLog,
 ) -> io::Result<tokio::net::TcpStream> {
     let mut user = p.user.clone();
     let mut password = p.password.clone();
@@ -316,13 +382,25 @@ fn connect_proxy(
             }
         });
         match r {
+            Ok(tcp) => {
+                log.note(format!(
+                    "プロキシ {p} が {host}:{port} への中継を始めました{}",
+                    if creds.is_some() {
+                        "（認証あり）"
+                    } else {
+                        ""
+                    }
+                ));
+                return Ok(tcp);
+            }
             Err(e) if proxy::needs_credentials(&e) && asked < RETRIES => {
+                log.note(format!("{e}。認証の情報を尋ねます"));
                 asked += 1;
                 let (u, pw) = ask_proxy_password(p, user.as_deref(), prompter)?;
                 user = Some(u);
                 password = Some(pw);
             }
-            r => return r,
+            Err(e) => return Err(e),
         }
     }
 }
@@ -367,28 +445,43 @@ fn authenticate(
     handle: &mut Handle<Client>,
     spec: &HostSpec,
     prompter: &dyn Prompter,
+    log: &ConnectLog,
 ) -> io::Result<()> {
     let user = spec.user.clone();
+    log.note(format!("ユーザー {user} で認証します"));
     // サーバーが受け付ける方法（最初は分からないので、すべて試す）
     let mut methods: Option<Vec<MethodKind>> = None;
     let allowed =
         |m: &Option<Vec<MethodKind>>, k: MethodKind| m.as_ref().is_none_or(|v| v.contains(&k));
-    let note = |r: &AuthResult, m: &mut Option<Vec<MethodKind>>| {
+    let note = |what: &str, r: &AuthResult, m: &mut Option<Vec<MethodKind>>| {
         if let AuthResult::Failure {
             remaining_methods, ..
         } = r
         {
             *m = Some(remaining_methods.iter().copied().collect());
+            log.note(format!(
+                "{what}: 受け付けられませんでした（サーバーが受け付ける方法: {}）",
+                method_names(m)
+            ));
         }
     };
+    let succeeded = |what: &str| {
+        log.note(format!("{what}で認証しました"));
+        Ok(())
+    };
 
-    for path in spec.identity_files.iter().filter(|p| p.is_file()) {
+    for path in &spec.identity_files {
+        if !path.is_file() {
+            continue;
+        }
         if !allowed(&methods, MethodKind::PublicKey) {
+            log.note("サーバーが公開鍵認証を受け付けないため、残りの秘密鍵は使いません");
             break;
         }
-        let Some(key) = load_key(path, prompter)? else {
+        let Some(key) = load_key(path, prompter, log)? else {
             continue;
         };
+        let what = format!("公開鍵（{}、{}）", path.display(), key.algorithm());
         let hash = rt
             .block_on(handle.best_supported_rsa_hash())
             .map_err(ssh_error)?
@@ -398,23 +491,33 @@ fn authenticate(
             .block_on(handle.authenticate_publickey(user.clone(), key))
             .map_err(ssh_error)?;
         if r.success() {
-            return Ok(());
+            return succeeded(&what);
         }
-        note(&r, &mut methods);
+        note(&what, &r, &mut methods);
+    }
+    if !spec.identity_files.iter().any(|p| p.is_file()) {
+        log.note("使える秘密鍵のファイルがありません");
     }
 
     if allowed(&methods, MethodKind::KeyboardInteractive) {
+        log.note("keyboard-interactive 認証を試します");
         let user_host = spec.user_host();
         let mut r = rt
             .block_on(handle.authenticate_keyboard_interactive_start(user.clone(), None))
             .map_err(ssh_error)?;
         loop {
             match r {
-                KeyboardInteractiveAuthResponse::Success => return Ok(()),
+                KeyboardInteractiveAuthResponse::Success => {
+                    return succeeded("keyboard-interactive 認証");
+                }
                 KeyboardInteractiveAuthResponse::Failure {
                     remaining_methods, ..
                 } => {
                     methods = Some(remaining_methods.iter().copied().collect());
+                    log.note(format!(
+                        "keyboard-interactive 認証: 受け付けられませんでした（サーバーが受け付ける方法: {}）",
+                        method_names(&methods)
+                    ));
                     break;
                 }
                 KeyboardInteractiveAuthResponse::InfoRequest {
@@ -425,11 +528,20 @@ fn authenticate(
                     let answers = if prompts.is_empty() {
                         Vec::new()
                     } else {
+                        // 質問は記録するが、答えは記録しない
                         let q: Vec<(String, bool)> =
                             prompts.iter().map(|p| (p.prompt.clone(), p.echo)).collect();
+                        let asked: Vec<&str> = q.iter().map(|(p, _)| p.trim()).collect();
+                        log.note(format!(
+                            "keyboard-interactive の質問: {}",
+                            asked.join(" / ")
+                        ));
                         prompter
                             .keyboard_interactive(&user_host, &name, &instructions, &q)
-                            .ok_or_else(cancelled)?
+                            .ok_or_else(|| {
+                                log.note("keyboard-interactive の入力が中止されました");
+                                cancelled()
+                            })?
                     };
                     r = rt
                         .block_on(handle.authenticate_keyboard_interactive_respond(answers))
@@ -440,15 +552,18 @@ fn authenticate(
     }
 
     if allowed(&methods, MethodKind::Password) {
-        for _ in 0..RETRIES {
-            let password = prompter.password(&spec.user_host()).ok_or_else(cancelled)?;
+        for i in 1..=RETRIES {
+            let password = prompter.password(&spec.user_host()).ok_or_else(|| {
+                log.note("パスワードの入力が中止されました");
+                cancelled()
+            })?;
             let r = rt
                 .block_on(handle.authenticate_password(user.clone(), password))
                 .map_err(ssh_error)?;
             if r.success() {
-                return Ok(());
+                return succeeded("パスワード認証");
             }
-            note(&r, &mut methods);
+            note(&format!("パスワード認証（{i} 回目）"), &r, &mut methods);
             if !allowed(&methods, MethodKind::Password) {
                 break;
             }
@@ -456,8 +571,21 @@ fn authenticate(
     }
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
-        format!("{} に認証できませんでした", spec.user_host()),
+        format!(
+            "{} に認証できませんでした（サーバーが受け付ける方法: {}）",
+            spec.user_host(),
+            method_names(&methods)
+        ),
     ))
+}
+
+/// 認証方式の名前の並び（分からなければ「不明」）。
+fn method_names(m: &Option<Vec<MethodKind>>) -> String {
+    match m {
+        Some(v) if !v.is_empty() => v.iter().map(<&str>::from).collect::<Vec<_>>().join(", "),
+        Some(_) => "なし".into(),
+        None => "不明".into(),
+    }
 }
 
 fn cancelled() -> io::Error {
@@ -465,20 +593,38 @@ fn cancelled() -> io::Error {
 }
 
 /// 秘密鍵を読む。暗号化されていればパスフレーズを尋ねる（答えなければ `None`）。
-fn load_key(path: &Path, prompter: &dyn Prompter) -> io::Result<Option<PrivateKey>> {
+fn load_key(
+    path: &Path,
+    prompter: &dyn Prompter,
+    log: &ConnectLog,
+) -> io::Result<Option<PrivateKey>> {
     match russh::keys::load_secret_key(path, None) {
         Ok(k) => return Ok(Some(k)),
         Err(russh::keys::Error::KeyIsEncrypted) => {}
         // 読めない鍵（対応していない形式など）は使わない
-        Err(_) => return Ok(None),
+        Err(e) => {
+            log.note(format!(
+                "秘密鍵 {} を読めないため使いません: {e}",
+                path.display()
+            ));
+            return Ok(None);
+        }
     }
     for _ in 0..RETRIES {
         let Some(pass) = prompter.passphrase(path) else {
+            log.note(format!(
+                "秘密鍵 {} のパスフレーズが入力されなかったため使いません",
+                path.display()
+            ));
             return Ok(None);
         };
         if let Ok(k) = russh::keys::load_secret_key(path, Some(&pass)) {
             return Ok(Some(k));
         }
+        log.note(format!(
+            "秘密鍵 {} のパスフレーズが違います",
+            path.display()
+        ));
     }
     Ok(None)
 }
