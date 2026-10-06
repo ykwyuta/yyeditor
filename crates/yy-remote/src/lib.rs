@@ -12,10 +12,13 @@ pub mod local;
 pub mod log;
 pub mod proxy;
 pub mod rpc;
+pub mod scp;
 pub mod session;
+pub mod sftp;
 pub mod ssh_config;
 pub mod transfer;
 pub mod uri;
+pub mod xfer;
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +39,13 @@ pub trait Transport: Send + Sync {
     fn is_closed(&self) -> bool;
     /// 端末（PTY）つきの対話シェルを起動する（ターミナル。12 章）。`command` を指定すると
     /// シェルの代わりにそのコマンドを端末つきで実行する。
+    /// サブシステム（`sftp` など）を起動する（13 章）。
+    fn subsystem(&self, name: &str) -> io::Result<Process> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("この接続ではサブシステム {name} を起動できません"),
+        ))
+    }
     fn shell(&self, _term: &str, _size: (u16, u16), _command: Option<&[u8]>) -> io::Result<Shell> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -347,6 +357,16 @@ impl Prompter for NoPrompt {
     ) -> Option<Vec<String>> {
         None
     }
+}
+
+/// 接続先のパスの表示。
+pub fn display(path: &[u8]) -> String {
+    yy_proto::display_path(path)
+}
+
+/// 接続先のフォルダ `dir` の中の `name`。
+pub fn join_remote(dir: &[u8], name: &[u8]) -> Vec<u8> {
+    yy_proto::join_path(dir, name)
 }
 
 /// シェルの引数として安全に渡せるよう単一引用符で囲む。

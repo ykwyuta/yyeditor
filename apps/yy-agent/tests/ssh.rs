@@ -166,6 +166,28 @@ impl server::Handler for Handler {
         Ok(())
     }
 
+    /// `sftp` サブシステム（手元の sftp-server を動かす）
+    async fn subsystem_request(
+        &mut self,
+        id: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let server = yy_remote::local::sftp_server();
+        let Some(channel) = self.channels.lock().unwrap().remove(&id) else {
+            return Ok(());
+        };
+        match (name, server) {
+            ("sftp", Some(p)) => {
+                session.channel_success(id)?;
+                let cmd = format!("exec {}", p.display()).into_bytes();
+                tokio::spawn(run_command(channel, cmd));
+            }
+            _ => session.channel_failure(id)?,
+        }
+        Ok(())
+    }
+
     async fn exec_request(
         &mut self,
         id: ChannelId,
@@ -1041,4 +1063,81 @@ fn opens_interactive_shells() {
     let mut out = String::new();
     sh.output.read_to_string(&mut out).unwrap();
     assert_eq!(out.trim(), "/tmp");
+}
+
+#[test]
+fn transfers_files_over_sftp_with_the_journal() {
+    use yy_remote::xfer;
+    if yy_remote::local::sftp_server().is_none() {
+        eprintln!("sftp-server がないため飛ばします");
+        return;
+    }
+    let server = TestServer::start(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let store = Arc::new(MemoryPasswords::default());
+    store
+        .save(
+            &format!("ssh/tester@127.0.0.1:{}", server.port),
+            &SavedPassword {
+                user: "tester".into(),
+                password: PASSWORD.into(),
+            },
+        )
+        .unwrap();
+    let mut c = connector(dir.path());
+    c.passwords = Some(store);
+    let spec = server.spec(vec![]);
+
+    let src = dir.path().join("big.bin");
+    let content: Vec<u8> = (0..5_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    fs::write(&src, &content).unwrap();
+    let dst = dir.path().join("up/big.bin");
+    let remote = yy_remote::RemoteUri {
+        user: None,
+        host: "127.0.0.1".into(),
+        port: Some(server.port),
+        path: dst.as_os_str().as_bytes().to_vec(),
+    };
+    let log = yy_remote::log::TransferLog::new(None, || "T".into());
+    let connect = |l: &yy_remote::log::TransferLog, id: u64| {
+        let cl = ConnectLog::new();
+        let r = c.connect(&spec, &Answers::default(), &cl);
+        l.connect_log(Some(id), &cl);
+        r
+    };
+    let journal = xfer::Journal::new(dir.path().join("journal"));
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut progress = |_: &xfer::Job| {};
+    let mut cx = xfer::Context {
+        connect: &connect,
+        log: &log,
+        journal: Some(&journal),
+        cancel: &cancel,
+        progress: &mut progress,
+        retry: xfer::Retry::default(),
+        scp_chunk: 1 << 20,
+        transport: None,
+    };
+    let mut job = xfer::upload_job(1, xfer::Protocol::Sftp, &src, remote.clone(), false).unwrap();
+    xfer::run(&mut job, &mut cx);
+    assert_eq!(job.state, xfer::State::Done, "{}", job.message);
+    assert_eq!(fs::read(&dst).unwrap(), content);
+
+    // 同じ接続で受け取る
+    let back = dir.path().join("down/big.bin");
+    let meta = fs::metadata(&dst).unwrap();
+    let mut job = xfer::download_job(
+        2,
+        xfer::Protocol::Sftp,
+        remote,
+        meta.len(),
+        xfer::mtime_of(&meta),
+        &back,
+        false,
+    );
+    xfer::run(&mut job, &mut cx);
+    assert_eq!(job.state, xfer::State::Done, "{}", job.message);
+    assert_eq!(fs::read(&back).unwrap(), content);
+    assert!(journal.load().is_empty());
 }

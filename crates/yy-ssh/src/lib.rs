@@ -835,6 +835,8 @@ impl Drop for SshTransport {
 /// チャネルで始めること。
 enum Start {
     Exec(Vec<u8>),
+    /// サブシステム（`sftp` など）
+    Subsystem(String),
     /// 端末つき（`command` がなければログインシェル）
     Shell {
         term: String,
@@ -860,6 +862,7 @@ impl SshTransport {
             let ch = self.handle.channel_open_session().await?;
             match start {
                 Start::Exec(command) => ch.exec(true, command).await?,
+                Start::Subsystem(name) => ch.request_subsystem(true, name).await?,
                 Start::Shell {
                     term,
                     cols,
@@ -947,6 +950,15 @@ impl SshTransport {
 impl Transport for SshTransport {
     fn exec(&self, command: &[u8]) -> io::Result<Process> {
         let o = self.open(Start::Exec(command.to_vec()), false)?;
+        Ok(Process::new(
+            Box::new(o.writer),
+            Box::new(o.reader),
+            o.finish,
+        ))
+    }
+
+    fn subsystem(&self, name: &str) -> io::Result<Process> {
+        let o = self.open(Start::Subsystem(name.to_owned()), false)?;
         Ok(Process::new(
             Box::new(o.writer),
             Box::new(o.reader),

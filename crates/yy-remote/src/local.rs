@@ -25,17 +25,28 @@ impl LocalTransport {
     }
 }
 
-impl Transport for LocalTransport {
-    fn exec(&self, command: &[u8]) -> io::Result<Process> {
+/// OpenSSH の sftp-server（テストでサブシステムの代わりに使う。なければ `None`）。
+pub fn sftp_server() -> Option<std::path::PathBuf> {
+    [
+        "/usr/lib/openssh/sftp-server",
+        "/usr/libexec/openssh/sftp-server",
+        "/usr/lib/ssh/sftp-server",
+        "/usr/libexec/sftp-server",
+    ]
+    .iter()
+    .map(std::path::PathBuf::from)
+    .find(|p| p.is_file())
+}
+
+impl LocalTransport {
+    fn spawn(&self, mut cmd: Command) -> io::Result<Process> {
         if self.is_closed() {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
                 "接続が切れています",
             ));
         }
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(std::ffi::OsStr::from_bytes(command))
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -60,6 +71,24 @@ impl Transport for LocalTransport {
             })
         });
         Ok(Process::new(Box::new(stdin), Box::new(stdout), finish))
+    }
+}
+
+impl Transport for LocalTransport {
+    fn exec(&self, command: &[u8]) -> io::Result<Process> {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(std::ffi::OsStr::from_bytes(command));
+        self.spawn(cmd)
+    }
+
+    fn subsystem(&self, name: &str) -> io::Result<Process> {
+        match (name, sftp_server()) {
+            ("sftp", Some(p)) => self.spawn(Command::new(p)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("サブシステム {name} はありません"),
+            )),
+        }
     }
 
     fn is_closed(&self) -> bool {
