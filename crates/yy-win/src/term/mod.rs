@@ -368,6 +368,8 @@ fn create(
             None,
         )
         .context("CreateWindowExW(tabs)")?;
+        // エディタと同じ閉じるボタン（「×」・中ボタン）と右クリックのメニュー
+        crate::tabclose::install(tabbar, frame);
         let dpi = GetDpiForWindow(frame).max(96);
         let font = crate::util::ui_font(dpi);
         SendMessageW(
@@ -779,7 +781,7 @@ impl TermApp {
             exited: None,
             size: (cols as u16, rows as u16),
         };
-        let label = crate::util::wide(&tab.title());
+        let label = crate::util::wide(&tab_label(&tab));
         self.tabs.push(tab);
         let index = self.tabs.len() - 1;
         unsafe {
@@ -836,6 +838,32 @@ impl TermApp {
         self.activate(next.min(self.tabs.len() - 1));
     }
 
+    /// タブ `keep` の右クリックのメニューで選んだタブ（`targets`）を閉じて、`keep` を表に出す。
+    fn close_tabs(&mut self, keep: usize, targets: &[usize]) {
+        let mut keep = keep;
+        // 右から閉じる（残すタブの番号が変わらないように）
+        for &i in targets.iter().rev() {
+            if i >= self.tabs.len() {
+                continue;
+            }
+            let t = self.tabs.remove(i);
+            (t.kill)();
+            unsafe {
+                SendMessageW(self.tabbar, TCM_DELETEITEM, Some(WPARAM(i)), None);
+            }
+            if i < keep {
+                keep -= 1;
+            }
+        }
+        if self.tabs.is_empty() {
+            unsafe {
+                let _ = PostMessageW(Some(self.frame), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+            return;
+        }
+        self.activate(keep.min(self.tabs.len() - 1));
+    }
+
     fn tab(&self) -> Option<&Tab> {
         self.tabs.get(self.active)
     }
@@ -869,7 +897,7 @@ impl TermApp {
         let Some(t) = self.tabs.get(index) else {
             return;
         };
-        let label = crate::util::wide(&t.title());
+        let label = crate::util::wide(&tab_label(t));
         unsafe {
             let item = TCITEMW {
                 mask: TCIF_TEXT,
@@ -1251,6 +1279,14 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             load_remote_dir(hwnd, wparam.0, lparam.0 as usize);
             LRESULT(0)
         }
+        crate::tabclose::WM_APP_CLOSE_TAB => {
+            with(|a| a.close_tab(wparam.0));
+            LRESULT(0)
+        }
+        crate::tabclose::WM_APP_TAB_MENU => {
+            tab_menu(hwnd, wparam.0);
+            LRESULT(0)
+        }
         m if m == crate::remote::WM_APP_REMOTE_PROMPT => {
             crate::remote::on_prompt(hwnd, lparam);
             LRESULT(0)
@@ -1515,6 +1551,57 @@ fn cmd_add_folder(hwnd: HWND) {
         });
         layout();
     }
+}
+
+/// タブの文字列（閉じるボタンの場所を空ける）。
+fn tab_label(t: &Tab) -> String {
+    let mut label = t.title();
+    if label.chars().count() > 32 {
+        label = label.chars().take(29).collect::<String>() + "...";
+    }
+    label + crate::tabclose::LABEL_PAD
+}
+
+/// タブの右クリックのメニュー（閉じる・ほかのタブ・右側・左側を閉じる）。まとめて閉じるとき、
+/// シェルが動いているタブがあれば確かめる。
+fn tab_menu(hwnd: HWND, index: usize) {
+    use crate::tabclose::TabMenu;
+    let Some(count) = with(|a| a.tabs.len()) else {
+        return;
+    };
+    let Some(which) = crate::tabclose::menu(hwnd, index, count) else {
+        return;
+    };
+    let targets = which.targets(index, count);
+    if targets.is_empty() {
+        return;
+    }
+    if which != TabMenu::Close {
+        let running = with(|a| {
+            targets
+                .iter()
+                .filter(|&&i| a.tabs.get(i).is_some_and(|t| t.exited.is_none()))
+                .count()
+        })
+        .unwrap_or(0);
+        if running > 0 {
+            let r = unsafe {
+                MessageBoxW(
+                    Some(hwnd),
+                    &windows::core::HSTRING::from(format!(
+                        "{} 個のタブを閉じます。そのうち {running} 個ではシェルが動いています（終了させます）。よろしいですか？",
+                        targets.len()
+                    )),
+                    w!("yyterm"),
+                    MB_OKCANCEL | MB_ICONQUESTION,
+                )
+            };
+            if r != IDOK {
+                return;
+            }
+        }
+    }
+    with(|a| a.close_tabs(index, &targets));
 }
 
 fn cmd_add_remote_folder(hwnd: HWND) {

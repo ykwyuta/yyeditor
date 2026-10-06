@@ -3,6 +3,10 @@
 //! 標準のタブコントロールには閉じるボタンがないため、サブクラス化して各タブの右端に
 //! 「×」を描き、そこのクリック（と中ボタンのクリック）でフレームにタブを閉じるよう知らせる。
 //! 「×」の場所はタブの文字列の後ろに空白を足して空けておく（[`LABEL_PAD`]）。
+//!
+//! タブの右クリックでは、フレームに [`WM_APP_TAB_MENU`] を送る。フレームは [`menu`] で
+//! 「閉じる・ほかのタブを閉じる・右側のタブを閉じる・左側のタブを閉じる」のメニューを出す
+//! （エディタとターミナルで共通）。
 
 use std::cell::Cell;
 
@@ -23,6 +27,84 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// タブを閉じる要求（`wparam` がタブの番号）。フレームに送る。
 pub(crate) const WM_APP_CLOSE_TAB: u32 = WM_APP + 20;
+
+/// タブの右クリック（`wparam` がタブの番号）。フレームに送る。
+pub(crate) const WM_APP_TAB_MENU: u32 = WM_APP + 24;
+
+/// タブの右クリックのメニューで選んだもの。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabMenu {
+    /// このタブを閉じる
+    Close,
+    /// このタブ以外を閉じる
+    Others,
+    /// このタブより右側を閉じる
+    Right,
+    /// このタブより左側を閉じる
+    Left,
+}
+
+impl TabMenu {
+    /// 閉じるタブの番号（小さい順）。`index` はメニューを出したタブ、`count` はタブの数。
+    pub(crate) fn targets(self, index: usize, count: usize) -> Vec<usize> {
+        if index >= count {
+            return Vec::new();
+        }
+        match self {
+            TabMenu::Close => vec![index],
+            TabMenu::Others => (0..count).filter(|&i| i != index).collect(),
+            TabMenu::Right => (index + 1..count).collect(),
+            TabMenu::Left => (0..index).collect(),
+        }
+    }
+}
+
+/// タブ `index` の右クリックのメニューを出して、選んだものを返す（`count` はタブの数）。
+pub(crate) fn menu(owner: HWND, index: usize, count: usize) -> Option<TabMenu> {
+    const CLOSE: usize = 1;
+    const OTHERS: usize = 2;
+    const RIGHT: usize = 3;
+    const LEFT: usize = 4;
+    unsafe {
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let m = CreatePopupMenu().ok()?;
+        let item = |id: usize, text: windows::core::PCWSTR, on: bool| {
+            let flags = if on { MF_STRING } else { MF_STRING | MF_GRAYED };
+            let _ = AppendMenuW(m, flags, id, text);
+        };
+        item(CLOSE, windows::core::w!("閉じる(&C)"), true);
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        item(
+            OTHERS,
+            windows::core::w!("ほかのタブをすべて閉じる(&O)"),
+            count > 1,
+        );
+        item(
+            RIGHT,
+            windows::core::w!("右側のタブを閉じる(&R)"),
+            index + 1 < count,
+        );
+        item(LEFT, windows::core::w!("左側のタブを閉じる(&L)"), index > 0);
+        let cmd = TrackPopupMenu(
+            m,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            None,
+            owner,
+            None,
+        );
+        let _ = DestroyMenu(m);
+        match cmd.0 as usize {
+            CLOSE => Some(TabMenu::Close),
+            OTHERS => Some(TabMenu::Others),
+            RIGHT => Some(TabMenu::Right),
+            LEFT => Some(TabMenu::Left),
+            _ => None,
+        }
+    }
+}
 
 /// 「×」の場所を空けるためにタブの文字列の後ろに足す空白。
 pub(crate) const LABEL_PAD: &str = "\u{3000}\u{3000}";
@@ -228,11 +310,40 @@ unsafe extern "system" fn subclass_proc(
                 }
                 LRESULT(0)
             }
+            // 右クリックのメニュー（フレームが出す）
+            WM_RBUTTONUP => {
+                if let Some(i) = hit_tab(hwnd, lparam) {
+                    let _ = PostMessageW(
+                        Some(HWND(frame as *mut _)),
+                        WM_APP_TAB_MENU,
+                        WPARAM(i),
+                        LPARAM(0),
+                    );
+                }
+                LRESULT(0)
+            }
             WM_NCDESTROY => {
                 let _ = RemoveWindowSubclass(hwnd, Some(subclass_proc), SUBCLASS_ID);
                 DefSubclassProc(hwnd, msg, wparam, lparam)
             }
             _ => DefSubclassProc(hwnd, msg, wparam, lparam),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_targets() {
+        assert_eq!(TabMenu::Close.targets(1, 4), vec![1]);
+        assert_eq!(TabMenu::Others.targets(1, 4), vec![0, 2, 3]);
+        assert_eq!(TabMenu::Right.targets(1, 4), vec![2, 3]);
+        assert_eq!(TabMenu::Left.targets(1, 4), vec![0]);
+        assert!(TabMenu::Right.targets(3, 4).is_empty());
+        assert!(TabMenu::Left.targets(0, 4).is_empty());
+        assert!(TabMenu::Others.targets(0, 1).is_empty());
+        assert!(TabMenu::Close.targets(5, 4).is_empty());
     }
 }

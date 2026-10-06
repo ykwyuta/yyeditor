@@ -3776,18 +3776,18 @@ impl App {
 
 /// 変更を保存するか確認する。続行してよければ `true`。
 /// タブ `index` を閉じる（閉じるボタン・中ボタンのクリック）。変更があれば確認する。
-/// 別のタブを閉じた場合は、元のタブに戻る。
-fn close_tab_at(hwnd: HWND, index: usize) {
+/// 別のタブを閉じた場合は、元のタブに戻る。閉じたら `true`（取り消したら `false`）。
+fn close_tab_at(hwnd: HWND, index: usize) -> bool {
     let Some((active, count)) = with_app(|a| (a.active_tab, a.tabs.len())) else {
-        return;
+        return false;
     };
     if index >= count {
-        return;
+        return false;
     }
     with_app(|a| a.switch_tab(index));
     if !confirm_discard(hwnd) {
         with_app(|a| a.switch_tab(active));
-        return;
+        return false;
     }
     with_app(|a| {
         a.close_tab();
@@ -3796,6 +3796,33 @@ fn close_tab_at(hwnd: HWND, index: usize) {
             a.switch_tab(back);
         }
     });
+    true
+}
+
+/// タブの右クリックのメニュー（閉じる・ほかのタブ・右側・左側を閉じる）。変更のある文書は
+/// 1 つずつ確認し、取り消したらそこでやめる。最後に右クリックしたタブを表に出す。
+fn tab_menu(hwnd: HWND, index: usize) {
+    let Some(count) = with_app(|a| a.tabs.len()) else {
+        return;
+    };
+    let Some(which) = crate::tabclose::menu(hwnd, index, count) else {
+        return;
+    };
+    if which == crate::tabclose::TabMenu::Close {
+        close_tab_at(hwnd, index);
+        return;
+    }
+    // 右から閉じる（閉じていないタブの番号が変わらないように）
+    let mut keep = index;
+    for i in which.targets(index, count).into_iter().rev() {
+        if !close_tab_at(hwnd, i) {
+            break;
+        }
+        if i < keep {
+            keep -= 1;
+        }
+    }
+    with_app(|a| a.switch_tab(keep));
 }
 
 /// 作業中のタブの文書を閉じてよいか確かめる。保存中なら終わるまで待ち、変更があれば
@@ -5319,6 +5346,10 @@ pub(crate) extern "system" fn frame_proc(
         crate::remote::WM_APP_REMOTE_WAKE => LRESULT(0),
         crate::tabclose::WM_APP_CLOSE_TAB => {
             close_tab_at(hwnd, wparam.0);
+            LRESULT(0)
+        }
+        crate::tabclose::WM_APP_TAB_MENU => {
+            tab_menu(hwnd, wparam.0);
             LRESULT(0)
         }
         WM_DPICHANGED => {
