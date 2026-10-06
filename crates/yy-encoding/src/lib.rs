@@ -23,7 +23,7 @@ use std::fmt;
 use std::ops::Range;
 
 pub use detect::{Detected, detect, detect_ebcdic};
-pub use ebcdic::{Ccsid, Records};
+pub use ebcdic::{Ccsid, EbcdicCode, Records};
 pub use fold::fold_compat;
 pub use mapfile::{
     Mapping, load_dir as load_mappings, mappings, parse as parse_mapping,
