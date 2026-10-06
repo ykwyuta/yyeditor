@@ -116,6 +116,8 @@ pub struct Emulator {
     pub model: u8,
     /// IND$FILE の転送
     pub ft: Dft,
+    /// WCC で印刷を求められた（プリンターの LU3。印刷した側で `take` する）
+    pub print_wcc: Option<u8>,
 }
 
 /// フィールドの中身の 1 文字。
@@ -137,6 +139,7 @@ impl Emulator {
             reply_mode: ReplyMode::Field,
             model,
             ft: Dft::default(),
+            print_wcc: None,
         }
     }
 
@@ -340,6 +343,9 @@ impl Emulator {
         }
         if wcc & WCC_ALARM != 0 {
             r.alarm = true;
+        }
+        if wcc & WCC_START_PRINTER != 0 {
+            self.print_wcc = Some(wcc);
         }
         if wcc & WCC_RESTORE != 0 {
             self.lock = Lock::None;

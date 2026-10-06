@@ -297,6 +297,20 @@ yyterm のタブで、IBM メインフレーム（z/OS など）に 3270 端末�
     再開できないので、切断されたら最初からやり直してください。
   - 受け取ったファイルは yyeditor で開けます。進み具合は画面の下の行とステータスバーに出し、
     「3270 のファイル転送を取り消す」で取り消せます（ホストは取り消しのメッセージを返して終わります）。
+- **プリンター（3287）**（ファイル メニューの「3270 のプリンターを接続」）: 3270 の端末のタブで選ぶと、
+  ホストの印刷を受け取るプリンターのタブを開きます。設定の `printer_lu` があればその LU、なければ端末に
+  割り当てられた LU に対応するプリンター（TN3270E の ASSOCIATE）につなぎます。設定で `printer = "auto"` に
+  すると、端末に LU が割り当てられたときに自動で開きます。
+  - LU1 の SCS（改行・改ページ・タブ・用紙の桁数と行数・位置・日本語の SO/SI）と、LU3 の 3270 データストリーム
+    （WCC の行の長さ、または NL・EM・FF で区切る形）に対応します。ジョブの終わりは TN3270E の PRINT-EOJ、
+    なければ `eoj_timeout` 秒データが来なかったときです。
+  - タブには受け取った印刷を古い順に並べ（新しいものが下）、ページの中身を表示します。
+  - 出力先は設定の `output`: `printer`（Windows のプリンター。`printer_name` が空なら既定のプリンター）、
+    `pdf`・`text`（`folder` に保存。空ならドキュメントの `yyterm-print`）、`ask`（一覧に置くだけ）。
+  - 一覧の印刷は、ファイル メニューの「受け取った印刷を印刷」「PDF で保存」「テキストで保存」で番号（#）を選んで
+    出せます。PDF は Windows の「Microsoft Print to PDF」で作ります。テキストは UTF-8 で、改ページは FF です。
+  - 印刷は用紙に合わせて文字の大きさを決め（桁数はジョブの最大の桁数、行数は 60 行以上）、
+    全角は 2 桁に置きます（MS ゴシック）。受け取りと出力は `logs\tn3270-transfer.log` に残します。
 - 設定（`config.toml`）:
 
 ```toml
@@ -307,10 +321,18 @@ terminal_type = ""   # 空なら IBM-3278-<model>-E
 tn3270e = true
 keypad = true
 
+[tn3270.printer]
+output = "ask"       # printer・pdf・text・ask（一覧に置くだけ）
+printer_name = ""    # 空なら Windows の既定のプリンター
+folder = ""          # pdf・text の保存先（空ならドキュメントの yyterm-print）
+eoj_timeout = 5      # PRINT-EOJ がないとき、ジョブの終わりとみなす秒数
+
 [tn3270.host.prod]
 host = "mvs01.example.co.jp"
 port = 23
 lu = "TCP00042"      # TN3270E で求める LU 名
+printer_lu = ""      # プリンターの LU 名（空なら端末の LU に対応するプリンター）
+printer = "manual"   # auto なら端末と一緒にプリンターも開く
 ccsid = 939
 ssh = "bastion"      # この SSH の接続を経由する
 ```

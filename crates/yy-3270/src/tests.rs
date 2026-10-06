@@ -165,3 +165,71 @@ fn query_reply_is_framed_for_the_host() {
     assert_eq!(o.send[0], codes::AID_SF);
     assert_eq!(o.send.last_chunk::<2>(), Some(&[IAC, EOR]));
 }
+
+#[test]
+fn printer_session_assembles_scs_jobs() {
+    let mut s = Session::new(Config {
+        printer: true,
+        associate: Some("TCP00042".into()),
+        ccsid: Ccsid::Ibm037,
+        ..Config::default()
+    });
+    s.receive(&iac(DO, OPT_TN3270E));
+    let o = s.receive(&sb(&[OPT_TN3270E, E_SEND, E_DEVICE_TYPE]));
+    let mut want = vec![OPT_TN3270E, E_DEVICE_TYPE, E_REQUEST];
+    want.extend_from_slice(b"IBM-3287-1");
+    want.push(E_ASSOCIATE);
+    want.extend_from_slice(b"TCP00042");
+    assert_eq!(o.send, sb(&want));
+    let mut is = vec![OPT_TN3270E, E_DEVICE_TYPE, E_IS];
+    is.extend_from_slice(b"IBM-3287-1");
+    is.push(E_CONNECT);
+    is.extend_from_slice(b"TCP00043");
+    let o = s.receive(&sb(&is));
+    assert_eq!(
+        o.send,
+        sb(&[
+            OPT_TN3270E,
+            E_FUNCTIONS,
+            E_REQUEST,
+            FN_RESPONSES,
+            FN_SCS_CTL_CODES,
+            FN_DATA_STREAM_CTL
+        ])
+    );
+    s.receive(&sb(&[
+        OPT_TN3270E,
+        E_FUNCTIONS,
+        E_IS,
+        FN_RESPONSES,
+        FN_SCS_CTL_CODES,
+    ]));
+    assert_eq!(s.mode(), Mode::Tn3270e);
+    // SCS のデータ（応答を求める）: "HI" NL "OK"
+    let o = s.receive(&record(&[
+        DT_SCS_DATA,
+        0,
+        RSP_ALWAYS_RESPONSE,
+        0,
+        9,
+        0xC8,
+        0xC9,
+        0x15,
+        0xD6,
+        0xD2,
+    ]));
+    assert_eq!(o.send, record(&[DT_RESPONSE, 0, RSP_POSITIVE, 0, 9, 0x00]));
+    assert!(o.events.is_empty());
+    assert!(s.printing());
+    // ジョブの終わり
+    let o = s.receive(&record(&[DT_PRINT_EOJ, 0, RSP_NO_RESPONSE, 0, 10]));
+    let Some(Event::PrintJob(job)) = o.events.first() else {
+        panic!("{:?}", o.events)
+    };
+    assert_eq!(job.pages, vec![vec!["HI".to_owned(), "OK".to_owned()]]);
+    assert!(!s.printing());
+    assert!(s.flush_print().is_none());
+    // PRINT-EOJ のないホスト: 呼び出し側が時間で区切る
+    s.receive(&record(&[DT_SCS_DATA, 0, 0, 0, 11, 0xC1]));
+    assert_eq!(s.flush_print().unwrap().pages, vec![vec!["A".to_owned()]]);
+}

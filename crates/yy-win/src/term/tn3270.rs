@@ -45,6 +45,14 @@ pub(crate) struct Target3270 {
     pub ssh: Option<String>,
     pub terminal_type: Option<String>,
     pub tn3270e: bool,
+    /// プリンター（3287）のセッション
+    pub printer: bool,
+    /// プリンターで、対応づける端末の LU（ASSOCIATE）
+    pub associate: Option<String>,
+    /// 設定のプリンターの LU 名
+    pub printer_lu: Option<String>,
+    /// 端末を開いたらプリンターも開く
+    pub auto_printer: bool,
 }
 
 impl Target3270 {
@@ -75,6 +83,13 @@ impl Target3270 {
                 ssh: h.ssh.clone().filter(|s| !s.is_empty()),
                 terminal_type,
                 tn3270e: t.tn3270e,
+                printer: false,
+                associate: None,
+                printer_lu: h.printer_lu.clone().filter(|l| !l.is_empty()),
+                auto_printer: h
+                    .printer
+                    .as_deref()
+                    .is_some_and(|p| p.eq_ignore_ascii_case("auto")),
             });
         }
         let rest = text
@@ -108,6 +123,35 @@ impl Target3270 {
             ssh: None,
             terminal_type,
             tn3270e: t.tn3270e,
+            printer: false,
+            associate: None,
+            printer_lu: None,
+            auto_printer: false,
+        })
+    }
+
+    /// この端末に対応するプリンターの接続先。設定のプリンターの LU 名があればそれを、なければ
+    /// 端末に割り当てられた LU（`terminal_lu`）に対応するプリンター（ASSOCIATE）を求める。
+    pub(crate) fn printer_target(&self, terminal_lu: Option<&str>) -> Result<Target3270, String> {
+        let associate = match (&self.printer_lu, terminal_lu) {
+            (Some(_), _) => None,
+            (None, Some(lu)) if !lu.is_empty() => Some(lu.to_owned()),
+            _ => {
+                return Err(
+                    "プリンターの LU が分かりません。TN3270E で接続して LU が割り当てられてから選ぶか、\
+                     設定の [tn3270.host.名前] に printer_lu を書いてください。"
+                        .into(),
+                );
+            }
+        };
+        Ok(Target3270 {
+            lu: self.printer_lu.clone(),
+            printer: true,
+            associate,
+            auto_printer: false,
+            tn3270e: true,
+            terminal_type: None,
+            ..self.clone()
         })
     }
 
@@ -128,6 +172,8 @@ impl Target3270 {
             terminal_type: self.terminal_type.clone(),
             lu: self.lu.clone(),
             tn3270e: self.tn3270e,
+            printer: self.printer,
+            associate: self.associate.clone(),
         }
     }
 }
@@ -140,6 +186,12 @@ pub(crate) struct Tn3270 {
     pub message: String,
     /// 実行中のファイル転送
     pub ft: Option<FtJob>,
+    /// プリンター: 受け取った印刷
+    pub jobs: Vec<super::printer::StoredJob>,
+    /// プリンター: 最後にデータを受け取った時刻（PRINT-EOJ のないホストのジョブの区切り）
+    pub last_data: Instant,
+    /// プリンター: タブの画面の行数
+    pub view_rows: usize,
 }
 
 impl Tn3270 {
@@ -149,6 +201,9 @@ impl Tn3270 {
             target,
             message: String::new(),
             ft: None,
+            jobs: Vec::new(),
+            last_data: Instant::now(),
+            view_rows: 30,
         }
     }
 }
@@ -236,6 +291,56 @@ pub(crate) fn finish(job: &FtJob, ok: bool) -> Result<u64, String> {
     })();
     let _ = std::fs::remove_file(part);
     result.map_err(|e| format!("{} に書けません: {e}", local.display()))
+}
+
+/// プリンターのタブの画面: 受け取った印刷の一覧（古い順）と、最後の行に状態。
+fn render_printer(tn: &Tn3270, exited: bool) -> Terminal {
+    let o = tn.session.oia();
+    let state = if exited {
+        "切断されました".to_owned()
+    } else if o.mode == Mode::Negotiating {
+        "接続中".to_owned()
+    } else if tn.session.printing() {
+        "受け取り中".to_owned()
+    } else {
+        "待機中".to_owned()
+    };
+    let status = format!(
+        " 3287 {:<8} {:<10} {state}  {}件  {}  {}",
+        o.mode.label(),
+        o.device.as_deref().unwrap_or(""),
+        tn.jobs.len(),
+        tn.session.ccsid().name(),
+        tn.message
+    );
+    let lines = super::printer::listing(&status, &tn.jobs, 50);
+    let cols = lines
+        .iter()
+        .map(|l| yy_3270::print::text_width(l))
+        .max()
+        .unwrap_or(0)
+        .clamp(80, 240);
+    let rows = tn.view_rows.max(5);
+    let mut term = Terminal::new(cols, rows, 20000);
+    let mut out = String::from("\x1b[?7l\x1b[2J\x1b[H");
+    let last = lines.len() - 1;
+    for (i, l) in lines.iter().enumerate() {
+        if i == last {
+            out.push_str(&format!(
+                "\x1b[0;38;2;210;210;210;48;2;45;45;60m{l:<cols$}\x1b[0m"
+            ));
+        } else if l.starts_with("━━") {
+            out.push_str(&format!("\x1b[1;96m{l}\x1b[0m\r\n"));
+        } else if l.starts_with("──") {
+            out.push_str(&format!("\x1b[2m{l}\x1b[0m\r\n"));
+        } else {
+            out.push_str(l);
+            out.push_str("\r\n");
+        }
+    }
+    out.push_str("\x1b[?25l");
+    term.feed(out.as_bytes());
+    term
 }
 
 /// 接続する（`show` に進みを表示する。接続中は呼び出し側の状態を借りないこと）。
@@ -367,6 +472,9 @@ fn oia_text(tn: &Tn3270, exited: bool) -> String {
 
 /// 3270 の画面と OIA を端末の画面の形にする（行数は画面＋1）。
 pub(crate) fn render(tn: &Tn3270, exited: bool) -> Terminal {
+    if tn.target.printer {
+        return render_printer(tn, exited);
+    }
     let screen = tn.session.screen();
     let (rows, cols) = (screen.rows, screen.cols);
     let mut term = Terminal::new(cols, rows + 1, 0);
@@ -590,6 +698,21 @@ mod tests {
             (t.host.as_str(), t.port, t.ccsid, t.ssh.as_deref()),
             ("10.0.0.5", 992, Ccsid::Ibm939, Some("bastion"))
         );
+        // プリンター: 設定の LU がなければ端末の LU に対応づける（ASSOCIATE）
+        assert!(t.printer_target(None).is_err());
+        let p = t.printer_target(Some("TCP00042")).unwrap();
+        assert!(p.printer && !p.auto_printer);
+        assert_eq!(
+            (p.lu.as_deref(), p.associate.as_deref()),
+            (None, Some("TCP00042"))
+        );
+        assert_eq!(p.session_config().terminal_type(), "IBM-3287-1");
+        cfg.tn3270.host.get_mut("prod").unwrap().printer_lu = Some("PRT01".into());
+        cfg.tn3270.host.get_mut("prod").unwrap().printer = Some("auto".into());
+        let t = Target3270::parse("prod", &cfg).unwrap();
+        assert!(t.auto_printer);
+        let p = t.printer_target(None).unwrap();
+        assert_eq!((p.lu.as_deref(), p.associate), (Some("PRT01"), None));
     }
 
     #[test]

@@ -13,6 +13,7 @@
 
 mod ftdlg;
 mod paint;
+mod printer;
 mod pty;
 mod sidebar;
 mod tn3270;
@@ -60,6 +61,10 @@ const WM_APP_TERM_FOCUS: u32 = WM_APP + 62;
 const WM_APP_TERM_FOCUS_CHANGED: u32 = WM_APP + 63;
 /// 並べ直す（大きさの変更が、状態を借りている間に届いた場合）
 const WM_APP_TERM_LAYOUT: u32 = WM_APP + 64;
+/// 端末と一緒に開くプリンターのタブを開く（`pending_printers`）
+const WM_APP_TERM_PRINTER: u32 = WM_APP + 65;
+/// プリンターのジョブの区切り（PRINT-EOJ のないホスト）を見るタイマー
+const TIMER_PRINTER: usize = 0x3287;
 
 const ID_TABS: u16 = 2001;
 const ID_VIEW: u16 = 2002;
@@ -73,6 +78,10 @@ const ID_EXIT: u16 = 3004;
 const ID_TN3270: u16 = 3005;
 const ID_TN_TRANSFER: u16 = 3006;
 const ID_TN_CANCEL: u16 = 3007;
+const ID_TN_PRINTER: u16 = 3050;
+const ID_PR_PRINT: u16 = 3051;
+const ID_PR_PDF: u16 = 3052;
+const ID_PR_TEXT: u16 = 3053;
 const ID_COPY: u16 = 3010;
 const ID_PASTE: u16 = 3011;
 const ID_CLEAR: u16 = 3012;
@@ -133,6 +142,10 @@ impl Place {
                 "{} [{target}]",
                 yy_proto::display_path(yy_proto::file_name(d))
             ),
+            Place::Tn3270(t) if t.printer => match t.lu.as_deref().or(t.associate.as_deref()) {
+                Some(lu) => format!("{} [3287 {lu}]", t.label),
+                None => format!("{} [3287]", t.label),
+            },
             Place::Tn3270(t) => match &t.lu {
                 Some(lu) => format!("{} [3270 {lu}]", t.label),
                 None => format!("{} [3270]", t.label),
@@ -231,6 +244,10 @@ struct TermApp {
     ft_log: Option<std::sync::Arc<yy_remote::log::TransferLog>>,
     /// 前回のファイル転送の指定（ダイアログの初期値）
     ft_last: Option<ftdlg::Choice>,
+    /// 端末と一緒に開くプリンター（`WM_APP_TERM_PRINTER` で開く）
+    pending_printers: Vec<tn3270::Target3270>,
+    /// 受け取った印刷の通し番号
+    print_jobs: usize,
 }
 
 thread_local! {
@@ -497,6 +514,8 @@ fn create(
             tn_log: None,
             ft_log: None,
             ft_last: None,
+            pending_printers: Vec::new(),
+            print_jobs: 0,
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         FRAME.with(|f| f.set(frame.0 as isize));
@@ -558,6 +577,14 @@ fn create_menu() -> Result<HMENU> {
             w!("3270 のファイル転送(&I)...\tCtrl+Shift+I"),
         )?;
         item(file, ID_TN_CANCEL, w!("3270 のファイル転送を取り消す(&N)"))?;
+        item(file, ID_TN_PRINTER, w!("3270 のプリンターを接続(&P)"))?;
+        item(file, ID_PR_PRINT, w!("受け取った印刷を印刷(&R)..."))?;
+        item(file, ID_PR_PDF, w!("受け取った印刷を PDF で保存(&D)..."))?;
+        item(
+            file,
+            ID_PR_TEXT,
+            w!("受け取った印刷をテキストで保存(&X)..."),
+        )?;
         sep(file)?;
         item(file, ID_CLOSE_TAB, w!("タブを閉じる(&C)\tCtrl+Shift+W"))?;
         item(file, ID_EXIT, w!("終了(&X)"))?;
@@ -894,9 +921,15 @@ impl TermApp {
         };
         let mut tab = tab;
         if let Place::Tn3270(target) = &tab.place {
-            let tn = tn3270::Tn3270::new(target.clone());
+            let mut tn = tn3270::Tn3270::new(target.clone());
+            tn.view_rows = self.grid.1;
             tab.term = tn3270::render(&tn, false);
             tab.tn = Some(Box::new(tn));
+            if target.printer {
+                unsafe {
+                    SetTimer(Some(self.frame), TIMER_PRINTER, 1000, None);
+                }
+            }
         }
         let label = crate::util::wide(&tab_label(&tab));
         self.tabs.push(tab);
@@ -1076,7 +1109,11 @@ impl TermApp {
     /// 借りずに行う（大きさの変更の通知がすぐに届くため）。
     /// 3270 のキーパッドを出すか（3270 のタブを表示していて、設定で出す）。
     fn keypad_visible(&self) -> bool {
-        self.config.tn3270.keypad && self.tab().is_some_and(|t| t.tn.is_some())
+        self.config.tn3270.keypad
+            && self
+                .tab()
+                .and_then(|t| t.tn.as_ref())
+                .is_some_and(|tn| !tn.target.printer)
     }
 
     fn layout_rects(&self) -> (bool, Vec<(HWND, RECT)>) {
@@ -1130,8 +1167,12 @@ impl TermApp {
         let (cols, rows) = self.painter.grid_size(width, height);
         self.grid = (cols, rows);
         for t in &mut self.tabs {
-            // 3270 の画面の大きさはホストが決める
-            if t.tn.is_some() {
+            // 3270 の画面の大きさはホストが決める（プリンターの一覧は画面の行数に合わせる）
+            if let Some(tn) = t.tn.as_mut() {
+                if tn.target.printer && tn.view_rows != rows {
+                    tn.view_rows = rows;
+                    t.term = tn3270::render(tn, t.exited.is_some());
+                }
                 continue;
             }
             t.term.resize(cols, rows);
@@ -1244,9 +1285,12 @@ impl TermApp {
                     let t = &mut self.tabs[i];
                     t.exited = Some(code);
                     if let Some(tn) = &mut t.tn {
-                        let events = tn.session.abandon_transfer(
+                        let mut events = tn.session.abandon_transfer(
                             "切断されました（IND$FILE は途中から再開できません。接続し直して最初から転送してください）",
                         );
+                        if let Some(job) = tn.session.flush_print() {
+                            events.push(yy_3270::Event::PrintJob(job));
+                        }
                         t.term = tn3270::render(tn, true);
                         let label = t.place.label();
                         self.tn_note(&format!("{label}: 切断されました"));
@@ -1334,6 +1378,31 @@ impl TermApp {
                 E::Device(d) => {
                     self.tn_log_line(&format!("{label}: LU {d} が割り当てられました"));
                     self.update_tab_label(i);
+                    // 設定で `printer = "auto"` なら、対応するプリンターも開く
+                    let auto = self.tabs[i]
+                        .tn
+                        .as_ref()
+                        .filter(|tn| tn.target.auto_printer && !tn.target.printer)
+                        .map(|tn| tn.target.printer_target(Some(&d)));
+                    match auto {
+                        Some(Ok(p)) => {
+                            self.pending_printers.push(p);
+                            unsafe {
+                                let _ = PostMessageW(
+                                    Some(self.frame),
+                                    WM_APP_TERM_PRINTER,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+                        }
+                        Some(Err(e)) => self.tn_note(&format!("{label}: {e}")),
+                        None => {}
+                    }
+                }
+                E::PrintJob(job) => {
+                    self.tn_print_job(i, job);
+                    rerender = true;
                 }
                 E::DeviceRejected(r) => {
                     if let Some(tn) = self.tabs[i].tn.as_mut() {
@@ -1423,6 +1492,120 @@ impl TermApp {
         }
     }
 
+    /// プリンターのタブ `i` が印刷を受け取った: 一覧に加え、設定の出力先に出す。
+    fn tn_print_job(&mut self, i: usize, job: yy_3270::PrintJob) {
+        if job.is_empty() {
+            return;
+        }
+        self.print_jobs += 1;
+        let number = self.print_jobs;
+        let label = self.tabs[i].place.label();
+        let clock = crate::remote::local_clock();
+        let time = clock.get(11..19).unwrap_or(&clock).to_owned();
+        let pc = &self.config.tn3270.printer;
+        let output = match printer::Output::from_config(&pc.output) {
+            printer::Output::Ask => String::new(),
+            // PDF のプリンターは保存先を尋ねる（ここでは尋ねられない）ので、output = "pdf" を使う
+            printer::Output::Printer
+                if pc
+                    .printer_name
+                    .trim()
+                    .eq_ignore_ascii_case(printer::PDF_PRINTER) =>
+            {
+                "印刷できませんでした: PDF にするときは設定の output を \"pdf\" にしてください"
+                    .into()
+            }
+            printer::Output::Printer => {
+                match printer::print(&job, &pc.printer_name, None, &format!("{label} #{number}")) {
+                    Ok(n) => format!("{n} ページを印刷しました"),
+                    Err(e) => format!("印刷できませんでした: {e}"),
+                }
+            }
+            out @ (printer::Output::Pdf | printer::Output::Text) => {
+                let stamp: String = clock
+                    .get(..19)
+                    .unwrap_or(&clock)
+                    .chars()
+                    .filter(char::is_ascii_digit)
+                    .collect();
+                let ext = if out == printer::Output::Pdf {
+                    "pdf"
+                } else {
+                    "txt"
+                };
+                let path = printer::output_folder(&pc.folder)
+                    .join(printer::output_name(&label, &stamp, number, ext));
+                let r = if out == printer::Output::Pdf {
+                    printer::save_pdf(&job, &path, &format!("{label} #{number}")).map(|_| ())
+                } else {
+                    printer::save_text(&job, &path)
+                };
+                match r {
+                    Ok(()) => format!("{} に保存しました", path.display()),
+                    Err(e) => format!("保存できませんでした: {e}"),
+                }
+            }
+        };
+        let pages = job.pages.len();
+        self.ft_note(&format!(
+            "{label}: 印刷 #{number}（{pages} ページ、{} バイト）を受け取りました。{}",
+            job.bytes,
+            if output.is_empty() {
+                "一覧に置きました"
+            } else {
+                output.as_str()
+            }
+        ));
+        if let Some(tn) = self.tabs[i].tn.as_mut() {
+            tn.jobs.push(printer::StoredJob {
+                number,
+                time,
+                job,
+                output,
+            });
+        }
+    }
+
+    /// PRINT-EOJ のないホスト: 一定時間データが来なければジョブを終える（タイマーから）。
+    fn tn_print_tick(&mut self) {
+        let timeout = std::time::Duration::from_secs(self.config.tn3270.printer.eoj_timeout.max(1));
+        for i in 0..self.tabs.len() {
+            let Some(tn) = self.tabs[i].tn.as_mut() else {
+                continue;
+            };
+            if !tn.target.printer || !tn.session.printing() || tn.last_data.elapsed() < timeout {
+                continue;
+            }
+            if let Some(job) = tn.session.flush_print() {
+                self.tn_events(i, vec![yy_3270::Event::PrintJob(job)]);
+            }
+        }
+    }
+
+    /// 表示しているプリンターのタブの、番号 `number` の印刷。
+    fn stored_job(&self, number: usize) -> Option<(String, yy_3270::PrintJob)> {
+        let t = self.tab()?;
+        let tn = t.tn.as_ref()?;
+        let j = tn.jobs.iter().find(|j| j.number == number)?;
+        Some((format!("{} #{}", t.place.label(), j.number), j.job.clone()))
+    }
+
+    /// 表示しているプリンターのタブの印刷に、出した先を書く。
+    fn set_job_output(&mut self, number: usize, output: String) {
+        let active = self.active;
+        if let Some(tn) = self.tabs.get_mut(active).and_then(|t| t.tn.as_mut())
+            && let Some(j) = tn.jobs.iter_mut().find(|j| j.number == number)
+        {
+            j.output = output.clone();
+            let t = &mut self.tabs[active];
+            if let Some(tn) = &t.tn {
+                t.term = tn3270::render(tn, t.exited.is_some());
+            }
+        }
+        self.ft_note(&format!("印刷 #{number}: {output}"));
+        self.invalidate();
+    }
+
     /// 表示している 3270 のタブのファイル転送を始める。
     fn tn_start_transfer(&mut self, choice: ftdlg::Choice) -> std::result::Result<(), String> {
         let active = self.active;
@@ -1487,6 +1670,7 @@ impl TermApp {
     fn tn_receive(&mut self, i: usize, data: &[u8]) {
         let t = &mut self.tabs[i];
         let Some(tn) = t.tn.as_mut() else { return };
+        tn.last_data = std::time::Instant::now();
         let mut o = tn.session.receive(data);
         let term = o.changed.then(|| tn3270::render(tn, false));
         t.send(std::mem::take(&mut o.send));
@@ -1514,6 +1698,10 @@ impl TermApp {
             return;
         }
         let Some(tn) = t.tn.as_mut() else { return };
+        // プリンターには入力しない
+        if tn.target.printer {
+            return;
+        }
         let mut o = tn.session.key(k);
         let term = o.changed.then(|| tn3270::render(tn, false));
         t.send(std::mem::take(&mut o.send));
@@ -1576,6 +1764,10 @@ impl TermApp {
         if let Some(t) = self.tabs.get_mut(self.active)
             && let Some(tn) = t.tn.as_mut()
         {
+            // プリンターには入力しない
+            if tn.target.printer {
+                return;
+            }
             let o = tn.session.paste(&text);
             if o.changed {
                 t.selection = None;
@@ -1682,6 +1874,17 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
         WM_APP_TERM_LAYOUT => {
             layout();
             with(|a| a.relayout_view());
+            LRESULT(0)
+        }
+        WM_APP_TERM_PRINTER => {
+            let targets = with(|a| std::mem::take(&mut a.pending_printers)).unwrap_or_default();
+            for t in targets {
+                open_tab(Place::Tn3270(t));
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_PRINTER => {
+            with(|a| a.tn_print_tick());
             LRESULT(0)
         }
         WM_SETFOCUS | WM_APP_TERM_FOCUS => {
@@ -1791,6 +1994,8 @@ fn command(hwnd: HWND, id: u16) {
         ID_SSH => cmd_ssh(hwnd),
         ID_TN3270 => cmd_tn3270(hwnd),
         ID_TN_TRANSFER => cmd_tn_transfer(hwnd),
+        ID_TN_PRINTER => cmd_tn_printer(hwnd),
+        ID_PR_PRINT | ID_PR_PDF | ID_PR_TEXT => cmd_print_output(hwnd, id),
         ID_TN_CANCEL => {
             with(|a| a.tn_cancel_transfer());
         }
@@ -2139,6 +2344,91 @@ fn cmd_tn_transfer(hwnd: HWND) {
         error_box(hwnd, &format!("ファイル転送を始められません。\n{e}"));
     }
     focus_view();
+}
+
+/// 「3270 のプリンターを接続」: 表示している 3270 の端末に対応するプリンターのタブを開く。
+fn cmd_tn_printer(hwnd: HWND) {
+    let target = with(|a| {
+        let tn = a.tab()?.tn.as_ref()?;
+        if tn.target.printer {
+            return Some(Err(
+                "プリンターのタブではなく、3270 の端末のタブで選んでください。".to_owned(),
+            ));
+        }
+        Some(tn.target.printer_target(tn.session.oia().device.as_deref()))
+    })
+    .flatten();
+    match target {
+        Some(Ok(t)) => open_tab(Place::Tn3270(t)),
+        Some(Err(e)) => error_box(hwnd, &e),
+        None => info_box(hwnd, "3270 の端末のタブを表示してから選んでください。"),
+    }
+}
+
+/// 受け取った印刷を印刷する・PDF やテキストで保存する（表示しているプリンターのタブ）。
+fn cmd_print_output(hwnd: HWND, id: u16) {
+    let Some(Some((last, printer_name))) = with(|a| {
+        let tn = a.tab()?.tn.as_ref()?;
+        if !tn.target.printer {
+            return None;
+        }
+        Some((
+            tn.jobs.last().map(|j| j.number),
+            a.config.tn3270.printer.printer_name.clone(),
+        ))
+    }) else {
+        info_box(
+            hwnd,
+            "3270 のプリンターのタブを表示してから選んでください。",
+        );
+        return;
+    };
+    let Some(last) = last else {
+        info_box(hwnd, "まだ印刷を受け取っていません。");
+        return;
+    };
+    let Some(number) = crate::goto::prompt_line(hwnd, "印刷の番号（#）:", last as u64)
+    else {
+        return;
+    };
+    let number = number as usize;
+    let Some(Some((title, job))) = with(|a| a.stored_job(number)) else {
+        error_box(hwnd, &format!("印刷 #{number} はこのタブにありません。"));
+        return;
+    };
+    let result = match id {
+        ID_PR_PRINT => {
+            let name = if printer_name.trim().is_empty() {
+                printer::default_printer().unwrap_or_default()
+            } else {
+                printer_name
+            };
+            printer::print(&job, &name, None, &title)
+                .map(|n| format!("{n} ページを {name} に印刷しました"))
+        }
+        _ => {
+            let pdf = id == ID_PR_PDF;
+            let ext = if pdf { "pdf" } else { "txt" };
+            let Some(path) =
+                printer::pick_save(hwnd, &printer::output_name(&title, "", number, ext), pdf)
+            else {
+                return;
+            };
+            if pdf {
+                printer::save_pdf(&job, &path, &title)
+                    .map(|_| format!("{} に保存しました", path.display()))
+            } else {
+                printer::save_text(&job, &path)
+                    .map(|()| format!("{} に保存しました", path.display()))
+            }
+        }
+    };
+    match result {
+        Ok(msg) => {
+            with(|a| a.set_job_output(number, msg));
+        }
+        Err(e) => error_box(hwnd, &e),
+    }
 }
 
 fn cmd_add_remote_folder(hwnd: HWND) {

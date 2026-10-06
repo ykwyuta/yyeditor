@@ -75,6 +75,8 @@ pub struct Tn3270Config {
     pub tn3270e: bool,
     /// ホストにしかないキー（PF13〜24・PA・Clear など）のボタンを画面の右に出す
     pub keypad: bool,
+    /// プリンター（3287）の出力
+    pub printer: Tn3270Printer,
     /// 接続先ごとの設定（名前 → 値）
     pub host: BTreeMap<String, Tn3270Host>,
 }
@@ -87,7 +89,33 @@ impl Default for Tn3270Config {
             terminal_type: String::new(),
             tn3270e: true,
             keypad: true,
+            printer: Tn3270Printer::default(),
             host: BTreeMap::new(),
+        }
+    }
+}
+
+/// 3270 のプリンター（3287）の出力（14 章 12.3）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tn3270Printer {
+    /// 印刷を受け取ったら: `printer`（Windows のプリンター）・`pdf`・`text`・`ask`（一覧に溜める）
+    pub output: String,
+    /// Windows のプリンターの名前（空なら既定のプリンター）
+    pub printer_name: String,
+    /// PDF・テキストを保存するフォルダー（空ならドキュメントの `yyterm-print`）
+    pub folder: String,
+    /// PRINT-EOJ のないホストで、この秒数データが来なければジョブの終わりとみなす
+    pub eoj_timeout: u64,
+}
+
+impl Default for Tn3270Printer {
+    fn default() -> Self {
+        Tn3270Printer {
+            output: "ask".into(),
+            printer_name: String::new(),
+            folder: String::new(),
+            eoj_timeout: 5,
         }
     }
 }
@@ -105,6 +133,10 @@ pub struct Tn3270Host {
     pub ccsid: Option<u32>,
     /// この SSH の接続（`~/.ssh/config` の Host・`ユーザー@ホスト`）を経由する
     pub ssh: Option<String>,
+    /// プリンターの LU 名（省略すると端末の LU に対応するプリンター。ASSOCIATE）
+    pub printer_lu: Option<String>,
+    /// `auto` なら端末を開いたらプリンターも開く（既定は `manual`）
+    pub printer: Option<String>,
 }
 
 /// ファイル転送（yysftp）の設定。

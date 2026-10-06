@@ -7,6 +7,7 @@
 pub mod codes;
 pub mod emu;
 pub mod ind_file;
+pub mod print;
 pub mod query;
 pub mod screen;
 
@@ -15,6 +16,7 @@ use yy_encoding::Ccsid;
 use codes::*;
 pub use emu::{Key, Lock, OperatorError};
 pub use ind_file::FtEvent;
+pub use print::PrintJob;
 pub use screen::{DisplayCell, Screen};
 
 /// 接続の設定。
@@ -29,6 +31,10 @@ pub struct Config {
     pub lu: Option<String>,
     /// TN3270E を使う（断られたら TN3270）
     pub tn3270e: bool,
+    /// プリンター（3287）のセッション
+    pub printer: bool,
+    /// プリンターで、LU 名の代わりに対応づける端末の LU（ASSOCIATE）
+    pub associate: Option<String>,
 }
 
 impl Default for Config {
@@ -39,6 +45,8 @@ impl Default for Config {
             terminal_type: None,
             lu: None,
             tn3270e: true,
+            printer: false,
+            associate: None,
         }
     }
 }
@@ -48,7 +56,13 @@ impl Config {
         self.terminal_type
             .clone()
             .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| format!("IBM-3278-{}-E", self.model.clamp(2, 5)))
+            .unwrap_or_else(|| {
+                if self.printer {
+                    "IBM-3287-1".to_owned()
+                } else {
+                    format!("IBM-3278-{}-E", self.model.clamp(2, 5))
+                }
+            })
     }
 }
 
@@ -90,6 +104,8 @@ pub enum Event {
     Text(String),
     /// IND$FILE の転送の進み具合・結果
     Transfer(FtEvent),
+    /// プリンターの印刷のジョブが終わった（PRINT-EOJ）
+    PrintJob(PrintJob),
 }
 
 /// 処理の結果。
@@ -141,11 +157,16 @@ pub struct Session {
     mode: Mode,
     device: Option<String>,
     nvt: Vec<u8>,
+    /// プリンターの組み立て中のジョブ
+    scs: print::Scs,
+    lu3: Vec<print::Page>,
+    lu3_bytes: usize,
 }
 
 impl Session {
     pub fn new(cfg: Config) -> Session {
         let emu = emu::Emulator::new(cfg.model, cfg.ccsid);
+        let cfg_ccsid = cfg.ccsid;
         Session {
             cfg,
             emu,
@@ -162,6 +183,9 @@ impl Session {
             mode: Mode::Negotiating,
             device: None,
             nvt: Vec::new(),
+            scs: print::Scs::new(cfg_ccsid),
+            lu3: Vec::new(),
+            lu3_bytes: 0,
         }
     }
 
@@ -384,11 +408,22 @@ impl Session {
                 let tt = self.cfg.terminal_type();
                 let mut body = vec![OPT_TN3270E, E_DEVICE_TYPE, E_REQUEST];
                 body.extend_from_slice(tt.as_bytes());
+                let associate = self
+                    .cfg
+                    .associate
+                    .as_deref()
+                    .filter(|l| self.cfg.printer && !l.is_empty());
                 if let Some(lu) = self.cfg.lu.as_deref().filter(|l| !l.is_empty()) {
                     body.push(E_CONNECT);
                     body.extend_from_slice(lu.as_bytes());
                     out.events.push(Event::Negotiation(format!(
                         "TN3270E: 端末の種類 {tt}、LU {lu} を求めます"
+                    )));
+                } else if let Some(term) = associate {
+                    body.push(E_ASSOCIATE);
+                    body.extend_from_slice(term.as_bytes());
+                    out.events.push(Event::Negotiation(format!(
+                        "TN3270E: 端末の種類 {tt}、端末の LU {term} に対応するプリンターを求めます"
                     )));
                 } else {
                     out.events.push(Event::Negotiation(format!(
@@ -406,8 +441,11 @@ impl Session {
                     out.events.push(Event::Device(d.clone()));
                 }
                 self.device = device;
-                // RESPONSES だけを求める（BIND-IMAGE を使うと SSCP-LU の画面の扱いが要る）
-                Self::send_sb(out, &[OPT_TN3270E, E_FUNCTIONS, E_REQUEST, FN_RESPONSES]);
+                // RESPONSES（プリンターは SCS-CTL-CODES・DATA-STREAM-CTL も）を求める
+                // （BIND-IMAGE を使うと SSCP-LU の画面の扱いが要る）
+                let mut body = vec![OPT_TN3270E, E_FUNCTIONS, E_REQUEST];
+                body.extend_from_slice(&self.wanted_functions());
+                Self::send_sb(out, &body);
             }
             [OPT_TN3270E, E_DEVICE_TYPE, E_REJECT, rest @ ..] => {
                 let reason = rest
@@ -427,10 +465,11 @@ impl Session {
             }
             [OPT_TN3270E, E_FUNCTIONS, E_REQUEST, list @ ..] => {
                 // サーバーの提案のうち、使えるものだけで答える
+                let wanted = self.wanted_functions();
                 let ours: Vec<u8> = list
                     .iter()
                     .copied()
-                    .filter(|f| matches!(*f, FN_RESPONSES))
+                    .filter(|f| wanted.contains(f))
                     .collect();
                 let mut body = vec![OPT_TN3270E, E_FUNCTIONS];
                 if ours.len() == list.len() {
@@ -447,6 +486,32 @@ impl Session {
             }
             _ => {}
         }
+    }
+
+    /// 使える TN3270E の関数。
+    fn wanted_functions(&self) -> Vec<u8> {
+        if self.cfg.printer {
+            vec![FN_RESPONSES, FN_SCS_CTL_CODES, FN_DATA_STREAM_CTL]
+        } else {
+            vec![FN_RESPONSES]
+        }
+    }
+
+    /// プリンターの書きかけのジョブを終える（PRINT-EOJ のないホストで、一定時間データが
+    /// 来なかったとき・切断したとき）。何もなければ `None`。
+    pub fn flush_print(&mut self) -> Option<PrintJob> {
+        let mut job = self.scs.finish().unwrap_or_default();
+        if !self.lu3.is_empty() {
+            job.pages.append(&mut self.lu3);
+            job.bytes += std::mem::take(&mut self.lu3_bytes);
+            job.columns = job.columns.max(job.width());
+        }
+        (job.bytes > 0).then_some(job)
+    }
+
+    /// プリンターのジョブを組み立て中か。
+    pub fn printing(&self) -> bool {
+        self.scs.has_data() || self.lu3_bytes > 0
     }
 
     fn set_mode(&mut self, m: Mode, out: &mut Output) {
@@ -489,23 +554,36 @@ impl Session {
                     }
                     return;
                 }
-                // それ以外（SCS・BIND など）は端末のセッションでは使わない
+                DT_SCS_DATA if self.cfg.printer => {
+                    self.scs.feed(data);
+                    self.respond(h, out);
+                    return;
+                }
+                DT_PRINT_EOJ if self.cfg.printer => {
+                    if let Some(job) = self.flush_print() {
+                        out.events.push(Event::PrintJob(job));
+                    }
+                    self.respond(h, out);
+                    return;
+                }
+                // それ以外（BIND など）は使わない
                 _ => return,
             }
         }
         let r = self.emu.process(data);
+        if self.cfg.printer
+            && let Some(wcc) = self.emu.print_wcc.take()
+        {
+            self.lu3
+                .extend(print::lu3_pages(&self.emu.screen, self.emu.ccsid, wcc));
+            self.lu3_bytes += data.len();
+        }
         if r.alarm {
             out.events.push(Event::Alarm);
         }
         out.changed |= r.changed;
-        // 応答を求められたら肯定の応答（Device End）
-        if let Some(h) = header
-            && h[2] == RSP_ALWAYS_RESPONSE
-            && self.functions.contains(&FN_RESPONSES)
-        {
-            let mut body = vec![DT_RESPONSE, 0, RSP_POSITIVE, h[3], h[4], 0x00];
-            frame(&mut body);
-            out.send.extend_from_slice(&body);
+        if let Some(h) = header {
+            self.respond(h, out);
         }
         if let Some(d) = r.data {
             self.send_data(&d, out);
@@ -515,6 +593,15 @@ impl Session {
     }
 
     /// 3270 のデータを送る（TN3270E ならヘッダーを付け、IAC を二重にして IAC EOR で終える）。
+    /// 応答を求められたら肯定の応答（Device End）。
+    fn respond(&self, h: [u8; 5], out: &mut Output) {
+        if h[2] == RSP_ALWAYS_RESPONSE && self.functions.contains(&FN_RESPONSES) {
+            let mut body = vec![DT_RESPONSE, 0, RSP_POSITIVE, h[3], h[4], 0x00];
+            frame(&mut body);
+            out.send.extend_from_slice(&body);
+        }
+    }
+
     fn send_data(&self, data: &[u8], out: &mut Output) {
         let mut rec = Vec::with_capacity(data.len() + 8);
         if self.mode == Mode::Tn3270e {
