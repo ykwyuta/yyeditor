@@ -768,8 +768,7 @@ impl Emulator {
             .take_while(|(t, _)| matches!(t, Tok::Single(0)) || matches!(t, Tok::Double(0)))
             .count();
         let mut chars: Vec<Tok> = toks.iter().map(|(t, _)| *t).collect();
-        let new_index;
-        match op {
+        let new_index = match op {
             Edit::Put(t) => {
                 if dbcs_field && matches!(t, Tok::Single(b) if b != FC_DUP && b != FC_FM) {
                     self.error(OperatorError::WrongCharset);
@@ -794,20 +793,20 @@ impl Emulator {
                     self.error(OperatorError::Overflow);
                     return false;
                 }
-                new_index = idx + 1;
+                idx + 1
             }
             Edit::Delete => {
                 if idx >= chars.len() {
                     return false;
                 }
                 chars.remove(idx);
-                new_index = idx;
+                idx
             }
             Edit::EraseEof => {
                 chars.truncate(idx);
-                new_index = idx;
+                idx
             }
-        }
+        };
         // 符号に戻す（2 バイト文字の前に SO、1 バイト文字の前と終わりに SI）
         let Some((bytes, positions)) = encode_field(&chars, dbcs_field, mixed, len) else {
             self.error(OperatorError::Overflow);
