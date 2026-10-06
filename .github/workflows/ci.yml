@@ -39,7 +39,8 @@ jobs:
         run: |
           A=target/${{ matrix.arch }}-unknown-linux-musl/release/yy-agent
           file "$A"
-          file "$A" | grep -q "statically linked"
+          # 静的リンク（x86_64 は static-pie）であること
+          file "$A" | grep -Eq "statically linked|static-pie linked"
           "$A" --version
           test "$("$A" --sha256)" = "$(sha256sum "$A" | cut -d' ' -f1)"
           mkdir -p agents
