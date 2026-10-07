@@ -7,7 +7,17 @@ use rustls::pki_types::PrivatePkcs8KeyDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
-use super::*;
+use std::io::{self, Read, Write};
+use std::net::TcpStream;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use rustls::RootCertStore;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+use crate::client::*;
+use crate::connect;
+use crate::*;
 
 /// 試験の認証局・サーバー・クライアントの証明書。
 struct Pki {

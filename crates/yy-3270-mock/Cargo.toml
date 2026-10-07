@@ -16,7 +16,7 @@ sha2.workspace = true
 [dev-dependencies]
 yy-3270.workspace = true
 yy-3270-macro.workspace = true
-yy-3270-tls.workspace = true
+yy-3270-tls = { workspace = true, features = ["rustls"] }
 tempfile.workspace = true
 
 [lints]

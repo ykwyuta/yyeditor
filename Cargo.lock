@@ -3473,6 +3473,7 @@ dependencies = [
 name = "yyterm"
 version = "0.1.0"
 dependencies = [
+ "yy-3270-tls",
  "yy-ssh",
  "yy-win",
 ]

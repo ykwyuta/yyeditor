@@ -12,7 +12,7 @@ yy-encoding.workspace = true
 rhai = { version = "1.26", default-features = false, features = ["std", "no_module", "no_custom_syntax"] }
 
 [dev-dependencies]
-yy-3270-tls.workspace = true
+yy-3270-tls = { workspace = true, features = ["rustls"] }
 
 [lints]
 workspace = true
