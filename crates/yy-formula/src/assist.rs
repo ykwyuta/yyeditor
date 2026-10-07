@@ -32,6 +32,18 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: Some((1, 1)),
     },
     FuncInfo {
+        name: "CBL.HIGH-VALUE",
+        desc: "COBOL の HIGH-VALUE。固定長の項目の列で、項目のすべてのバイトを X'FF' にします（COBOL の型のない列では #VALUE!）。",
+        params: &[],
+        repeat: None,
+    },
+    FuncInfo {
+        name: "CBL.LOW-VALUE",
+        desc: "COBOL の LOW-VALUE。固定長の項目の列で、項目のすべてのバイトを X'00' にします（COBOL の型のない列では #VALUE!）。",
+        params: &[],
+        repeat: None,
+    },
+    FuncInfo {
         name: "CONCAT",
         desc: "文字列をつなげます（範囲はセルの順に）。",
         params: &["文字列1", "[文字列2]"],
@@ -56,21 +68,15 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: None,
     },
     FuncInfo {
-        name: "HIGH-VALUE",
-        desc: "COBOL の HIGH-VALUE。固定長の項目の列で、項目のすべてのバイトを X'FF' にします（COBOL の型のない列では #VALUE!）。",
-        params: &[],
-        repeat: None,
-    },
-    FuncInfo {
         name: "IF",
         desc: "条件が真なら「真の場合」、偽なら「偽の場合」の値を返します（選んだ方だけを計算します。偽の場合を省くと FALSE）。",
         params: &["条件", "真の場合", "[偽の場合]"],
         repeat: None,
     },
     FuncInfo {
-        name: "LOW-VALUE",
-        desc: "COBOL の LOW-VALUE。固定長の項目の列で、項目のすべてのバイトを X'00' にします（COBOL の型のない列では #VALUE!）。",
-        params: &[],
+        name: "IFERROR",
+        desc: "値がエラー（#DIV/0!・#N/A・#VALUE! など）ならエラーの場合の値を、そうでなければ値をそのまま返します。",
+        params: &["値", "エラーの場合の値"],
         repeat: None,
     },
     FuncInfo {
@@ -261,7 +267,7 @@ fn is_name_char(c: char) -> bool {
 }
 
 /// `text` の `caret`（文字の番号）での入力の様子。`=` で始まらなければ何もない。
-/// `chars[..end]` の終わりにある名前の始め（`LOW-VAL` のように `LOW-`・`HIGH-` に続く `VALUE(S)` の
+/// `chars[..end]` の終わりにある名前の始め（`CBL.LOW-VAL` のように `CBL.LOW-`・`CBL.HIGH-` に続く `VALUE(S)` の
 /// 途中も 1 つの名前とする）。
 fn name_start(chars: &[char], end: usize) -> usize {
     let mut s = end;
@@ -281,7 +287,7 @@ fn name_start(chars: &[char], end: usize) -> usize {
             .iter()
             .collect::<String>()
             .to_ascii_uppercase();
-        if head == "LOW" || head == "HIGH" {
+        if head == "CBL.LOW" || head == "CBL.HIGH" {
             return h;
         }
     }

@@ -1,6 +1,6 @@
 //! 数式（15 章 7）: Excel と同じ文法の解析・評価と、`XLOOKUP`・`SUMIFS`・`COUNTIFS`・`SUM`・`COUNT`・
 //! `AVERAGE`・`MAX`・`MIN`・`MEDIAN`・`PERCENTILE`・`ROUND`・`ROUNDUP`・`ROUNDDOWN`・`IF`・`MOD`・`PI`・`TRUE`・`FALSE`・`PRODUCT`・`ABS`・`CONCAT`・
-//! `TEXTJOIN`・`TEXTSPLIT`・`LOW-VALUE`・`HIGH-VALUE`・四則演算・文字列の連結。
+//! `TEXTJOIN`・`TEXTSPLIT`・`IFERROR`・`CBL.LOW-VALUE`・`CBL.HIGH-VALUE`・四則演算・文字列の連結。
 //!
 //! セルの保管には依存しない: 評価はセルの読み方（[`Grid`]）を受け取って行う。列をまとめて読む
 //! [`Grid::scan`] を使うので、5000 万行の列に対する `SUMIFS` も列を 1 回読むだけで済む。
@@ -31,10 +31,10 @@ pub use parse::{Area, AreaKind, BinOp, Expr, Func, ParseError, Ref, Rounding, pa
 pub use print::formula_text;
 pub use rows::{eval_rows, shift, shift_by, spread};
 
-/// `LOW-VALUE()` の値（印の文字列。固定長の項目の列では項目をすべて X'00' にし、そのほかの列では
-/// `#VALUE!` にする。比べると `LOW-VALUE()` どうしは等しい）。
+/// `CBL.LOW-VALUE()` の値（印の文字列。固定長の項目の列では項目をすべて X'00' にし、そのほかの列では
+/// `#VALUE!` にする。比べると `CBL.LOW-VALUE()` どうしは等しい）。
 pub const LOW_VALUE: &str = "\u{F8F0}LOW-VALUE";
-/// `HIGH-VALUE()` の値（項目をすべて X'FF' にする）。
+/// `CBL.HIGH-VALUE()` の値（項目をすべて X'FF' にする）。
 pub const HIGH_VALUE: &str = "\u{F8F0}HIGH-VALUE";
 
 /// 表意定数（`LOW-VALUE`・`HIGH-VALUE`）の印の文字列なら、項目を埋めるバイト。

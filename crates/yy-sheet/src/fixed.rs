@@ -220,9 +220,9 @@ fn formula_field(sheet: &Sheet, src_row: u64, col: u32) -> Option<(&FixedSpec, &
 /// 呼ぶので、参照する式・表示・書き出しはどれも合わせた値を見る）。
 ///
 /// - 項目の列: 型に合わなければエラー値（型が違えば `#VALUE!`、桁・範囲の外なら `#NUM!`）。
-///   数値の小数部の多い桁は切り捨てた値にする（書き出す値と同じ）。`LOW-VALUE()`・`HIGH-VALUE()` は
+///   数値の小数部の多い桁は切り捨てた値にする（書き出す値と同じ）。`CBL.LOW-VALUE()`・`CBL.HIGH-VALUE()` は
 ///   そのまま（書き出すときに項目のすべてのバイトを 0x00・0xFF にする）。
-/// - 項目のない列: `LOW-VALUE()`・`HIGH-VALUE()` は値にできないので `#VALUE!`。
+/// - 項目のない列: `CBL.LOW-VALUE()`・`CBL.HIGH-VALUE()` は値にできないので `#VALUE!`。
 pub fn fit_formula_result(sheet: &Sheet, src_row: u64, col: u32, v: Value) -> Value {
     let fig = matches!(&v, Value::Text(s) if yy_formula::figurative(s).is_some());
     let Some((spec, f)) = formula_field(sheet, src_row, col) else {
@@ -247,7 +247,7 @@ pub fn fit_formula_result(sheet: &Sheet, src_row: u64, col: u32, v: Value) -> Va
     }
 }
 
-/// 式の結果を合わせる要るか（固定長の項目の列か、`LOW-VALUE()`・`HIGH-VALUE()` の結果）。速い道に使う。
+/// 式の結果を合わせる要るか（固定長の項目の列か、`CBL.LOW-VALUE()`・`CBL.HIGH-VALUE()` の結果）。速い道に使う。
 pub(crate) fn needs_fit(sheet: &Sheet, src_row: u64, col: u32, v: &yy_formula::Val) -> bool {
     matches!(v, yy_formula::Val::Text(s) if yy_formula::figurative(s).is_some())
         || formula_field(sheet, src_row, col).is_some()
@@ -1018,17 +1018,17 @@ mod tests {
             apply_layout(ctx, sh, &s)?;
             // ID 9(5)・NAME X(10)・KANA N(4)・AMT S9(7)V99 COMP-3・CNT S9(4) COMP・BIG・FILLER
             let f = |sh: &mut Sheet, r: u64, c: u32, t: &str| sh.set_formula(ctx, r, c, t).unwrap();
-            f(sh, 1, 0, "=LOW-VALUE()");
-            f(sh, 1, 1, "=HIGH-VALUE()");
+            f(sh, 1, 0, "=CBL.LOW-VALUE()");
+            f(sh, 1, 1, "=CBL.HIGH-VALUE()");
             f(sh, 1, 3, "=10/3");
             f(sh, 1, 4, "=99999");
             f(sh, 2, 0, "=-1");
             f(sh, 2, 1, "=\"ABCDEFGHIJK\"");
             f(sh, 2, 3, "=\"x\"");
             f(sh, 2, 4, "=1234");
-            f(sh, 3, 0, "=A2=LOW-VALUE()");
+            f(sh, 3, 0, "=A2=CBL.LOW-VALUE()");
             // 項目のない列（表の外）
-            f(sh, 1, 9, "=LOW-VALUE()");
+            f(sh, 1, 9, "=CBL.LOW-VALUE()");
             f(sh, 1, 10, "=J2");
             Ok(())
         })

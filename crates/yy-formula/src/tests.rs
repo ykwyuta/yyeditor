@@ -527,42 +527,51 @@ fn shared_lookup_rows_use_the_index() {
 #[test]
 fn cobol_figurative_constants() {
     let mut g = Mem::new();
-    for f in ["=LOW-VALUE()", "=low-values()", "=Low-Value( )"] {
+    for f in ["=CBL.LOW-VALUE()", "=cbl.low-values()", "=Cbl.Low-Value( )"] {
         assert_eq!(g.eval(f), t(LOW_VALUE), "{f}");
     }
-    assert_eq!(g.eval("=HIGH-VALUE()"), t(HIGH_VALUE));
-    assert_eq!(g.eval("=HIGH-VALUES()"), t(HIGH_VALUE));
+    assert_eq!(g.eval("=CBL.HIGH-VALUE()"), t(HIGH_VALUE));
+    assert_eq!(g.eval("=CBL.HIGH-VALUES()"), t(HIGH_VALUE));
     assert_eq!(figurative(LOW_VALUE), Some(0x00));
     assert_eq!(figurative(HIGH_VALUE), Some(0xFF));
     assert_eq!(figurative("LOW-VALUE"), None);
-    assert_eq!(g.eval("=LOW-VALUE(1)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=CBL.LOW-VALUE(1)"), Val::Err(Error::Value));
     // 比べる（COBOL の IF X = LOW-VALUE）
     g.set(0, "A1", t(LOW_VALUE));
-    assert_eq!(g.eval("=A1=LOW-VALUE()"), Val::Bool(true));
-    assert_eq!(g.eval("=A1=HIGH-VALUE()"), Val::Bool(false));
+    assert_eq!(g.eval("=A1=CBL.LOW-VALUE()"), Val::Bool(true));
+    assert_eq!(g.eval("=A1=CBL.HIGH-VALUE()"), Val::Bool(false));
     // 名前のあとにかっこがなければ、今までどおり引き算・名前
     g.set(0, "B1", n(5.0));
     assert_eq!(g.eval("=B1-1"), n(4.0));
-    assert_eq!(g.eval("=LOW-VALUE"), Val::Err(Error::Name));
+    assert_eq!(g.eval("=CBL.LOW-VALUE"), Val::Err(Error::Name));
+    // 前の名前（接頭辞なし）は使えない
+    assert_eq!(g.eval("=LOW-VALUE()"), Val::Err(Error::Name));
     // 式の文字列に戻す
-    let e = parse("=low-values()").unwrap();
-    assert_eq!(formula_text(&e), "=LOW-VALUE()");
-    assert!(refs_in("=LOW-VALUE()").is_empty());
-    assert!(refs_in("=HIGH-VALUE()").is_empty());
+    let e = parse("=cbl.low-values()").unwrap();
+    assert_eq!(formula_text(&e), "=CBL.LOW-VALUE()");
+    assert!(refs_in("=CBL.LOW-VALUE()").is_empty());
+    assert!(refs_in("=CBL.HIGH-VALUE()").is_empty());
     // 入力の補助
     let w = |s: &str| typing(s, s.chars().count()).word.map(|w| w.1);
-    assert_eq!(w("=LOW-V"), Some("LOW-V".into()));
-    assert_eq!(w("=high-"), Some("high-".into()));
+    assert_eq!(w("=CBL.LOW-V"), Some("CBL.LOW-V".into()));
+    assert_eq!(w("=cbl.high-"), Some("cbl.high-".into()));
     assert_eq!(w("=A1-V"), Some("V".into()));
     assert_eq!(
-        FuncInfo::complete("LOW-")
+        FuncInfo::complete("CBL.LOW-")
             .iter()
             .map(|f| f.name)
             .collect::<Vec<_>>(),
-        ["LOW-VALUE"]
+        ["CBL.LOW-VALUE"]
     );
-    let c = typing("=LOW-VALUE(", 11).call;
-    assert_eq!(c.map(|c| c.0), Some("LOW-VALUE".into()));
+    let c = typing("=CBL.LOW-VALUE(", 15).call;
+    assert_eq!(c.map(|c| c.0), Some("CBL.LOW-VALUE".into()));
+    assert_eq!(
+        FuncInfo::complete("CBL.")
+            .iter()
+            .map(|f| f.name)
+            .collect::<Vec<_>>(),
+        ["CBL.HIGH-VALUE", "CBL.LOW-VALUE"]
+    );
 }
 
 #[test]
@@ -732,4 +741,27 @@ fn pi_logical_and_mod() {
         Val::Array(a) => assert_eq!(a.data, vec![n(2.0), n(0.0), n(1.0)]),
         v => panic!("{v:?}"),
     }
+}
+
+#[test]
+fn iferror() {
+    let mut g = Mem::new();
+    g.set(0, "A1", n(10.0));
+    g.set(0, "A2", n(0.0));
+    assert_eq!(g.eval("=IFERROR(A1/A2,\"-\")"), t("-"));
+    assert_eq!(g.eval("=IFERROR(A1/2,\"-\")"), n(5.0));
+    assert_eq!(g.eval("=IFERROR(XLOOKUP(99,A1:A2,A1:A2),0)"), n(0.0));
+    assert_eq!(g.eval("=IFERROR(\"x\"+1,)"), n(0.0));
+    assert_eq!(g.eval("=IFERROR(#N/A,#VALUE!)"), Val::Err(Error::Value));
+    // エラーでなければ 2 つ目は計算しない
+    assert_eq!(g.eval("=IFERROR(1,1/0)"), n(1.0));
+    assert_eq!(g.eval("=IFERROR(1)"), Val::Err(Error::Value));
+    match g.eval("=IFERROR({1,2}/{1,0},-1)") {
+        Val::Array(a) => assert_eq!(a.data, vec![n(1.0), n(-1.0)]),
+        v => panic!("{v:?}"),
+    }
+    assert_eq!(
+        formula_text(&parse("=iferror(A1,0)").unwrap()),
+        "=IFERROR(A1,0)"
+    );
 }

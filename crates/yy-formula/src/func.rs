@@ -27,6 +27,7 @@ pub(crate) fn call(f: &Func, args: &[Expr], cx: &Context<'_>) -> Val {
         Func::Percentile { inc, .. } => percentile(args, cx, *inc),
         Func::Round(mode) => round(args, cx, *mode),
         Func::If => if_(args, cx),
+        Func::Iferror => iferror(args, cx),
         Func::Mod => modulo(args, cx),
         Func::Pi | Func::Logical(_) if !args.is_empty() => Val::Err(Error::Value),
         Func::Pi => Val::Num(std::f64::consts::PI),
@@ -360,6 +361,29 @@ fn modulo(args: &[Expr], cx: &Context<'_>) -> Val {
             Val::Err(Error::Num)
         }
     })
+}
+
+/// `IFERROR(値, エラーの場合の値)`: 値がエラーならエラーの場合の値（値がエラーでなければ計算しない）。
+/// 空の引数は 0。値が配列なら要素ごとに（エラーの場合の値も配列なら同じ位置の値）。
+fn iferror(args: &[Expr], cx: &Context<'_>) -> Val {
+    if args.len() != 2 {
+        return Val::Err(Error::Value);
+    }
+    let arg_or_zero = |e: &Expr| match e {
+        Expr::Missing => Val::Num(0.0),
+        e => eval(e, cx),
+    };
+    match arg_or_zero(&args[0]) {
+        Val::Err(_) => arg_or_zero(&args[1]),
+        Val::Array(a) if a.data.iter().any(|v| matches!(v, Val::Err(_))) => {
+            let alt = arg_or_zero(&args[1]);
+            zip(&Val::Array(a), &alt, &|v, alt| match v {
+                Val::Err(_) => alt.clone(),
+                v => v.clone(),
+            })
+        }
+        v => v,
+    }
 }
 
 // ---- IF --------------------------------------------------------------------------------

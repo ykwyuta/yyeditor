@@ -617,7 +617,7 @@ fn display(
 ) -> (String, Align, Option<(u8, u8, u8)>) {
     match v {
         Value::Empty => (String::new(), Align::Left, None),
-        // LOW-VALUE()・HIGH-VALUE()（固定長の項目のすべてのバイト）
+        // CBL.LOW-VALUE()・CBL.HIGH-VALUE()（固定長の項目のすべてのバイト）
         Value::Text(s) if yy_sheet::value::figurative_label(s).is_some() => (
             yy_sheet::value::figurative_label(s)
                 .unwrap_or_default()

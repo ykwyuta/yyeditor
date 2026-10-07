@@ -122,13 +122,14 @@ pub enum Func {
     /// `ROUND`・`ROUNDUP`・`ROUNDDOWN`
     Round(Rounding),
     If,
+    Iferror,
     Mod,
     Pi,
     /// `TRUE()`（`true`）・`FALSE()`
     Logical(bool),
-    /// `LOW-VALUE()`（COBOL の LOW-VALUE。項目をすべて X'00' にする）
+    /// `CBL.LOW-VALUE()`（COBOL の LOW-VALUE。項目をすべて X'00' にする）
     LowValue,
-    /// `HIGH-VALUE()`（COBOL の HIGH-VALUE。項目をすべて X'FF' にする）
+    /// `CBL.HIGH-VALUE()`（COBOL の HIGH-VALUE。項目をすべて X'FF' にする）
     HighValue,
     /// 未登録（`#NAME?`）
     Unknown(Arc<str>),
@@ -173,8 +174,9 @@ impl Func {
             "PI" => Func::Pi,
             "TRUE" => Func::Logical(true),
             "FALSE" => Func::Logical(false),
-            "LOW-VALUE" | "LOW-VALUES" => Func::LowValue,
-            "HIGH-VALUE" | "HIGH-VALUES" => Func::HighValue,
+            "CBL.LOW-VALUE" | "CBL.LOW-VALUES" => Func::LowValue,
+            "CBL.HIGH-VALUE" | "CBL.HIGH-VALUES" => Func::HighValue,
+            "IFERROR" => Func::Iferror,
             _ => Func::Unknown(Arc::from(name)),
         }
     }
@@ -204,8 +206,9 @@ impl Func {
             Func::Pi => "PI",
             Func::Logical(true) => "TRUE",
             Func::Logical(false) => "FALSE",
-            Func::LowValue => "LOW-VALUE",
-            Func::HighValue => "HIGH-VALUE",
+            Func::LowValue => "CBL.LOW-VALUE",
+            Func::HighValue => "CBL.HIGH-VALUE",
+            Func::Iferror => "IFERROR",
             Func::Unknown(n) => n,
         }
     }
@@ -522,8 +525,8 @@ impl Parser<'_> {
             return Err(self.err("式の書き方が正しくありません"));
         }
         let mut name: String = self.s[start..self.i].iter().collect();
-        // COBOL の表意定数の関数（`LOW-VALUE(`・`HIGH-VALUES(`）は名前に `-` を含む
-        if matches!(name.to_ascii_uppercase().as_str(), "LOW" | "HIGH") {
+        // COBOL の表意定数の関数（`CBL.LOW-VALUE(`・`CBL.HIGH-VALUES(`）は名前に `-` を含む
+        if matches!(name.to_ascii_uppercase().as_str(), "CBL.LOW" | "CBL.HIGH") {
             for tail in ["-VALUES", "-VALUE"] {
                 let n = tail.chars().count();
                 let next: String = self.s[self.i..(self.i + n).min(self.s.len())]

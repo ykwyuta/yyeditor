@@ -274,7 +274,7 @@ yyeditor と共通に使います。
   `Sheet2!A1`・`'売上 2026'!B:B`、配列定数 `{1,2;3,4}`、演算子 `+ - * / ^ % &` と比較）。使える関数は
   `SUMIFS`・`COUNTIFS`（条件 `"東京"`・`">=100"`・`"<>"`・`"東*"` など）・`XLOOKUP`（一致モード・検索
   モード・見つからない場合）・`SUM`・`COUNT`・`AVERAGE`・`MAX`・`MIN`・`MEDIAN`・`PERCENTILE`（`.INC`・`.EXC`）・`ROUND`・`ROUNDUP`・`ROUNDDOWN`・`IF`・`MOD`・`PI`・`TRUE`・`FALSE`・`PRODUCT`・`ABS`・`CONCAT`（`CONCATENATE`）・`TEXTJOIN`・`TEXTSPLIT`・
-  `LOW-VALUE`・`HIGH-VALUE`（固定長の項目のすべてのバイトを X'00'・X'FF' に） です
+  `IFERROR`・`CBL.LOW-VALUE`・`CBL.HIGH-VALUE`（固定長の項目のすべてのバイトを X'00'・X'FF' に。`CBL.` は COBOL のための関数） です
   （ほかの関数は `#NAME?`）。複数の値を返す式（`TEXTSPLIT`、範囲どうしの演算、複数列の `XLOOKUP`）は
   右・下のセルにあふれ（スピル）、あふれる先に値があれば `#SPILL!` になります。値を直すと、そのセルを参照する式
   （とそれに依存する式）だけを依存の順に、バックグラウンドで計算し直します（時間がかかるときは
