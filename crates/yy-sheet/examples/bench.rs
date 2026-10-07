@@ -235,6 +235,31 @@ fn main() {
                 d3.book.sheets[0].get(&ctx, 0, col).unwrap()
             );
         }
+        // 共有式: 表の全行に式を下へコピーする（1 つの式で持ち、まとめて計算する）
+        let rows = d3.book.sheets[0].table.rows;
+        for (label, f, col) in [
+            ("演算の共有式", "=A2*2+B2", last + 4),
+            (
+                "XLOOKUP の共有式（表どうしの結合）",
+                "=XLOOKUP(D2,D:D,A:A)",
+                last + 5,
+            ),
+        ] {
+            let t = Instant::now();
+            d3.edit(|b, ctx| {
+                let s = &mut b.sheets[0];
+                s.set_formula(ctx, 1, col, f)
+                    .map_err(std::io::Error::other)?;
+                s.fill_down(ctx, 1, rows, col, col)
+                    .map_err(std::io::Error::other)
+            })
+            .unwrap();
+            println!(
+                "{label} {f} を {rows} 行 {:.2} 秒 → 最後 {:?}",
+                t.elapsed().as_secs_f64(),
+                d3.book.sheets[0].get(&ctx, rows, col).unwrap()
+            );
+        }
         // 元のデータの 1 セルを直す: 関わる式だけ（ここではすべて）を計算し直す
         let t = Instant::now();
         d3.edit(|b, ctx| b.sheets[0].set(ctx, 5, 1, 1.0.into()))

@@ -20,6 +20,7 @@ pub mod column;
 pub mod csv;
 pub mod formula;
 pub mod query;
+pub mod shared;
 pub mod sheet;
 pub mod store;
 pub mod style;

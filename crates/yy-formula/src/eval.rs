@@ -16,6 +16,7 @@ use crate::{Array, Cell, Error, Grid, Val, cmp_text, func};
 pub(crate) const MAX_ARRAY: u64 = 5_000_000;
 
 /// 評価の環境。
+#[derive(Clone, Copy)]
 pub struct Context<'a> {
     pub grid: &'a dyn Grid,
     /// 式のあるシート
@@ -23,6 +24,8 @@ pub struct Context<'a> {
     pub sys: DateSystem,
     /// 1 回の再計算の間の覚え書き（同じ範囲の `SUMIFS` をまとめる。なければまとめない）
     pub cache: Option<&'a crate::Cache>,
+    /// 相対参照の行をずらす数（共有式の各行。ふつうは 0）
+    pub offset: i64,
 }
 
 /// 引数（参照は値にせずに渡す。`SUMIFS` などは列を直接読む）。
@@ -66,7 +69,10 @@ pub(crate) fn arg(e: &Expr, cx: &Context<'_>) -> Arg {
                     None => return Arg::V(Val::Err(Error::Ref)),
                 },
             };
-            Arg::R(sheet, clamp(cx, sheet, &r.area))
+            let Some(area) = crate::offset_area(&r.area, cx.offset) else {
+                return Arg::V(Val::Err(Error::Ref));
+            };
+            Arg::R(sheet, clamp(cx, sheet, &area))
         }
         Expr::Paren(inner) => arg(inner, cx),
         e => Arg::V(eval_expr(e, cx)),
@@ -214,7 +220,7 @@ fn finite(n: f64) -> Val {
     }
 }
 
-fn binary(op: BinOp, a: &Val, b: &Val, sys: DateSystem) -> Val {
+pub(crate) fn binary(op: BinOp, a: &Val, b: &Val, sys: DateSystem) -> Val {
     use BinOp::*;
     match op {
         Add | Sub | Mul | Div | Pow => {

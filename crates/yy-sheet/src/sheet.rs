@@ -233,15 +233,167 @@ impl Sheet {
             rows = rows.max(r + 1);
             cols = cols.max(c + 1);
         }
+        for sh in self.formulas.shared.iter() {
+            rows = rows.max(sh.r1 + 1);
+            cols = cols.max(sh.col + 1);
+        }
         (rows, cols)
     }
 
-    /// 格子のセルの式。
-    pub fn formula_at(&self, row: u64, col: u32) -> Option<&Formula> {
-        if self.formulas.cells.is_empty() {
+    /// 格子のセルの式（共有式なら、その行の式）。
+    pub fn formula_at(&self, row: u64, col: u32) -> Option<Formula> {
+        if self.formulas.cells.is_empty() && self.formulas.shared.is_empty() {
             return None;
         }
-        self.formulas.cells.get(&(self.source_row(row), col))
+        let src = self.source_row(row);
+        if let Some(f) = self.formulas.cells.get(&(src, col)) {
+            return Some(f.clone());
+        }
+        let i = self.formulas.shared_at(src, col)?;
+        Some(self.formulas.shared[i].formula_at(src))
+    }
+
+    /// `top` 行の `c0..=c1` 列を `bottom` 行まで下へコピーする（Excel の Ctrl+D）。式は行ごとに相対参照を
+    /// ずらし、行が多ければ共有式にする（1 つの式で持ち、まとめて計算する）。絞り込みをしないときの
+    /// 格子の行で指定する。
+    pub fn fill_down(
+        &mut self,
+        ctx: &Context,
+        top: u64,
+        bottom: u64,
+        c0: u32,
+        c1: u32,
+    ) -> Result<(), String> {
+        if bottom <= top {
+            return Ok(());
+        }
+        let count = bottom - top + 1;
+        for col in c0..=c1 {
+            match self.formula_at(top, col) {
+                Some(f) => {
+                    if matches!(self.place_source(top, col), Place::Header(_)) {
+                        continue;
+                    }
+                    // 自分の範囲を参照する式（前の行を足していくなど）は共有式にしない
+                    let own = yy_formula::Area {
+                        r0: top,
+                        c0: col,
+                        r1: bottom,
+                        c1: col,
+                        ..yy_formula::Area::cell(top, col)
+                    };
+                    let mut rs = Vec::new();
+                    collect_refs(&f.expr, &mut rs);
+                    let name = self.name.clone();
+                    let self_ref = rs.iter().any(|(sheet, a)| {
+                        sheet
+                            .as_deref()
+                            .is_none_or(|n| yy_formula::eq_text(n, &name))
+                            && yy_formula::spread(a, count).intersects(&own)
+                    });
+                    if count >= SHARED_MIN && !self_ref {
+                        self.clear_range(ctx, top + 1, bottom, col)
+                            .map_err(|e| e.to_string())?;
+                        self.formulas.add_shared(crate::shared::Shared {
+                            col,
+                            r0: top,
+                            r1: bottom,
+                            formula: f,
+                            results: None,
+                        });
+                    } else if count <= INDIVIDUAL_MAX {
+                        for i in 1..count {
+                            let e = yy_formula::shift(&f.expr, i as i64);
+                            let text = yy_formula::formula_text(&e);
+                            self.set_formula_source(ctx, top + i, col, &text)?;
+                        }
+                    } else {
+                        return Err(format!(
+                            "自分の列を参照する式は {} 行までしか下へコピーできません",
+                            INDIVIDUAL_MAX
+                        ));
+                    }
+                }
+                None => {
+                    let v = self.get_source(ctx, top, col).map_err(|e| e.to_string())?;
+                    for r in top + 1..=bottom {
+                        self.set_source(ctx, r, col, v.clone())
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 1 列の `r0..=r1` 行（絞り込みをしないときの格子の行）の値を消す（表の列は区間の付け替えで）。
+    fn clear_range(&mut self, ctx: &Context, r0: u64, r1: u64, col: u32) -> io::Result<()> {
+        let t = &self.table;
+        let head = t.header as u64;
+        if col < t.cols() && r0 < t.grid_rows() {
+            let lo = r0.max(head) - head;
+            let hi = r1.min(t.grid_rows() - 1).saturating_sub(head);
+            if lo <= hi && r1 >= head {
+                let c = &mut Arc::make_mut(&mut self.table.columns)[col as usize];
+                c.delete_rows(ctx, lo, hi - lo + 1)?;
+                c.insert_rows(ctx, lo, hi - lo + 1)?;
+            }
+        }
+        let gone: Vec<(u64, u32)> = self
+            .cells
+            .range((r0, 0)..=(r1, u32::MAX))
+            .filter(|(k, _)| k.1 == col)
+            .map(|(k, _)| *k)
+            .collect();
+        if !gone.is_empty() {
+            let cells = Arc::make_mut(&mut self.cells);
+            for k in gone {
+                cells.remove(&k);
+            }
+        }
+        self.formulas.touch(r0, col, r1, col);
+        Ok(())
+    }
+
+    /// 絞り込みをしないときの格子の位置の値。
+    pub fn get_source(&self, ctx: &Context, row: u64, col: u32) -> io::Result<Value> {
+        if let Some(v) = self.formulas.result(row, col) {
+            return Ok(v.clone());
+        }
+        if let Some(i) = self.formulas.shared_at(row, col) {
+            let sh = &self.formulas.shared[i];
+            return Ok(match &sh.results {
+                Some(c) => c.get(ctx, row - sh.r0)?,
+                None => Value::Empty,
+            });
+        }
+        Ok(match self.place_source(row, col) {
+            Place::Header(c) => Value::Text(self.table.columns[c as usize].name.clone()),
+            Place::Data(r, c) => self.table.columns[c as usize].get(ctx, r)?,
+            Place::Free => self.cells.get(&(row, col)).cloned().unwrap_or_default(),
+        })
+    }
+
+    /// 絞り込みをしないときの格子の位置に値を入れる。
+    fn set_source(&mut self, ctx: &Context, row: u64, col: u32, v: Value) -> io::Result<()> {
+        let saved = std::mem::take(&mut self.view.rows);
+        let r = self.set(ctx, row, col, v);
+        self.view.rows = saved;
+        r
+    }
+
+    /// 絞り込みをしないときの格子の位置に式を入れる。
+    fn set_formula_source(
+        &mut self,
+        ctx: &Context,
+        row: u64,
+        col: u32,
+        text: &str,
+    ) -> Result<(), String> {
+        let saved = std::mem::take(&mut self.view.rows);
+        let r = self.set_formula(ctx, row, col, text);
+        self.view.rows = saved;
+        r
     }
 
     /// 格子のセルに式を入れる（値は消す。計算は [`crate::formula::recalc`]）。
@@ -297,6 +449,16 @@ impl Sheet {
         {
             return Ok(v.clone());
         }
+        if !self.formulas.shared.is_empty() {
+            let src = self.source_row(row);
+            if let Some(i) = self.formulas.shared_at(src, col) {
+                let sh = &self.formulas.shared[i];
+                return Ok(match &sh.results {
+                    Some(c) => c.get(ctx, src - sh.r0)?,
+                    None => Value::Empty,
+                });
+            }
+        }
         Ok(match self.place(row, col) {
             Place::Header(c) => Value::Text(self.table.columns[c as usize].name.clone()),
             Place::Data(r, c) => self.table.columns[c as usize].get(ctx, r)?,
@@ -312,6 +474,9 @@ impl Sheet {
         let src = self.source_row(row);
         if !self.formulas.cells.is_empty() {
             self.formulas.remove(src, col);
+        }
+        if !self.formulas.shared.is_empty() {
+            self.formulas.split_shared(src, col);
         }
         self.formulas.touch(src, col, src, col);
         match self.place(row, col) {
@@ -345,7 +510,8 @@ impl Sheet {
             .keys()
             .copied()
             .chain(self.formulas.cells.keys().copied())
-            .chain(self.formulas.results.keys().map(|&(c, r)| (r, c)));
+            .chain(self.formulas.results.keys().map(|&(c, r)| (r, c)))
+            .chain(self.formulas.shared.iter().map(|s| (s.r1, s.col)));
         for (r, c) in keys {
             if let Some(g) = self.grid_row_of_free(r) {
                 rows = rows.max(g + 1);
@@ -486,6 +652,26 @@ impl Sheet {
 pub struct Workbook {
     pub sheets: Vec<Sheet>,
     pub date_system: DateSystem,
+}
+
+/// 下へコピーで共有式にする行数（これより少なければ 1 つずつの式）。
+const SHARED_MIN: u64 = 16;
+/// 共有式にできない式を 1 つずつ下へコピーできる行数。
+const INDIVIDUAL_MAX: u64 = 100_000;
+
+/// 式の参照（シート名・範囲）を集める。
+fn collect_refs(e: &yy_formula::Expr, out: &mut Vec<(Option<Arc<str>>, yy_formula::Area)>) {
+    use yy_formula::Expr;
+    match e {
+        Expr::Ref(r) => out.push((r.sheet.clone(), r.area)),
+        Expr::Neg(x) | Expr::Plus(x) | Expr::Percent(x) | Expr::Paren(x) => collect_refs(x, out),
+        Expr::Bin(_, l, r) => {
+            collect_refs(l, out);
+            collect_refs(r, out);
+        }
+        Expr::Call(_, args) => args.iter().for_each(|a| collect_refs(a, out)),
+        _ => {}
+    }
 }
 
 impl Workbook {

@@ -185,14 +185,15 @@ fn ranges(exprs: &[&Expr], cx: &Context<'_>) -> Result<Vec<Range>, Error> {
                     None => cx.sheet,
                     Some(n) => cx.grid.sheet(n).ok_or(Error::Ref)?,
                 };
+                let area = crate::offset_area(&r.area, cx.offset).ok_or(Error::Ref)?;
                 let (rows, cols) = cx.grid.used(sheet);
-                if r.area.r1 == u64::MAX {
+                if area.r1 == u64::MAX {
                     whole_rows = whole_rows.max(rows);
                 }
-                if r.area.c1 == u32::MAX {
+                if area.c1 == u32::MAX {
                     whole_cols = whole_cols.max(cols);
                 }
-                resolved.push(Ok((sheet, r.area)));
+                resolved.push(Ok((sheet, area)));
             }
             e => resolved.push(Err(eval(e, cx))),
         }

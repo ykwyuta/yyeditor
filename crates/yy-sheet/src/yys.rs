@@ -64,6 +64,15 @@ struct Ext2 {
 /// シートの式（シートの番号, （行, 列, 式の文字列））。
 type SheetFormulas = (u32, Vec<(u64, u32, String)>);
 
+/// 共有式（列, 始めの行, 終わりの行, 1 行目の式）。
+type SharedDir = (u32, u64, u64, String);
+
+/// 4 つ目の追加の記録: 共有式（シートの番号ごと）。
+#[derive(Serialize, Deserialize, Default)]
+struct Ext4 {
+    shared: Vec<(u32, Vec<SharedDir>)>,
+}
+
 /// 3 つ目の追加の記録: 数式（結果は開いたときに計算し直す）。
 #[derive(Serialize, Deserialize, Default)]
 struct Ext3 {
@@ -395,6 +404,25 @@ fn write_into(
             .collect(),
     };
     bytes.extend(postcard::to_allocvec(&ext3).map_err(|e| invalid(&e.to_string()))?);
+    let ext4 = Ext4 {
+        shared: book
+            .sheets
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.formulas.shared.is_empty())
+            .map(|(i, s)| {
+                (
+                    i as u32,
+                    s.formulas
+                        .shared
+                        .iter()
+                        .map(|x| (x.col, x.r0, x.r1, x.formula.text.to_string()))
+                        .collect(),
+                )
+            })
+            .collect(),
+    };
+    bytes.extend(postcard::to_allocvec(&ext4).map_err(|e| invalid(&e.to_string()))?);
     let dir_off = store.append(&bytes)?;
     let mut trailer = Vec::with_capacity(TRAILER as usize);
     trailer.extend_from_slice(&dir_off.to_le_bytes());
@@ -412,7 +440,9 @@ fn write_into(
 }
 
 /// 末尾を探して目次を読む（末尾が壊れていれば、前の末尾を後ろから探す）。
-fn read_dir(store: &Store) -> io::Result<(Dir, Ext, Ext2, Ext3, u64)> {
+type Exts = (Ext, Ext2, Ext3, Ext4);
+
+fn read_dir(store: &Store) -> io::Result<(Dir, Exts, u64)> {
     let len = store.len();
     if len < 16 + TRAILER {
         return Err(invalid("yysheet のファイルではありません（短すぎます）"));
@@ -427,7 +457,7 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Ext, Ext2, Ext3, u64)> {
             "新しい版（{version}）の yysheet で保存されたファイルです"
         )));
     }
-    let try_at = |end: u64| -> Option<(Dir, Ext, Ext2, Ext3, u64)> {
+    let try_at = |end: u64| -> Option<(Dir, Exts, u64)> {
         let t = store.read(end - TRAILER, TRAILER).ok()?;
         if &t[24..32] != END_MAGIC {
             return None;
@@ -445,8 +475,9 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Ext, Ext2, Ext3, u64)> {
         let (d, rest): (Dir, &[u8]) = postcard::take_from_bytes(&b).ok()?;
         let (ext, rest): (Ext, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
         let (ext2, rest): (Ext2, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
-        let (ext3, _): (Ext3, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
-        Some((d, ext, ext2, ext3, off))
+        let (ext3, rest): (Ext3, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        let (ext4, _): (Ext4, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        Some((d, (ext, ext2, ext3, ext4), off))
     };
     if let Some(r) = try_at(len) {
         return Ok(r);
@@ -484,7 +515,7 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Ext, Ext2, Ext3, u64)> {
 /// 開く。
 pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
     let store = Store::open(path)?;
-    let (dir, ext, ext2, ext3, dir_off) = read_dir(&store)?;
+    let (dir, (ext, ext2, ext3, ext4), dir_off) = read_dir(&store)?;
     let chunks: Vec<Arc<Chunk>> = dir
         .chunks
         .iter()
@@ -562,6 +593,24 @@ pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
                     Err(_) => {
                         std::sync::Arc::make_mut(&mut s.cells).insert((r, c), Value::text(&text));
                     }
+                }
+            }
+        }
+    }
+    for (i, list) in ext4.shared {
+        if let Some(s) = sheets.get_mut(i as usize) {
+            let shared = std::sync::Arc::make_mut(&mut s.formulas.shared);
+            for (col, r0, r1, text) in list {
+                if let Ok(formula) = crate::formula::Formula::parse(&text)
+                    && r0 <= r1
+                {
+                    shared.push(crate::shared::Shared {
+                        col,
+                        r0,
+                        r1,
+                        formula,
+                        results: None,
+                    });
                 }
             }
         }

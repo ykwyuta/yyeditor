@@ -38,6 +38,7 @@ impl Mem {
                 sheet: 0,
                 sys: DateSystem::D1900,
                 cache: Some(&self.cache),
+                offset: 0,
             },
         )
     }
@@ -376,6 +377,7 @@ fn indexes_and_batches_match_plain_evaluation() {
                 sheet: 0,
                 sys: DateSystem::D1900,
                 cache: None,
+                offset: 0,
             },
         );
         // まとめた計算は 2 回目から使われるので 2 回ずつ
@@ -387,9 +389,101 @@ fn indexes_and_batches_match_plain_evaluation() {
                     sheet: 0,
                     sys: DateSystem::D1900,
                     cache: Some(&cache),
+                    offset: 0,
                 },
             );
             assert_eq!(quick, plain, "{f}");
+        }
+    }
+}
+
+#[test]
+fn shared_rows_match_per_row_evaluation() {
+    let mut g = Mem::new();
+    for r in 1..=300 {
+        g.set(0, &format!("A{r}"), n(r as f64 - 150.0));
+        if r % 7 != 0 {
+            g.set(0, &format!("B{r}"), t(&format!("x{r}")));
+        }
+        g.set(0, &format!("C{r}"), n((r % 5) as f64));
+    }
+    g.set(0, "E1", n(10.0));
+    for f in [
+        "=A2*C2+$E$1",
+        "=ABS(A2)&\"-\"&B2",
+        "=CONCAT(B2,\":\",C2)",
+        "=A2/C2",
+        "=A1+A3-50%",
+        "=SUMIFS(A:A,C:C,C2)",
+        "=XLOOKUP(C2,C1:C5,A1:A5)",
+        "=A2>0",
+    ] {
+        let e = parse(f).unwrap();
+        let cx = Context {
+            grid: &g,
+            sheet: 0,
+            sys: DateSystem::D1900,
+            cache: None,
+            offset: 0,
+        };
+        let mut got = Vec::new();
+        eval_rows(&e, &cx, 250, &mut |i, v| {
+            assert_eq!(i as usize, got.len());
+            got.push(v);
+        });
+        for (i, v) in got.iter().enumerate() {
+            // 1 行ずつ、ずらした式を評価したものと同じ
+            let want = eval(&shift(&e, i as i64), &cx);
+            let want = match want {
+                Val::Array(a) => a.data[0].clone(),
+                v => v,
+            };
+            assert_eq!(*v, want, "{f} row {i}");
+        }
+    }
+    assert_eq!(
+        formula_text(&shift(
+            &parse("=A2+$B$1+B$2+SUMIFS(C:C,D2:D9,1)").unwrap(),
+            3
+        )),
+        "=A5+$B$1+B$2+SUMIFS(C:C,D5:D12,1)"
+    );
+    assert_eq!(formula_text(&shift(&parse("=A2").unwrap(), -5)), "=#REF!");
+    let Expr::Ref(r) = parse("=B2:B4").unwrap() else {
+        panic!()
+    };
+    let s = spread(&r.area, 10);
+    assert_eq!((s.r0, s.r1), (1, 12));
+}
+
+#[test]
+fn shared_lookup_rows_use_the_index() {
+    let mut g = Mem::new();
+    for r in 1..=200 {
+        g.set(0, &format!("A{r}"), n(r as f64 * 10.0));
+        g.set(0, &format!("B{r}"), t(&format!("k{}", r % 37)));
+        g.set(0, &format!("C{r}"), n((r % 9) as f64));
+    }
+    let fast = Fast(&g);
+    for f in [
+        "=XLOOKUP(C2,$C$1:$C$50,$A$1:$A$50)",
+        "=XLOOKUP(B2,B:B,A:A,\"なし\",0,-1)",
+        "=XLOOKUP(C2+100,C:C,A:A,-1)",
+        "=XLOOKUP(\"K\"&C2,B:B,A:A)",
+    ] {
+        let e = parse(f).unwrap();
+        let cx = Context {
+            grid: &fast,
+            sheet: 0,
+            sys: DateSystem::D1900,
+            cache: None,
+            offset: 0,
+        };
+        let mut got = Vec::new();
+        eval_rows(&e, &cx, 150, &mut |_, v| got.push(v));
+        for (i, v) in got.iter().enumerate() {
+            let want = eval(&shift(&e, i as i64), &Context { grid: &g, ..cx });
+            assert_eq!(*v, want, "{f} row {i}");
         }
     }
 }

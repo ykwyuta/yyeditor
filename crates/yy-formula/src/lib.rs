@@ -15,6 +15,7 @@ mod func;
 mod index;
 mod parse;
 mod print;
+mod rows;
 #[cfg(test)]
 mod tests;
 
@@ -23,6 +24,7 @@ pub use eval::{Context, eval};
 pub use index::{Cache, ExactIndex};
 pub use parse::{Area, AreaKind, BinOp, Expr, Func, ParseError, Ref, parse};
 pub use print::formula_text;
+pub use rows::{eval_rows, shift, spread};
 
 /// エラー値（Excel と同じ。並びは `yy_sheet::CellError` と同じ）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -185,6 +187,28 @@ pub trait Grid {
     fn stable(&self, _sheet: usize, _area: &Area) -> bool {
         false
     }
+}
+
+/// 範囲の相対参照の行を `dr` 行ずらす（列全体の参照は動かない）。行が負になれば `None`。
+pub fn offset_area(a: &Area, dr: i64) -> Option<Area> {
+    if dr == 0 || a.kind == AreaKind::Cols {
+        return Some(*a);
+    }
+    let mv = |r: u64, abs: bool| -> Option<u64> {
+        if abs {
+            Some(r)
+        } else {
+            u64::try_from(r as i64 + dr).ok()
+        }
+    };
+    let mut out = *a;
+    out.r0 = mv(a.r0, a.abs[0])?;
+    out.r1 = mv(a.r1, a.abs[2])?;
+    if out.r0 > out.r1 {
+        std::mem::swap(&mut out.r0, &mut out.r1);
+        out.abs.swap(0, 2);
+    }
+    Some(out)
 }
 
 /// 列番号 → 列の名前（0 → `A`）。

@@ -67,6 +67,7 @@ const ID_COPY: u16 = 13;
 const ID_PASTE: u16 = 14;
 const ID_DELETE: u16 = 15;
 const ID_SELECT_ALL: u16 = 16;
+const ID_FILL_DOWN: u16 = 17;
 const ID_INSERT_ROWS: u16 = 20;
 const ID_DELETE_ROWS: u16 = 21;
 const ID_INSERT_COLS: u16 = 22;
@@ -259,6 +260,7 @@ fn create_menu() -> Result<HMENU> {
         add(edit, ID_COPY, "コピー(&C)\tCtrl+C");
         add(edit, ID_PASTE, "貼り付け(&P)\tCtrl+V");
         add(edit, ID_DELETE, "内容を消す(&D)\tDelete");
+        add(edit, ID_FILL_DOWN, "下へコピー(&W)\tCtrl+D");
         sep(edit);
         add(edit, ID_SELECT_ALL, "すべて選択(&A)\tCtrl+A");
         let insert = CreatePopupMenu()?;
@@ -1261,6 +1263,46 @@ impl App {
         self.after_edit();
     }
 
+    /// 選択範囲の 1 行目を下へコピーする（式は相対参照をずらし、行が多ければ共有式にする）。
+    fn fill_down(&mut self) {
+        self.end_edit(true);
+        let (t, l, b, r) = self.selection();
+        if b <= t {
+            return;
+        }
+        if self.sheet().view.rows.is_some() {
+            info_box(
+                self.frame,
+                "絞り込み・並べ替えの表示中は下へコピーできません。解除してから行ってください。",
+            );
+            return;
+        }
+        // 値のコピーはセルごとに書くので、数を抑える
+        let values = (l..=r)
+            .filter(|&c| self.sheet().formula_at(t, c).is_none())
+            .count() as u64;
+        if values * (b - t) > CLIP_LIMIT {
+            error_box(
+                self.frame,
+                &format!(
+                    "値を一度に下へコピーできるのは {} セルまでです（式は何行でも共有式にできます）。",
+                    crate::util::group_digits(CLIP_LIMIT)
+                ),
+            );
+            return;
+        }
+        let sheet = self.sheet;
+        let res = self.doc.edit(|bk, ctx| {
+            bk.sheets[sheet]
+                .fill_down(ctx, t, b, l, r)
+                .map_err(std::io::Error::other)
+        });
+        if let Err(e) = res {
+            error_box(self.frame, &format!("下へコピーできませんでした: {e}"));
+        }
+        self.after_edit();
+    }
+
     fn insert_or_delete(&mut self, id: u16) {
         if matches!(id, ID_INSERT_ROWS | ID_DELETE_ROWS) && self.sheet().view.rows.is_some() {
             info_box(
@@ -1934,6 +1976,9 @@ fn command(id: u16) {
         ID_DELETE => {
             with(|a| a.clear_selection());
         }
+        ID_FILL_DOWN => {
+            with(|a| a.fill_down());
+        }
         ID_SELECT_ALL => {
             with(|a| {
                 let (rows, cols) = a.sheet().extent();
@@ -2110,6 +2155,7 @@ fn key_hook(msg: &MSG) -> bool {
         (VK_0 | VK_NUMPAD0, false) => ID_ZOOM_RESET,
         (VK_1, false) => ID_FORMAT_CELLS,
         (VK_B, false) => ID_BOLD,
+        (VK_D, false) => ID_FILL_DOWN,
         (VK_I, false) => ID_ITALIC,
         // コピー・貼り付けは格子にフォーカスがあるときだけ（数式バーの EDIT では EDIT に任せる）
         (VK_C | VK_X | VK_V, false) => {
