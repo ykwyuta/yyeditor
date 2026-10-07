@@ -137,7 +137,7 @@ enum Place {
         dir: Option<Vec<u8>>,
     },
     /// 3270 のホスト（14 章）
-    Tn3270(tn3270::Target3270),
+    Tn3270(Box<tn3270::Target3270>),
 }
 
 impl Place {
@@ -773,8 +773,13 @@ fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
         return;
     };
     let mut reports: Vec<crate::remote::ForwardReport> = Vec::new();
+    let mut tls = None;
     let backend = match &place {
         Place::Tn3270(t) => tn3270::connect(t, &set_status)
+            .map(|(b, info)| {
+                tls = info;
+                b
+            })
             .map_err(|e| format!("3270 のホスト {} に接続できませんでした。\n{e}", t.uri())),
         Place::Local(dir) => {
             let dir = dir.as_deref().filter(|d| d.is_dir());
@@ -831,6 +836,9 @@ fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
         Ok(b) => {
             with(|a| {
                 a.add_tab(place, b);
+                if let Some(info) = tls {
+                    a.tn_set_tls(info);
+                }
                 if let Some(t) = a.tabs.last_mut() {
                     for (ok, text) in &reports {
                         t.term.feed(&notice_bytes(*ok, text));
@@ -955,7 +963,7 @@ impl TermApp {
         };
         let mut tab = tab;
         if let Place::Tn3270(target) = &tab.place {
-            let mut tn = tn3270::Tn3270::new(target.clone());
+            let mut tn = tn3270::Tn3270::new((**target).clone());
             tn.view_rows = self.grid.1;
             // 設定の trace = true なら接続（交渉）から記録する
             if self.config.tn3270.trace
@@ -1377,6 +1385,23 @@ impl TermApp {
     }
 
     // ---- 3270 のタブ -------------------------------------------------------------
+
+    /// 最後に開いた 3270 のタブに TLS の情報を付け、記録する。
+    fn tn_set_tls(&mut self, info: yy_3270_tls::SessionInfo) {
+        let Some(tab) = self.tabs.last_mut() else {
+            return;
+        };
+        let Some(tn) = tab.tn.as_mut() else { return };
+        let mut line = format!("{}: TLS {}", tn.target.uri(), info.summary());
+        if let Some(p) = &info.problem {
+            line.push_str(&format!("（検証できない理由: {p}）"));
+        }
+        line.push_str(&format!("、指紋 {}", info.cert.sha256));
+        tn.trace_note(&line);
+        tn.tls = Some(info);
+        tab.term = tn3270::render(tn, false);
+        self.tn_log_line(&line);
+    }
 
     /// 3270 の接続の記録に 1 行書く（`logs\tn3270.log`）。
     fn tn_log_line(&mut self, text: &str) {
@@ -2330,7 +2355,7 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
         WM_APP_TERM_PRINTER => {
             let targets = with(|a| std::mem::take(&mut a.pending_printers)).unwrap_or_default();
             for t in targets {
-                open_tab(Place::Tn3270(t));
+                open_tab(Place::Tn3270(Box::new(t)));
             }
             LRESULT(0)
         }
@@ -2773,7 +2798,7 @@ fn cmd_tn3270(hwnd: HWND) {
     };
     let target = with(|a| tn3270::Target3270::parse(&input, &a.config));
     match target {
-        Some(Ok(t)) => open_tab(Place::Tn3270(t)),
+        Some(Ok(t)) => open_tab(Place::Tn3270(Box::new(t))),
         Some(Err(e)) => error_box(hwnd, &e),
         None => {}
     }
@@ -3023,7 +3048,7 @@ fn cmd_tn_printer(hwnd: HWND) {
     })
     .flatten();
     match target {
-        Some(Ok(t)) => open_tab(Place::Tn3270(t)),
+        Some(Ok(t)) => open_tab(Place::Tn3270(Box::new(t))),
         Some(Err(e)) => error_box(hwnd, &e),
         None => info_box(hwnd, "3270 の端末のタブを表示してから選んでください。"),
     }

@@ -111,7 +111,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 
 ### 3270（yyterm のタブ）
 
-提案書 [14 章](docs/proposal/14-tn3270.md) の方式で、yyterm のタブとして IBM メインフレームの 3270 端末（TN3270・TN3270E）を作っています（M1〜M5）。
+提案書 [14 章](docs/proposal/14-tn3270.md) の方式で、yyterm のタブとして IBM メインフレームの 3270 端末（TN3270・TN3270E）を作っています（M1〜M6）。
 
 - 3270 データストリーム（フィールド・拡張属性・色・Query Reply）と端末の入力の規則（保護・数字・自動スキップ・挿入・AID）、TN3270E の LU 名の指定、モデル 2〜5。
 - 日本語（CCSID 930・939・1390・1399）。IME で漢字を入れると SO/SI を自動で入れます。
@@ -121,7 +121,8 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 - プリンター（3287。TN3270E のプリンター LU、LU1 の SCS・LU3、日本語）。受け取った印刷を Windows のプリンター・PDF・テキストに出します。
 - 通信の記録（トレース）: 送受信の 16 進と解釈（オーダー・属性・AID など）。パスワードは伏せ字にし、記録から画面を再現できます。
 - IND$FILE のファイル転送（DFT。TSO・CMS・CICS の GET・PUT）。日本語のテキストはバイナリで転送して端末で CCSID と UTF-8 を変換します。
-- 中核は OS に依存しない `yy-3270`（Linux の CI で、模擬ホストとの往復・転送を含めてテスト）。TLS は次の段階です。
+- TLS（`tn3270s://` の暗黙の TLS と Telnet の STARTTLS。rustls）。検証できない証明書（社内の自己署名など）は SSH のホスト鍵と同じく初めて見たときに確かめて記録し、変わったら接続しません。PEM のクライアント証明書も使えます。
+- 中核は OS に依存しない `yy-3270`・`yy-3270-tls`。テスト用の模擬ホスト `yy-3270-mock`（TN3270E の LU・ASSOCIATE・RESPONSES・PRINT-EOJ、日本語、Query、IND$FILE、SCS/LU3、TLS）を x3270（s3270・pr3287）で確かめたうえで、Linux の CI で yyterm の 3270 の中核を試験しています。
 
 ### ファイル転送（yysftp）
 
@@ -283,6 +284,8 @@ crates/
   yy-ssh/      組み込みの SSH クライアント（russh + ring。OpenSSH を使わない）
   yy-3270/     3270 の中核（Telnet・TN3270E・3270 データストリーム・フィールド・入力の規則・DBCS・IND$FILE・SCS と LU3 の印刷・通信の記録）
   yy-3270-macro/ 3270 のマクロ（Rhai。待つ・読む・入力・転送・記録）
+  yy-3270-tls/ 3270 の TLS（暗黙の TLS・STARTTLS・証明書の TOFU・クライアント証明書。rustls + ring）
+  yy-3270-mock/ 3270 の模擬ホスト（試験用。x3270 で確かめる check-with-x3270.sh）
   yy-term/     ターミナルの中核（制御シーケンスの解釈、画面、スクロールバック、キーの送り方。OS 非依存）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）

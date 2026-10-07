@@ -9,10 +9,15 @@ publish = false
 
 [dependencies]
 yy-encoding.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 yy-3270.workspace = true
 yy-3270-macro.workspace = true
+yy-3270-tls.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

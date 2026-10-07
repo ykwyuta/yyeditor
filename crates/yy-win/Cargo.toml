@@ -22,6 +22,7 @@ yy-remote.workspace = true
 yy-term.workspace = true
 yy-3270.workspace = true
 yy-3270-macro.workspace = true
+yy-3270-tls.workspace = true
 webview2-com.workspace = true
 crossbeam-channel.workspace = true
 windows-numerics.workspace = true

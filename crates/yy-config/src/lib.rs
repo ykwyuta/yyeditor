@@ -77,6 +77,12 @@ pub struct Tn3270Config {
     pub keypad: bool,
     /// 3270 のタブを開いたときから通信の記録（`logs\tn3270-trace-*.log`）をとる
     pub trace: bool,
+    /// TLS で加えて信頼する認証局の証明書（PEM のファイル。空なら OS の信頼する認証局だけ）
+    pub ca_file: String,
+    /// TLS のクライアント証明書（PEM のファイル。秘密鍵も入っていてよい。空なら使わない）
+    pub client_cert: String,
+    /// クライアント証明書の秘密鍵（PEM。空なら `client_cert` から読む）
+    pub client_key: String,
     /// プリンター（3287）の出力
     pub printer: Tn3270Printer,
     /// マクロ
@@ -95,6 +101,9 @@ impl Default for Tn3270Config {
             tn3270e: true,
             keypad: true,
             trace: false,
+            ca_file: String::new(),
+            client_cert: String::new(),
+            client_key: String::new(),
             printer: Tn3270Printer::default(),
             macros: Tn3270Macro::default(),
             host: BTreeMap::new(),
@@ -154,8 +163,16 @@ impl Default for Tn3270Printer {
 #[serde(default, deny_unknown_fields)]
 pub struct Tn3270Host {
     pub host: String,
-    /// ポート（省略すると 23）
+    /// ポート（省略すると 23。`tls = "tls"` なら 992）
     pub port: Option<u16>,
+    /// TLS: `none`（既定）・`tls`（暗黙の TLS）・`starttls`（Telnet の STARTTLS）
+    pub tls: Option<String>,
+    /// TLS で加えて信頼する認証局の証明書（省略すると `[tn3270]` の値）
+    pub ca_file: Option<String>,
+    /// TLS のクライアント証明書（省略すると `[tn3270]` の値。空の文字列なら使わない）
+    pub client_cert: Option<String>,
+    /// クライアント証明書の秘密鍵
+    pub client_key: Option<String>,
     /// TN3270E で求める LU 名
     pub lu: Option<String>,
     pub model: Option<u8>,

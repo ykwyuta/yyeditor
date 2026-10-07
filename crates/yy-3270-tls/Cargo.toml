@@ -1,0 +1,19 @@
+[package]
+name = "yy-3270-tls"
+description = "TLS for yyterm's 3270 sessions (implicit TLS, Telnet STARTTLS, TOFU for certificates, client certificates)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rustls.workspace = true
+rustls-native-certs.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -12,6 +12,7 @@
 //!   段階を閉じない）を選べる。
 //! - プリンター: 端末の `PRINT` で、対応するプリンターの LU に SCS（日本語）または LU3 の印刷を送り、
 //!   PRINT-EOJ で終える。
+//! - TLS: 暗黙の TLS か Telnet の STARTTLS。クライアント証明書を求めることもできる（[`tls`]）。
 //!
 //! 出来事は [`MockHost::events`] に文字列で残る（試験で確かめる）。同じホストを x3270（s3270・pr3287）
 //! でも確かめられる（`check-with-x3270.sh`）。
@@ -30,6 +31,7 @@ mod dft;
 pub mod ebcdic;
 mod printer;
 mod terminal;
+pub mod tls;
 
 use codes::*;
 
@@ -58,6 +60,8 @@ pub struct MockConfig {
     pub responses: bool,
     /// 出来事を標準エラーにも出す
     pub verbose: bool,
+    /// TLS（なければ平文）
+    pub tls: Option<tls::MockTls>,
 }
 
 impl Default for MockConfig {
@@ -71,6 +75,7 @@ impl Default for MockConfig {
             ind_file: IndFileStyle::Zos,
             responses: true,
             verbose: false,
+            tls: None,
         }
     }
 }
@@ -96,6 +101,7 @@ pub(crate) enum Job {
 /// ホストの状態（接続のスレッドで共有する）。
 pub(crate) struct Shared {
     pub cfg: MockConfig,
+    tls: Option<(tls::TlsMode, Arc<rustls::ServerConfig>)>,
     events: Mutex<Vec<String>>,
     changed: Condvar,
     lus: Mutex<LuState>,
@@ -149,7 +155,12 @@ impl MockHost {
     pub fn bind(addr: &str, cfg: MockConfig) -> io::Result<MockHost> {
         let listener = TcpListener::bind(addr)?;
         let addr = listener.local_addr()?;
+        let tls = match &cfg.tls {
+            Some(t) => Some((t.mode, tls::server_config(t)?)),
+            None => None,
+        };
         let shared = Arc::new(Shared {
+            tls,
             datasets: Mutex::new(dft::initial_datasets(cfg.ccsid)),
             cfg,
             events: Mutex::new(Vec::new()),
@@ -168,7 +179,16 @@ impl MockHost {
                         .unwrap_or_default();
                     let _ = stream.set_nodelay(true);
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
-                    let conn = Conn::new(Box::new(stream));
+                    let conn = match &s.tls {
+                        None => Conn::new(Box::new(stream)),
+                        Some((mode, cfg)) => match tls::accept(Box::new(stream), *mode, cfg, &s) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                s.log(format!("tls failed {peer}: {e}"));
+                                return;
+                            }
+                        },
+                    };
                     if let Err(e) = serve(conn, &s) {
                         s.log(format!("disconnect {peer}: {e}"));
                     }
@@ -267,6 +287,12 @@ impl Conn {
             units: VecDeque::new(),
             closed: false,
         }
+    }
+
+    /// 下の接続（STARTTLS で TLS に移るとき。読み残しがないこと）。
+    pub fn into_inner(self) -> Box<dyn Stream> {
+        debug_assert!(self.units.is_empty() && self.rec.is_empty());
+        self.s
     }
 
     /// 次の単位（`timeout` までに来なければ `None`）。切れたらエラー。

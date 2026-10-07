@@ -369,6 +369,8 @@ pub(crate) fn show_status(text: &str) {
 
 enum Question {
     HostKey(HostKeyQuestion),
+    /// 3270 の TLS で、検証できないサーバーの証明書
+    TlsCert(yy_3270_tls::CertQuestion),
     Password(String),
     /// 保存を選べるパスワード・パスフレーズ（`check` は「保存する」のチェックボックスの文言。
     /// `None` ならチェックボックスを出さない）
@@ -541,6 +543,7 @@ pub(crate) fn on_prompt(frame: HWND, lparam: LPARAM) {
     let owner = prompt_owner(frame);
     let answer = match req.question {
         Question::HostKey(q) => Answer::Yes(confirm_host_key(owner, &q)),
+        Question::TlsCert(q) => Answer::Yes(confirm_tls_cert(owner, &q)),
         Question::Password(user_host) => Answer::Text(crate::goto::prompt_secret(
             owner,
             "パスワード",
@@ -625,6 +628,51 @@ fn confirm_host_key(owner: HWND, q: &HostKeyQuestion) -> bool {
                 file.display(),
                 q.algorithm,
                 q.fingerprint
+            );
+            message_box(owner, &text, MB_OK | MB_ICONERROR);
+            false
+        }
+    }
+}
+
+/// 3270 の TLS の証明書を利用者に確かめる [`yy_3270_tls::Confirm`]（接続のスレッドで、[`wait`] の
+/// 中から使う）。
+pub(crate) fn tls_confirm() -> yy_3270_tls::Confirm {
+    let frame = SendHwnd(frame().0 as isize);
+    Arc::new(move |q: &yy_3270_tls::CertQuestion| {
+        let p = UiPrompter { frame };
+        matches!(p.ask(Question::TlsCert(q.clone())), Some(Answer::Yes(true)))
+    })
+}
+
+fn confirm_tls_cert(owner: HWND, q: &yy_3270_tls::CertQuestion) -> bool {
+    let host = format!("{}:{}", q.host, q.port);
+    match &q.check {
+        yy_3270_tls::CertCheck::Unknown => {
+            let text = format!(
+                "{host} の TLS の証明書を検証できません。\n\n理由: {}\n\n{}\n\n\
+                 この指紋が、接続先の管理者から知らされたものと一致する場合だけ「はい」を選んで\n\
+                 ください（社内の認証局が発行した証明書なら、設定の ca_file にその認証局の証明書を\n\
+                 書くと、尋ねずに検証できます）。\n\n\
+                 接続して、この証明書を記録しますか？",
+                q.problem,
+                q.cert.describe()
+            );
+            message_box(owner, &text, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES
+        }
+        yy_3270_tls::CertCheck::Changed {
+            file,
+            line,
+            recorded,
+        } => {
+            let text = format!(
+                "警告: {host} の TLS の証明書が記録と違います。\n\n\
+                 通信を盗み見られている（中間者攻撃の）おそれがあるため、接続しません。\n\n\
+                 記録: {} の {line} 行目（指紋 {recorded}）\n\n受け取った証明書:\n{}\n\n\
+                 接続先の証明書が正しく更新されたことを管理者に確かめた場合は、記録の該当する行を\n\
+                 削除してから接続し直してください。",
+                file.display(),
+                q.cert.describe()
             );
             message_box(owner, &text, MB_OK | MB_ICONERROR);
             false

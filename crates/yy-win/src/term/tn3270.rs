@@ -17,6 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::HSTRING;
 use yy_3270::ind_file::{self, Direction, Local, Mode as FtMode};
 use yy_3270::{Config as SessionConfig, DisplayCell, Key, Lock, Mode, Session};
+use yy_3270_tls::Security;
 use yy_config::Config;
 use yy_encoding::Ccsid;
 use yy_remote::uri::Target;
@@ -28,6 +29,8 @@ use super::pty::Backend;
 
 /// 既定のポート
 const DEFAULT_PORT: u16 = 23;
+/// 暗黙の TLS の既定のポート
+const DEFAULT_TLS_PORT: u16 = 992;
 /// 接続を待つ時間の上限
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -43,6 +46,13 @@ pub(crate) struct Target3270 {
     pub ccsid: Ccsid,
     /// この SSH の接続を経由する
     pub ssh: Option<String>,
+    /// TLS（暗黙の TLS・STARTTLS）
+    pub security: Security,
+    /// TLS で加えて信頼する認証局の証明書
+    pub ca_file: Option<PathBuf>,
+    /// TLS のクライアント証明書・秘密鍵
+    pub client_cert: Option<PathBuf>,
+    pub client_key: Option<PathBuf>,
     pub terminal_type: Option<String>,
     pub tn3270e: bool,
     /// プリンター（3287）のセッション
@@ -58,10 +68,15 @@ pub(crate) struct Target3270 {
 }
 
 impl Target3270 {
-    /// 入力を読む: `tn3270://[LU@]ホスト[:ポート]`・`[LU@]ホスト[:ポート]`・設定の名前。
+    /// 入力を読む: `tn3270://[LU@]ホスト[:ポート]`・`tn3270s://…`（暗黙の TLS）・`[LU@]ホスト[:ポート]`・
+    /// 設定の名前。
     pub(crate) fn parse(input: &str, cfg: &Config) -> Result<Target3270, String> {
         let t = &cfg.tn3270;
         let text = input.trim();
+        let path = |s: &str| Some(PathBuf::from(s.trim())).filter(|p| !p.as_os_str().is_empty());
+        let ca_file = path(&t.ca_file);
+        let client_cert = path(&t.client_cert);
+        let client_key = path(&t.client_key);
         let ccsid_of =
             |n: u32| Ccsid::from_number(n).ok_or_else(|| format!("CCSID {n} には対応していません"));
         let base_ccsid = ccsid_of(t.ccsid)?;
@@ -72,17 +87,38 @@ impl Target3270 {
             .find(|(name, _)| name.eq_ignore_ascii_case(text))
             .map(|(_, h)| h)
         {
+            let security = match &h.tls {
+                Some(v) => Security::parse(v).ok_or_else(|| {
+                    format!("設定の tls（{v}）を読めません。none・tls・starttls のどれかです")
+                })?,
+                None => Security::None,
+            };
+            let ssh = h.ssh.clone().filter(|s| !s.is_empty());
+            if ssh.is_some() && security != Security::None {
+                return Err(
+                    "SSH を経由する 3270 の接続では TLS を使えません（設定の ssh か tls を外してください）"
+                        .into(),
+                );
+            }
             return Ok(Target3270 {
                 label: text.to_owned(),
                 host: h.host.clone(),
-                port: h.port.unwrap_or(DEFAULT_PORT),
+                port: h.port.unwrap_or(if security == Security::Tls {
+                    DEFAULT_TLS_PORT
+                } else {
+                    DEFAULT_PORT
+                }),
+                security,
+                ca_file: h.ca_file.as_deref().map_or(ca_file, path),
+                client_cert: h.client_cert.as_deref().map_or(client_cert, path),
+                client_key: h.client_key.as_deref().map_or(client_key, path),
                 lu: h.lu.clone().filter(|l| !l.is_empty()),
                 model: h.model.unwrap_or(t.model),
                 ccsid: match h.ccsid {
                     Some(n) => ccsid_of(n)?,
                     None => base_ccsid,
                 },
-                ssh: h.ssh.clone().filter(|s| !s.is_empty()),
+                ssh,
                 terminal_type,
                 tn3270e: t.tn3270e,
                 printer: false,
@@ -95,10 +131,19 @@ impl Target3270 {
                 on_connect: h.on_connect.clone().filter(|m| !m.trim().is_empty()),
             });
         }
-        let rest = text
-            .strip_prefix("tn3270://")
-            .unwrap_or(text)
-            .trim_end_matches('/');
+        let (security, rest) = match text.strip_prefix("tn3270s://") {
+            Some(r) => (Security::Tls, r),
+            None => (
+                Security::None,
+                text.strip_prefix("tn3270://").unwrap_or(text),
+            ),
+        };
+        let rest = rest.trim_end_matches('/');
+        let default_port = if security == Security::Tls {
+            DEFAULT_TLS_PORT
+        } else {
+            DEFAULT_PORT
+        };
         let (lu, hostport) = match rest.rsplit_once('@') {
             Some((l, h)) if !l.is_empty() => (Some(l.to_owned()), h),
             _ => (None, rest),
@@ -109,11 +154,12 @@ impl Target3270 {
                 p.parse::<u16>()
                     .map_err(|_| format!("ポート（{p}）を読めません"))?,
             ),
-            _ => (hostport.trim_matches(['[', ']']).to_owned(), DEFAULT_PORT),
+            _ => (hostport.trim_matches(['[', ']']).to_owned(), default_port),
         };
         if host.is_empty() || host.contains(char::is_whitespace) {
             return Err(format!(
-                "接続先（{text}）を読めません。例: mvs01.example.co.jp、tn3270://TCP00042@mvs01:23"
+                "接続先（{text}）を読めません。例: mvs01.example.co.jp、tn3270://TCP00042@mvs01:23、\
+                 tn3270s://mvs01（TLS）"
             ));
         }
         Ok(Target3270 {
@@ -124,6 +170,10 @@ impl Target3270 {
             model: t.model,
             ccsid: base_ccsid,
             ssh: None,
+            security,
+            ca_file,
+            client_cert,
+            client_key,
             terminal_type,
             tn3270e: t.tn3270e,
             printer: false,
@@ -160,14 +210,36 @@ impl Target3270 {
         })
     }
 
-    /// `tn3270://[LU@]ホスト:ポート` の形。
+    /// `tn3270://[LU@]ホスト:ポート` の形（暗黙の TLS は `tn3270s://`）。
     pub(crate) fn uri(&self) -> String {
         let lu = self
             .lu
             .as_deref()
             .map(|l| format!("{l}@"))
             .unwrap_or_default();
-        format!("tn3270://{lu}{}:{}", self.host, self.port)
+        let scheme = if self.security == Security::Tls {
+            "tn3270s"
+        } else {
+            "tn3270"
+        };
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        format!("{scheme}://{lu}{host}:{}", self.port)
+    }
+
+    /// TLS の設定（受け入れた証明書は設定のフォルダの `known_certs` に記録する）。
+    fn tls_options(&self) -> yy_3270_tls::Options {
+        yy_3270_tls::Options {
+            ca_file: self.ca_file.clone(),
+            client_cert: self.client_cert.clone(),
+            client_key: self.client_key.clone(),
+            known_certs: yy_config::config_dir().map(|d| d.join("known_certs")),
+            timeout: CONNECT_TIMEOUT,
+            ..yy_3270_tls::Options::new(&self.host, self.port)
+        }
     }
 
     fn session_config(&self) -> SessionConfig {
@@ -199,6 +271,8 @@ pub(crate) struct Tn3270 {
     pub view_rows: usize,
     /// 通信の記録のファイル（記録中）
     pub trace: Option<TraceFile>,
+    /// TLS の情報（TLS でつないだとき）
+    pub tls: Option<yy_3270_tls::SessionInfo>,
 }
 
 /// 通信の記録のファイル（`logs\tn3270-trace-<日時>-<名前>.log`）。
@@ -224,6 +298,7 @@ impl Tn3270 {
             last_data: Instant::now(),
             view_rows: 30,
             trace: None,
+            tls: None,
         }
     }
 
@@ -461,8 +536,12 @@ fn render_printer(tn: &Tn3270, exited: bool) -> Terminal {
     term
 }
 
-/// 接続する（`show` に進みを表示する。接続中は呼び出し側の状態を借りないこと）。
-pub(crate) fn connect(t: &Target3270, show: &dyn Fn(&str)) -> Result<Backend, String> {
+/// 接続する（`show` に進みを表示する。接続中は呼び出し側の状態を借りないこと）。TLS なら
+/// その情報も返す。
+pub(crate) fn connect(
+    t: &Target3270,
+    show: &dyn Fn(&str),
+) -> Result<(Backend, Option<yy_3270_tls::SessionInfo>), String> {
     let (host, port) = (t.host.clone(), t.port);
     if let Some(via) = &t.ssh {
         let target = Target::parse(via)
@@ -476,43 +555,93 @@ pub(crate) fn connect(t: &Target3270, show: &dyn Fn(&str)) -> Result<Backend, St
         show("");
         let p = r.map_err(|e| e.to_string())?;
         let (input, output, finish) = p.into_parts();
-        return Ok(Backend {
-            input,
-            output,
-            resize: Box::new(|_, _| {}),
-            wait: Box::new(move || {
-                let _ = finish();
-                None
-            }),
-            // 入力を閉じると中継を終える（タブを閉じたとき）
-            kill: Box::new(|| {}),
-        });
+        return Ok((
+            Backend {
+                input,
+                output,
+                resize: Box::new(|_, _| {}),
+                wait: Box::new(move || {
+                    let _ = finish();
+                    None
+                }),
+                // 入力を閉じると中継を終える（タブを閉じたとき）
+                kill: Box::new(|| {}),
+            },
+            None,
+        ));
     }
     show(&format!("{host}:{port} に接続しています…（Esc で中止）"));
     let h = host.clone();
-    let r = crate::remote::wait(show, move |_| -> io::Result<TcpStream> {
+    let security = t.security;
+    let (opts, confirm) = (t.tls_options(), crate::remote::tls_confirm());
+    let r = crate::remote::wait(show, move |w| -> Result<_, String> {
         let mut last = None;
-        for addr in (h.as_str(), port).to_socket_addrs()? {
+        let mut stream = None;
+        let addrs = (h.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|e| format!("{h}:{port} に接続できませんでした: {e}"))?;
+        for addr in addrs {
             match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
-                Ok(s) => return Ok(s),
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
                 Err(e) => last = Some(e),
             }
         }
-        Err(last.unwrap_or_else(|| io::Error::other("アドレスが見つかりません")))
+        let stream = stream.ok_or_else(|| {
+            let e = last.unwrap_or_else(|| io::Error::other("アドレスが見つかりません"));
+            format!("{h}:{port} に接続できませんでした: {e}")
+        })?;
+        let _ = stream.set_nodelay(true);
+        if security == Security::None {
+            return Ok((stream, None));
+        }
+        w.report(format!(
+            "{h}:{port} と TLS{}を始めています…",
+            if security == Security::StartTls {
+                "（STARTTLS）"
+            } else {
+                ""
+            }
+        ));
+        let tls = yy_3270_tls::connect(stream, security == Security::StartTls, &opts, confirm)
+            .map_err(|e| format!("{h}:{port} と TLS でつなげませんでした: {e}"))?;
+        Ok((
+            tls.socket.try_clone().map_err(|e| e.to_string())?,
+            Some(tls),
+        ))
     });
     show("");
-    let stream = r.map_err(|e| format!("{host}:{port} に接続できませんでした: {e}"))?;
-    let _ = stream.set_nodelay(true);
-    let out = stream.try_clone().map_err(|e| e.to_string())?;
+    let (stream, tls) = r?;
     let killer = stream.try_clone().map_err(|e| e.to_string())?;
-    Ok(Backend {
-        input: Box::new(stream),
-        output: Box::new(out),
-        resize: Box::new(|_, _| {}),
-        wait: Box::new(|| None),
-        kill: Box::new(move || {
-            let _ = killer.shutdown(Shutdown::Both);
-        }),
+    let kill: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        let _ = killer.shutdown(Shutdown::Both);
+    });
+    Ok(match tls {
+        Some(tls) => (
+            Backend {
+                input: Box::new(tls.writer),
+                output: Box::new(tls.reader),
+                resize: Box::new(|_, _| {}),
+                wait: Box::new(|| None),
+                kill,
+            },
+            Some(tls.info),
+        ),
+        None => {
+            let out = stream.try_clone().map_err(|e| e.to_string())?;
+            (
+                Backend {
+                    input: Box::new(stream),
+                    output: Box::new(out),
+                    resize: Box::new(|_, _| {}),
+                    wait: Box::new(|| None),
+                    kill,
+                },
+                None,
+            )
+        }
     })
 }
 
@@ -581,6 +710,9 @@ fn oia_text(tn: &Tn3270, exited: bool) -> String {
         o.cursor.1,
         tn.session.ccsid().name(),
     );
+    if tn.tls.is_some() {
+        s.push_str("  TLS");
+    }
     if tn.trace.is_some() {
         s.push_str("  TRACE");
     }
@@ -801,6 +933,31 @@ mod tests {
         assert_eq!(t.uri(), "tn3270://TCP00042@mvs01.example.co.jp:2323");
         let t = Target3270::parse("mvs01", &cfg).unwrap();
         assert_eq!((t.port, t.lu.clone(), t.ccsid), (23, None, Ccsid::Ibm930));
+        assert_eq!(t.security, Security::None);
+        // 暗黙の TLS: 既定のポートは 992
+        let t = Target3270::parse("tn3270s://LU9@mvs01", &cfg).unwrap();
+        assert_eq!((t.security, t.port), (Security::Tls, 992));
+        assert_eq!(t.uri(), "tn3270s://LU9@mvs01:992");
+        cfg.tn3270.ca_file = r"C:\certs\ca.pem".into();
+        cfg.tn3270.host.insert(
+            "secure".into(),
+            yy_config::Tn3270Host {
+                host: "mvs02".into(),
+                tls: Some("starttls".into()),
+                client_cert: Some(r"C:\certs\me.pem".into()),
+                ..Default::default()
+            },
+        );
+        let t = Target3270::parse("secure", &cfg).unwrap();
+        assert_eq!((t.security, t.port), (Security::StartTls, 23));
+        assert_eq!(t.ca_file, Some(PathBuf::from(r"C:\certs\ca.pem")));
+        assert_eq!(t.client_cert, Some(PathBuf::from(r"C:\certs\me.pem")));
+        cfg.tn3270.host.get_mut("secure").unwrap().tls = Some("ssl".into());
+        assert!(Target3270::parse("secure", &cfg).is_err());
+        cfg.tn3270.host.get_mut("secure").unwrap().tls = Some("tls".into());
+        assert_eq!(Target3270::parse("secure", &cfg).unwrap().port, 992);
+        cfg.tn3270.host.get_mut("secure").unwrap().ssh = Some("bastion".into());
+        assert!(Target3270::parse("secure", &cfg).is_err());
         assert!(Target3270::parse("", &cfg).is_err());
         assert!(Target3270::parse("mvs01:abc", &cfg).is_err());
         cfg.tn3270.host.insert(
