@@ -14,6 +14,7 @@ mod fillhandle;
 mod filter;
 mod fixedui;
 mod format;
+mod multiui;
 mod paint;
 mod view;
 
@@ -66,6 +67,9 @@ const ID_EXPORT_CSV: u16 = 5;
 const ID_EXIT: u16 = 6;
 const ID_OPEN_FIXED: u16 = 7;
 const ID_EXPORT_FIXED: u16 = 8;
+const ID_OPEN_MULTI: u16 = 9;
+const ID_MULTI_LAYOUT: u16 = 27;
+const ID_ROW_LAYOUT: u16 = 28;
 const ID_FIXED_LAYOUT: u16 = 26;
 const ID_UNDO: u16 = 10;
 const ID_REDO: u16 = 11;
@@ -297,6 +301,11 @@ fn create_menu() -> Result<HMENU> {
         add(file, ID_NEW, "新規(&N)\tCtrl+N");
         add(file, ID_OPEN, "開く(&O)...\tCtrl+O");
         add(file, ID_OPEN_FIXED, "固定長ファイルを開く(&F)...");
+        add(
+            file,
+            ID_OPEN_MULTI,
+            "固定長ファイルを開く（マルチレイアウト）(&U)...",
+        );
         sep(file);
         add(file, ID_SAVE, "上書き保存(&S)\tCtrl+S");
         add(file, ID_SAVE_AS, "名前を付けて保存(&A)...\tCtrl+Shift+S");
@@ -382,6 +391,8 @@ fn create_menu() -> Result<HMENU> {
         sep(data);
         add(data, ID_DEDUP, "重複の削除(&U)...");
         add(data, ID_FIXED_LAYOUT, "固定長のレイアウト(&Y)...");
+        add(data, ID_MULTI_LAYOUT, "マルチレイアウトの設定(&M)...");
+        add(data, ID_ROW_LAYOUT, "行のレイアウトを指定(&W)...");
         add(data, ID_TO_NUMBER, "列を数値に変換(&V)");
         add(data, ID_TO_TEXT, "列を文字列に変換(&T)");
         let help = CreatePopupMenu()?;
@@ -683,6 +694,16 @@ fn parse_entry(text: &str, sys: DateSystem) -> Value {
     }
 }
 
+/// レイアウト未確定の行の背景と、エラーの文字の色。
+const UNDETERMINED_FILL: (u8, u8, u8) = (255, 199, 206);
+const UNDETERMINED_FG: (u8, u8, u8) = (156, 0, 6);
+
+/// マルチレイアウトのレイアウトの列のセル（見出し行は除く）か。
+fn is_layout_cell(sheet: &yy_sheet::Sheet, r: u64, c: u32) -> bool {
+    yy_sheet::fixed::layout_column(sheet) == Some(c)
+        && !matches!(sheet.place(r, c), yy_sheet::Place::Header(_))
+}
+
 /// 固定長の項目の型に合わない入力の知らせ。
 fn type_mismatch(f: &yy_cobol::Field, why: &str) -> String {
     format!(
@@ -788,8 +809,25 @@ impl App {
         self.sync_grid_size();
         self.compute_layout();
         let sys = self.sys();
+        // マルチレイアウト: レイアウト未確定の行（背景を赤く、レイアウトの列にエラーを出す）
+        let multi_lc = yy_sheet::fixed::layout_column(self.sheet());
+        let head = self.sheet().table.header as u64;
+        let last_row = multi_lc.map_or(0, |_| self.sheet().extent().0);
         let mut cells = Vec::with_capacity(self.rows.len());
         for &(row, _) in &self.rows {
+            let undetermined = match multi_lc {
+                Some(_) if row >= head && row < last_row => {
+                    match yy_sheet::fixed::row_layout(
+                        &self.ctx,
+                        self.sheet(),
+                        self.sheet().source_row(row),
+                    ) {
+                        yy_sheet::fixed::RowLayout::Undetermined(n) => Some(n),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
             let mut line = Vec::with_capacity(self.cols.len());
             for &(col, _, _) in &self.cols {
                 let v = self
@@ -811,7 +849,7 @@ impl App {
                 for (side, b) in borders.iter_mut().enumerate() {
                     *b = st.line(side).map(|l| (l.style, rgb(l.color)));
                 }
-                line.push(Cell {
+                let mut cell = Cell {
                     text,
                     align,
                     // 表示形式の色（[赤] など）が書式の文字の色より優先（Excel と同じ）
@@ -821,7 +859,20 @@ impl App {
                     bold: st.bold.unwrap_or(false),
                     italic: st.italic.unwrap_or(false),
                     borders,
-                });
+                };
+                if let Some(name) = &undetermined {
+                    cell.fill = Some(UNDETERMINED_FILL);
+                    if Some(col) == multi_lc {
+                        cell.text = match name {
+                            Some(n) => format!("#レイアウト未確定（{n}）"),
+                            None => "#レイアウト未確定".into(),
+                        };
+                        cell.color = Some(UNDETERMINED_FG);
+                        cell.align = Align::Left;
+                        cell.bold = true;
+                    }
+                }
+                line.push(cell);
             }
             cells.push(line);
         }
@@ -837,12 +888,19 @@ impl App {
             })
             .collect();
         let buttons = self.header_buttons();
-        // 固定長: 列見出しに項目の型
+        // 固定長: 列見出しに項目の型（マルチレイアウトはアクティブなセルの行のレイアウトの項目名と型）
+        let active_src = self.sheet().source_row(self.cur.0);
         let col_types: Vec<(u32, String)> = self
             .cols
             .iter()
             .filter_map(|&(c, _, _)| {
-                yy_sheet::fixed::column_field(self.sheet(), c).map(|(_, f)| (c, f.describe.clone()))
+                if multi_lc.is_some() {
+                    yy_sheet::fixed::field_for(&self.ctx, self.sheet(), active_src, c)
+                        .map(|(_, f)| (c, format!("{} {}", f.name, f.describe)))
+                } else {
+                    yy_sheet::fixed::column_field(self.sheet(), c)
+                        .map(|(_, f)| (c, f.describe.clone()))
+                }
             })
             .collect();
         let scene = Scene {
@@ -1008,12 +1066,29 @@ impl App {
     fn update_fixed_status(&self) {
         let sh = self.sheet();
         let text = sh.fixed.as_ref().map(|spec| {
-            let mut t = format!(
-                "固定長 {}・レコード長 {} バイト",
-                spec.codec.charset.name(),
-                spec.layout.record_len
-            );
-            if let Some((_, f)) = yy_sheet::fixed::column_field(sh, self.cur.1) {
+            let src = sh.source_row(self.cur.0);
+            let mut t = if spec.is_multi() {
+                let row = match yy_sheet::fixed::row_layout(&self.ctx, sh, src) {
+                    yy_sheet::fixed::RowLayout::Known(l) => format!(
+                        "　行のレイアウト {}（レコード長 {} バイト）",
+                        l.name, l.layout.record_len
+                    ),
+                    yy_sheet::fixed::RowLayout::Undetermined(_) => "　レイアウト未確定の行".into(),
+                    yy_sheet::fixed::RowLayout::NotMulti => String::new(),
+                };
+                format!(
+                    "固定長 {}・マルチレイアウト {} 種{row}",
+                    spec.codec.charset.name(),
+                    spec.multi.len()
+                )
+            } else {
+                format!(
+                    "固定長 {}・レコード長 {} バイト",
+                    spec.codec.charset.name(),
+                    spec.layout.record_len
+                )
+            };
+            if let Some((_, f)) = yy_sheet::fixed::field_for(&self.ctx, sh, src, self.cur.1) {
                 t.push_str(&format!(
                     "　{}: {}（{}〜{} バイト目）",
                     f.name,
@@ -1370,7 +1445,12 @@ impl App {
             return f.text.to_string();
         }
         let v = self.sheet().get(&self.ctx, r, c).unwrap_or_default();
-        edit_text(&v, self.format_of(r, c).as_deref(), self.sys())
+        let text = edit_text(&v, self.format_of(r, c).as_deref(), self.sys());
+        // 英数字の埋め草（COBOL の空白）は編集では見せない（確定すると埋め直す）
+        match yy_sheet::fixed::field_at(&self.ctx, self.sheet(), r, c) {
+            Some((spec, f)) if !f.kind.is_numeric() => spec.codec.unpad(f, &text).to_string(),
+            _ => text,
+        }
     }
 
     /// セルに入力する（式・値）。式の誤り・固定長の項目の型に合わない値なら知らせて、入れずに
@@ -1391,8 +1471,26 @@ impl App {
                 return false;
             }
             res
+        } else if is_layout_cell(self.sheet(), r, c) {
+            // マルチレイアウトの行のレイアウト（行のバイト列をそのレイアウトで読み直す）
+            let mut bad = None;
+            let res = self.doc.edit(|b, ctx| {
+                yy_sheet::fixed::set_row_layout(ctx, &mut b.sheets[sheet], r, text).map_err(|e| {
+                    bad = Some(e.clone());
+                    std::io::Error::other(e)
+                })
+            });
+            if let Some(e) = bad {
+                error_box(
+                    self.frame,
+                    &format!("行のレイアウトを指定できませんでした。\n{e}"),
+                );
+                self.after_edit();
+                return false;
+            }
+            res
         } else {
-            let v = match yy_sheet::fixed::field_at(self.sheet(), r, c) {
+            let v = match yy_sheet::fixed::field_at(&self.ctx, self.sheet(), r, c) {
                 Some((spec, f)) => match yy_sheet::fixed::entry_value(spec, f, text) {
                     Ok(v) => v,
                     Err(e) => {
@@ -1518,9 +1616,14 @@ impl App {
                     let (r, c) = (r0 + i as u64, c0 + j as u32);
                     // 式は式として（読めなければ文字列として）
                     if !(is_formula(v) && s.set_formula(ctx, r, c, v).is_ok()) {
+                        if !is_formula(v) && is_layout_cell(s, r, c) {
+                            yy_sheet::fixed::set_row_layout(ctx, s, r, v)
+                                .map_err(std::io::Error::other)?;
+                            continue;
+                        }
                         let value = if is_formula(v) {
                             Value::text(v)
-                        } else if let Some((spec, f)) = yy_sheet::fixed::field_at(s, r, c) {
+                        } else if let Some((spec, f)) = yy_sheet::fixed::field_at(ctx, s, r, c) {
                             match yy_sheet::fixed::entry_value(spec, f, v) {
                                 Ok(x) => x,
                                 Err(e) => {
@@ -2273,6 +2376,9 @@ fn command(id: u16) {
             fixedui::export_fixed(None);
         }
         ID_FIXED_LAYOUT => fixedui::layout_dialog(),
+        ID_OPEN_MULTI => multiui::open_multi(),
+        ID_MULTI_LAYOUT => multiui::multi_layout_dialog(),
+        ID_ROW_LAYOUT => multiui::row_layout_dialog(),
         ID_EXIT => {
             if let Some(f) = with(|a| a.frame) {
                 unsafe {

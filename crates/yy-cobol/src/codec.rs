@@ -274,6 +274,11 @@ impl Codec {
         }
     }
 
+    /// バイト列を文字として読んだもの（空白を除かない。表にないバイトはエスケープ文字にする）。
+    pub fn bytes_text(&self, b: &[u8]) -> String {
+        self.decode_text(b, false)
+    }
+
     /// 文字列のバイト列（切らない。集団の MOVE で型のない値を並べるのに使う）。
     pub fn string_bytes(&self, s: &str) -> Vec<u8> {
         self.text_bytes(s, usize::MAX, false, &mut Issues::default())
@@ -622,16 +627,18 @@ impl Codec {
             return;
         }
         match &f.kind {
+            // 埋めてある空白（COBOL の埋め草）は除いてから書く（項目の長さを超えた空白を切った数に入れない）
             Kind::Alnum { justified, .. } => {
                 let s = text_of(v);
-                self.encode_text(&s, out, false, *justified, issues);
+                self.encode_text(self.unpad(f, &s), out, false, *justified, issues);
             }
             Kind::Dbcs => {
                 let s = text_of(v);
-                self.encode_text(&s, out, true, false, issues);
+                self.encode_text(self.unpad(f, &s), out, true, false, issues);
             }
             Kind::National => {
                 let s = text_of(v);
+                let s = self.unpad(f, &s);
                 let mut units: Vec<u16> = Vec::new();
                 for ch in s.chars() {
                     let mut buf = [0u16; 2];
@@ -782,6 +789,49 @@ impl Codec {
         }
     }
 
+    // ---- 埋め草（COBOL の MOVE と同じく、英数字は空白で埋める） ----
+
+    /// 英数字・2 バイト文字・`NATIONAL` の項目の値を、項目の長さまで COBOL と同じく埋めた文字列
+    /// （英数字は後ろに空白〔`JUSTIFIED` なら前に〕、2 バイト文字は全角の空白、`NATIONAL` は空白）。
+    /// 埋める要がない・数値の項目なら `None`。長さは文字コードでのバイト数（漢字は 2 バイト、EBCDIC は
+    /// SO / SI も数える）。
+    pub fn pad(&self, f: &Field, s: &str) -> Option<String> {
+        match &f.kind {
+            Kind::Alnum { justified, .. } => {
+                let n = self.string_bytes(s).len();
+                (n < f.len).then(|| {
+                    let sp = " ".repeat(f.len - n);
+                    if *justified {
+                        sp + s
+                    } else {
+                        s.to_string() + &sp
+                    }
+                })
+            }
+            Kind::Dbcs => {
+                let n = s.chars().count();
+                (n * 2 < f.len).then(|| s.to_string() + &"\u{3000}".repeat(f.len / 2 - n))
+            }
+            Kind::National => {
+                let n = s.encode_utf16().count();
+                (n * 2 < f.len).then(|| s.to_string() + &" ".repeat(f.len / 2 - n))
+            }
+            _ => None,
+        }
+    }
+
+    /// 埋め草を除いた文字列（編集・長さの確かめに使う）。
+    pub fn unpad<'a>(&self, f: &Field, s: &'a str) -> &'a str {
+        match &f.kind {
+            Kind::Alnum {
+                justified: true, ..
+            } => s.trim_start_matches(' '),
+            Kind::Alnum { .. } | Kind::National => s.trim_end_matches(' '),
+            Kind::Dbcs => s.trim_end_matches(['\u{3000}', ' ']),
+            _ => s,
+        }
+    }
+
     // ---- 入力の確かめ ----
 
     /// 文字が 2 バイト文字（SO / SI なし）で書けるか。
@@ -823,6 +873,11 @@ impl Codec {
     ///   小数部・整数部の桁数の超え、`COMP-5` の範囲の外は受け付けない。値は小数部の桁を項目に
     ///   揃えた `Num`（`COMP-1`・`COMP-2` は `Float`）。`X'…'`（元のバイト）はそのまま `Text`。
     pub fn accept(&self, f: &Field, text: &str) -> Result<Decoded, String> {
+        let text = if f.kind.is_numeric() {
+            text
+        } else {
+            self.unpad(f, text)
+        };
         if text.trim().is_empty() {
             return Ok(Decoded::Empty);
         }
@@ -1510,5 +1565,39 @@ mod tests {
                 assert_eq!(is, Issues::default());
             }
         }
+    }
+
+    #[test]
+    fn pad_like_cobol() {
+        let ms = Codec::new(Charset::Ms932);
+        let x5 = field("PIC X(5)");
+        assert_eq!(ms.pad(&x5, "AB").as_deref(), Some("AB   "));
+        assert_eq!(ms.pad(&x5, "ABCDE"), None);
+        assert_eq!(
+            ms.pad(&field("PIC X(5) JUSTIFIED RIGHT"), "AB").as_deref(),
+            Some("   AB")
+        );
+        // 漢字は 2 バイト
+        assert_eq!(ms.pad(&field("PIC X(4)"), "漢").as_deref(), Some("漢  "));
+        assert_eq!(
+            ms.pad(&field("PIC N(3)"), "漢").as_deref(),
+            Some("漢\u{3000}\u{3000}")
+        );
+        assert_eq!(
+            ms.pad(&field("PIC N(3) NATIONAL"), "a").as_deref(),
+            Some("a  ")
+        );
+        assert_eq!(ms.pad(&field("PIC 9(5)"), "1"), None);
+        // EBCDIC の漢字は SO / SI を数える（2+1+1）
+        let eb = Codec::new(Charset::Ebcdic(Ccsid::Ibm930));
+        assert_eq!(eb.pad(&field("PIC X(6)"), "漢").as_deref(), Some("漢  "));
+        assert_eq!(ms.unpad(&x5, "AB   "), "AB");
+        assert_eq!(ms.unpad(&field("PIC X(5) JUSTIFIED RIGHT"), "   AB"), "AB");
+        assert_eq!(ms.unpad(&field("PIC N(3)"), "漢\u{3000}\u{3000}"), "漢");
+        // 埋めた値を書いても同じバイト・切った数に入れない
+        let (b, is) = enc(&ms, &field("PIC X(3)"), Input::Text("AB        "));
+        assert_eq!(b, b"AB ");
+        assert_eq!(is, Issues::default());
+        assert!(ms.accept(&field("PIC X(3)"), "AB        ").is_ok());
     }
 }

@@ -75,7 +75,7 @@ fn initial() -> (String, Charset, Option<RecordSep>, bool) {
     .unwrap_or_else(|| (String::new(), Charset::Ms932, None, false))
 }
 
-fn crlf(s: &str) -> String {
+pub(super) fn crlf(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
@@ -110,7 +110,7 @@ fn read_controls(hwnd: HWND, st: &mut LayoutState) {
 }
 
 /// 長い文字列も読む（`dlg_text` は 4096 文字まで）。
-fn dlg_text_long(hwnd: HWND, id: u16) -> String {
+pub(super) fn dlg_text_long(hwnd: HWND, id: u16) -> String {
     unsafe {
         let Ok(h) = GetDlgItem(Some(hwnd), id as i32) else {
             return String::new();
@@ -217,7 +217,7 @@ fn layout_dialog_with(owner: HWND, purpose: Purpose, title: &str) -> Option<Fixe
 }
 
 /// コピーブックのファイルを読む（文字コードを推定して）。
-fn load_copybook(owner: HWND) -> Option<String> {
+pub(super) fn load_copybook(owner: HWND) -> Option<String> {
     let path = pick_file(
         owner,
         &[
@@ -386,7 +386,7 @@ extern "system" fn layout_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
 }
 
 /// ファイルを選ぶ（`filters` は（名前, パターン））。
-fn pick_file(owner: HWND, filters: &[(&str, &str)]) -> Option<PathBuf> {
+pub(super) fn pick_file(owner: HWND, filters: &[(&str, &str)]) -> Option<PathBuf> {
     use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
     use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog};
     unsafe {
@@ -772,6 +772,18 @@ pub(super) fn export_fixed(target: Option<PathBuf>) -> bool {
                 spec.codec.charset.name(),
                 spec.separator.label()
             );
+            if rep.undetermined > 0 {
+                let first = rep
+                    .first_undetermined
+                    .map(|r| format!("（最初は {} 行目）", r + 2))
+                    .unwrap_or_default();
+                let note = format!(
+                    "レイアウト未確定の行が {} 行あります{first}。取り込んだときの元のバイトのある行はそのまま書き、ない行は書いていません。",
+                    crate::util::group_digits(rep.undetermined)
+                );
+                msg.push_str("（レイアウト未確定の行があります）");
+                info_box(frame, &note);
+            }
             let is = rep.issues;
             if is.total() > 0 {
                 let mut lines = vec![

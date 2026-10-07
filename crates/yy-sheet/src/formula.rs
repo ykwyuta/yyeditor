@@ -458,7 +458,9 @@ impl BookGrid<'_> {
 
 impl Grid for BookGrid<'_> {
     fn cobol_move(&self, src: (usize, yy_formula::Area), dst: (usize, yy_formula::Area)) -> Val {
-        crate::fixed::cobol_move(self.book, self.at, src, dst, &|s, r, c| self.get(s, r, c))
+        crate::fixed::cobol_move(self.ctx, self.book, self.at, src, dst, &|s, r, c| {
+            self.get(s, r, c)
+        })
     }
 
     fn stable(&self, sheet: usize, a: &yy_formula::Area) -> bool {
@@ -849,8 +851,14 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
     // 結果をセルの項目の型に合わせる（固定長。15 章 6.5）
     let fit = |si: usize, r: u64, c: u32, v: Val| -> Val {
         let sh = &book.sheets[si];
-        if crate::fixed::needs_fit(sh, r, c, &v) {
-            to_val(&crate::fixed::fit_formula_result(sh, r, c, from_val(&v)))
+        if crate::fixed::needs_fit(ctx, sh, r, c, &v) {
+            to_val(&crate::fixed::fit_formula_result(
+                ctx,
+                sh,
+                r,
+                c,
+                from_val(&v),
+            ))
         } else {
             v
         }

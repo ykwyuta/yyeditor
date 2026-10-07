@@ -369,7 +369,9 @@ pub(super) fn format_dialog() {
     // COBOL の型は表の列に付ける
     let cobol = with(|a| {
         let s = a.sheet();
-        (a.cur.1 < s.table.cols()).then(|| {
+        // マルチレイアウトでは型はレイアウトで決まる
+        let multi = s.fixed.as_deref().is_some_and(|f| f.is_multi());
+        (a.cur.1 < s.table.cols() && !multi).then(|| {
             yy_sheet::fixed::column_field(s, a.cur.1)
                 .map(|(_, f)| f.describe.clone())
                 .unwrap_or_default()
@@ -678,7 +680,7 @@ extern "system" fn format_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         set_text(
                             hwnd,
                             D_COBOL_INFO,
-                            "COBOL の型は表の列に付けます（データ > 固定長のレイアウト、または表を開く）",
+                            "COBOL の型は表の列に付けます（データ > 固定長のレイアウト、または表を開く）。マルチレイアウトでは、型はレイアウト（データ > マルチレイアウトの設定）で決まります",
                         );
                     }
                 }

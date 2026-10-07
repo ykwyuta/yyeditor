@@ -79,7 +79,22 @@ impl RecordSep {
     }
 }
 
+/// マルチレイアウトの列のうち、行のレイアウトの名前を入れる列の印（[`Column::field`]）。
+pub const LAYOUT_COL: u32 = u32::MAX;
+
+/// 名前を付けたレイアウト（マルチレイアウト）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamedLayout {
+    pub name: Arc<str>,
+    pub copybook: Arc<str>,
+    pub layout: Arc<Layout>,
+}
+
 /// 固定長ファイルの設定（シートが持つ）。
+///
+/// マルチレイアウト（`multi` が空でない）では、行ごとにレイアウトの列（`field` が [`LAYOUT_COL`] の列）に
+/// レイアウトの名前を入れ、項目の列（`field` が `k`）はその行のレイアウトの `k` 番目の項目になる。名前が
+/// ない・登録されていない行は「レイアウト未確定」。`copybook`・`layout` は最初のレイアウト。
 #[derive(Clone, Debug, PartialEq)]
 pub struct FixedSpec {
     /// コピーブックの文字列（`.yys` に保存する）
@@ -87,6 +102,8 @@ pub struct FixedSpec {
     pub layout: Arc<Layout>,
     pub codec: Codec,
     pub separator: RecordSep,
+    /// マルチレイアウトのレイアウト（単一のレイアウトなら空）
+    pub multi: Vec<NamedLayout>,
 }
 
 impl FixedSpec {
@@ -101,7 +118,68 @@ impl FixedSpec {
             layout: Arc::new(layout),
             codec,
             separator,
+            multi: Vec::new(),
         })
+    }
+
+    /// マルチレイアウト（（名前, コピーブック）の並び）から。名前は空でなく、重ならない
+    /// （大文字・小文字を区別しない）。
+    pub fn new_multi(
+        layouts: &[(String, String)],
+        codec: Codec,
+        separator: RecordSep,
+    ) -> Result<FixedSpec, String> {
+        if layouts.is_empty() {
+            return Err("レイアウトがありません".into());
+        }
+        let mut multi: Vec<NamedLayout> = Vec::with_capacity(layouts.len());
+        for (name, copybook) in layouts {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("名前のないレイアウトがあります".into());
+            }
+            if multi.iter().any(|m| m.name.eq_ignore_ascii_case(name)) {
+                return Err(format!("レイアウトの名前 {name} が重なっています"));
+            }
+            let layout =
+                yy_cobol::parse(copybook).map_err(|e| format!("レイアウト {name}: {e}"))?;
+            if layout.record_len == 0 {
+                return Err(format!("レイアウト {name}: レコード長が 0 です"));
+            }
+            multi.push(NamedLayout {
+                name: Arc::from(name),
+                copybook: Arc::from(copybook.as_str()),
+                layout: Arc::new(layout),
+            });
+        }
+        Ok(FixedSpec {
+            copybook: multi[0].copybook.clone(),
+            layout: multi[0].layout.clone(),
+            codec,
+            separator,
+            multi,
+        })
+    }
+
+    pub fn is_multi(&self) -> bool {
+        !self.multi.is_empty()
+    }
+
+    /// 名前のレイアウト（前後の空白を除き、大文字・小文字を区別しない）。
+    pub fn find_layout(&self, name: &str) -> Option<&NamedLayout> {
+        let name = name.trim();
+        self.multi
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(name))
+    }
+
+    /// マルチレイアウトの項目の列の数（いちばん多いレイアウトの項目の数）。
+    pub fn max_fields(&self) -> usize {
+        self.multi
+            .iter()
+            .map(|m| m.layout.fields.len())
+            .max()
+            .unwrap_or(self.layout.fields.len())
     }
 
     fn stride(&self) -> usize {
@@ -152,6 +230,10 @@ pub struct FixedReport {
     pub issues: Issues,
     /// 最初の注意の場所（表の行・項目の名前）
     pub first: Option<(u64, String)>,
+    /// レイアウト未確定の行の数（マルチレイアウト）
+    pub undetermined: u64,
+    /// 最初のレイアウト未確定の行（表の行）
+    pub first_undetermined: Option<u64>,
 }
 
 /// 10 進数をセルの値に（15 桁までなら数値、それより長ければ桁を落とさないよう文字列）。
@@ -161,10 +243,21 @@ fn num_cell(f: &yy_cobol::Field, n: &yy_cobol::Decimal) -> Option<f64> {
 }
 
 /// 読んだ値をセルに。
-fn push_decoded(b: &mut Builder, f: &yy_cobol::Field, d: Decoded, raw: &[u8], invalid: &mut u64) {
+fn push_decoded(
+    b: &mut Builder,
+    codec: &Codec,
+    f: &yy_cobol::Field,
+    d: Decoded,
+    raw: &[u8],
+    invalid: &mut u64,
+) {
     match d {
         Decoded::Empty => b.push(CellRef::Empty),
-        Decoded::Text(s) => b.push(CellRef::Text(&s)),
+        // 英数字は COBOL と同じく項目の長さまで空白で埋めた値
+        Decoded::Text(s) => match codec.pad(f, &s) {
+            Some(p) => b.push(CellRef::Text(&p)),
+            None => b.push(CellRef::Text(&s)),
+        },
         Decoded::Float(x) => b.push(CellRef::Number(x)),
         Decoded::Num(n) => match num_cell(f, &n) {
             Some(x) => b.push(CellRef::Number(x)),
@@ -177,19 +270,510 @@ fn push_decoded(b: &mut Builder, f: &yy_cobol::Field, d: Decoded, raw: &[u8], in
     }
 }
 
-/// 表の列の項目（固定長の設定があって、列が項目に結び付いていれば）。
+/// 表の列の項目（単一のレイアウトで、列が項目に結び付いていれば。マルチレイアウトは行ごとに違うので
+/// [`field_for`] を使う）。
 pub fn column_field(sheet: &Sheet, col: u32) -> Option<(&FixedSpec, &yy_cobol::Field)> {
     let spec = sheet.fixed.as_deref()?;
+    if spec.is_multi() {
+        return None;
+    }
     let i = sheet.table.columns.get(col as usize)?.field?;
     Some((spec, spec.layout.fields.get(i as usize)?))
 }
 
-/// 格子のセルが項目の列のデータ（見出し行・表の外は除く）なら、その項目。
-pub fn field_at(sheet: &Sheet, row: u64, col: u32) -> Option<(&FixedSpec, &yy_cobol::Field)> {
-    match sheet.place(row, col) {
-        Place::Data(_, c) => column_field(sheet, c),
+/// マルチレイアウトのレイアウトの列。
+pub fn layout_column(sheet: &Sheet) -> Option<u32> {
+    sheet.fixed.as_deref().filter(|s| s.is_multi())?;
+    sheet
+        .table
+        .columns
+        .iter()
+        .position(|c| c.field == Some(LAYOUT_COL))
+        .map(|c| c as u32)
+}
+
+/// 行（元の行）のレイアウトの名前の欄の値。
+fn layout_name(ctx: &Context, sheet: &Sheet, src_row: u64) -> Option<String> {
+    let lc = layout_column(sheet)?;
+    match sheet.get_source(ctx, src_row, lc).ok()? {
+        Value::Text(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        Value::Number(n) => Some(yy_numfmt::general(n)),
         _ => None,
     }
+}
+
+/// 行のレイアウト（マルチレイアウト）。
+#[derive(Clone, Debug, PartialEq)]
+pub enum RowLayout<'a> {
+    /// マルチレイアウトでない・見出し行
+    NotMulti,
+    Known(&'a NamedLayout),
+    /// レイアウト未確定（名前がない、または登録されていない名前）
+    Undetermined(Option<String>),
+}
+
+/// 元の行 `src_row` のレイアウト。
+pub fn row_layout<'a>(ctx: &Context, sheet: &'a Sheet, src_row: u64) -> RowLayout<'a> {
+    let Some(spec) = sheet.fixed.as_deref().filter(|s| s.is_multi()) else {
+        return RowLayout::NotMulti;
+    };
+    if sheet.table.header && src_row == 0 {
+        return RowLayout::NotMulti;
+    }
+    match layout_name(ctx, sheet, src_row) {
+        Some(n) => match spec.find_layout(&n) {
+            Some(l) => RowLayout::Known(l),
+            None => RowLayout::Undetermined(Some(n)),
+        },
+        None => RowLayout::Undetermined(None),
+    }
+}
+
+/// 元の行 `src_row`・列 `col` の項目（見出し行・項目のない列・レイアウト未確定の行は `None`）。
+pub fn field_for<'a>(
+    ctx: &Context,
+    sheet: &'a Sheet,
+    src_row: u64,
+    col: u32,
+) -> Option<(&'a FixedSpec, &'a yy_cobol::Field)> {
+    let spec = sheet.fixed.as_deref()?;
+    if sheet.table.header && src_row == 0 {
+        return None;
+    }
+    let k = sheet.table.columns.get(col as usize)?.field?;
+    if k == LAYOUT_COL {
+        return None;
+    }
+    if !spec.is_multi() {
+        return Some((spec, spec.layout.fields.get(k as usize)?));
+    }
+    match row_layout(ctx, sheet, src_row) {
+        RowLayout::Known(l) => Some((spec, l.layout.fields.get(k as usize)?)),
+        _ => None,
+    }
+}
+
+/// 格子のセル（見出し行は除く）の項目。
+pub fn field_at<'a>(
+    ctx: &Context,
+    sheet: &'a Sheet,
+    row: u64,
+    col: u32,
+) -> Option<(&'a FixedSpec, &'a yy_cobol::Field)> {
+    match sheet.place(row, col) {
+        Place::Header(_) => None,
+        _ => field_for(ctx, sheet, sheet.source_row(row), col),
+    }
+}
+
+/// 読んだ値をセルの値に（英数字は埋め草付き、15 桁を超える数値は文字列、読めない数値は `X'…'`）。
+fn decoded_value(spec: &FixedSpec, f: &yy_cobol::Field, d: Decoded, raw: &[u8]) -> Value {
+    match d {
+        Decoded::Empty => Value::Empty,
+        Decoded::Text(s) => padded(spec, f, Value::text(&s)),
+        Decoded::Float(x) => Value::Number(x),
+        Decoded::Num(n) => match num_cell(f, &n) {
+            Some(x) => Value::Number(x),
+            None => Value::text(&n.to_string()),
+        },
+        Decoded::Invalid => Value::text(&yy_cobol::hex_text(raw)),
+    }
+}
+
+/// `X'…'`（長さは問わない）のバイト列。
+fn hex_any(s: &str) -> Option<Vec<u8>> {
+    let t = s.trim();
+    let body = t
+        .strip_prefix("X'")
+        .or_else(|| t.strip_prefix("x'"))?
+        .strip_suffix('\'')?;
+    if body.is_empty() || body.len() % 2 != 0 {
+        return None;
+    }
+    yy_cobol::parse_hex(t, body.len() / 2)
+}
+
+/// 項目の列（`field` が `k`）の、`k` → 列の番号。
+fn field_columns(sheet: &Sheet) -> Vec<(u32, u32)> {
+    sheet
+        .table
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(c, col)| {
+            col.field
+                .filter(|&k| k != LAYOUT_COL)
+                .map(|k| (k, c as u32))
+        })
+        .collect()
+}
+
+/// 行（元の行）のバイト列: レイアウトが分かれば項目を書いたもの、未確定なら最初の項目の列の `X'…'`。
+fn row_bytes(ctx: &Context, sheet: &Sheet, src_row: u64) -> io::Result<Option<Vec<u8>>> {
+    let Some(spec) = sheet.fixed.as_deref() else {
+        return Ok(None);
+    };
+    let cols = field_columns(sheet);
+    match row_layout(ctx, sheet, src_row) {
+        RowLayout::Known(l) => {
+            let mut rec = vec![spec.codec.charset.space(); l.layout.record_len];
+            let mut issues = Issues::default();
+            for (k, f) in l.layout.fields.iter().enumerate() {
+                let v = match cols.iter().find(|x| x.0 == k as u32) {
+                    Some(&(_, c)) => sheet.get_source(ctx, src_row, c)?,
+                    None => Value::Empty,
+                };
+                spec.codec.encode(
+                    f,
+                    input_of(CellRef::of(&v)),
+                    &mut rec[f.offset..f.offset + f.len],
+                    &mut issues,
+                );
+            }
+            Ok(Some(rec))
+        }
+        RowLayout::Undetermined(_) => {
+            let Some(&(_, c)) = cols.iter().find(|x| x.0 == 0) else {
+                return Ok(None);
+            };
+            Ok(match sheet.get_source(ctx, src_row, c)? {
+                Value::Text(s) => hex_any(&s),
+                _ => None,
+            })
+        }
+        RowLayout::NotMulti => Ok(None),
+    }
+}
+
+/// 未確定の行の項目の列: 項目1 に元のバイト（`X'…'`）、項目2 に文字として読んだ内容、ほかは空。
+fn raw_row_values(spec: &FixedSpec, bytes: &[u8], k: u32) -> Value {
+    match k {
+        0 => Value::text(&yy_cobol::hex_text(bytes)),
+        1 => {
+            let t = spec.codec.bytes_text(bytes);
+            let t = t.trim_end();
+            if t.is_empty() {
+                Value::Empty
+            } else {
+                Value::text(t)
+            }
+        }
+        _ => Value::Empty,
+    }
+}
+
+/// 行（格子の行）のレイアウトを `name` にする（マルチレイアウト）。名前が登録されていなければ、その名前の
+/// まま「レイアウト未確定」にする（空なら名前を消す）。
+///
+/// レイアウトが変わるときは、COBOL の `REDEFINES` と同じく行のバイト列を新しいレイアウトで読み直す
+/// （前のレイアウトで項目を書いたバイト列か、未確定の行なら元のバイト〔項目1 の `X'…'`〕）。バイト列の
+/// ない行（手で入力している行）は値をそのままにする。未確定に戻すと、元のバイトを項目1・2 に置く。
+pub fn set_row_layout(
+    ctx: &Context,
+    sheet: &mut Sheet,
+    row: u64,
+    name: &str,
+) -> Result<(), String> {
+    let spec = sheet
+        .fixed
+        .clone()
+        .filter(|s| s.is_multi())
+        .ok_or("マルチレイアウトのシートではありません")?;
+    let lc = layout_column(sheet).ok_or("レイアウトの列がありません")?;
+    if matches!(sheet.place(row, lc), Place::Header(_)) {
+        return Err("見出し行にはレイアウトを指定できません".into());
+    }
+    let src = sheet.source_row(row);
+    let new = spec.find_layout(name).cloned();
+    let old = match row_layout(ctx, sheet, src) {
+        RowLayout::Known(l) => Some(l.name.clone()),
+        _ => None,
+    };
+    if new.as_ref().map(|n| n.name.clone()) == old && old.is_some() {
+        return Ok(());
+    }
+    let bytes = row_bytes(ctx, sheet, src).map_err(|e| e.to_string())?;
+    let label = match &new {
+        Some(n) => Value::text(&n.name),
+        None if name.trim().is_empty() => Value::Empty,
+        None => Value::text(name.trim()),
+    };
+    let io = |e: io::Error| e.to_string();
+    sheet.set(ctx, row, lc, label).map_err(io)?;
+    let Some(bytes) = bytes else {
+        return Ok(());
+    };
+    let cols = field_columns(sheet);
+    match &new {
+        Some(n) => {
+            let mut rec = bytes;
+            if rec.len() < n.layout.record_len {
+                rec.resize(n.layout.record_len, spec.codec.charset.space());
+            }
+            for (k, c) in cols {
+                let v = match n.layout.fields.get(k as usize) {
+                    Some(f) => {
+                        let b = &rec[f.offset..f.offset + f.len];
+                        decoded_value(&spec, f, spec.codec.decode(f, b), b)
+                    }
+                    None => Value::Empty,
+                };
+                sheet.set(ctx, row, c, v).map_err(io)?;
+            }
+        }
+        None if old.is_some() => {
+            for (k, c) in cols {
+                sheet
+                    .set(ctx, row, c, raw_row_values(&spec, &bytes, k))
+                    .map_err(io)?;
+            }
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// マルチレイアウトを今のシートに設定する。空のシートならレイアウトの列（「レイアウト」）と項目の列
+/// （「項目1」…）を作り、マルチレイアウトのシートならレイアウトを入れ替えて、足りない項目の列を足す。
+pub fn apply_multi(ctx: &Context, sheet: &mut Sheet, spec: &FixedSpec) -> Result<usize, String> {
+    if !spec.is_multi() {
+        return Err("マルチレイアウトではありません".into());
+    }
+    let empty = sheet.table.columns.is_empty() && sheet.cells.is_empty();
+    let multi = layout_column(sheet).is_some();
+    if !empty && !multi {
+        return Err(
+            "マルチレイアウトは、空のシートか、マルチレイアウトのシートで設定してください".into(),
+        );
+    }
+    let rows = sheet.table.rows;
+    let mut cols: Vec<Column> = sheet.table.columns.as_ref().clone();
+    let io = |e: io::Error| e.to_string();
+    if empty {
+        let mut c = Column::new("レイアウト");
+        c.field = Some(LAYOUT_COL);
+        cols.push(c);
+    }
+    let have = cols
+        .iter()
+        .filter_map(|c| c.field.filter(|&k| k != LAYOUT_COL))
+        .max()
+        .map_or(0, |k| k as usize + 1);
+    let mut added = 0;
+    for k in have..spec.max_fields() {
+        let mut c = Column::new(&format!("項目{}", k + 1));
+        c.extend_empty(ctx, rows).map_err(io)?;
+        c.field = Some(k as u32);
+        cols.push(c);
+        added += 1;
+    }
+    sheet.table = Table {
+        columns: Arc::new(cols),
+        rows,
+        header: true,
+    };
+    sheet.fixed = Some(Arc::new(spec.clone()));
+    sheet.formulas.touch_all();
+    Ok(added)
+}
+
+/// レコードの切れ目（始め・長さ）。区切りがあれば区切りで分け、なければ決まった長さ（すべての
+/// レイアウトのレコード長が同じときだけ）。
+fn split_records(raw: &[u8], spec: &FixedSpec) -> io::Result<Vec<(usize, usize)>> {
+    let sep = spec.separator.bytes();
+    let mut out = Vec::new();
+    if sep.is_empty() {
+        let len = spec.layout.record_len;
+        if spec.multi.iter().any(|m| m.layout.record_len != len) {
+            return Err(io::Error::other(
+                "レコードの区切りのないマルチレイアウトのファイルは、すべてのレイアウトのレコード長が同じときだけ読めます（区切りを選んでください）",
+            ));
+        }
+        let mut at = 0;
+        while at + len <= raw.len() {
+            out.push((at, len));
+            at += len;
+        }
+        return Ok(out);
+    }
+    let mut at = 0;
+    while at < raw.len() {
+        let end = raw[at..]
+            .windows(sep.len())
+            .position(|w| w == sep)
+            .map_or(raw.len(), |p| at + p);
+        out.push((at, end - at));
+        at = end + sep.len();
+    }
+    Ok(out)
+}
+
+/// マルチレイアウトのファイルを取り込む。どの行もレイアウト未確定で、項目1 に元のバイト（`X'…'`）、
+/// 項目2 に文字として読んだ内容を置く（行のレイアウトを指定すると、そのレイアウトで読み直す）。
+pub fn import_multi(
+    ctx: &Context,
+    path: &Path,
+    spec: &FixedSpec,
+    progress: &(dyn Fn(u64, u64) -> bool + Sync),
+) -> io::Result<(Sheet, FixedReport)> {
+    let file = yy_io::open_file(path)?;
+    let raw = file.bytes();
+    let recs = split_records(raw, spec)?;
+    let nf = spec.max_fields().max(2);
+    let total = recs.len() as u64;
+    let mut builders: Vec<Builder> = (0..nf).map(|_| Builder::default()).collect();
+    let mut pieces: Vec<Vec<Piece>> = vec![Vec::new(); nf];
+    let flush = |builders: &mut Vec<Builder>, pieces: &mut Vec<Vec<Piece>>| -> io::Result<()> {
+        for (b, p) in builders.iter_mut().zip(pieces.iter_mut()) {
+            let ch = Chunk::create(ctx, std::mem::take(b).finish())?;
+            p.push(Piece {
+                len: ch.rows,
+                chunk: ch,
+                start: 0,
+            });
+        }
+        Ok(())
+    };
+    let mut in_chunk = 0usize;
+    for (i, &(at, len)) in recs.iter().enumerate() {
+        let rec = &raw[at..at + len];
+        for (k, b) in builders.iter_mut().enumerate() {
+            match raw_row_values(spec, rec, k as u32) {
+                Value::Text(s) => b.push(CellRef::Text(&s)),
+                _ => b.push(CellRef::Empty),
+            }
+        }
+        in_chunk += 1;
+        if in_chunk == 65_536 {
+            flush(&mut builders, &mut pieces)?;
+            in_chunk = 0;
+            if !progress(i as u64 + 1, total) {
+                return Err(cancelled());
+            }
+        }
+    }
+    if in_chunk > 0 {
+        flush(&mut builders, &mut pieces)?;
+    }
+    let mut cols = Vec::with_capacity(nf + 1);
+    let mut lc = Column::new("レイアウト");
+    lc.extend_empty(ctx, total)?;
+    lc.field = Some(LAYOUT_COL);
+    cols.push(lc);
+    for (k, p) in pieces.into_iter().enumerate() {
+        let mut c = Column::from_pieces(&format!("項目{}", k + 1), p);
+        if c.rows() < total {
+            c.extend_empty(ctx, total - c.rows())?;
+        }
+        c.field = Some(k as u32);
+        cols.push(c);
+    }
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Sheet1".into());
+    let mut sheet = Sheet::new(&name);
+    sheet.table = Table {
+        columns: Arc::new(cols),
+        rows: total,
+        header: true,
+    };
+    sheet.fixed = Some(Arc::new(spec.clone()));
+    progress(total, total);
+    Ok((
+        sheet,
+        FixedReport {
+            records: total,
+            undetermined: total,
+            ..Default::default()
+        },
+    ))
+}
+
+/// マルチレイアウトのシートを書き出す: 行ごとに、その行のレイアウトで項目を書く（レコード長は
+/// レイアウトごと）。レイアウト未確定の行は、元のバイト（項目1 の `X'…'`）があればそのまま書き、
+/// なければ書かない（どちらも `undetermined` に数える）。
+fn export_multi_to(
+    ctx: &Context,
+    sheet: &Sheet,
+    path: &Path,
+    spec: &FixedSpec,
+    order: Option<&[u32]>,
+    progress: &(dyn Fn(u64, u64) -> bool + Sync),
+) -> io::Result<FixedReport> {
+    let mut out = BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
+    let head = sheet.table.header as u64;
+    let total = match order {
+        Some(o) => o.len() as u64,
+        None => sheet
+            .source_extent()
+            .0
+            .saturating_sub(head)
+            .max(sheet.table.rows),
+    };
+    let cols = field_columns(sheet);
+    let sep = spec.separator.bytes();
+    let mut report = FixedReport::default();
+    for i in 0..total {
+        let row = match order {
+            Some(o) => o[i as usize] as u64,
+            None => i,
+        };
+        let src = row + head;
+        match row_layout(ctx, sheet, src) {
+            RowLayout::Known(l) => {
+                let mut rec = vec![spec.codec.charset.space(); l.layout.record_len];
+                for (k, f) in l.layout.fields.iter().enumerate() {
+                    let v = match cols.iter().find(|x| x.0 == k as u32) {
+                        Some(&(_, c)) => sheet.get_source(ctx, src, c)?,
+                        None => Value::Empty,
+                    };
+                    let before = report.issues.total();
+                    spec.codec.encode(
+                        f,
+                        input_of(CellRef::of(&v)),
+                        &mut rec[f.offset..f.offset + f.len],
+                        &mut report.issues,
+                    );
+                    if report.first.is_none() && report.issues.total() > before {
+                        report.first = Some((row, f.name.clone()));
+                    }
+                }
+                out.write_all(&rec)?;
+                out.write_all(sep)?;
+                report.records += 1;
+            }
+            _ => {
+                // 何も入っていない行は書かない
+                let raw = row_bytes(ctx, sheet, src)?;
+                let any = cols.iter().any(|&(_, c)| {
+                    sheet
+                        .get_source(ctx, src, c)
+                        .map(|v| !v.is_empty())
+                        .unwrap_or(false)
+                }) || layout_name(ctx, sheet, src).is_some();
+                if !any {
+                    continue;
+                }
+                report.undetermined += 1;
+                if report.first_undetermined.is_none() {
+                    report.first_undetermined = Some(row);
+                }
+                if let Some(b) = raw {
+                    out.write_all(&b)?;
+                    out.write_all(sep)?;
+                    report.records += 1;
+                }
+            }
+        }
+        if i % 65_536 == 65_535 && !progress(i + 1, total) {
+            return Err(cancelled());
+        }
+    }
+    out.flush()?;
+    out.get_ref().sync_data()?;
+    progress(total, total);
+    Ok(report)
 }
 
 /// 項目のセルに入力した文字列を確かめて、セルの値にする（型に合わなければ理由）。先頭の `'` は
@@ -198,7 +782,7 @@ pub fn entry_value(spec: &FixedSpec, f: &yy_cobol::Field, text: &str) -> Result<
     let t = text.strip_prefix('\'').unwrap_or(text);
     Ok(match spec.codec.accept(f, t)? {
         Decoded::Empty => Value::Empty,
-        Decoded::Text(s) => Value::text(&s),
+        Decoded::Text(s) => padded(spec, f, Value::text(&s)),
         Decoded::Float(x) => Value::Number(x),
         Decoded::Num(n) => match num_cell(f, &n) {
             Some(x) => Value::Number(x),
@@ -209,11 +793,13 @@ pub fn entry_value(spec: &FixedSpec, f: &yy_cobol::Field, text: &str) -> Result<
 }
 
 /// 式の結果を置くセル（元の行 `src_row`・列 `col`）の項目（見出し行・項目のない列は `None`）。
-fn formula_field(sheet: &Sheet, src_row: u64, col: u32) -> Option<(&FixedSpec, &yy_cobol::Field)> {
-    if sheet.table.header && src_row == 0 {
-        return None;
-    }
-    column_field(sheet, col)
+fn formula_field<'a>(
+    ctx: &Context,
+    sheet: &'a Sheet,
+    src_row: u64,
+    col: u32,
+) -> Option<(&'a FixedSpec, &'a yy_cobol::Field)> {
+    field_for(ctx, sheet, src_row, col)
 }
 
 /// 式の結果を、セル（元の行 `src_row`・列 `col`）の項目の型に合わせる（再計算で結果を置くたびに
@@ -223,9 +809,9 @@ fn formula_field(sheet: &Sheet, src_row: u64, col: u32) -> Option<(&FixedSpec, &
 ///   数値の小数部の多い桁は切り捨てた値にする（書き出す値と同じ）。`CBL.LOW-VALUE()`・`CBL.HIGH-VALUE()` は
 ///   そのまま（書き出すときに項目のすべてのバイトを 0x00・0xFF にする）。
 /// - 項目のない列: `CBL.LOW-VALUE()`・`CBL.HIGH-VALUE()` は値にできないので `#VALUE!`。
-pub fn fit_formula_result(sheet: &Sheet, src_row: u64, col: u32, v: Value) -> Value {
+pub fn fit_formula_result(ctx: &Context, sheet: &Sheet, src_row: u64, col: u32, v: Value) -> Value {
     let fig = matches!(&v, Value::Text(s) if yy_formula::figurative(s).is_some());
-    let Some((spec, f)) = formula_field(sheet, src_row, col) else {
+    let Some((spec, f)) = formula_field(ctx, sheet, src_row, col) else {
         return if fig {
             Value::Error(crate::CellError::Value)
         } else {
@@ -241,6 +827,8 @@ pub fn fit_formula_result(sheet: &Sheet, src_row: u64, col: u32, v: Value) -> Va
             None => Value::text(&n.to_string()),
         },
         Ok(Decoded::Float(x)) => Value::Number(x),
+        // 英数字は書く文字列（数値は 123 のような表記）を、COBOL と同じく項目の長さまで埋める
+        Ok(Decoded::Text(s)) if !f.kind.is_numeric() => padded(spec, f, Value::text(&s)),
         Ok(Decoded::Text(_) | Decoded::Empty | Decoded::Invalid) => v,
         Err(yy_cobol::Misfit::Num) => Value::Error(crate::CellError::Num),
         Err(yy_cobol::Misfit::Value) => Value::Error(crate::CellError::Value),
@@ -248,9 +836,15 @@ pub fn fit_formula_result(sheet: &Sheet, src_row: u64, col: u32, v: Value) -> Va
 }
 
 /// 式の結果を合わせる要るか（固定長の項目の列か、`CBL.LOW-VALUE()`・`CBL.HIGH-VALUE()` の結果）。速い道に使う。
-pub(crate) fn needs_fit(sheet: &Sheet, src_row: u64, col: u32, v: &yy_formula::Val) -> bool {
+pub(crate) fn needs_fit(
+    ctx: &Context,
+    sheet: &Sheet,
+    src_row: u64,
+    col: u32,
+    v: &yy_formula::Val,
+) -> bool {
     matches!(v, yy_formula::Val::Text(s) if yy_formula::figurative(s).is_some())
-        || formula_field(sheet, src_row, col).is_some()
+        || formula_field(ctx, sheet, src_row, col).is_some()
 }
 
 /// 読んだ値（MOVE の結果）を式の値に。
@@ -290,6 +884,7 @@ fn val_input(v: &yy_formula::Val) -> Input<'_> {
 ///   送り出しの列の型（なければ値のまま）と、受け取りの列の型で送る。文字コードは受け取り側。
 /// - 送れない組み合わせ（小数部のある数値 → 英数字など）・エラー値は `#VALUE!`。
 pub(crate) fn cobol_move(
+    ctx: &Context,
     book: &crate::Workbook,
     at: Option<(usize, u64, u32)>,
     (ss, sa): (usize, yy_formula::Area),
@@ -309,20 +904,22 @@ pub(crate) fn cobol_move(
     if dst_sheet.table.header && da.r0 == 0 {
         return Val::Err(Error::Value);
     }
-    let Some(dst): Option<Vec<&yy_cobol::Field>> = (da.c0..=da.c1)
-        .map(|c| column_field(dst_sheet, c).map(|x| x.1))
-        .collect()
-    else {
-        return Val::Err(Error::Value);
-    };
     let src_sheet = &book.sheets[ss];
-    let src: Vec<Option<&yy_cobol::Field>> = (sa.c0..=sa.c1)
-        .map(|c| column_field(src_sheet, c).map(|x| x.1))
-        .collect();
     let codec = &spec.codec;
     let rows = da.rows() as usize;
-    let mut data = Vec::with_capacity(rows * dst.len());
+    let ncols = (da.c1 - da.c0 + 1) as usize;
+    let mut data = Vec::with_capacity(rows * ncols);
     for i in 0..rows as u64 {
+        // 項目は行ごと（マルチレイアウトでは行のレイアウトで違う）
+        let Some(dst): Option<Vec<&yy_cobol::Field>> = (da.c0..=da.c1)
+            .map(|c| field_for(ctx, dst_sheet, da.r0 + i, c).map(|x| x.1))
+            .collect()
+        else {
+            return Val::Err(Error::Value);
+        };
+        let src: Vec<Option<&yy_cobol::Field>> = (sa.c0..=sa.c1)
+            .map(|c| field_for(ctx, src_sheet, sa.r0 + i, c).map(|x| x.1))
+            .collect();
         let vals: Vec<Val> = (sa.c0..=sa.c1).map(|c| get(ss, sa.r0 + i, c)).collect();
         if src.len() == dst.len() {
             for ((v, sf), df) in vals.iter().zip(&src).zip(&dst) {
@@ -347,17 +944,19 @@ pub(crate) fn cobol_move(
             }
         }
     }
-    Val::Array(Arc::new(Array::new(rows, dst.len(), data)))
+    Val::Array(Arc::new(Array::new(rows, ncols, data)))
 }
 
 /// 自動で付けた表示形式か（なし・`0`・`0.00` など）。
 fn auto_format(f: Option<&str>) -> bool {
     match f {
         None => true,
+        // 0 と 1 つの小数点だけ（`0`・`00000`・`0.00`・`00000.00`）
         Some(f) => {
-            f == "0"
-                || f.strip_prefix("0.")
-                    .is_some_and(|z| !z.is_empty() && z.chars().all(|c| c == '0'))
+            f.starts_with('0')
+                && f.chars().all(|c| c == '0' || c == '.')
+                && f.matches('.').count() <= 1
+                && !f.ends_with('.')
         }
     }
 }
@@ -372,6 +971,12 @@ pub fn set_column_type(
     codec: Codec,
     separator: RecordSep,
 ) -> Result<(), String> {
+    if sheet.fixed.as_deref().is_some_and(|s| s.is_multi()) {
+        return Err(
+            "マルチレイアウトのシートでは、型はレイアウト（コピーブック）で決まります。データ > マルチレイアウトの設定 で変えてください"
+                .into(),
+        );
+    }
     let t = &sheet.table;
     let Some(column) = t.columns.get(col as usize) else {
         return Err(if t.columns.is_empty() {
@@ -422,12 +1027,37 @@ pub fn set_column_type(
 }
 
 /// 項目の列の表示形式（小数部のある数値）。
+/// 項目の列の表示形式: 数値（ゾーン 10 進数・パック 10 進数・2 進数）は COBOL と同じく整数部の桁まで
+/// 0 で埋め、小数部の桁まで出す（`9(5)V99` は `00000.00`）。
 fn format_of(f: &yy_cobol::Field) -> Option<Arc<str>> {
-    match f.kind.digits_scale() {
-        Some((d, s)) if d <= 15 && s > 0 => {
-            Some(Arc::from(format!("0.{}", "0".repeat(s as usize))))
-        }
-        _ => None,
+    use yy_cobol::Kind;
+    if !matches!(
+        f.kind,
+        Kind::Zoned { .. } | Kind::Packed { .. } | Kind::Binary { .. }
+    ) {
+        return None;
+    }
+    let (d, s) = f.kind.digits_scale()?;
+    if d > 15 {
+        return None;
+    }
+    let int = (d as i32 - s).max(1) as usize;
+    let mut fmt = "0".repeat(int);
+    if s > 0 {
+        fmt.push('.');
+        fmt.push_str(&"0".repeat(s as usize));
+    }
+    Some(Arc::from(fmt))
+}
+
+/// 英数字の値を、COBOL と同じく項目の長さまで埋める（数値・空・エラーはそのまま）。
+fn padded(spec: &FixedSpec, f: &yy_cobol::Field, v: Value) -> Value {
+    match &v {
+        Value::Text(s) => match spec.codec.pad(f, s) {
+            Some(p) => Value::text(&p),
+            None => v,
+        },
+        _ => v,
     }
 }
 
@@ -560,7 +1190,14 @@ pub fn import(
                     let rec = &raw[at..at + reclen];
                     for (f, b) in fields.iter().zip(builders.iter_mut()) {
                         let bytes = &rec[f.offset..f.offset + f.len];
-                        push_decoded(b, f, spec.codec.decode(f, bytes), bytes, &mut bad);
+                        push_decoded(
+                            b,
+                            &spec.codec,
+                            f,
+                            spec.codec.decode(f, bytes),
+                            bytes,
+                            &mut bad,
+                        );
                     }
                 }
                 invalid.fetch_add(bad, Ordering::Relaxed);
@@ -682,7 +1319,11 @@ pub fn export(
     progress: &(dyn Fn(u64, u64) -> bool + Sync),
 ) -> io::Result<FixedReport> {
     let tmp = path.with_extension("yysheet-export.tmp");
-    let r = export_to(ctx, sheet, &tmp, spec, order, progress);
+    let r = if spec.is_multi() {
+        export_multi_to(ctx, sheet, &tmp, spec, order, progress)
+    } else {
+        export_to(ctx, sheet, &tmp, spec, order, progress)
+    };
     match r {
         Ok(rep) => {
             std::fs::rename(&tmp, path)?;
@@ -874,8 +1515,13 @@ mod tests {
         sh
     }
 
+    /// セルの文字列（英数字の埋め草の空白を除いて比べる）。
     fn text_at(sh: &Sheet, ctx: &Context, r: u64, c: u32) -> String {
-        sh.get(ctx, r, c).unwrap().general_text()
+        sh.get(ctx, r, c)
+            .unwrap()
+            .general_text()
+            .trim_end_matches([' ', '\u{3000}'])
+            .to_string()
     }
 
     #[test]
@@ -911,7 +1557,7 @@ mod tests {
             }
             // 17 桁の整数部は文字列で、桁を落とさない
             assert_eq!(text_at(&back, &ctx, 1, 5), "12345678901234567.89");
-            assert_eq!(back.table.columns[3].format.as_deref(), Some("0.00"));
+            assert_eq!(back.table.columns[3].format.as_deref(), Some("0000000.00"));
             // 書き出すとバイト単位で同じ
             let path2 = dir.path().join("again.dat");
             export(&ctx, &back, &path2, &s, None, &|_, _| true).unwrap();
@@ -1072,18 +1718,18 @@ mod tests {
         assert_eq!(spec.layout.record_len, 4 + 10 + 4);
         let fields: Vec<Option<u32>> = sh.table.columns.iter().map(|c| c.field).collect();
         assert_eq!(fields, [Some(0), Some(1), Some(2)]);
-        assert_eq!(sh.table.columns[2].format.as_deref(), Some("0.00"));
+        assert_eq!(sh.table.columns[2].format.as_deref(), Some("00000.00"));
         // 型を変える
         set_column_type(&mut sh, 2, "S9(7) COMP", ms, RecordSep::Lf).unwrap();
         let spec = sh.fixed.clone().unwrap();
         assert_eq!(spec.layout.fields[2].describe, "S9(7) COMP");
         assert_eq!(spec.layout.record_len, 4 + 10 + 4);
-        assert_eq!(sh.table.columns[2].format, None);
+        assert_eq!(sh.table.columns[2].format.as_deref(), Some("0000000"));
         assert!(set_column_type(&mut sh, 2, "9(5)Q", ms, RecordSep::Lf).is_err());
         // 入力
-        assert!(field_at(&sh, 0, 0).is_none());
-        assert!(field_at(&sh, 1, 5).is_none());
-        let (sp, f) = field_at(&sh, 1, 0).unwrap();
+        assert!(field_at(&ctx, &sh, 0, 0).is_none());
+        assert!(field_at(&ctx, &sh, 1, 5).is_none());
+        let (sp, f) = field_at(&ctx, &sh, 1, 0).unwrap();
         assert_eq!(entry_value(sp, f, "0012"), Ok(Value::Number(12.0)));
         assert!(entry_value(sp, f, "12a").is_err());
         assert!(
@@ -1091,9 +1737,14 @@ mod tests {
                 .unwrap_err()
                 .contains("整数部は 4 桁")
         );
-        let (sp, f) = field_at(&sh, 1, 1).unwrap();
-        assert_eq!(entry_value(sp, f, "00123"), Ok(Value::text("00123")));
-        assert_eq!(entry_value(sp, f, "'abc"), Ok(Value::text("abc")));
+        let (sp, f) = field_at(&ctx, &sh, 1, 1).unwrap();
+        assert_eq!(entry_value(sp, f, "00123"), Ok(Value::text("00123     ")));
+        assert_eq!(entry_value(sp, f, "'abc"), Ok(Value::text("abc       ")));
+        // 埋め草の付いた値をもう一度入れても同じ（長さを超えない）
+        assert_eq!(
+            entry_value(sp, f, "abc       "),
+            Ok(Value::text("abc       "))
+        );
         assert_eq!(entry_value(sp, f, ""), Ok(Value::Empty));
         // 15 桁を超える数値は文字列
         let s = super::tests::spec(Charset::Ms932, RecordSep::Crlf);
@@ -1203,10 +1854,10 @@ mod tests {
         assert_eq!(get(6, 4), Value::Number(0.0));
         assert_eq!(get(7, 4), Value::Number(0.0));
         // 9(5) → X(10): 桁数の数字
-        assert_eq!(get(5, 1), Value::text("00001"));
-        assert_eq!(get(6, 1), Value::text("00002"));
+        assert_eq!(get(5, 1), Value::text("00001     "));
+        assert_eq!(get(6, 1), Value::text("00002     "));
         // 集団の MOVE: 2 列 → 1 列、1 列 → 2 列
-        assert_eq!(get(9, 1), Value::text("00001ABC"));
+        assert_eq!(get(9, 1), Value::text("00001ABC  "));
         assert_eq!(get(11, 0), Value::text("X'4142432020'"));
         assert_eq!(get(11, 1), Value::Empty);
         // 行数が違う・型のない列・左上でない・送れない組み合わせ
@@ -1229,5 +1880,233 @@ mod tests {
         };
         assert_eq!(&rec(9)[5..15], b"00001ABC  ");
         assert_eq!(&rec(11)[0..5], b"ABC  ");
+    }
+
+    const HDR: &str = "01 H.\n 05 TYP PIC X.\n 05 DT PIC 9(8).\n 05 FILLER PIC X(11).\n";
+    const DTL: &str = "01 D.\n 05 TYP PIC X.\n 05 AMT PIC S9(7)V99 COMP-3.\n 05 NAME PIC X(14).\n";
+
+    fn multi_spec(cs: Charset, sep: RecordSep) -> FixedSpec {
+        FixedSpec::new_multi(
+            &[("HDR".into(), HDR.into()), ("DTL".into(), DTL.into())],
+            Codec::new(cs),
+            sep,
+        )
+        .unwrap()
+    }
+
+    /// HDR と DTL のレコード（どちらも 20 バイト）を書いたファイルのバイト列。
+    fn multi_file(spec: &FixedSpec) -> Vec<u8> {
+        let c = &spec.codec;
+        let enc = |l: &Layout, vals: &[Input<'_>]| {
+            let mut rec = vec![c.charset.space(); l.record_len];
+            for (f, v) in l.fields.iter().zip(vals) {
+                c.encode(
+                    f,
+                    *v,
+                    &mut rec[f.offset..f.offset + f.len],
+                    &mut Issues::default(),
+                );
+            }
+            rec
+        };
+        let h = &spec.find_layout("HDR").unwrap().layout;
+        let d = &spec.find_layout("DTL").unwrap().layout;
+        let mut out = Vec::new();
+        for rec in [
+            enc(
+                h,
+                &[Input::Text("H"), Input::Number(20261007.0), Input::Empty],
+            ),
+            enc(
+                d,
+                &[Input::Text("D"), Input::Number(-1234.5), Input::Text("ABC")],
+            ),
+            enc(
+                d,
+                &[Input::Text("D"), Input::Number(99.99), Input::Text("漢字")],
+            ),
+        ] {
+            out.extend(rec);
+            out.extend_from_slice(spec.separator.bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn multi_layout_rows() {
+        use crate::{CellError, Document};
+        let ctx = Context::for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        for (cs, sep) in [
+            (Charset::Ms932, RecordSep::Crlf),
+            (Charset::Ebcdic(Ccsid::Ibm930), RecordSep::None),
+        ] {
+            let spec = multi_spec(cs, sep);
+            assert!(spec.is_multi());
+            assert_eq!(spec.max_fields(), 3);
+            let bytes = multi_file(&spec);
+            let path = dir.path().join(format!("multi-{}.dat", cs.name()));
+            std::fs::write(&path, &bytes).unwrap();
+            let (sheet, rep) = import_multi(&ctx, &path, &spec, &|_, _| true).unwrap();
+            assert_eq!((rep.records, rep.undetermined), (3, 3));
+            // レイアウトの列と項目1〜4
+            let names: Vec<&str> = sheet.table.columns.iter().map(|c| &*c.name).collect();
+            assert_eq!(names, ["レイアウト", "項目1", "項目2", "項目3"]);
+            let mut d = Document::new(ctx.clone());
+            d.book.sheets = vec![sheet];
+            let get = |d: &Document, r: u64, c: u32| d.book.sheets[0].get(&ctx, r, c).unwrap();
+            // 未確定: 項目1 は元のバイト、項目2 は文字として読んだもの
+            assert_eq!(
+                row_layout(&ctx, &d.book.sheets[0], 1),
+                RowLayout::Undetermined(None)
+            );
+            assert!(matches!(get(&d, 1, 1), Value::Text(s) if s.starts_with("X'")));
+            assert!(matches!(get(&d, 1, 2), Value::Text(s) if s.starts_with("H20261007")));
+            assert!(field_at(&ctx, &d.book.sheets[0], 1, 2).is_none());
+            // 行のレイアウトを指定すると、そのレイアウトで読み直す
+            d.edit(|b, ctx| {
+                let sh = &mut b.sheets[0];
+                set_row_layout(ctx, sh, 1, "hdr").map_err(io::Error::other)?;
+                set_row_layout(ctx, sh, 2, "DTL").map_err(io::Error::other)?;
+                set_row_layout(ctx, sh, 3, "DTL").map_err(io::Error::other)?;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(get(&d, 1, 0), Value::text("HDR"));
+            assert_eq!(get(&d, 1, 1), Value::text("H"));
+            assert_eq!(get(&d, 1, 2), Value::Number(20261007.0));
+            assert_eq!(get(&d, 1, 3), Value::Empty);
+            assert_eq!(get(&d, 2, 2), Value::Number(-1234.5));
+            assert_eq!(get(&d, 2, 3), Value::text("ABC           "));
+            // 漢字のバイト数は文字コードで違う（MS932 は 4、EBCDIC は SO / SI を入れて 6）
+            let kanji = if cs.is_ebcdic() {
+                "漢字        "
+            } else {
+                "漢字          "
+            };
+            assert_eq!(get(&d, 3, 3), Value::text(kanji));
+            // 入力は行のレイアウトの型で確かめる
+            let sh = &d.book.sheets[0];
+            let (sp, f) = field_at(&ctx, sh, 1, 2).unwrap();
+            assert_eq!(f.describe, "9(8)");
+            assert!(entry_value(sp, f, "1.5").is_err());
+            let (sp, f) = field_at(&ctx, sh, 2, 2).unwrap();
+            assert_eq!(f.describe, "S9(7)V99 COMP-3");
+            assert!(entry_value(sp, f, "1.5").is_ok());
+            assert!(field_at(&ctx, sh, 2, 4).is_none());
+            assert!(field_at(&ctx, sh, 2, 0).is_none());
+            // 書き出すと元のバイト
+            let out = dir.path().join(format!("out-{}.dat", cs.name()));
+            let rep = export(&ctx, sh, &out, &spec, None, &|_, _| true).unwrap();
+            assert_eq!((rep.records, rep.undetermined), (3, 0));
+            assert_eq!(std::fs::read(&out).unwrap(), bytes, "{cs:?}");
+            // 別のレイアウトで読み直す（REDEFINES と同じ）→ 戻すと元の値
+            d.edit(|b, ctx| {
+                set_row_layout(ctx, &mut b.sheets[0], 2, "HDR").map_err(io::Error::other)
+            })
+            .unwrap();
+            assert_eq!(get(&d, 2, 1), Value::text("D"));
+            assert!(matches!(get(&d, 2, 2), Value::Text(s) if s.starts_with("X'")));
+            d.edit(|b, ctx| {
+                set_row_layout(ctx, &mut b.sheets[0], 2, "DTL").map_err(io::Error::other)
+            })
+            .unwrap();
+            assert_eq!(get(&d, 2, 2), Value::Number(-1234.5));
+            // 未確定に戻すと元のバイト、登録されていない名前も未確定
+            d.edit(|b, ctx| {
+                let sh = &mut b.sheets[0];
+                set_row_layout(ctx, sh, 3, "").map_err(io::Error::other)?;
+                set_row_layout(ctx, sh, 1, "XYZ").map_err(io::Error::other)
+            })
+            .unwrap();
+            let sh = &d.book.sheets[0];
+            assert_eq!(row_layout(&ctx, sh, 3), RowLayout::Undetermined(None));
+            assert_eq!(
+                row_layout(&ctx, sh, 1),
+                RowLayout::Undetermined(Some("XYZ".into()))
+            );
+            let rep = export(&ctx, sh, &out, &spec, None, &|_, _| true).unwrap();
+            assert_eq!((rep.records, rep.undetermined), (3, 2));
+            assert_eq!(rep.first_undetermined, Some(0));
+            assert_eq!(
+                std::fs::read(&out).unwrap(),
+                bytes,
+                "未確定の行も元のバイトのまま"
+            );
+            // 式の結果も行のレイアウトの型に合わせる
+            d.edit(|b, ctx| {
+                let sh = &mut b.sheets[0];
+                set_row_layout(ctx, sh, 3, "DTL").map_err(io::Error::other)?;
+                sh.set_formula(ctx, 3, 2, "=10/3")
+                    .map_err(io::Error::other)?;
+                sh.set_formula(ctx, 3, 3, "=123")
+                    .map_err(io::Error::other)?;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(get(&d, 3, 2), Value::Number(3.33));
+            assert_eq!(get(&d, 3, 3), Value::text("123           "));
+            // .yys に保存して開き直す
+            let p = dir.path().join(format!("m-{}.yys", cs.name()));
+            crate::yys::save(&mut d, &p, &mut |_, _| true).unwrap();
+            let back = crate::yys::open(ctx.clone(), &p).unwrap();
+            let b = &back.book.sheets[0];
+            assert_eq!(b.fixed.as_deref(), Some(&spec));
+            assert_eq!(layout_column(b), Some(0));
+            assert_eq!(
+                row_layout(&ctx, b, 2),
+                RowLayout::Known(spec.find_layout("DTL").unwrap())
+            );
+            assert_eq!(b.get(&ctx, 3, 2).unwrap(), Value::Number(3.33));
+            let _ = CellError::Value;
+        }
+    }
+
+    #[test]
+    fn multi_layout_setup() {
+        let ctx = Context::for_tests();
+        let spec = multi_spec(Charset::Ms932, RecordSep::Crlf);
+        assert!(
+            FixedSpec::new_multi(
+                &[("A".into(), HDR.into()), ("a".into(), DTL.into())],
+                Codec::new(Charset::Ms932),
+                RecordSep::Crlf
+            )
+            .is_err()
+        );
+        assert!(
+            FixedSpec::new_multi(
+                &[(" ".into(), HDR.into())],
+                Codec::new(Charset::Ms932),
+                RecordSep::Crlf
+            )
+            .is_err()
+        );
+        // 空のシートに設定すると、レイアウトの列と項目の列ができる（手で入力する行）
+        let mut sh = Sheet::new("S");
+        assert_eq!(apply_multi(&ctx, &mut sh, &spec), Ok(3));
+        assert_eq!(layout_column(&sh), Some(0));
+        sh.set(&ctx, 1, 0, Value::text("DTL")).unwrap();
+        sh.set(&ctx, 1, 3, Value::text("X")).unwrap();
+        assert!(matches!(row_layout(&ctx, &sh, 1), RowLayout::Known(_)));
+        // 手で入力した行はバイト列がないので、レイアウトを変えても値はそのまま
+        set_row_layout(&ctx, &mut sh, 1, "HDR").unwrap();
+        assert_eq!(sh.get(&ctx, 1, 0).unwrap(), Value::text("HDR"));
+        // 表のある（マルチレイアウトでない）シートには設定できない
+        let mut t = Sheet::new("T");
+        t.set(&ctx, 0, 0, Value::Number(1.0)).unwrap();
+        assert!(apply_multi(&ctx, &mut t, &spec).is_err());
+        // 区切りなしでレコード長が違えば読めない
+        let odd = FixedSpec::new_multi(
+            &[
+                ("A".into(), HDR.into()),
+                ("B".into(), "01 B.\n 05 X PIC X(3).\n".into()),
+            ],
+            Codec::new(Charset::Ms932),
+            RecordSep::None,
+        )
+        .unwrap();
+        assert!(split_records(b"abc", &odd).is_err());
+        assert!(set_column_type(&mut sh, 1, "X", spec.codec, spec.separator).is_err());
     }
 }
