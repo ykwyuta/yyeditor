@@ -52,12 +52,33 @@ impl Decimal {
         Some(Decimal::new(v, scale))
     }
 
-    /// 浮動小数点数から（小数部 `scale` 桁に四捨五入。値は最短の 10 進表記で見る: `1.005` → `1.01`）。
+    /// 小数部の桁数を `scale` にする（減らすときは切り捨て。COBOL の `MOVE` と同じ）。桁あふれなら `None`。
+    pub fn truncate(self, scale: i32) -> Option<Decimal> {
+        let d = scale - self.scale;
+        if d >= 0 {
+            return self.rescale(scale);
+        }
+        let p = pow10((-d) as u32)?;
+        Some(Decimal::new(self.value / p, scale))
+    }
+
+    /// 有効数字 `n` 桁に四捨五入する（浮動小数点の計算の誤差を消す）。
+    pub fn round_sig(self, n: u32) -> Decimal {
+        let d = self.digits();
+        if d <= n {
+            return self;
+        }
+        self.rescale(self.scale - (d - n) as i32).unwrap_or(self)
+    }
+
+    /// 浮動小数点数（セルの値）から、小数部 `scale` 桁の値に（COBOL の `MOVE` と同じく、多い桁は
+    /// 切り捨てる）。値は最短の 10 進表記を有効数字 15 桁にしたもの（Excel の精度）で見るので、
+    /// 計算の誤差（`0.7 * 3` = `2.0999999999999996`）で 1 つ下にならない。
     pub fn from_f64(x: f64, scale: i32) -> Option<Decimal> {
         if !x.is_finite() || scale > 38 {
             return None;
         }
-        // 速い道: 小数部の桁数を掛けた値が整数のごく近く（四捨五入の境目から遠い）なら、その整数
+        // 速い道: 小数部の桁数を掛けた値が整数のごく近くなら、その整数
         if (0..=15).contains(&scale) {
             let y = x * 10f64.powi(scale);
             let r = y.round();
@@ -65,7 +86,9 @@ impl Decimal {
                 return Some(Decimal::new(r as i128, scale));
             }
         }
-        Decimal::parse(&format!("{x}"))?.rescale(scale)
+        Decimal::parse(&format!("{x}"))?
+            .round_sig(15)
+            .truncate(scale)
     }
 
     /// 文字列から（`1,234.5`・`-12`・`12-`・`+3`・全角の数字。前後の空白は無視）。
@@ -232,7 +255,14 @@ mod tests {
         assert_eq!(d("-1.235").rescale(2), Some(Decimal::new(-124, 2)));
         assert_eq!(d("1.5").rescale(3), Some(Decimal::new(1500, 3)));
         assert_eq!(Decimal::from_f64(0.1 + 0.2, 2), Some(Decimal::new(30, 2)));
-        assert_eq!(Decimal::from_f64(-1234.5, 0), Some(Decimal::new(-1235, 0)));
+        // 多い桁は切り捨て（COBOL の MOVE）。計算の誤差は有効数字 15 桁で消す
+        assert_eq!(Decimal::from_f64(-1234.5, 0), Some(Decimal::new(-1234, 0)));
+        assert_eq!(Decimal::from_f64(1.239, 2), Some(Decimal::new(123, 2)));
+        assert_eq!(Decimal::from_f64(1.005, 2), Some(Decimal::new(100, 2)));
+        assert_eq!(Decimal::from_f64(0.7 * 3.0, 2), Some(Decimal::new(210, 2)));
+        assert_eq!(d("1.239").truncate(2), Some(Decimal::new(123, 2)));
+        assert_eq!(d("-1.239").truncate(2), Some(Decimal::new(-123, 2)));
+        assert_eq!(d("12999").truncate(-3), Some(Decimal::new(12, -3)));
         assert_eq!(Decimal::from_f64(12345.0, -3), Some(Decimal::new(12, -3)));
         assert_eq!(Decimal::new(-123450, 2).to_f64(), -1234.5);
         assert_eq!(Decimal::new(99999, 0).digits(), 5);

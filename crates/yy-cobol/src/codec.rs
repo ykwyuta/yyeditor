@@ -14,6 +14,8 @@
 //! - 2 進数: 2・4・8 バイトの 2 の補数（既定はビッグエンディアン）。`COMP`・`BINARY` は `PIC` の桁数を
 //!   超える値をあふれとして下の桁だけにする（`TRUNC(STD)`）、`COMP-5` は型の範囲まで。
 //! - 浮動小数点: EBCDIC は IBM の 16 進浮動小数点、MS932 は IEEE 754。
+//! - 数値を書くときは、小数部の多い桁を切り捨て、整数部のあふれは上の桁を落とす（COBOL の `MOVE` と
+//!   同じ）。セルの数値（浮動小数点）は有効数字 15 桁にしてから切り捨てる。
 //! - 数値として読めない項目（不正な数字・符号）は [`Decoded::Invalid`]。呼ぶ側は [`hex_text`] で
 //!   `X'12345F'` の形の文字列にして持ち、書くときにその文字列なら元のバイトをそのまま書く。
 
@@ -702,18 +704,33 @@ impl Codec {
                     issues.negative += 1;
                     x = -x;
                 }
-                let (lo, hi): (i128, i128) = match (*signed, *bytes) {
-                    (true, n) => (-(1i128 << (8 * n - 1)), (1i128 << (8 * n - 1)) - 1),
-                    (false, n) => (0, (1i128 << (8 * n)) - 1),
+                let bits = 8 * *bytes as u32;
+                // 型の範囲（2 の補数）と、COMP の PIC の桁数の範囲
+                let (tmin, tmax): (i128, i128) = if *signed {
+                    (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+                } else {
+                    (0, (1i128 << bits) - 1)
                 };
-                let limit = if *native { hi } else { 10i128.pow(*digits) - 1 };
-                if x > limit || x < lo.max(-limit) {
+                let (min, max) = if *native {
+                    (tmin, tmax)
+                } else {
+                    let p = 10i128.pow(*digits) - 1;
+                    (if *signed { -p } else { 0 }, p)
+                };
+                if x < min || x > max {
                     issues.overflow += 1;
-                    if *native {
-                        x = x.rem_euclid(hi - lo + 1) + lo.min(0);
+                    x = if *native {
+                        // 上のビットを落とす
+                        let m = x.rem_euclid(1i128 << bits);
+                        if *signed && m > tmax {
+                            m - (1i128 << bits)
+                        } else {
+                            m
+                        }
                     } else {
-                        x %= 10i128.pow(*digits);
-                    }
+                        // 上の桁を落とす（TRUNC(STD)）
+                        x % 10i128.pow(*digits)
+                    };
                 }
                 let le = (x as i64).to_le_bytes();
                 let n = *bytes;
@@ -755,7 +772,8 @@ impl Codec {
             Input::Number(x) => Decimal::from_f64(x, scale),
             Input::Bool(b) => Decimal::new(b as i128, 0).rescale(scale),
             Input::Text(s) if s.trim().is_empty() => return None,
-            Input::Text(s) => Decimal::parse(s).and_then(|d| d.rescale(scale)),
+            // 小数部の多い桁は切り捨てる（COBOL の MOVE と同じ）
+            Input::Text(s) => Decimal::parse(s).and_then(|d| d.truncate(scale)),
         };
         match d {
             Some(d) => Some(d),
@@ -977,6 +995,14 @@ mod tests {
         let f = field("PIC S9(4) COMP-5");
         let (b, is) = enc(&c, &f, Input::Number(12345.0));
         assert_eq!((b, is.overflow), (vec![0x30, 0x39], 0));
+        // COMP-5 は型の範囲いっぱい（-32768〜32767）、超えれば上のビットを落とす
+        let (b, is) = enc(&c, &f, Input::Number(-32768.0));
+        assert_eq!((b, is.overflow), (vec![0x80, 0x00], 0));
+        let (b, is) = enc(&c, &f, Input::Number(32768.0));
+        assert_eq!((b, is.overflow), (vec![0x80, 0x00], 1));
+        let f = field("PIC 9(4) COMP-5");
+        let (b, is) = enc(&c, &f, Input::Number(65535.0));
+        assert_eq!((b, is.overflow), (vec![0xFF, 0xFF], 0));
         let le = Codec {
             little_endian: true,
             ..c
