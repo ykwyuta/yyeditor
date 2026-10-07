@@ -208,6 +208,51 @@ pub fn entry_value(spec: &FixedSpec, f: &yy_cobol::Field, text: &str) -> Result<
     })
 }
 
+/// 式の結果を置くセル（元の行 `src_row`・列 `col`）の項目（見出し行・項目のない列は `None`）。
+fn formula_field(sheet: &Sheet, src_row: u64, col: u32) -> Option<(&FixedSpec, &yy_cobol::Field)> {
+    if sheet.table.header && src_row == 0 {
+        return None;
+    }
+    column_field(sheet, col)
+}
+
+/// 式の結果を、セル（元の行 `src_row`・列 `col`）の項目の型に合わせる（再計算で結果を置くたびに
+/// 呼ぶので、参照する式・表示・書き出しはどれも合わせた値を見る）。
+///
+/// - 項目の列: 型に合わなければエラー値（型が違えば `#VALUE!`、桁・範囲の外なら `#NUM!`）。
+///   数値の小数部の多い桁は切り捨てた値にする（書き出す値と同じ）。`LOW-VALUE()`・`HIGH-VALUE()` は
+///   そのまま（書き出すときに項目のすべてのバイトを 0x00・0xFF にする）。
+/// - 項目のない列: `LOW-VALUE()`・`HIGH-VALUE()` は値にできないので `#VALUE!`。
+pub fn fit_formula_result(sheet: &Sheet, src_row: u64, col: u32, v: Value) -> Value {
+    let fig = matches!(&v, Value::Text(s) if yy_formula::figurative(s).is_some());
+    let Some((spec, f)) = formula_field(sheet, src_row, col) else {
+        return if fig {
+            Value::Error(crate::CellError::Value)
+        } else {
+            v
+        };
+    };
+    if fig || matches!(v, Value::Error(_)) {
+        return v;
+    }
+    match spec.codec.fit_result(f, input_of(CellRef::of(&v))) {
+        Ok(Decoded::Num(n)) => match num_cell(f, &n) {
+            Some(x) => Value::Number(x),
+            None => Value::text(&n.to_string()),
+        },
+        Ok(Decoded::Float(x)) => Value::Number(x),
+        Ok(Decoded::Text(_) | Decoded::Empty | Decoded::Invalid) => v,
+        Err(yy_cobol::Misfit::Num) => Value::Error(crate::CellError::Num),
+        Err(yy_cobol::Misfit::Value) => Value::Error(crate::CellError::Value),
+    }
+}
+
+/// 式の結果を合わせる要るか（固定長の項目の列か、`LOW-VALUE()`・`HIGH-VALUE()` の結果）。速い道に使う。
+pub(crate) fn needs_fit(sheet: &Sheet, src_row: u64, col: u32, v: &yy_formula::Val) -> bool {
+    matches!(v, yy_formula::Val::Text(s) if yy_formula::figurative(s).is_some())
+        || formula_field(sheet, src_row, col).is_some()
+}
+
 /// 自動で付けた表示形式か（なし・`0`・`0.00` など）。
 fn auto_format(f: Option<&str>) -> bool {
     match f {
@@ -274,6 +319,8 @@ pub fn set_column_type(
     }
     sheet.table.columns = Arc::new(cols);
     sheet.fixed = Some(Arc::new(spec));
+    // 式の結果を新しい型に合わせ直す
+    sheet.formulas.touch_all();
     Ok(())
 }
 
@@ -517,7 +564,11 @@ fn input_of(v: CellRef<'_>) -> Input<'_> {
     match v {
         CellRef::Empty => Input::Empty,
         CellRef::Number(x) => Input::Number(x),
-        CellRef::Text(s) => Input::Text(s),
+        // LOW-VALUE()・HIGH-VALUE() の結果は項目のすべてのバイト
+        CellRef::Text(s) => match yy_formula::figurative(s) {
+            Some(b) => Input::Fill(b),
+            None => Input::Text(s),
+        },
         CellRef::Bool(b) => Input::Bool(b),
         CellRef::Error(_) => Input::Error,
     }
@@ -954,5 +1005,65 @@ mod tests {
             entry_value(&s, big, "-12345678901234567.8"),
             Ok(Value::text("-12345678901234567.80"))
         );
+    }
+
+    #[test]
+    fn formula_results_fit_the_field_and_figurative_constants() {
+        use crate::Document;
+        let ctx = Context::for_tests();
+        let s = super::tests::spec(Charset::Ms932, RecordSep::Crlf);
+        let mut d = Document::new(ctx.clone());
+        d.edit(|b, ctx| {
+            let sh = &mut b.sheets[0];
+            apply_layout(ctx, sh, &s)?;
+            // ID 9(5)・NAME X(10)・KANA N(4)・AMT S9(7)V99 COMP-3・CNT S9(4) COMP・BIG・FILLER
+            let f = |sh: &mut Sheet, r: u64, c: u32, t: &str| sh.set_formula(ctx, r, c, t).unwrap();
+            f(sh, 1, 0, "=LOW-VALUE()");
+            f(sh, 1, 1, "=HIGH-VALUE()");
+            f(sh, 1, 3, "=10/3");
+            f(sh, 1, 4, "=99999");
+            f(sh, 2, 0, "=-1");
+            f(sh, 2, 1, "=\"ABCDEFGHIJK\"");
+            f(sh, 2, 3, "=\"x\"");
+            f(sh, 2, 4, "=1234");
+            f(sh, 3, 0, "=A2=LOW-VALUE()");
+            // 項目のない列（表の外）
+            f(sh, 1, 9, "=LOW-VALUE()");
+            f(sh, 1, 10, "=J2");
+            Ok(())
+        })
+        .unwrap();
+        let get = |d: &Document, r: u64, c: u32| d.book.sheets[0].get(&ctx, r, c).unwrap();
+        let err = |e| Value::Error(e);
+        assert_eq!(get(&d, 1, 0), Value::text(yy_formula::LOW_VALUE));
+        assert_eq!(get(&d, 1, 0).general_text(), "LOW-VALUE");
+        assert_eq!(get(&d, 1, 1).general_text(), "HIGH-VALUE");
+        // 小数部は切り捨て、桁・範囲の外は #NUM!、型が違えば #VALUE!
+        assert_eq!(get(&d, 1, 3), Value::Number(3.33));
+        assert_eq!(get(&d, 1, 4), err(crate::CellError::Num));
+        assert_eq!(get(&d, 2, 0), err(crate::CellError::Num));
+        assert_eq!(get(&d, 2, 1), err(crate::CellError::Value));
+        assert_eq!(get(&d, 2, 3), err(crate::CellError::Value));
+        assert_eq!(get(&d, 2, 4), Value::Number(1234.0));
+        // ID の列は 9(5) なので、真偽値は #VALUE!
+        assert_eq!(get(&d, 3, 0), err(crate::CellError::Value));
+        // 型のない列では LOW-VALUE() は値にならない
+        assert_eq!(get(&d, 1, 9), err(crate::CellError::Value));
+        assert_eq!(get(&d, 1, 10), err(crate::CellError::Value));
+        // 書き出すと、LOW-VALUE は X'00…'、HIGH-VALUE は X'FF…'
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fig.dat");
+        export(&ctx, &d.book.sheets[0], &path, &s, None, &|_, _| true).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let rec = &bytes[..s.layout.record_len];
+        assert_eq!(&rec[0..5], &[0u8; 5]);
+        assert_eq!(&rec[5..15], &[0xFFu8; 10]);
+        // 型を変えると合わせ直す（CNT を S9(5) COMP-3 にすると 99999 が入る）
+        d.edit(|b, _| {
+            set_column_type(&mut b.sheets[0], 4, "S9(5) COMP-3", s.codec, s.separator)
+                .map_err(std::io::Error::other)
+        })
+        .unwrap();
+        assert_eq!(get(&d, 1, 4), Value::Number(99999.0));
     }
 }

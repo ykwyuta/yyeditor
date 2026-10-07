@@ -617,6 +617,14 @@ fn display(
 ) -> (String, Align, Option<(u8, u8, u8)>) {
     match v {
         Value::Empty => (String::new(), Align::Left, None),
+        // LOW-VALUE()・HIGH-VALUE()（固定長の項目のすべてのバイト）
+        Value::Text(s) if yy_sheet::value::figurative_label(s).is_some() => (
+            yy_sheet::value::figurative_label(s)
+                .unwrap_or_default()
+                .into(),
+            Align::Center,
+            Some((31, 111, 208)),
+        ),
         Value::Text(s) => match format {
             Some(f) => {
                 let r = yy_numfmt::format::parsed(f).format(FmtValue::Text(s), sys);

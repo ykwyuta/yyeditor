@@ -834,6 +834,15 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
     }
     let sys = book.date_system;
     let cache = yy_formula::Cache::default();
+    // 結果をセルの項目の型に合わせる（固定長。15 章 6.5）
+    let fit = |si: usize, r: u64, c: u32, v: Val| -> Val {
+        let sh = &book.sheets[si];
+        if crate::fixed::needs_fit(sh, r, c, &v) {
+            to_val(&crate::fixed::fit_formula_result(sh, r, c, from_val(&v)))
+        } else {
+            v
+        }
+    };
     for &i in order.iter().filter(|&&i| dirty[i]) {
         let node = &list[i];
         let (si, r, c) = (node.sheet, node.row, node.col);
@@ -855,7 +864,9 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                     offset: 0,
                 };
                 results_column(ctx, |push| {
-                    yy_formula::eval_rows(&node.expr, &cx, rows, &mut |_, v| push(v))
+                    yy_formula::eval_rows(&node.expr, &cx, rows, &mut |i, v| {
+                        push(fit(si, r + i, c, v))
+                    })
                 })
             };
             shared_res[si][k] = col.ok();
@@ -911,15 +922,18 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                 } else {
                     for dr in 0..a.rows {
                         for dc in 0..a.cols {
-                            results[si]
-                                .insert((c + dc as u32, r + dr as u64), from_val(a.get(dr, dc)));
+                            let (rr, cc) = (r + dr as u64, c + dc as u32);
+                            results[si].insert(
+                                (cc, rr),
+                                from_val(&fit(si, rr, cc, a.get(dr, dc).clone())),
+                            );
                         }
                     }
                     spills[si].insert((r, c), size);
                 }
             }
             v => {
-                results[si].insert((c, r), from_val(&v));
+                results[si].insert((c, r), from_val(&fit(si, r, c, v)));
             }
         }
     }

@@ -123,6 +123,8 @@ pub enum Input<'a> {
     Bool(bool),
     /// エラー値（空として書く）
     Error,
+    /// 項目のすべてのバイトをこの値にする（COBOL の `LOW-VALUE` は 0x00、`HIGH-VALUE` は 0xFF）
+    Fill(u8),
 }
 
 /// 書いたときの注意の数。
@@ -596,6 +598,10 @@ impl Codec {
             }
             v => v,
         };
+        if let Input::Fill(b) = v {
+            out.fill(b);
+            return;
+        }
         // 数値の項目に X'…' なら元のバイト
         if f.kind.is_numeric()
             && let Input::Text(s) = v
@@ -869,20 +875,8 @@ impl Codec {
             }
             kind => {
                 let d = Decimal::parse(text).ok_or_else(not_number)?;
-                let (digits, scale) = kind.digits_scale().unwrap_or((18, 0));
-                let signed = match kind {
-                    Kind::Zoned { signed, .. }
-                    | Kind::Packed { signed, .. }
-                    | Kind::Binary { signed, .. } => *signed,
-                    Kind::Edited { syms, .. } => syms.iter().any(|s| {
-                        matches!(
-                            s,
-                            crate::Sym::Plus | crate::Sym::Minus | crate::Sym::Cr | crate::Sym::Db
-                        )
-                    }),
-                    _ => true,
-                };
-                if d.value < 0 && !signed {
+                let scale = kind.digits_scale().map_or(0, |d| d.1);
+                if d.value < 0 && !signed_kind(kind) {
                     return Err(format!(
                         "符号なしの項目（{}）です。負の数は入力できません",
                         f.describe
@@ -907,36 +901,51 @@ impl Codec {
                     });
                 }
                 let d = d.rescale(scale).ok_or_else(not_number)?;
-                if let Kind::Binary {
-                    signed,
-                    bytes,
-                    native: true,
-                    ..
-                } = kind
-                {
-                    let bits = 8 * *bytes as u32;
-                    let (min, max): (i128, i128) = if *signed {
-                        (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
-                    } else {
-                        (0, (1i128 << bits) - 1)
-                    };
-                    if d.value < min || d.value > max {
-                        return Err(format!(
-                            "範囲は {}〜{} です（{}）",
-                            Decimal::new(min, scale),
-                            Decimal::new(max, scale),
-                            f.describe
-                        ));
-                    }
-                } else if d.value.unsigned_abs() >= 10u128.pow(digits.min(38)) {
-                    let int = digits as i32 - scale;
-                    return Err(if int > 0 {
-                        format!("整数部は {int} 桁までです（{}）", f.describe)
-                    } else {
-                        format!("1 より小さい数だけです（{}）", f.describe)
-                    });
+                match range_error(f, &d) {
+                    Some(m) => Err(m),
+                    None => Ok(Decoded::Num(d)),
                 }
-                Ok(Decoded::Num(d))
+            }
+        }
+    }
+
+    /// 式の結果（セルの値）が項目の型に合うかを確かめ、書く値を返す。合わなければ、セルに出す
+    /// エラーの種類。入力の確かめ（[`Codec::accept`]）と同じ決まりだが、数値の小数部の多い桁は
+    /// COBOL の `COMPUTE` と同じく切り捨てる（`1/3` を `9V99` に入れられる）。英数字の項目の数値・
+    /// 真偽値は、書くときの文字列（`123`・`TRUE`）で確かめる。
+    pub fn fit_result(&self, f: &Field, v: Input<'_>) -> Result<Decoded, Misfit> {
+        let v = match v {
+            Input::Empty | Input::Fill(_) => return Ok(Decoded::Empty),
+            Input::Error => return Err(Misfit::Value),
+            v => v,
+        };
+        if !f.kind.is_numeric() {
+            return self.accept(f, &text_of(v)).map_err(|_| Misfit::Value);
+        }
+        match (&f.kind, v) {
+            (_, Input::Text(s)) if s.trim().is_empty() => Ok(Decoded::Empty),
+            (_, Input::Text(s)) if parse_hex(s, f.len).is_some() => {
+                Ok(Decoded::Text(s.trim().to_string()))
+            }
+            (_, Input::Bool(_)) => Err(Misfit::Value),
+            (Kind::Float { .. }, Input::Number(x)) => Ok(Decoded::Float(x)),
+            (Kind::Float { .. }, Input::Text(s)) => Decimal::parse(s)
+                .map(|d| Decoded::Float(d.to_f64()))
+                .ok_or(Misfit::Value),
+            (kind, v) => {
+                let scale = kind.digits_scale().map_or(0, |d| d.1);
+                let d = match v {
+                    Input::Number(x) => Decimal::from_f64(x, scale).ok_or(Misfit::Num)?,
+                    Input::Text(s) => Decimal::parse(s)
+                        .ok_or(Misfit::Value)?
+                        .truncate(scale)
+                        .ok_or(Misfit::Num)?,
+                    _ => return Err(Misfit::Value),
+                };
+                match range_error(f, &d) {
+                    Some(_) => Err(Misfit::Num),
+                    None => Ok(Decoded::Num(d)),
+                }
             }
         }
     }
@@ -944,7 +953,7 @@ impl Codec {
     /// 値を小数部 `scale` 桁の 10 進数に（空なら `None`）。
     fn number(&self, v: Input<'_>, scale: i32, issues: &mut Issues) -> Option<Decimal> {
         let d = match v {
-            Input::Empty | Input::Error => return None,
+            Input::Empty | Input::Error | Input::Fill(_) => return None,
             Input::Number(x) => Decimal::from_f64(x, scale),
             Input::Bool(b) => Decimal::new(b as i128, 0).rescale(scale),
             Input::Text(s) if s.trim().is_empty() => return None,
@@ -1031,9 +1040,76 @@ fn digits_into(mut v: u128, out: &mut [u8]) {
     }
 }
 
+/// 式の結果が項目の型に合わないわけ（セルに出すエラー値）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Misfit {
+    /// 型が違う（数値の項目に数値でない文字列・真偽値、文字コードにない文字、長すぎる文字列）: `#VALUE!`
+    Value,
+    /// 桁・範囲の外（整数部の桁あふれ、符号なしの項目に負の数、`COMP-5` の範囲の外）: `#NUM!`
+    Num,
+}
+
+/// 符号を持てる数値の型か（数字編集は `+`・`-`・`CR`・`DB` があれば）。
+fn signed_kind(kind: &Kind) -> bool {
+    match kind {
+        Kind::Zoned { signed, .. } | Kind::Packed { signed, .. } | Kind::Binary { signed, .. } => {
+            *signed
+        }
+        Kind::Edited { syms, .. } => syms.iter().any(|s| {
+            matches!(
+                s,
+                crate::Sym::Plus | crate::Sym::Minus | crate::Sym::Cr | crate::Sym::Db
+            )
+        }),
+        _ => true,
+    }
+}
+
+/// 項目の小数部の桁に揃えた値が、符号・桁数・範囲に収まらなければ、そのわけ。
+fn range_error(f: &Field, d: &Decimal) -> Option<String> {
+    let kind = &f.kind;
+    let (digits, scale) = kind.digits_scale().unwrap_or((18, 0));
+    if d.value < 0 && !signed_kind(kind) {
+        return Some(format!(
+            "符号なしの項目（{}）です。負の数は入力できません",
+            f.describe
+        ));
+    }
+    if let Kind::Binary {
+        signed,
+        bytes,
+        native: true,
+        ..
+    } = kind
+    {
+        let bits = 8 * *bytes as u32;
+        let (min, max): (i128, i128) = if *signed {
+            (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+        } else {
+            (0, (1i128 << bits) - 1)
+        };
+        if d.value < min || d.value > max {
+            return Some(format!(
+                "範囲は {}〜{} です（{}）",
+                Decimal::new(min, scale),
+                Decimal::new(max, scale),
+                f.describe
+            ));
+        }
+    } else if d.value.unsigned_abs() >= 10u128.pow(digits.min(38)) {
+        let int = digits as i32 - scale;
+        return Some(if int > 0 {
+            format!("整数部は {int} 桁までです（{}）", f.describe)
+        } else {
+            format!("1 より小さい数だけです（{}）", f.describe)
+        });
+    }
+    None
+}
+
 fn text_of(v: Input<'_>) -> String {
     match v {
-        Input::Empty | Input::Error => String::new(),
+        Input::Empty | Input::Error | Input::Fill(_) => String::new(),
         Input::Text(s) => s.to_string(),
         Input::Bool(true) => "TRUE".into(),
         Input::Bool(false) => "FALSE".into(),
@@ -1367,5 +1443,61 @@ mod tests {
         );
         assert!(eb.accept(&field("PIC X(6)"), "漢字").is_ok());
         assert!(eb.accept(&g, "ｱ").is_err());
+    }
+
+    #[test]
+    fn fit_formula_results_and_fill() {
+        let ms = Codec::new(Charset::Ms932);
+        let fit = |f: &Field, v: Input<'_>| ms.fit_result(f, v);
+        let s52 = field("PIC S9(5)V99 COMP-3");
+        // 小数部の多い桁は切り捨て（COMPUTE と同じ）
+        assert_eq!(
+            fit(&s52, Input::Number(1.0 / 3.0)),
+            Ok(Decoded::Num(Decimal::new(33, 2)))
+        );
+        assert_eq!(fit(&s52, Input::Number(123456.0)), Err(Misfit::Num));
+        assert_eq!(fit(&s52, Input::Text("12x")), Err(Misfit::Value));
+        assert_eq!(
+            fit(&s52, Input::Text("-1.239")),
+            Ok(Decoded::Num(Decimal::new(-123, 2)))
+        );
+        assert_eq!(fit(&s52, Input::Bool(true)), Err(Misfit::Value));
+        assert_eq!(fit(&s52, Input::Empty), Ok(Decoded::Empty));
+        assert_eq!(fit(&s52, Input::Error), Err(Misfit::Value));
+        let u5 = field("PIC 9(5)");
+        assert_eq!(fit(&u5, Input::Number(-1.0)), Err(Misfit::Num));
+        let c5 = field("PIC S9(4) COMP-5");
+        assert_eq!(fit(&c5, Input::Number(40000.0)), Err(Misfit::Num));
+        assert!(fit(&c5, Input::Number(-32768.0)).is_ok());
+        assert!(matches!(
+            fit(&field("COMP-2"), Input::Number(0.1)),
+            Ok(Decoded::Float(_))
+        ));
+        let x3 = field("PIC X(3)");
+        assert_eq!(
+            fit(&x3, Input::Number(123.0)),
+            Ok(Decoded::Text("123".into()))
+        );
+        assert_eq!(fit(&x3, Input::Number(1234.0)), Err(Misfit::Value));
+        assert_eq!(fit(&x3, Input::Text("😀")), Err(Misfit::Value));
+        assert_eq!(
+            fit(&field("PIC A(4)"), Input::Text("A1")),
+            Err(Misfit::Value)
+        );
+        // LOW-VALUE・HIGH-VALUE: どの型でもすべてのバイト
+        for pic in [
+            "PIC X(3)",
+            "PIC S9(5)V99 COMP-3",
+            "PIC S9(4) COMP",
+            "COMP-2",
+            "PIC N(2)",
+        ] {
+            let f = field(pic);
+            for b in [0x00u8, 0xFF] {
+                let (out, is) = enc(&ms, &f, Input::Fill(b));
+                assert_eq!(out, vec![b; f.len], "{pic}");
+                assert_eq!(is, Issues::default());
+            }
+        }
     }
 }

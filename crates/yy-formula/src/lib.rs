@@ -30,6 +30,21 @@ pub use parse::{Area, AreaKind, BinOp, Expr, Func, ParseError, Ref, parse};
 pub use print::formula_text;
 pub use rows::{eval_rows, shift, shift_by, spread};
 
+/// `LOW-VALUE()` の値（印の文字列。固定長の項目の列では項目をすべて X'00' にし、そのほかの列では
+/// `#VALUE!` にする。比べると `LOW-VALUE()` どうしは等しい）。
+pub const LOW_VALUE: &str = "\u{F8F0}LOW-VALUE";
+/// `HIGH-VALUE()` の値（項目をすべて X'FF' にする）。
+pub const HIGH_VALUE: &str = "\u{F8F0}HIGH-VALUE";
+
+/// 表意定数（`LOW-VALUE`・`HIGH-VALUE`）の印の文字列なら、項目を埋めるバイト。
+pub fn figurative(s: &str) -> Option<u8> {
+    match s {
+        LOW_VALUE => Some(0x00),
+        HIGH_VALUE => Some(0xFF),
+        _ => None,
+    }
+}
+
 /// エラー値（Excel と同じ。並びは `yy_sheet::CellError` と同じ）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Error {

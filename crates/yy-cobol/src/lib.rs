@@ -12,7 +12,7 @@ mod edit;
 mod num;
 mod pic;
 
-pub use codec::{Charset, Codec, Decoded, Input, Issues, hex_text, parse_hex};
+pub use codec::{Charset, Codec, Decoded, Input, Issues, Misfit, hex_text, parse_hex};
 pub use copybook::{add_field, check_type, parse, retype};
 pub use num::Decimal;
 

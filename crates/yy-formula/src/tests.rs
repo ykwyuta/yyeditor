@@ -523,3 +523,44 @@ fn shared_lookup_rows_use_the_index() {
         }
     }
 }
+
+#[test]
+fn cobol_figurative_constants() {
+    let mut g = Mem::new();
+    for f in ["=LOW-VALUE()", "=low-values()", "=Low-Value( )"] {
+        assert_eq!(g.eval(f), t(LOW_VALUE), "{f}");
+    }
+    assert_eq!(g.eval("=HIGH-VALUE()"), t(HIGH_VALUE));
+    assert_eq!(g.eval("=HIGH-VALUES()"), t(HIGH_VALUE));
+    assert_eq!(figurative(LOW_VALUE), Some(0x00));
+    assert_eq!(figurative(HIGH_VALUE), Some(0xFF));
+    assert_eq!(figurative("LOW-VALUE"), None);
+    assert_eq!(g.eval("=LOW-VALUE(1)"), Val::Err(Error::Value));
+    // 比べる（COBOL の IF X = LOW-VALUE）
+    g.set(0, "A1", t(LOW_VALUE));
+    assert_eq!(g.eval("=A1=LOW-VALUE()"), Val::Bool(true));
+    assert_eq!(g.eval("=A1=HIGH-VALUE()"), Val::Bool(false));
+    // 名前のあとにかっこがなければ、今までどおり引き算・名前
+    g.set(0, "B1", n(5.0));
+    assert_eq!(g.eval("=B1-1"), n(4.0));
+    assert_eq!(g.eval("=LOW-VALUE"), Val::Err(Error::Name));
+    // 式の文字列に戻す
+    let e = parse("=low-values()").unwrap();
+    assert_eq!(formula_text(&e), "=LOW-VALUE()");
+    assert!(refs_in("=LOW-VALUE()").is_empty());
+    assert!(refs_in("=HIGH-VALUE()").is_empty());
+    // 入力の補助
+    let w = |s: &str| typing(s, s.chars().count()).word.map(|w| w.1);
+    assert_eq!(w("=LOW-V"), Some("LOW-V".into()));
+    assert_eq!(w("=high-"), Some("high-".into()));
+    assert_eq!(w("=A1-V"), Some("V".into()));
+    assert_eq!(
+        FuncInfo::complete("LOW-")
+            .iter()
+            .map(|f| f.name)
+            .collect::<Vec<_>>(),
+        ["LOW-VALUE"]
+    );
+    let c = typing("=LOW-VALUE(", 11).call;
+    assert_eq!(c.map(|c| c.0), Some("LOW-VALUE".into()));
+}

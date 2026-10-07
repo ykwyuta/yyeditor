@@ -20,6 +20,9 @@ pub(crate) fn call(f: &Func, args: &[Expr], cx: &Context<'_>) -> Val {
         Func::Concat => concat(args, cx),
         Func::Textjoin => textjoin(args, cx),
         Func::Textsplit => textsplit(args, cx),
+        Func::LowValue | Func::HighValue if !args.is_empty() => Val::Err(Error::Value),
+        Func::LowValue => Val::text(crate::LOW_VALUE),
+        Func::HighValue => Val::text(crate::HIGH_VALUE),
         Func::Unknown(_) => Val::Err(Error::Name),
     }
 }

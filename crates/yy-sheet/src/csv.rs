@@ -920,7 +920,10 @@ fn push_cell(
 ) {
     match v {
         CellRef::Empty => {}
-        CellRef::Text(s) => push_field(buf, s.as_bytes(), &opts.dialect),
+        CellRef::Text(s) => {
+            let s = crate::value::figurative_label(s).unwrap_or(s);
+            push_field(buf, s.as_bytes(), &opts.dialect)
+        }
         _ => {
             let s = cell_text(v, format, opts, sys);
             push_field(buf, s.as_bytes(), &opts.dialect);
@@ -944,7 +947,7 @@ fn cell_text(
             }
             _ => yy_numfmt::general(n),
         },
-        CellRef::Text(s) => s.to_owned(),
+        CellRef::Text(s) => crate::value::figurative_label(s).unwrap_or(s).to_owned(),
         CellRef::Bool(true) => "TRUE".into(),
         CellRef::Bool(false) => "FALSE".into(),
         CellRef::Error(e) => e.text().into(),

@@ -44,6 +44,18 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: Some((2, 2)),
     },
     FuncInfo {
+        name: "HIGH-VALUE",
+        desc: "COBOL の HIGH-VALUE。固定長の項目の列で、項目のすべてのバイトを X'FF' にします（COBOL の型のない列では #VALUE!）。",
+        params: &[],
+        repeat: None,
+    },
+    FuncInfo {
+        name: "LOW-VALUE",
+        desc: "COBOL の LOW-VALUE。固定長の項目の列で、項目のすべてのバイトを X'00' にします（COBOL の型のない列では #VALUE!）。",
+        params: &[],
+        repeat: None,
+    },
+    FuncInfo {
         name: "PRODUCT",
         desc: "数値の積を返します。",
         params: &["数値1", "[数値2]"],
@@ -159,6 +171,33 @@ fn is_name_char(c: char) -> bool {
 }
 
 /// `text` の `caret`（文字の番号）での入力の様子。`=` で始まらなければ何もない。
+/// `chars[..end]` の終わりにある名前の始め（`LOW-VAL` のように `LOW-`・`HIGH-` に続く `VALUE(S)` の
+/// 途中も 1 つの名前とする）。
+fn name_start(chars: &[char], end: usize) -> usize {
+    let mut s = end;
+    while s > 1 && is_name_char(chars[s - 1]) {
+        s -= 1;
+    }
+    let tail: String = chars[s..end]
+        .iter()
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if s > 1 && chars[s - 1] == '-' && "VALUES".starts_with(tail.as_str()) {
+        let mut h = s - 1;
+        while h > 1 && is_name_char(chars[h - 1]) {
+            h -= 1;
+        }
+        let head: String = chars[h..s - 1]
+            .iter()
+            .collect::<String>()
+            .to_ascii_uppercase();
+        if head == "LOW" || head == "HIGH" {
+            return h;
+        }
+    }
+    s
+}
+
 pub fn typing(text: &str, caret: usize) -> Typing {
     let chars: Vec<char> = text.chars().collect();
     let caret = caret.min(chars.len());
@@ -189,10 +228,7 @@ pub fn typing(text: &str, caret: usize) -> Typing {
                 '"' => in_str = true,
                 '\'' => in_quote = true,
                 '(' => {
-                    let mut s = i;
-                    while s > 1 && is_name_char(chars[s - 1]) {
-                        s -= 1;
-                    }
+                    let s = name_start(&chars, i);
                     let name: String = chars[s..i].iter().collect();
                     let name = name
                         .chars()
@@ -226,10 +262,7 @@ pub fn typing(text: &str, caret: usize) -> Typing {
         };
     }
     // 入力中の名前
-    let mut ws = caret;
-    while ws > 1 && is_name_char(chars[ws - 1]) {
-        ws -= 1;
-    }
+    let ws = name_start(&chars, caret);
     let before =
         |at: usize| -> Option<char> { chars[1..at].iter().rev().find(|c| **c != ' ').copied() };
     let after_op = |at: usize| -> bool {

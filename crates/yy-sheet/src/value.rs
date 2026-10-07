@@ -100,7 +100,7 @@ impl Value {
         match self {
             Value::Empty => String::new(),
             Value::Number(n) => yy_numfmt::general(*n),
-            Value::Text(s) => s.to_string(),
+            Value::Text(s) => figurative_label(s).unwrap_or(s).to_string(),
             Value::Bool(true) => "TRUE".into(),
             Value::Bool(false) => "FALSE".into(),
             Value::Error(e) => e.text().into(),
@@ -123,5 +123,13 @@ impl From<&str> for Value {
 impl From<bool> for Value {
     fn from(v: bool) -> Value {
         Value::Bool(v)
+    }
+}
+
+/// `LOW-VALUE()`・`HIGH-VALUE()` の結果（印の文字列）なら、表示する名前（`LOW-VALUE`・`HIGH-VALUE`）。
+pub fn figurative_label(s: &str) -> Option<&'static str> {
+    match yy_formula::figurative(s)? {
+        0x00 => Some("LOW-VALUE"),
+        _ => Some("HIGH-VALUE"),
     }
 }

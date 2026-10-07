@@ -99,6 +99,10 @@ pub enum Func {
     Concat,
     Textjoin,
     Textsplit,
+    /// `LOW-VALUE()`（COBOL の LOW-VALUE。項目をすべて X'00' にする）
+    LowValue,
+    /// `HIGH-VALUE()`（COBOL の HIGH-VALUE。項目をすべて X'FF' にする）
+    HighValue,
     /// 未登録（`#NAME?`）
     Unknown(Arc<str>),
 }
@@ -118,6 +122,8 @@ impl Func {
             "CONCAT" | "CONCATENATE" => Func::Concat,
             "TEXTJOIN" => Func::Textjoin,
             "TEXTSPLIT" => Func::Textsplit,
+            "LOW-VALUE" | "LOW-VALUES" => Func::LowValue,
+            "HIGH-VALUE" | "HIGH-VALUES" => Func::HighValue,
             _ => Func::Unknown(Arc::from(name)),
         }
     }
@@ -134,6 +140,8 @@ impl Func {
             Func::Concat => "CONCAT",
             Func::Textjoin => "TEXTJOIN",
             Func::Textsplit => "TEXTSPLIT",
+            Func::LowValue => "LOW-VALUE",
+            Func::HighValue => "HIGH-VALUE",
             Func::Unknown(n) => n,
         }
     }
@@ -449,7 +457,21 @@ impl Parser<'_> {
         if self.i == start {
             return Err(self.err("式の書き方が正しくありません"));
         }
-        let name: String = self.s[start..self.i].iter().collect();
+        let mut name: String = self.s[start..self.i].iter().collect();
+        // COBOL の表意定数の関数（`LOW-VALUE(`・`HIGH-VALUES(`）は名前に `-` を含む
+        if matches!(name.to_ascii_uppercase().as_str(), "LOW" | "HIGH") {
+            for tail in ["-VALUES", "-VALUE"] {
+                let n = tail.chars().count();
+                let next: String = self.s[self.i..(self.i + n).min(self.s.len())]
+                    .iter()
+                    .collect();
+                if next.eq_ignore_ascii_case(tail) && self.peek_at(n) == Some('(') {
+                    name.push_str(&next);
+                    self.i += n;
+                    break;
+                }
+            }
+        }
         if self.eat('(') {
             let mut args = Vec::new();
             if !self.eat(')') {
