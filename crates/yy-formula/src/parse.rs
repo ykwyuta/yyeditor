@@ -99,6 +99,17 @@ pub enum Func {
     Concat,
     Textjoin,
     Textsplit,
+    Max,
+    Min,
+    Average,
+    Median,
+    /// `PERCENTILE`・`PERCENTILE.INC`（`inc`）と `PERCENTILE.EXC`。`name` は書いたときの名前
+    Percentile {
+        inc: bool,
+        name: &'static str,
+    },
+    /// `ROUNDUP`（`true`）・`ROUNDDOWN`（`false`）
+    RoundAway(bool),
     /// `LOW-VALUE()`（COBOL の LOW-VALUE。項目をすべて X'00' にする）
     LowValue,
     /// `HIGH-VALUE()`（COBOL の HIGH-VALUE。項目をすべて X'FF' にする）
@@ -122,6 +133,24 @@ impl Func {
             "CONCAT" | "CONCATENATE" => Func::Concat,
             "TEXTJOIN" => Func::Textjoin,
             "TEXTSPLIT" => Func::Textsplit,
+            "MAX" => Func::Max,
+            "MIN" => Func::Min,
+            "AVERAGE" => Func::Average,
+            "MEDIAN" => Func::Median,
+            "PERCENTILE" => Func::Percentile {
+                inc: true,
+                name: "PERCENTILE",
+            },
+            "PERCENTILE.INC" => Func::Percentile {
+                inc: true,
+                name: "PERCENTILE.INC",
+            },
+            "PERCENTILE.EXC" => Func::Percentile {
+                inc: false,
+                name: "PERCENTILE.EXC",
+            },
+            "ROUNDUP" => Func::RoundAway(true),
+            "ROUNDDOWN" => Func::RoundAway(false),
             "LOW-VALUE" | "LOW-VALUES" => Func::LowValue,
             "HIGH-VALUE" | "HIGH-VALUES" => Func::HighValue,
             _ => Func::Unknown(Arc::from(name)),
@@ -140,6 +169,13 @@ impl Func {
             Func::Concat => "CONCAT",
             Func::Textjoin => "TEXTJOIN",
             Func::Textsplit => "TEXTSPLIT",
+            Func::Max => "MAX",
+            Func::Min => "MIN",
+            Func::Average => "AVERAGE",
+            Func::Median => "MEDIAN",
+            Func::Percentile { name, .. } => name,
+            Func::RoundAway(true) => "ROUNDUP",
+            Func::RoundAway(false) => "ROUNDDOWN",
             Func::LowValue => "LOW-VALUE",
             Func::HighValue => "HIGH-VALUE",
             Func::Unknown(n) => n,

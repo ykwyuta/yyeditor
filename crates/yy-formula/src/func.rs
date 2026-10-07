@@ -20,6 +20,12 @@ pub(crate) fn call(f: &Func, args: &[Expr], cx: &Context<'_>) -> Val {
         Func::Concat => concat(args, cx),
         Func::Textjoin => textjoin(args, cx),
         Func::Textsplit => textsplit(args, cx),
+        Func::Max => extreme(args, cx, true),
+        Func::Min => extreme(args, cx, false),
+        Func::Average => average(args, cx),
+        Func::Median => median(args, cx),
+        Func::Percentile { inc, .. } => percentile(args, cx, *inc),
+        Func::RoundAway(up) => round_away(args, cx, *up),
         Func::LowValue | Func::HighValue if !args.is_empty() => Val::Err(Error::Value),
         Func::LowValue => Val::text(crate::LOW_VALUE),
         Func::HighValue => Val::text(crate::HIGH_VALUE),
@@ -142,6 +148,178 @@ fn count(args: &[Expr], cx: &Context<'_>) -> Val {
         }
     }
     Val::Num(n as f64)
+}
+
+// ---- MAX・MIN・AVERAGE・MEDIAN・PERCENTILE ---------------------------------------------
+
+/// 引数の数値を順を問わずに渡す（`SUM` と同じ決まり: 直接書いた値は数値に変え〔文字列の数値・
+/// 真偽値も〕、範囲・配列の中は数値だけ。文字列・真偽値・空は無視し、エラーは伝える）。
+fn each_number(args: &[Expr], cx: &Context<'_>, f: &mut dyn FnMut(f64)) -> Result<(), Error> {
+    for e in args {
+        let a = arg(e, cx);
+        match &a {
+            Arg::V(v) if !matches!(v, Val::Array(_)) => {
+                if !matches!(v, Val::Empty) {
+                    f(num(v, cx.sys)?);
+                }
+            }
+            _ => {
+                let mut err = None;
+                each_cell_any_order(&a, cx, &mut |c| match c {
+                    Cell::Num(n) => f(n),
+                    Cell::Err(e) if err.is_none() => err = Some(e),
+                    _ => {}
+                });
+                if let Some(e) = err {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn numbers(args: &[Expr], cx: &Context<'_>) -> Result<Vec<f64>, Error> {
+    let mut v = Vec::new();
+    each_number(args, cx, &mut |n| v.push(n))?;
+    Ok(v)
+}
+
+/// `MAX`（`max`）・`MIN`: 数値がなければ 0（Excel と同じ）。
+fn extreme(args: &[Expr], cx: &Context<'_>, max: bool) -> Val {
+    if args.is_empty() {
+        return Val::Err(Error::Value);
+    }
+    let mut best: Option<f64> = None;
+    let r = each_number(args, cx, &mut |n| {
+        best = Some(match best {
+            Some(b) if (max && b >= n) || (!max && b <= n) => b,
+            _ => n,
+        })
+    });
+    match r {
+        Ok(()) => Val::Num(best.unwrap_or(0.0)),
+        Err(e) => Val::Err(e),
+    }
+}
+
+/// `AVERAGE`: 数値がなければ `#DIV/0!`。
+fn average(args: &[Expr], cx: &Context<'_>) -> Val {
+    if args.is_empty() {
+        return Val::Err(Error::Value);
+    }
+    let (mut sum, mut n) = (0.0, 0u64);
+    if let Err(e) = each_number(args, cx, &mut |x| {
+        sum += x;
+        n += 1;
+    }) {
+        return Val::Err(e);
+    }
+    if n == 0 {
+        return Val::Err(Error::Div0);
+    }
+    let avg = sum / n as f64;
+    if avg.is_finite() {
+        Val::Num(avg)
+    } else {
+        Val::Err(Error::Num)
+    }
+}
+
+/// 並べた数値の、位置 `pos`（0 始まり。小数は前後の値の間を比例で）の値。
+fn interpolate(sorted: &[f64], pos: f64) -> f64 {
+    let lo = pos.floor() as usize;
+    let hi = (lo + 1).min(sorted.len() - 1);
+    sorted[lo] + (pos - lo as f64) * (sorted[hi] - sorted[lo])
+}
+
+fn sort_numbers(v: &mut [f64]) {
+    v.sort_unstable_by(|a, b| a.total_cmp(b));
+}
+
+/// `MEDIAN`: 数値がなければ `#NUM!`。
+fn median(args: &[Expr], cx: &Context<'_>) -> Val {
+    if args.is_empty() {
+        return Val::Err(Error::Value);
+    }
+    let mut v = match numbers(args, cx) {
+        Ok(v) => v,
+        Err(e) => return Val::Err(e),
+    };
+    if v.is_empty() {
+        return Val::Err(Error::Num);
+    }
+    sort_numbers(&mut v);
+    Val::Num(interpolate(&v, (v.len() - 1) as f64 / 2.0))
+}
+
+/// `PERCENTILE`・`PERCENTILE.INC`（`inc`。率は 0〜1、位置は 率×(n−1)）と `PERCENTILE.EXC`（率は 0 と
+/// 1 を含まず、順位は 率×(n+1)。1〜n の外なら `#NUM!`）。
+fn percentile(args: &[Expr], cx: &Context<'_>, inc: bool) -> Val {
+    if args.len() != 2 {
+        return Val::Err(Error::Value);
+    }
+    let k = match num(&eval(&args[1], cx), cx.sys) {
+        Ok(k) => k,
+        Err(e) => return Val::Err(e),
+    };
+    let mut v = match numbers(&args[..1], cx) {
+        Ok(v) => v,
+        Err(e) => return Val::Err(e),
+    };
+    if v.is_empty() {
+        return Val::Err(Error::Num);
+    }
+    sort_numbers(&mut v);
+    let n = v.len() as f64;
+    let pos = if inc {
+        if !(0.0..=1.0).contains(&k) {
+            return Val::Err(Error::Num);
+        }
+        k * (n - 1.0)
+    } else {
+        let rank = k * (n + 1.0);
+        if k <= 0.0 || k >= 1.0 || rank < 1.0 || rank > n {
+            return Val::Err(Error::Num);
+        }
+        rank - 1.0
+    };
+    Val::Num(interpolate(&v, pos))
+}
+
+// ---- ROUNDUP・ROUNDDOWN ----------------------------------------------------------------
+
+/// 有効数字 15 桁に丸める（`0.1*3` = `0.30000000000000004` を 0.3 と見る。Excel と同じ精度）。
+fn snap15(x: f64) -> f64 {
+    format!("{x:.14e}").parse().unwrap_or(x)
+}
+
+/// `ROUNDUP`（`up`。0 から遠い方へ）・`ROUNDDOWN`（0 に近い方へ）。桁数は小数点以下の桁（負なら
+/// 整数部の桁。`ROUNDUP(1234,-2)` = 1300）で、小数は切り捨てて使う。
+fn round_away(args: &[Expr], cx: &Context<'_>, up: bool) -> Val {
+    if args.len() != 2 {
+        return Val::Err(Error::Value);
+    }
+    let digits = match num(&eval(&args[1], cx), cx.sys) {
+        Ok(d) => d.trunc().clamp(-308.0, 308.0) as i32,
+        Err(e) => return Val::Err(e),
+    };
+    map(&eval(&args[0], cx), &|v| match num(v, cx.sys) {
+        Ok(x) => {
+            let scale = 10f64.powi(digits.abs());
+            let y = if digits >= 0 { x * scale } else { x / scale };
+            let y = snap15(y.abs());
+            let r = if up { y.ceil() } else { y.floor() };
+            let r = if digits >= 0 { r / scale } else { r * scale };
+            let r = r.copysign(x);
+            if r.is_finite() {
+                Val::Num(if r == 0.0 { 0.0 } else { r })
+            } else {
+                Val::Err(Error::Num)
+            }
+        }
+        Err(e) => Val::Err(e),
+    })
 }
 
 // ---- ABS・PRODUCT ----------------------------------------------------------------------

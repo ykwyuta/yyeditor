@@ -26,6 +26,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: None,
     },
     FuncInfo {
+        name: "AVERAGE",
+        desc: "数値の平均を返します（範囲の中の文字列・真偽値・空は無視します。数値がなければ #DIV/0!）。",
+        params: &["数値1", "[数値2]"],
+        repeat: Some((1, 1)),
+    },
+    FuncInfo {
         name: "CONCAT",
         desc: "文字列をつなげます（範囲はセルの順に）。",
         params: &["文字列1", "[文字列2]"],
@@ -56,10 +62,58 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: None,
     },
     FuncInfo {
+        name: "MAX",
+        desc: "数値の最大値を返します（範囲の中の文字列・真偽値・空は無視します。数値がなければ 0）。",
+        params: &["数値1", "[数値2]"],
+        repeat: Some((1, 1)),
+    },
+    FuncInfo {
+        name: "MEDIAN",
+        desc: "数値の中央値を返します（数が偶数なら中央の 2 つの平均）。",
+        params: &["数値1", "[数値2]"],
+        repeat: Some((1, 1)),
+    },
+    FuncInfo {
+        name: "MIN",
+        desc: "数値の最小値を返します（範囲の中の文字列・真偽値・空は無視します。数値がなければ 0）。",
+        params: &["数値1", "[数値2]"],
+        repeat: Some((1, 1)),
+    },
+    FuncInfo {
+        name: "PERCENTILE",
+        desc: "範囲の数値の百分位数（率は 0〜1。0.9 なら 90 パーセンタイル）を、前後の値の間を比例で求めて返します。PERCENTILE.INC と同じです。",
+        params: &["範囲", "率"],
+        repeat: None,
+    },
+    FuncInfo {
+        name: "PERCENTILE.EXC",
+        desc: "範囲の数値の百分位数を返します（率は 0 と 1 を含まない。順位は 率×(個数+1)）。",
+        params: &["範囲", "率"],
+        repeat: None,
+    },
+    FuncInfo {
+        name: "PERCENTILE.INC",
+        desc: "範囲の数値の百分位数を返します（率は 0〜1。位置は 率×(個数−1)）。",
+        params: &["範囲", "率"],
+        repeat: None,
+    },
+    FuncInfo {
         name: "PRODUCT",
         desc: "数値の積を返します。",
         params: &["数値1", "[数値2]"],
         repeat: Some((1, 1)),
+    },
+    FuncInfo {
+        name: "ROUNDDOWN",
+        desc: "数値を指定の桁で切り捨てます（0 に近い方へ。桁数が負なら整数部で切り捨て）。",
+        params: &["数値", "桁数"],
+        repeat: None,
+    },
+    FuncInfo {
+        name: "ROUNDUP",
+        desc: "数値を指定の桁で切り上げます（0 から遠い方へ。桁数が負なら整数部で切り上げ）。",
+        params: &["数値", "桁数"],
+        repeat: None,
     },
     FuncInfo {
         name: "SUM",

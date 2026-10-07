@@ -564,3 +564,86 @@ fn cobol_figurative_constants() {
     let c = typing("=LOW-VALUE(", 11).call;
     assert_eq!(c.map(|c| c.0), Some("LOW-VALUE".into()));
 }
+
+#[test]
+fn statistics_and_rounding() {
+    let mut g = Mem::new();
+    g.set(0, "A1", n(2.0));
+    g.set(0, "A2", t("3"));
+    g.set(0, "A3", n(4.0));
+    g.set(0, "A4", Val::Bool(true));
+    g.set(0, "B1", t("x"));
+    // MAX・MIN: 範囲の中の文字列・真偽値・空は無視、直接書いた値は数値に変える
+    assert_eq!(g.eval("=MAX(A1:A4)"), n(4.0));
+    assert_eq!(g.eval("=MIN(A1:A4)"), n(2.0));
+    assert_eq!(g.eval("=MAX(A:A,\"9\")"), n(9.0));
+    assert_eq!(g.eval("=MIN(A1:A4,TRUE)"), n(1.0));
+    assert_eq!(g.eval("=MAX(-1,-5)"), n(-1.0));
+    assert_eq!(g.eval("=MAX(B1:B3)"), n(0.0));
+    assert_eq!(g.eval("=MIN(\"x\")"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=MAX({1,5;3,2})"), n(5.0));
+    // AVERAGE
+    assert_eq!(g.eval("=AVERAGE(A1:A4)"), n(3.0));
+    assert_eq!(g.eval("=AVERAGE(1,\"2\",TRUE)"), n(4.0 / 3.0));
+    assert_eq!(g.eval("=AVERAGE(B1:B3)"), Val::Err(Error::Div0));
+    // MEDIAN
+    assert_eq!(g.eval("=MEDIAN(1,2,3,4)"), n(2.5));
+    assert_eq!(g.eval("=MEDIAN(3,1,2)"), n(2.0));
+    assert_eq!(g.eval("=MEDIAN(A1:A4)"), n(3.0));
+    assert_eq!(g.eval("=MEDIAN(B1:B3)"), Val::Err(Error::Num));
+    // PERCENTILE（Excel の値）
+    assert_eq!(g.eval("=PERCENTILE({1,2,3,4},0.3)"), n(1.9));
+    assert_eq!(g.eval("=PERCENTILE.INC({1,2,3,4},1)"), n(4.0));
+    assert_eq!(g.eval("=PERCENTILE.INC({1,2,3,4},0)"), n(1.0));
+    assert_eq!(g.eval("=PERCENTILE.EXC({1,2,3,4},0.3)"), n(1.5));
+    assert_eq!(
+        g.eval("=PERCENTILE.EXC({1,2,3,4},0.1)"),
+        Val::Err(Error::Num)
+    );
+    assert_eq!(g.eval("=PERCENTILE({1,2,3,4},1.1)"), Val::Err(Error::Num));
+    assert_eq!(g.eval("=PERCENTILE(B1:B3,0.5)"), Val::Err(Error::Num));
+    assert_eq!(g.eval("=PERCENTILE(A1:A4,0.5)"), n(3.0));
+    // 誤差: 0.9 パーセンタイル
+    match g.eval("=PERCENTILE({10,20,30,40,50},0.9)") {
+        Val::Num(x) => assert!((x - 46.0).abs() < 1e-9, "{x}"),
+        v => panic!("{v:?}"),
+    }
+    // ROUNDUP・ROUNDDOWN（Excel の例）
+    assert_eq!(g.eval("=ROUNDUP(3.2,0)"), n(4.0));
+    assert_eq!(g.eval("=ROUNDUP(76.9,0)"), n(77.0));
+    assert_eq!(g.eval("=ROUNDUP(5.43219,3)"), n(5.433));
+    assert_eq!(g.eval("=ROUNDUP(-3.14159,1)"), n(-3.2));
+    assert_eq!(g.eval("=ROUNDUP(31415.92654,-2)"), n(31500.0));
+    assert_eq!(g.eval("=ROUNDDOWN(3.2,0)"), n(3.0));
+    assert_eq!(g.eval("=ROUNDDOWN(76.9,0)"), n(76.0));
+    assert_eq!(g.eval("=ROUNDDOWN(5.43289,3)"), n(5.432));
+    assert_eq!(g.eval("=ROUNDDOWN(-3.14159,1)"), n(-3.1));
+    assert_eq!(g.eval("=ROUNDDOWN(31415.92654,-2)"), n(31400.0));
+    // 計算の誤差で 1 つずれない
+    assert_eq!(g.eval("=ROUNDUP(0.1*3,1)"), n(0.3));
+    assert_eq!(g.eval("=ROUNDDOWN(0.7*3,1)"), n(2.1));
+    assert_eq!(g.eval("=ROUNDUP(1.005,2)"), n(1.01));
+    assert_eq!(g.eval("=ROUNDDOWN(2.5,0.9)"), n(2.0));
+    assert_eq!(g.eval("=ROUNDUP(-0.1,0)"), n(-1.0));
+    assert_eq!(g.eval("=ROUNDDOWN(-0.1,0)"), n(0.0));
+    assert_eq!(g.eval("=ROUNDUP(\"x\",0)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=ROUNDUP(1)"), Val::Err(Error::Value));
+    // 配列にも
+    match g.eval("=ROUNDUP({1.1,2.2},0)") {
+        Val::Array(a) => assert_eq!(a.data, vec![n(2.0), n(3.0)]),
+        v => panic!("{v:?}"),
+    }
+    // 書いた名前のまま戻す
+    for (src, out) in [
+        ("=percentile(A1:A4,0.5)", "=PERCENTILE(A1:A4,0.5)"),
+        ("=Percentile.Inc(A1:A4,0.5)", "=PERCENTILE.INC(A1:A4,0.5)"),
+        (
+            "=_xlfn.PERCENTILE.EXC(A1:A4,0.5)",
+            "=PERCENTILE.EXC(A1:A4,0.5)",
+        ),
+        ("=roundup(A1,2)", "=ROUNDUP(A1,2)"),
+    ] {
+        assert_eq!(formula_text(&parse(src).unwrap()), out);
+    }
+    assert!(FuncInfo::find("percentile.exc").is_some());
+}

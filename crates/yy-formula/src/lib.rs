@@ -1,5 +1,6 @@
-//! 数式（15 章 7）: Excel と同じ文法の解析・評価と、`XLOOKUP`・`SUMIFS`・`COUNTIFS`・`PRODUCT`・
-//! `ABS`・`CONCAT`・`TEXTJOIN`・`TEXTSPLIT`・四則演算・文字列の連結。
+//! 数式（15 章 7）: Excel と同じ文法の解析・評価と、`XLOOKUP`・`SUMIFS`・`COUNTIFS`・`SUM`・`COUNT`・
+//! `AVERAGE`・`MAX`・`MIN`・`MEDIAN`・`PERCENTILE`・`ROUNDUP`・`ROUNDDOWN`・`PRODUCT`・`ABS`・`CONCAT`・
+//! `TEXTJOIN`・`TEXTSPLIT`・`LOW-VALUE`・`HIGH-VALUE`・四則演算・文字列の連結。
 //!
 //! セルの保管には依存しない: 評価はセルの読み方（[`Grid`]）を受け取って行う。列をまとめて読む
 //! [`Grid::scan`] を使うので、5000 万行の列に対する `SUMIFS` も列を 1 回読むだけで済む。
