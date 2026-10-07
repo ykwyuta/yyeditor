@@ -794,6 +794,7 @@ pub struct Document {
     pub book: Workbook,
     undo: Vec<Workbook>,
     redo: Vec<Workbook>,
+    generation: u64,
     pub path: Option<PathBuf>,
     /// 開いた（保存した）独自形式のファイル
     pub(crate) file: Option<Arc<Store>>,
@@ -814,6 +815,7 @@ impl Document {
             book: Workbook::default(),
             undo: Vec::new(),
             redo: Vec::new(),
+            generation: 0,
             path: None,
             file: None,
             last_dir: 0,
@@ -846,6 +848,7 @@ impl Document {
             crate::formula::recalc(&mut self.book, &self.ctx);
         }
         self.undo.push(before);
+        self.generation += 1;
         if self.undo.len() > UNDO_DEPTH {
             self.undo.remove(0);
         }
@@ -864,6 +867,11 @@ impl Document {
         self.book = book;
     }
 
+    /// 変更の番号（編集・元に戻す・やり直すのたびに増える。直前の編集が変わっていないかを確かめる）。
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -875,6 +883,7 @@ impl Document {
     pub fn undo(&mut self) -> bool {
         match self.undo.pop() {
             Some(b) => {
+                self.generation += 1;
                 self.redo.push(std::mem::replace(&mut self.book, b));
                 self.dirty = true;
                 true
@@ -886,6 +895,7 @@ impl Document {
     pub fn redo(&mut self) -> bool {
         match self.redo.pop() {
             Some(b) => {
+                self.generation += 1;
                 self.undo.push(std::mem::replace(&mut self.book, b));
                 self.dirty = true;
                 true

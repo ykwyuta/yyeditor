@@ -330,10 +330,20 @@ pub fn refs_in(text: &str) -> Vec<RefSpan> {
         if c == '\'' {
             let s = i + 1;
             i += 1;
-            while i < chars.len() && chars[i] != '\'' {
+            let mut name = String::new();
+            // `''` は名前の中の `'`
+            while i < chars.len() {
+                if chars[i] == '\'' {
+                    if chars.get(i + 1) == Some(&'\'') {
+                        name.push('\'');
+                        i += 2;
+                        continue;
+                    }
+                    break;
+                }
+                name.push(chars[i]);
                 i += 1;
             }
-            let name: String = chars[s..i.min(chars.len())].iter().collect();
             i += 1;
             if chars.get(i) == Some(&'!') {
                 sheet = Some((name, s - 1));
@@ -438,6 +448,24 @@ pub fn refs_in(text: &str) -> Vec<RefSpan> {
         }
     }
     out
+}
+
+/// シート名を参照の前に付ける形に（`Sheet2!`。名前に記号・空白がある、数字で始まる、参照に見える
+/// ときは `'売上 2026'!`。`'` は `''`）。
+pub fn sheet_prefix(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let plain = chars
+        .first()
+        .is_some_and(|c| c.is_alphabetic() || *c == '_')
+        && chars.iter().all(|c| c.is_alphanumeric() || *c == '_')
+        && !matches!(part(&chars, 0), Some((_, end)) if end == chars.len())
+        && !name.eq_ignore_ascii_case("TRUE")
+        && !name.eq_ignore_ascii_case("FALSE");
+    if plain {
+        format!("{name}!")
+    } else {
+        format!("'{}'!", name.replace('\'', "''"))
+    }
 }
 
 /// 範囲を式の参照の書き方に（`A1`・`A1:B3`・`A:C`・`1:3`）。
@@ -607,6 +635,25 @@ mod tests {
         assert_eq!(t, "=B3+$B4+D$3+$D$4+SUM(F:F)+SUM(7:7)");
         let t = crate::formula_text(&crate::shift_by(&e, 0, -1));
         assert_eq!(t, "=#REF!+$B2+B$3+$D$4+SUM(D:D)+SUM(5:5)");
+    }
+
+    #[test]
+    fn sheet_prefixes() {
+        assert_eq!(sheet_prefix("Sheet2"), "Sheet2!");
+        assert_eq!(sheet_prefix("売上"), "売上!");
+        assert_eq!(sheet_prefix("売上 2026"), "'売上 2026'!");
+        assert_eq!(sheet_prefix("2026"), "'2026'!");
+        assert_eq!(sheet_prefix("AB12"), "'AB12'!");
+        assert_eq!(sheet_prefix("It's"), "'It''s'!");
+        // 作った参照を読める（式の解析と参照の取り出し）
+        for name in ["Sheet2", "売上 2026", "It's", "AB12"] {
+            let f = format!("={}B3+1", sheet_prefix(name));
+            crate::parse(&f).unwrap();
+            let r = refs_in(&f);
+            assert_eq!(r.len(), 1, "{f}");
+            assert_eq!(r[0].sheet.as_deref(), Some(name));
+            assert_eq!(area_text(&r[0].area), "B3");
+        }
     }
 
     #[test]

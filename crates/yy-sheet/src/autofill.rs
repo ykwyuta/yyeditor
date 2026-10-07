@@ -15,6 +15,7 @@ use crate::Context;
 use crate::sheet::Sheet;
 use crate::style::Rect;
 use crate::value::Value;
+use yy_numfmt::DateSystem;
 
 /// 一度に書くセルの数の上限（式を下へ広げる共有式は数えない）。
 pub const MAX_CELLS: u64 = 2_000_000;
@@ -183,19 +184,74 @@ fn fit(ys: &[f64]) -> (f64, f64) {
     (m, my - m * mx)
 }
 
-/// 連続データにするか（`false` ならコピー）。
-pub fn is_series(src: &[Src], ctrl: bool) -> bool {
-    let kinds: Vec<Kind> = src.iter().map(|s| kind(&s.value)).collect();
-    let base = match kinds.as_slice() {
-        [] => return false,
-        [k] => match k {
-            Kind::Num(_) => {
-                // 数値はコピー・日付は連続データ（Ctrl で入れ替え）
-                return src[0].date != ctrl;
-            }
-            Kind::List(..) | Kind::TextNum { .. } => true,
-            Kind::Other => return false,
-        },
+/// フィルの仕方（Excel の「オートフィル オプション」）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FillMode {
+    /// 元の並びから決める（Ctrl で入れ替え）
+    Auto,
+    /// セルのコピー（並びを繰り返す）
+    Copy,
+    /// 連続データ（数値 1 つも 1 ずつ増やす）
+    Series,
+    /// 日付を日単位・週日単位（土日を飛ばす）・月単位・年単位で
+    Days,
+    Weekdays,
+    Months,
+    Years,
+}
+
+/// フィルの指定。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FillOptions {
+    pub mode: FillMode,
+    /// Ctrl を押しながら離した（`Auto` で連続データとコピーを入れ替える）
+    pub ctrl: bool,
+    /// 値（式）を入れる（`false` なら書式のみコピー）
+    pub values: bool,
+    /// 書式を写す（`false` なら書式なしコピー）
+    pub formats: bool,
+    /// 日付のシリアル値の基準
+    pub sys: DateSystem,
+}
+
+impl FillOptions {
+    pub fn auto(ctrl: bool, sys: DateSystem) -> FillOptions {
+        FillOptions {
+            mode: FillMode::Auto,
+            ctrl,
+            values: true,
+            formats: true,
+            sys,
+        }
+    }
+}
+
+/// 値の続け方（線ごと）。
+#[derive(Clone, Copy, Debug)]
+pub struct How {
+    pub mode: FillMode,
+    pub ctrl: bool,
+    /// 上・左へ続ける（元は呼ぶ側で逆に並べる。1 つだけのときは減らす向き）
+    pub backward: bool,
+    pub sys: DateSystem,
+}
+
+impl How {
+    fn auto(ctrl: bool) -> How {
+        How {
+            mode: FillMode::Auto,
+            ctrl,
+            backward: false,
+            sys: DateSystem::D1900,
+        }
+    }
+}
+
+/// 連続データにできる並びか（種類がそろっているか）。
+fn seriesable(kinds: &[Kind]) -> bool {
+    match kinds {
+        [] => false,
+        [k] => !matches!(k, Kind::Other),
         ks => {
             let all_num = ks.iter().all(|k| matches!(k, Kind::Num(_)));
             let same_list = match &ks[0] {
@@ -208,24 +264,161 @@ pub fn is_series(src: &[Src], ctrl: bool) -> bool {
                 ),
                 _ => false,
             };
-            if !(all_num || same_list || same_text) {
-                return false;
-            }
-            true
+            all_num || same_list || same_text
         }
-    };
-    base != ctrl
+    }
 }
 
-/// `src` の続きの `n` 個の値（`src` の並びの向きに、近い順）。
+/// 連続データにするか（`false` ならコピー）。`ctrl` は Ctrl を押しながら離した。
+pub fn is_series(src: &[Src], ctrl: bool) -> bool {
+    series_with(src, &How::auto(ctrl))
+}
+
+fn series_with(src: &[Src], how: &How) -> bool {
+    let kinds: Vec<Kind> = src.iter().map(|s| kind(&s.value)).collect();
+    if !seriesable(&kinds) {
+        return false;
+    }
+    match how.mode {
+        FillMode::Copy => false,
+        FillMode::Series => true,
+        FillMode::Days | FillMode::Weekdays | FillMode::Months | FillMode::Years => true,
+        FillMode::Auto => {
+            // 数値 1 つはコピー、日付 1 つは連続データ（Ctrl で入れ替え）
+            let base = match kinds.as_slice() {
+                [Kind::Num(_)] => src[0].date,
+                _ => true,
+            };
+            base != how.ctrl
+        }
+    }
+}
+
+/// `src` の続きの `n` 個の値（`src` の並びの向きに、近い順。Excel のオートフィルと同じ決め方）。
 pub fn extend(src: &[Src], n: usize, ctrl: bool) -> Vec<Value> {
+    extend_with(src, n, &How::auto(ctrl))
+}
+
+/// 年・月・日（と 1 日の中の時刻）。
+fn ymd(sys: DateSystem, x: f64) -> Option<(i32, u32, u32, f64)> {
+    let day = x.floor();
+    let dt = yy_numfmt::date::datetime_from_serial(sys, day)?;
+    Some((dt.year, dt.month, dt.day, x - day))
+}
+
+fn days_in_month(y: i32, m: u32) -> u32 {
+    (28..=31)
+        .rev()
+        .find(|&d| yy_numfmt::date::valid_date(y, m, d))
+        .unwrap_or(28)
+}
+
+/// 月を足した日付（日は元の日、月末を超えれば月末。Excel の `EDATE`）。
+fn add_months(sys: DateSystem, x: f64, months: i64) -> Option<f64> {
+    let (y, m, d, frac) = ymd(sys, x)?;
+    let total = y as i64 * 12 + (m as i64 - 1) + months;
+    let (ny, nm) = (total.div_euclid(12) as i32, total.rem_euclid(12) as u32 + 1);
+    let nd = d.min(days_in_month(ny, nm));
+    Some(yy_numfmt::date::serial_from_date(sys, ny, nm, nd)? + frac)
+}
+
+/// 月の番号（年 × 12 ＋ 月）。
+fn month_index(sys: DateSystem, x: f64) -> Option<i64> {
+    let (y, m, ..) = ymd(sys, x)?;
+    Some(y as i64 * 12 + m as i64)
+}
+
+/// 曜日（0 が日曜）。
+fn weekday(sys: DateSystem, x: f64) -> Option<i64> {
+    let (y, m, d, _) = ymd(sys, x)?;
+    Some((yy_numfmt::date::days_from_civil(y, m, d) + 4).rem_euclid(7))
+}
+
+/// 日付が月ずつ（同じ日、または月末で丸めた日）に並んでいれば、その月の数。
+fn month_step(sys: DateSystem, xs: &[f64]) -> Option<i64> {
+    let step = month_index(sys, xs[1])? - month_index(sys, xs[0])?;
+    if step == 0 {
+        return None;
+    }
+    for (j, &x) in xs.iter().enumerate() {
+        if add_months(sys, xs[0], step * j as i64)?.floor() != x.floor() {
+            return None;
+        }
+    }
+    Some(step)
+}
+
+/// 数値（日付）の続き。
+fn extend_numbers(src: &[Src], ys: &[f64], n: usize, how: &How) -> Vec<Value> {
+    let k = ys.len();
+    let sign = if how.backward { -1.0 } else { 1.0 };
+    let sys = how.sys;
+    let num = |x: Option<f64>| {
+        x.map(Value::Number)
+            .unwrap_or(Value::Error(crate::CellError::Num))
+    };
+    // 月単位・年単位（指定、または日付が月ずつ並んでいるとき）
+    let months = match how.mode {
+        FillMode::Months | FillMode::Years => {
+            let unit = if how.mode == FillMode::Years { 12 } else { 1 };
+            Some(if k == 1 {
+                unit * sign as i64
+            } else {
+                match (month_index(sys, ys[0]), month_index(sys, ys[1])) {
+                    (Some(a), Some(b)) if b != a => {
+                        // 年単位は年の差に丸める
+                        if unit == 12 {
+                            ((b - a) as f64 / 12.0).round().max(1.0) as i64 * 12 * (b - a).signum()
+                        } else {
+                            b - a
+                        }
+                    }
+                    _ => unit * sign as i64,
+                }
+            })
+        }
+        FillMode::Auto if k >= 2 && src.iter().all(|s| s.date) => month_step(sys, ys),
+        _ => None,
+    };
+    if let Some(step) = months {
+        return (0..n)
+            .map(|i| num(add_months(sys, ys[0], step * (k + i) as i64)))
+            .collect();
+    }
+    if how.mode == FillMode::Weekdays {
+        let dir = if k >= 2 && ys[k - 1] < ys[0] || k == 1 && how.backward {
+            -1.0
+        } else {
+            1.0
+        };
+        let mut x = ys[k - 1];
+        return (0..n)
+            .map(|_| {
+                x += dir;
+                // 土日を飛ばす
+                while matches!(weekday(sys, x), Some(0 | 6)) {
+                    x += dir;
+                }
+                Value::Number(x)
+            })
+            .collect();
+    }
+    let (m, b) = if k == 1 { (sign, ys[0]) } else { fit(ys) };
+    (0..n)
+        .map(|i| Value::Number(round15(b + m * (k + i) as f64)))
+        .collect()
+}
+
+/// `src` の続きの `n` 個の値（`how` の仕方で）。
+pub fn extend_with(src: &[Src], n: usize, how: &How) -> Vec<Value> {
     let k = src.len();
     if k == 0 {
         return vec![Value::Empty; n];
     }
-    if !is_series(src, ctrl) {
+    if !series_with(src, how) {
         return (0..n).map(|i| src[i % k].value.clone()).collect();
     }
+    let sign: i64 = if how.backward { -1 } else { 1 };
     let kinds: Vec<Kind> = src.iter().map(|s| kind(&s.value)).collect();
     match &kinds[0] {
         Kind::Num(_) => {
@@ -236,10 +429,7 @@ pub fn extend(src: &[Src], n: usize, ctrl: bool) -> Vec<Value> {
                     _ => 0.0,
                 })
                 .collect();
-            let (m, b) = if k == 1 { (1.0, ys[0]) } else { fit(&ys) };
-            (0..n)
-                .map(|i| Value::Number(round15(b + m * (k + i) as f64)))
-                .collect()
+            extend_numbers(src, &ys, n, how)
         }
         Kind::List(li, ..) => {
             let list = LISTS[*li];
@@ -251,7 +441,7 @@ pub fn extend(src: &[Src], n: usize, ctrl: bool) -> Vec<Value> {
                     _ => 0,
                 })
                 .collect();
-            let step = if k == 1 { 1 } else { pos[1] - pos[0] };
+            let step = if k == 1 { sign } else { pos[1] - pos[0] };
             let case = match kinds[k - 1] {
                 Kind::List(_, _, c) => c,
                 _ => Case::AsList,
@@ -279,7 +469,7 @@ pub fn extend(src: &[Src], n: usize, ctrl: bool) -> Vec<Value> {
                 })
                 .collect();
             let step = if k == 1 {
-                1
+                sign
             } else {
                 fit(&nums).0.round() as i64
             };
@@ -317,14 +507,14 @@ impl Sheet {
     }
 
     /// 選択範囲 `src` のフィルハンドルを `dst` まで動かす（`dst` は `src` を 1 方向に広げたか、左上を
-    /// そろえて縮めた範囲）。`ctrl` は Ctrl を押しながら離した（連続データとコピーを入れ替える）。
+    /// そろえて縮めた範囲）。`opts` は仕方（連続データ・コピー・書式のみ・書式なし・日付の単位、Ctrl）。
     /// 絞り込み・並べ替えをしないときに、格子の位置で指定する。
     pub fn autofill(
         &mut self,
         ctx: &Context,
         src: Range4,
         dst: Range4,
-        ctrl: bool,
+        opts: &FillOptions,
     ) -> Result<Filled, String> {
         if self.view.rows.is_some() {
             return Err("絞り込み・並べ替えの表示中はフィルできません".into());
@@ -397,7 +587,11 @@ impl Sheet {
         let down_formula = |s: &Sheet, line: u64| {
             vertical && forward && k == 1 && s.formula_at(t, line as u32).is_some()
         };
-        let written: u64 = lines.iter().filter(|&&ln| !down_formula(self, ln)).count() as u64 * n;
+        let written: u64 = if !opts.values {
+            0
+        } else {
+            lines.iter().filter(|&&ln| !down_formula(self, ln)).count() as u64 * n
+        };
         if written > MAX_CELLS {
             return Err(format!(
                 "一度にフィルできるのは {} セルまでです（1 つの式を下へ広げるのは何行でもできます）",
@@ -420,16 +614,21 @@ impl Sheet {
             } else {
                 Rect::new(line, dl, line, l - 1)
             };
-            self.styles.clear(span);
-            if styles.iter().all(|s| *s == styles[0]) || n * lines.len() as u64 > STYLE_CELLS {
-                self.styles.set(span, styles[0].clone());
-            } else {
-                for q in 0..n as usize {
-                    let p = target(q);
-                    let s = p.rem_euclid(k as i64) as usize;
-                    let (rw, c) = at(line, p);
-                    self.styles.set(Rect::new(rw, c, rw, c), styles[s].clone());
+            if opts.formats {
+                self.styles.clear(span);
+                if styles.iter().all(|s| *s == styles[0]) || n * lines.len() as u64 > STYLE_CELLS {
+                    self.styles.set(span, styles[0].clone());
+                } else {
+                    for q in 0..n as usize {
+                        let p = target(q);
+                        let s = p.rem_euclid(k as i64) as usize;
+                        let (rw, c) = at(line, p);
+                        self.styles.set(Rect::new(rw, c, rw, c), styles[s].clone());
+                    }
                 }
+            }
+            if !opts.values {
+                continue;
             }
             if down_formula(self, line) {
                 self.fill_down(ctx, t, db, line as u32, line as u32)?;
@@ -477,13 +676,30 @@ impl Sheet {
             if !forward {
                 srcs.reverse();
             }
-            series |= is_series(&srcs, ctrl);
-            for (q, v) in extend(&srcs, n as usize, ctrl).into_iter().enumerate() {
+            let how = How {
+                mode: opts.mode,
+                ctrl: opts.ctrl,
+                backward: !forward,
+                sys: opts.sys,
+            };
+            series |= series_with(&srcs, &how);
+            for (q, v) in extend_with(&srcs, n as usize, &how).into_iter().enumerate() {
                 let (rw, c) = at(line, target(q));
                 self.set(ctx, rw, c, v).map_err(io)?;
             }
         }
         Ok(if series { Filled::Series } else { Filled::Copy })
+    }
+
+    /// 元の範囲に日付（日付の表示形式の数値）があるか（オートフィル オプションに日付の単位を出す）。
+    pub fn fill_has_dates(&self, ctx: &Context, src: Range4) -> bool {
+        let (t, l, b, r) = src;
+        (t..=b)
+            .flat_map(|row| (l..=r).map(move |c| (row, c)))
+            .take(1000)
+            .any(|(row, c)| {
+                self.is_date_at(row, c) && matches!(self.get(ctx, row, c), Ok(Value::Number(_)))
+            })
     }
 
     /// フィルハンドルのダブルクリックで、下へ広げる最後の行（Excel と同じく、左の列、なければ右の列の
@@ -605,6 +821,10 @@ mod tests {
         assert_eq!(show(extend(&nums(&[2.0, 1.0]), 2, false)), ["0", "-1"]);
     }
 
+    fn opts() -> FillOptions {
+        FillOptions::auto(false, DateSystem::D1900)
+    }
+
     fn sheet_with(ctx: &Context, cells: &[((u64, u32), &str)]) -> Sheet {
         let mut s = Sheet::new("Sheet1");
         for &((r, c), t) in cells {
@@ -633,27 +853,36 @@ mod tests {
         let ctx = Context::for_tests();
         let mut s = sheet_with(&ctx, &[((1, 0), "1"), ((2, 0), "2"), ((1, 1), "=A2*10")]);
         // 下へ: 数値は傾向、式はずらす
-        let f = s.autofill(&ctx, (1, 0, 2, 0), (1, 0, 5, 0), false).unwrap();
+        let f = s
+            .autofill(&ctx, (1, 0, 2, 0), (1, 0, 5, 0), &opts())
+            .unwrap();
         assert_eq!(f, Filled::Series);
         let col: Vec<_> = (1..=5).map(|r| text_at(&s, &ctx, r, 0)).collect();
         assert_eq!(col, ["1", "2", "3", "4", "5"]);
-        s.autofill(&ctx, (1, 1, 1, 1), (1, 1, 3, 1), false).unwrap();
+        s.autofill(&ctx, (1, 1, 1, 1), (1, 1, 3, 1), &opts())
+            .unwrap();
         assert_eq!(text_at(&s, &ctx, 3, 1), "=A4*10");
         // 上へ
-        s.autofill(&ctx, (1, 0, 2, 0), (0, 0, 2, 0), false).unwrap();
+        s.autofill(&ctx, (1, 0, 2, 0), (0, 0, 2, 0), &opts())
+            .unwrap();
         assert_eq!(text_at(&s, &ctx, 0, 0), "0");
         // 右へ（式の列をずらす）
-        s.autofill(&ctx, (1, 1, 1, 1), (1, 1, 1, 3), false).unwrap();
+        s.autofill(&ctx, (1, 1, 1, 1), (1, 1, 1, 3), &opts())
+            .unwrap();
         assert_eq!(text_at(&s, &ctx, 1, 3), "=C2*10");
         // 縮めると消える
         assert_eq!(
-            s.autofill(&ctx, (1, 0, 5, 0), (1, 0, 3, 0), false).unwrap(),
+            s.autofill(&ctx, (1, 0, 5, 0), (1, 0, 3, 0), &opts())
+                .unwrap(),
             Filled::Cleared
         );
         assert_eq!(text_at(&s, &ctx, 4, 0), "");
         assert_eq!(text_at(&s, &ctx, 3, 0), "3");
         // 2 方向は不可
-        assert!(s.autofill(&ctx, (1, 0, 1, 0), (1, 0, 2, 1), false).is_err());
+        assert!(
+            s.autofill(&ctx, (1, 0, 1, 0), (1, 0, 2, 1), &opts())
+                .is_err()
+        );
     }
 
     #[test]
@@ -667,7 +896,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        s.autofill(&ctx, (0, 0, 1, 0), (0, 0, 5, 0), false).unwrap();
+        s.autofill(&ctx, (0, 0, 1, 0), (0, 0, 5, 0), &opts())
+            .unwrap();
         let col: Vec<_> = (0..=5).map(|r| text_at(&s, &ctx, r, 0)).collect();
         assert_eq!(col, ["x", "=B2", "x", "=B4", "x", "=B6"]);
         assert_eq!(s.style_at(4, 0).bold, Some(true));
@@ -678,10 +908,133 @@ mod tests {
     fn single_formula_down_becomes_shared() {
         let ctx = Context::for_tests();
         let mut s = sheet_with(&ctx, &[((0, 0), "=B1+1")]);
-        s.autofill(&ctx, (0, 0, 0, 0), (0, 0, 99_999, 0), false)
+        s.autofill(&ctx, (0, 0, 0, 0), (0, 0, 99_999, 0), &opts())
             .unwrap();
         assert_eq!(text_at(&s, &ctx, 99_999, 0), "=B100000+1");
         assert!(!s.formulas.shared.is_empty());
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> f64 {
+        yy_numfmt::date::serial_from_date(DateSystem::D1900, y, m, d).unwrap()
+    }
+
+    fn dates_of(v: Vec<Value>) -> Vec<(i32, u32, u32)> {
+        v.iter()
+            .map(|x| match x {
+                Value::Number(n) => {
+                    let (y, m, d, _) = ymd(DateSystem::D1900, *n).unwrap();
+                    (y, m, d)
+                }
+                _ => panic!("{x:?}"),
+            })
+            .collect()
+    }
+
+    fn how(mode: FillMode, backward: bool) -> How {
+        How {
+            mode,
+            ctrl: false,
+            backward,
+            sys: DateSystem::D1900,
+        }
+    }
+
+    #[test]
+    fn date_units() {
+        let d = |y, m, dd| Src {
+            value: Value::Number(date(y, m, dd)),
+            date: true,
+        };
+        // 月末: 1/31 → 2/28 → 3/31（元の日を保つ。EDATE と同じ）
+        let v = extend_with(&[d(2026, 1, 31)], 3, &how(FillMode::Months, false));
+        assert_eq!(dates_of(v), [(2026, 2, 28), (2026, 3, 31), (2026, 4, 30)]);
+        // 月ずつ並んだ日付は自動で月単位（1/31, 2/28 → 3/31）
+        let v = extend(&[d(2026, 1, 31), d(2026, 2, 28)], 2, false);
+        assert_eq!(dates_of(v), [(2026, 3, 31), (2026, 4, 30)]);
+        let v = extend(&[d(2026, 1, 15), d(2026, 3, 15)], 2, false);
+        assert_eq!(dates_of(v), [(2026, 5, 15), (2026, 7, 15)]);
+        // 日数の差が同じでも、月がそろわなければ日単位
+        let v = extend(&[d(2026, 1, 1), d(2026, 1, 8)], 1, false);
+        assert_eq!(dates_of(v), [(2026, 1, 15)]);
+        // 年単位（うるう日は 2/28 に）
+        let v = extend_with(&[d(2024, 2, 29)], 2, &how(FillMode::Years, false));
+        assert_eq!(dates_of(v), [(2025, 2, 28), (2026, 2, 28)]);
+        // 週日単位（2026/10/9 は金曜 → 月・火）
+        let v = extend_with(&[d(2026, 10, 9)], 2, &how(FillMode::Weekdays, false));
+        assert_eq!(dates_of(v), [(2026, 10, 12), (2026, 10, 13)]);
+        // 上へ（1 つだけなら減らす）
+        let v = extend_with(&[d(2026, 3, 31)], 2, &how(FillMode::Months, true));
+        assert_eq!(dates_of(v), [(2026, 2, 28), (2026, 1, 31)]);
+        let v = extend_with(&[d(2026, 10, 12)], 1, &how(FillMode::Weekdays, true));
+        assert_eq!(dates_of(v), [(2026, 10, 9)]);
+        let v = extend_with(&[d(2026, 1, 10)], 2, &how(FillMode::Auto, true));
+        assert_eq!(dates_of(v), [(2026, 1, 9), (2026, 1, 8)]);
+        // 数値の指定: コピー・連続データ
+        assert_eq!(
+            show(extend_with(
+                &nums(&[1.0, 2.0]),
+                2,
+                &how(FillMode::Copy, false)
+            )),
+            ["1", "2"]
+        );
+        assert_eq!(
+            show(extend_with(&nums(&[7.0]), 2, &how(FillMode::Series, false))),
+            ["8", "9"]
+        );
+        assert_eq!(
+            show(extend_with(&texts(&["水"]), 2, &how(FillMode::Auto, true))),
+            ["火", "月"]
+        );
+    }
+
+    #[test]
+    fn formats_only_and_values_only() {
+        let ctx = Context::for_tests();
+        let mut s = sheet_with(&ctx, &[((0, 0), "1"), ((2, 0), "keep")]);
+        s.styles.set(
+            Rect::new(0, 0, 0, 0),
+            crate::style::Style {
+                bold: Some(true),
+                ..Default::default()
+            },
+        );
+        let only_formats = FillOptions {
+            values: false,
+            ..opts()
+        };
+        s.autofill(&ctx, (0, 0, 0, 0), (0, 0, 2, 0), &only_formats)
+            .unwrap();
+        assert_eq!(text_at(&s, &ctx, 2, 0), "keep");
+        assert_eq!(s.style_at(2, 0).bold, Some(true));
+        let mut s = sheet_with(&ctx, &[((0, 0), "1")]);
+        s.styles.set(
+            Rect::new(0, 0, 0, 0),
+            crate::style::Style {
+                bold: Some(true),
+                ..Default::default()
+            },
+        );
+        let no_formats = FillOptions {
+            formats: false,
+            mode: FillMode::Series,
+            ..opts()
+        };
+        s.autofill(&ctx, (0, 0, 0, 0), (0, 0, 2, 0), &no_formats)
+            .unwrap();
+        assert_eq!(text_at(&s, &ctx, 2, 0), "3");
+        assert_eq!(s.style_at(2, 0).bold, None);
+        // 日付の表示形式があれば日付の単位を出す
+        let mut s = sheet_with(&ctx, &[((0, 0), "45000")]);
+        assert!(!s.fill_has_dates(&ctx, (0, 0, 0, 0)));
+        s.styles.set(
+            Rect::new(0, 0, 0, 0),
+            crate::style::Style {
+                num_fmt: Some("yyyy/m/d".into()),
+                ..Default::default()
+            },
+        );
+        assert!(s.fill_has_dates(&ctx, (0, 0, 0, 0)));
     }
 
     #[test]

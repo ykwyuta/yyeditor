@@ -21,7 +21,9 @@ mod rows;
 mod tests;
 
 pub use adjust::{Edit, adjust};
-pub use assist::{FUNCTIONS, FuncInfo, RefSpan, Typing, area_text, refs_in, toggle_abs, typing};
+pub use assist::{
+    FUNCTIONS, FuncInfo, RefSpan, Typing, area_text, refs_in, sheet_prefix, toggle_abs, typing,
+};
 pub use eval::{Context, eval};
 pub use index::{Cache, ExactIndex};
 pub use parse::{Area, AreaKind, BinOp, Expr, Func, ParseError, Ref, parse};

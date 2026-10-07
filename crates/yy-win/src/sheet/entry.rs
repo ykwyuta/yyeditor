@@ -4,6 +4,8 @@
 //!   広げる）・列見出し・行番号をクリックすると、その参照を式に入れる（Excel の「参照」モード）。続けて
 //!   クリックすると入れた参照を差し替える。文字を入力すると確定する。セルの編集を文字の入力で始めたとき
 //!   は、矢印キー（Shift+矢印で範囲）でも選べる。
+//! - 参照を入れられるときにシートのタブをクリックすると、編集を続けたままそのシートを表示し、`Sheet2!`
+//!   を入れる（セルをクリックすると `Sheet2!B3`）。確定・取り消しで元のシート・セルに戻る。
 //! - F4 で参照の `$` を切り替える。
 //! - 関数名を入力している間は候補の一覧（↑↓で選び、Tab・Enter・クリックで入れる。Esc で閉じる）、
 //!   関数のかっこの中では引数の書き方（いまの引数を太字）と説明を出す。
@@ -24,6 +26,16 @@ use super::*;
 
 pub(super) const ASSIST_CLASS: PCWSTR = w!("YYSheetAssist");
 
+/// 別のシートの参照を選んでいる間の、元のシートの表示（確定・取り消しで戻す）。
+pub(super) struct Home {
+    pub sheet: usize,
+    top: u64,
+    left: u32,
+    cur: (u64, u32),
+    anchor: (u64, u32),
+    whole: (bool, bool),
+}
+
 /// 式に入れている参照。
 pub(super) struct Point {
     /// 入れている EDIT（セルの編集か数式バー）
@@ -35,17 +47,31 @@ pub(super) struct Point {
     pub cur: (u64, u32),
     /// 列全体・行全体
     pub whole: (bool, bool),
+    /// 参照のシート（表示しているシート）
+    pub sheet: usize,
+    /// シートのタブをクリックして `Sheet2!` だけを入れた（セルはまだ）
+    pub pending: bool,
 }
 
 impl Point {
-    pub fn range(&self) -> Range4 {
+    /// 枠を描く範囲（`Sheet2!` だけならなし）。
+    pub fn range(&self) -> Option<Range4> {
+        if self.pending {
+            return None;
+        }
         let (t, b) = (self.anchor.0.min(self.cur.0), self.anchor.0.max(self.cur.0));
         let (l, r) = (self.anchor.1.min(self.cur.1), self.anchor.1.max(self.cur.1));
-        match self.whole {
+        Some(match self.whole {
             (true, _) => (0, l, u64::MAX, r),
             (_, true) => (t, 0, b, yy_formula::MAX_COL),
             _ => (t, l, b, r),
-        }
+        })
+    }
+
+    fn area(&self) -> Range4 {
+        let (t, b) = (self.anchor.0.min(self.cur.0), self.anchor.0.max(self.cur.0));
+        let (l, r) = (self.anchor.1.min(self.cur.1), self.anchor.1.max(self.cur.1));
+        (t, l, b, r)
     }
 }
 
@@ -352,6 +378,8 @@ impl App {
             anchor,
             cur,
             whole,
+            sheet: self.sheet,
+            pending: false,
         };
         let text = self.point_text(&p);
         edit_replace(h, p.start, p.end, &text);
@@ -361,10 +389,19 @@ impl App {
         self.invalidate();
     }
 
-    /// 参照の書き方（`A1`・`A1:B3`・`B:D`・`3:5`）。
+    /// 参照の書き方（`A1`・`A1:B3`・`B:D`・`3:5`。別のシートなら `Sheet2!A1`）。
     fn point_text(&self, p: &Point) -> String {
-        let (t, l, b, r) = p.range();
-        let sh = self.sheet();
+        let prefix = match &self.home {
+            Some(h) if h.sheet != p.sheet => {
+                yy_formula::sheet_prefix(&self.doc.book.sheets[p.sheet].name)
+            }
+            _ => String::new(),
+        };
+        if p.pending {
+            return prefix;
+        }
+        let (t, l, b, r) = p.area();
+        let sh = &self.doc.book.sheets[p.sheet];
         let area = match p.whole {
             (true, _) => Area {
                 r0: 0,
@@ -395,7 +432,88 @@ impl App {
                 },
             },
         };
-        yy_formula::area_text(&area)
+        format!("{prefix}{}", yy_formula::area_text(&area))
+    }
+
+    /// 参照を入れられるときにシートのタブを選んだ: 編集を続けたままそのシートを表示し、`Sheet2!` を
+    /// 入れる。元のシートに戻ったら `Sheet2!` だけの参照は消す。扱ったら `true`。
+    pub(super) fn point_sheet(&mut self, i: usize) -> bool {
+        let Some(h) = self.entry_target() else {
+            return false;
+        };
+        if i >= self.doc.book.sheets.len() || !self.can_point(h) {
+            return false;
+        }
+        if i != self.sheet {
+            if self.home.is_none() {
+                self.home = Some(Home {
+                    sheet: self.sheet,
+                    top: self.top,
+                    left: self.left,
+                    cur: self.cur,
+                    anchor: self.anchor,
+                    whole: self.whole,
+                });
+            }
+            let home = self.home.as_ref().map(|x| x.sheet).unwrap_or(self.sheet);
+            if i == home {
+                self.go_home();
+                if let Some(p) = self.point.take_if(|p| p.hwnd == h && p.pending) {
+                    edit_replace(h, p.start, p.end, "");
+                }
+            } else {
+                self.sheet = i;
+                self.top = 0;
+                self.left = 0;
+                self.cur = (0, 0);
+                self.anchor = (0, 0);
+                self.whole = (false, false);
+                let (start, end) = match &self.point {
+                    Some(p) if p.hwnd == h => (p.start, p.end),
+                    _ => edit_sel(h),
+                };
+                let prefix = yy_formula::sheet_prefix(&self.doc.book.sheets[i].name);
+                edit_replace(h, start, end, &prefix);
+                self.point = Some(Point {
+                    hwnd: h,
+                    start,
+                    end: start + prefix.encode_utf16().count(),
+                    anchor: (0, 0),
+                    cur: (0, 0),
+                    whole: (false, false),
+                    sheet: i,
+                    pending: true,
+                });
+                set_status(
+                    "参照するセルをクリックしてください（Enter で確定、Esc で取り消して元のシートに戻ります）",
+                );
+            }
+            self.update_scrollbars();
+            self.place_editor();
+            self.invalidate();
+        }
+        unsafe {
+            let _ = SetFocus(Some(h));
+        }
+        true
+    }
+
+    /// 元のシートの表示に戻る（別のシートの参照を選んでいたとき）。
+    pub(super) fn go_home(&mut self) {
+        let Some(h) = self.home.take() else {
+            return;
+        };
+        self.sheet = h.sheet;
+        self.top = h.top;
+        self.left = h.left;
+        self.cur = h.cur;
+        self.anchor = h.anchor;
+        self.whole = h.whole;
+        unsafe {
+            SendMessageW(self.tabs, TCM_SETCURSEL, Some(WPARAM(h.sheet)), None);
+        }
+        self.update_scrollbars();
+        self.invalidate();
     }
 
     /// 格子のクリックで参照を入れる（式の入力中で、入れられる位置のとき）。入れたら `true`。
@@ -414,7 +532,15 @@ impl App {
             (None, None) => return false,
         };
         let anchor = match &self.point {
-            Some(p) if shift && p.hwnd == h && p.whole == whole => p.anchor,
+            Some(p)
+                if shift
+                    && p.hwnd == h
+                    && p.whole == whole
+                    && p.sheet == self.sheet
+                    && !p.pending =>
+            {
+                p.anchor
+            }
             _ => cell,
         };
         self.point_set(h, anchor, cell, whole);
@@ -457,7 +583,7 @@ impl App {
         let active = self
             .point
             .as_ref()
-            .filter(|p| p.hwnd == h && p.whole == (false, false));
+            .filter(|p| p.hwnd == h && p.whole == (false, false) && p.sheet == self.sheet);
         let (anchor, cur) = match active {
             Some(p) => (p.anchor, p.cur),
             None if enter_mode && self.can_point(h) => (cell, cell),
@@ -494,7 +620,12 @@ impl App {
             return;
         };
         let (h, (r, c)) = (ed.hwnd, ed.cell);
-        let rc = self.cell_rect_px(r, c);
+        // 別のシートを表示している間は外へ（入力は続けられる。内容は数式バーに映す）
+        let rc = if self.home.is_some() {
+            None
+        } else {
+            self.cell_rect_px(r, c)
+        };
         unsafe {
             let _ = match rc {
                 Some(rc) => MoveWindow(
@@ -624,6 +755,7 @@ impl App {
 
     /// 式の入力が終わった（確定・取り消し・ほかへ移った）。
     pub(super) fn entry_reset(&mut self) {
+        self.go_home();
         self.point = None;
         self.assist.dismissed = None;
         self.assist.hide();
@@ -647,9 +779,15 @@ impl App {
         // 式の参照の枠（絞り込み・並べ替えの表示中は行が合わないので出さない）
         let mut marks = Vec::new();
         if text.starts_with('=') && self.sheet().view.rows.is_none() {
+            // 表示しているシートの参照（元のシートなら名前のない参照も）
+            let shown = self.sheet().name.clone();
+            let on_home = self.home.is_none();
             for (i, r) in yy_formula::refs_in(&text)
                 .into_iter()
-                .filter(|r| r.sheet.is_none())
+                .filter(|r| match &r.sheet {
+                    None => on_home,
+                    Some(n) => yy_formula::eq_text(n, &shown),
+                })
                 .enumerate()
             {
                 let a = r.area;

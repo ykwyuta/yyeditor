@@ -148,8 +148,8 @@ enum Drag {
     Select,
     /// 式に入れる参照を選んでいる
     Point,
-    /// フィルハンドル（広げる先）
-    Fill(paint::Range4),
+    /// フィルハンドル（広げる先・右ボタン）
+    Fill(paint::Range4, bool),
     /// 列の幅（列・始めの x〔DIP〕・始めの幅〔DIP〕）
     ColWidth(u32, f32, f32),
 }
@@ -189,6 +189,10 @@ struct App {
     assist: entry::Assist,
     /// 編集中の式の参照の枠（範囲・色）
     marks: Vec<(paint::Range4, (u8, u8, u8))>,
+    /// 別のシートの参照を選んでいる間の、元のシートの表示
+    home: Option<entry::Home>,
+    /// 直前のフィル（オートフィル オプションのボタン）
+    last_fill: Option<fillhandle::LastFill>,
 }
 
 thread_local! {
@@ -556,6 +560,8 @@ fn create() -> Result<HWND> {
             point: None,
             assist: entry::Assist::create(frame, instance, ui_font),
             marks: Vec::new(),
+            home: None,
+            last_fill: None,
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         with(|a| {
@@ -802,14 +808,19 @@ impl App {
             cells: &cells,
             sel: (t, l, b, r),
             active: self.cur,
-            editing: self.editor.is_some(),
+            editing: self.editor.is_some() && self.home.is_none(),
             marks: &self.marks,
-            point: self.point.as_ref().map(|p| p.range()),
+            point: self
+                .point
+                .as_ref()
+                .filter(|p| p.sheet == self.sheet)
+                .and_then(|p| p.range()),
             fill: match self.drag {
-                Some(Drag::Fill(t)) => Some(t),
+                Some(Drag::Fill(t, _)) => Some(t),
                 _ => None,
             },
             handle: self.handle_shown(),
+            fill_button: self.fill_button_dip(),
         };
         let (w, h) = self.size_px;
         if let Err(e) = self.painter.paint(self.grid, w as u32, h as u32, &scene) {
@@ -1215,8 +1226,8 @@ impl App {
             return;
         }
         let text = window_text(self.formula);
-        let (r, c) = self.cur;
         self.entry_reset();
+        let (r, c) = self.cur;
         if text != self.cell_edit_text(r, c) {
             self.set_cell(r, c, &text);
         }
@@ -1474,6 +1485,7 @@ impl App {
         if i >= self.doc.book.sheets.len() {
             return;
         }
+        self.commit_formula_bar();
         self.end_edit(true);
         self.sheet = i;
         self.top = 0;
@@ -2261,8 +2273,9 @@ fn key_hook(msg: &MSG) -> bool {
             VK_RETURN => {
                 with(|a| {
                     let text = window_text(a.formula);
-                    let (r, c) = a.cur;
+                    // 別のシートを表示していれば元のシートに戻してから
                     a.entry_reset();
+                    let (r, c) = a.cur;
                     a.set_cell(r, c, &text);
                     unsafe {
                         let _ = SetFocus(Some(a.grid));
@@ -2374,6 +2387,10 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             if hdr.idFrom == IDC_TABS as usize && hdr.code == TCN_SELCHANGE {
                 with(|a| {
                     let i = unsafe { SendMessageW(a.tabs, TCM_GETCURSEL, None, None) }.0;
+                    // 式の入力中なら、そのシートのセルを参照として選べるようにする
+                    if i >= 0 && a.point_sheet(i as usize) {
+                        return;
+                    }
                     if i >= 0 {
                         a.switch_sheet(i as usize);
                     }
@@ -2502,13 +2519,29 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                 }
                 return LRESULT(0);
             }
+            // 別のシートの参照を選んでいる途中で参照を入れられない位置なら、確定して元のシートへ
+            if with(|a| a.home.is_some()) == Some(true) {
+                with(|a| {
+                    a.commit_formula_bar();
+                    a.end_edit(true);
+                });
+                return LRESULT(0);
+            }
             with(|a| a.commit_formula_bar());
+            // オートフィル オプションのボタン
+            if let Some((pt, dates, checked)) = with(|a| a.fill_button_down(x, y)).flatten() {
+                if let Some(id) = fillhandle::options_menu(hwnd, pt.x, pt.y, dates, checked) {
+                    with(|a| a.refill(id));
+                }
+                return LRESULT(0);
+            }
+            with(|a| a.last_fill = None);
             unsafe {
                 let _ = SetFocus(Some(hwnd));
                 SetCapture(hwnd);
             }
             // フィルハンドル
-            if with(|a| a.handle_down(x, y, msg == WM_LBUTTONDBLCLK, ctrl)) == Some(true) {
+            if with(|a| a.handle_down(x, y, msg == WM_LBUTTONDBLCLK, ctrl, false)) == Some(true) {
                 if msg == WM_LBUTTONDBLCLK {
                     unsafe {
                         let _ = ReleaseCapture();
@@ -2574,7 +2607,7 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
             let (x, y) = mouse_pos(lparam);
             with(|a| match a.drag {
                 Some(Drag::Point) => a.point_drag(x, y),
-                Some(Drag::Fill(_)) => {
+                Some(Drag::Fill(..)) => {
                     unsafe {
                         if let Ok(c) = LoadCursorW(None, IDC_CROSS) {
                             SetCursor(Some(c));
@@ -2632,9 +2665,10 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                     a.update_title();
                     a.update_scrollbars();
                 }
-                let drag = a.drag.take();
-                if let Some(Drag::Fill(target)) = drag {
-                    a.do_fill(target, ctrl);
+                if matches!(a.drag, Some(Drag::Fill(_, false))) {
+                    a.handle_up(ctrl);
+                } else if !matches!(a.drag, Some(Drag::Fill(_, true))) {
+                    a.drag = None;
                 }
                 a.invalidate();
             });
@@ -2811,8 +2845,35 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
             }
             LRESULT(0)
         }
+        WM_RBUTTONUP => {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            let Some((target, dates)) = with(|a| a.take_right_fill()).flatten() else {
+                return default_proc(hwnd, msg, wparam, lparam);
+            };
+            let mut pt = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut pt);
+            }
+            match fillhandle::options_menu(hwnd, pt.x, pt.y, dates, 0) {
+                Some(id) => {
+                    with(|a| a.right_fill(target, id));
+                }
+                None => set_status("準備完了"),
+            }
+            LRESULT(0)
+        }
         WM_RBUTTONDOWN => {
             let (x, y) = mouse_pos(lparam);
+            // 右ボタンでフィルハンドルをドラッグ（離すと仕方のメニュー）
+            if with(|a| a.handle_down(x, y, false, false, true)) == Some(true) {
+                unsafe {
+                    let _ = SetFocus(Some(hwnd));
+                    SetCapture(hwnd);
+                }
+                return LRESULT(0);
+            }
             with(|a| {
                 let (row, col) = a.hit(x, y);
                 if let (Some(r), Some(c)) = (row, col) {

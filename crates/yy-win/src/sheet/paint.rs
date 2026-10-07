@@ -93,6 +93,8 @@ pub(crate) struct Scene<'a> {
     pub fill: Option<Range4>,
     /// フィルハンドルを描く
     pub handle: bool,
+    /// オートフィル オプションのボタン（DIP。左・上・右・下）
+    pub fill_button: Option<(f32, f32, f32, f32)>,
 }
 
 /// 範囲（上・左・下・右。含む）。
@@ -675,6 +677,15 @@ impl GridPainter {
                 BG,
             );
             self.fill(rt, brush, rect(cx - d, cy - d, cx + d, cy + d), ACTIVE);
+        }
+        if let Some((l, t, r, b)) = s.fill_button {
+            let br = rect(l, t, r, b);
+            self.fill(rt, brush, br, HEAD_BG);
+            unsafe {
+                brush.SetColor(&rgb_f(GRID));
+                rt.DrawRectangle(&br, brush, 1.0, None);
+            }
+            self.text(rt, brush, "▼", 3, br, ACTIVE);
         }
         if let (Some((ax, aw)), Some(ay)) = (col_x(s.active.1), row_y(s.active.0)) {
             let r = rect(
