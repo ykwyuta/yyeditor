@@ -1,5 +1,5 @@
 //! 数式（15 章 7）: Excel と同じ文法の解析・評価と、`XLOOKUP`・`SUMIFS`・`COUNTIFS`・`SUM`・`COUNT`・
-//! `AVERAGE`・`MAX`・`MIN`・`MEDIAN`・`PERCENTILE`・`ROUNDUP`・`ROUNDDOWN`・`PRODUCT`・`ABS`・`CONCAT`・
+//! `AVERAGE`・`MAX`・`MIN`・`MEDIAN`・`PERCENTILE`・`ROUND`・`ROUNDUP`・`ROUNDDOWN`・`IF`・`PRODUCT`・`ABS`・`CONCAT`・
 //! `TEXTJOIN`・`TEXTSPLIT`・`LOW-VALUE`・`HIGH-VALUE`・四則演算・文字列の連結。
 //!
 //! セルの保管には依存しない: 評価はセルの読み方（[`Grid`]）を受け取って行う。列をまとめて読む
@@ -27,7 +27,7 @@ pub use assist::{
 };
 pub use eval::{Context, eval};
 pub use index::{Cache, ExactIndex};
-pub use parse::{Area, AreaKind, BinOp, Expr, Func, ParseError, Ref, parse};
+pub use parse::{Area, AreaKind, BinOp, Expr, Func, ParseError, Ref, Rounding, parse};
 pub use print::formula_text;
 pub use rows::{eval_rows, shift, shift_by, spread};
 

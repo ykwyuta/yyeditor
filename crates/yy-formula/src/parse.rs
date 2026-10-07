@@ -86,6 +86,17 @@ pub enum BinOp {
     Ge,
 }
 
+/// 丸め方。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rounding {
+    /// 四捨五入（`ROUND`。5 は 0 から遠い方へ）
+    HalfUp,
+    /// 切り上げ（`ROUNDUP`。0 から遠い方へ）
+    Up,
+    /// 切り捨て（`ROUNDDOWN`。0 に近い方へ）
+    Down,
+}
+
 /// 関数。
 #[derive(Clone, Debug, PartialEq)]
 pub enum Func {
@@ -108,8 +119,9 @@ pub enum Func {
         inc: bool,
         name: &'static str,
     },
-    /// `ROUNDUP`（`true`）・`ROUNDDOWN`（`false`）
-    RoundAway(bool),
+    /// `ROUND`・`ROUNDUP`・`ROUNDDOWN`
+    Round(Rounding),
+    If,
     /// `LOW-VALUE()`（COBOL の LOW-VALUE。項目をすべて X'00' にする）
     LowValue,
     /// `HIGH-VALUE()`（COBOL の HIGH-VALUE。項目をすべて X'FF' にする）
@@ -149,8 +161,10 @@ impl Func {
                 inc: false,
                 name: "PERCENTILE.EXC",
             },
-            "ROUNDUP" => Func::RoundAway(true),
-            "ROUNDDOWN" => Func::RoundAway(false),
+            "ROUND" => Func::Round(Rounding::HalfUp),
+            "ROUNDUP" => Func::Round(Rounding::Up),
+            "ROUNDDOWN" => Func::Round(Rounding::Down),
+            "IF" => Func::If,
             "LOW-VALUE" | "LOW-VALUES" => Func::LowValue,
             "HIGH-VALUE" | "HIGH-VALUES" => Func::HighValue,
             _ => Func::Unknown(Arc::from(name)),
@@ -174,8 +188,10 @@ impl Func {
             Func::Average => "AVERAGE",
             Func::Median => "MEDIAN",
             Func::Percentile { name, .. } => name,
-            Func::RoundAway(true) => "ROUNDUP",
-            Func::RoundAway(false) => "ROUNDDOWN",
+            Func::Round(Rounding::HalfUp) => "ROUND",
+            Func::Round(Rounding::Up) => "ROUNDUP",
+            Func::Round(Rounding::Down) => "ROUNDDOWN",
+            Func::If => "IF",
             Func::LowValue => "LOW-VALUE",
             Func::HighValue => "HIGH-VALUE",
             Func::Unknown(n) => n,

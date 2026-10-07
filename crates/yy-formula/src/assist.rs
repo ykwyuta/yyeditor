@@ -56,6 +56,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: None,
     },
     FuncInfo {
+        name: "IF",
+        desc: "条件が真なら「真の場合」、偽なら「偽の場合」の値を返します（選んだ方だけを計算します。偽の場合を省くと FALSE）。",
+        params: &["条件", "真の場合", "[偽の場合]"],
+        repeat: None,
+    },
+    FuncInfo {
         name: "LOW-VALUE",
         desc: "COBOL の LOW-VALUE。固定長の項目の列で、項目のすべてのバイトを X'00' にします（COBOL の型のない列では #VALUE!）。",
         params: &[],
@@ -102,6 +108,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         desc: "数値の積を返します。",
         params: &["数値1", "[数値2]"],
         repeat: Some((1, 1)),
+    },
+    FuncInfo {
+        name: "ROUND",
+        desc: "数値を指定の桁で四捨五入します（5 は 0 から遠い方へ。桁数が負なら整数部で四捨五入）。",
+        params: &["数値", "桁数"],
+        repeat: None,
     },
     FuncInfo {
         name: "ROUNDDOWN",

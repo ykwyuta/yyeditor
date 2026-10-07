@@ -647,3 +647,57 @@ fn statistics_and_rounding() {
     }
     assert!(FuncInfo::find("percentile.exc").is_some());
 }
+
+#[test]
+fn round_and_if() {
+    let mut g = Mem::new();
+    // ROUND（Excel の例。5 は 0 から遠い方へ）
+    assert_eq!(g.eval("=ROUND(2.15,1)"), n(2.2));
+    assert_eq!(g.eval("=ROUND(2.149,1)"), n(2.1));
+    assert_eq!(g.eval("=ROUND(-1.475,2)"), n(-1.48));
+    assert_eq!(g.eval("=ROUND(21.5,-1)"), n(20.0));
+    assert_eq!(g.eval("=ROUND(626.3,-3)"), n(1000.0));
+    assert_eq!(g.eval("=ROUND(1.98,-1)"), n(0.0));
+    assert_eq!(g.eval("=ROUND(-50.55,-2)"), n(-100.0));
+    assert_eq!(g.eval("=ROUND(2.5,0)"), n(3.0));
+    assert_eq!(g.eval("=ROUND(-2.5,0)"), n(-3.0));
+    // 浮動小数点の表現で 1 つ下にならない（2.675 は 2.67499999… と持つ）
+    assert_eq!(g.eval("=ROUND(2.675,2)"), n(2.68));
+    assert_eq!(g.eval("=ROUND(1.005,2)"), n(1.01));
+    assert_eq!(g.eval("=ROUND(\"x\",0)"), Val::Err(Error::Value));
+    assert_eq!(
+        formula_text(&parse("=round(A1,0)").unwrap()),
+        "=ROUND(A1,0)"
+    );
+    // IF
+    g.set(0, "A1", n(5.0));
+    g.set(0, "A2", t("東京"));
+    g.set(0, "A3", Val::Err(Error::Div0));
+    assert_eq!(g.eval("=IF(A1>3,\"大\",\"小\")"), t("大"));
+    assert_eq!(g.eval("=IF(A1>9,\"大\",\"小\")"), t("小"));
+    assert_eq!(g.eval("=IF(A1>9,\"大\")"), Val::Bool(false));
+    assert_eq!(g.eval("=IF(A1>9,\"大\",)"), n(0.0));
+    assert_eq!(g.eval("=IF(A1,,1)"), n(0.0));
+    assert_eq!(g.eval("=IF(A2=\"東京\",1,2)"), n(1.0));
+    assert_eq!(g.eval("=IF(0,1,2)"), n(2.0));
+    assert_eq!(g.eval("=IF(B9,1,2)"), n(2.0));
+    assert_eq!(g.eval("=IF(\"true\",1,2)"), n(1.0));
+    assert_eq!(g.eval("=IF(\"x\",1,2)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=IF(A3,1,2)"), Val::Err(Error::Div0));
+    // 選ばなかった方は計算しない（エラーにならない）
+    assert_eq!(g.eval("=IF(TRUE,1,A3)"), n(1.0));
+    assert_eq!(g.eval("=IF(FALSE,1/0,7)"), n(7.0));
+    // 入れ子・ほかの関数と
+    assert_eq!(g.eval("=IF(A1>=5,IF(A1>=8,\"A\",\"B\"),\"C\")"), t("B"));
+    assert_eq!(g.eval("=SUM(IF({1,0,1},{10,20,30},0))"), n(40.0));
+    assert_eq!(g.eval("=IF(1)"), Val::Err(Error::Value));
+    // 配列の条件は要素ごと
+    match g.eval("=IF({1,0;0,1},\"y\",\"n\")") {
+        Val::Array(a) => {
+            assert_eq!((a.rows, a.cols), (2, 2));
+            assert_eq!(a.data, vec![t("y"), t("n"), t("n"), t("y")]);
+        }
+        v => panic!("{v:?}"),
+    }
+    assert_eq!(FuncInfo::find("if").map(|f| f.name), Some("IF"));
+}

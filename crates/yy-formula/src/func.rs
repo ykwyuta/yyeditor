@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::criteria::Criterion;
 use crate::eval::{Arg, Context, MAX_ARRAY, arg, compare, eval, map, num, num_cmp, text};
-use crate::parse::{Area, Expr, Func};
+use crate::parse::{Area, Expr, Func, Rounding};
 use crate::{Array, Cell, Error, Val, eq_text, wildcard_match};
 
 pub(crate) fn call(f: &Func, args: &[Expr], cx: &Context<'_>) -> Val {
@@ -25,7 +25,8 @@ pub(crate) fn call(f: &Func, args: &[Expr], cx: &Context<'_>) -> Val {
         Func::Average => average(args, cx),
         Func::Median => median(args, cx),
         Func::Percentile { inc, .. } => percentile(args, cx, *inc),
-        Func::RoundAway(up) => round_away(args, cx, *up),
+        Func::Round(mode) => round(args, cx, *mode),
+        Func::If => if_(args, cx),
         Func::LowValue | Func::HighValue if !args.is_empty() => Val::Err(Error::Value),
         Func::LowValue => Val::text(crate::LOW_VALUE),
         Func::HighValue => Val::text(crate::HIGH_VALUE),
@@ -294,9 +295,9 @@ fn snap15(x: f64) -> f64 {
     format!("{x:.14e}").parse().unwrap_or(x)
 }
 
-/// `ROUNDUP`（`up`。0 から遠い方へ）・`ROUNDDOWN`（0 に近い方へ）。桁数は小数点以下の桁（負なら
-/// 整数部の桁。`ROUNDUP(1234,-2)` = 1300）で、小数は切り捨てて使う。
-fn round_away(args: &[Expr], cx: &Context<'_>, up: bool) -> Val {
+/// `ROUND`（四捨五入。5 は 0 から遠い方へ）・`ROUNDUP`（0 から遠い方へ）・`ROUNDDOWN`（0 に近い方へ）。
+/// 桁数は小数点以下の桁（負なら整数部の桁。`ROUND(1234.5,-2)` = 1200）で、小数は切り捨てて使う。
+fn round(args: &[Expr], cx: &Context<'_>, mode: Rounding) -> Val {
     if args.len() != 2 {
         return Val::Err(Error::Value);
     }
@@ -309,7 +310,11 @@ fn round_away(args: &[Expr], cx: &Context<'_>, up: bool) -> Val {
             let scale = 10f64.powi(digits.abs());
             let y = if digits >= 0 { x * scale } else { x / scale };
             let y = snap15(y.abs());
-            let r = if up { y.ceil() } else { y.floor() };
+            let r = match mode {
+                Rounding::HalfUp => y.round(),
+                Rounding::Up => y.ceil(),
+                Rounding::Down => y.floor(),
+            };
             let r = if digits >= 0 { r / scale } else { r * scale };
             let r = r.copysign(x);
             if r.is_finite() {
@@ -320,6 +325,85 @@ fn round_away(args: &[Expr], cx: &Context<'_>, up: bool) -> Val {
         }
         Err(e) => Val::Err(e),
     })
+}
+
+// ---- IF --------------------------------------------------------------------------------
+
+/// 条件の真偽（数値は 0 以外が真、文字列は `TRUE`・`FALSE` だけ、空は偽）。
+fn truth(v: &Val) -> Result<bool, Error> {
+    match v.cell() {
+        Cell::Empty => Ok(false),
+        Cell::Num(n) => Ok(n != 0.0),
+        Cell::Bool(b) => Ok(b),
+        Cell::Err(e) => Err(e),
+        Cell::Text(s) if s.eq_ignore_ascii_case("TRUE") => Ok(true),
+        Cell::Text(s) if s.eq_ignore_ascii_case("FALSE") => Ok(false),
+        Cell::Text(_) => Err(Error::Value),
+    }
+}
+
+/// `IF(条件, 真の場合, [偽の場合])`: 選んだ方の式だけを計算する。偽の場合を書かなければ `FALSE`、
+/// 空の引数（`IF(A1,,1)`）は 0。条件が配列なら要素ごとに選ぶ（Excel と同じ。1 行・1 列は広げる）。
+fn if_(args: &[Expr], cx: &Context<'_>) -> Val {
+    if !(2..=3).contains(&args.len()) {
+        return Val::Err(Error::Value);
+    }
+    let branch = |i: usize| -> Val {
+        match args.get(i) {
+            None => Val::Bool(false),
+            Some(Expr::Missing) => Val::Num(0.0),
+            Some(e) => eval(e, cx),
+        }
+    };
+    let cond = eval(&args[0], cx);
+    let Val::Array(c) = &cond else {
+        return match truth(&cond) {
+            Ok(true) => branch(1),
+            Ok(false) => branch(2),
+            Err(e) => Val::Err(e),
+        };
+    };
+    let (t, f) = (branch(1), branch(2));
+    let dims = |v: &Val| match v {
+        Val::Array(x) => (x.rows, x.cols),
+        _ => (1, 1),
+    };
+    let (tr, tc) = dims(&t);
+    let (fr, fc) = dims(&f);
+    let rows = c.rows.max(tr).max(fr);
+    let cols = c.cols.max(tc).max(fc);
+    if (rows * cols) as u64 > MAX_ARRAY {
+        return Val::Err(Error::Num);
+    }
+    // 1 行・1 列は広げ、はみ出た部分は #N/A
+    let at = |v: &Val, r: usize, col: usize| -> Val {
+        match v {
+            Val::Array(x) => {
+                let r = if x.rows == 1 { 0 } else { r };
+                let col = if x.cols == 1 { 0 } else { col };
+                if r >= x.rows || col >= x.cols {
+                    Val::Err(Error::NA)
+                } else {
+                    x.get(r, col).clone()
+                }
+            }
+            v => v.clone(),
+        }
+    };
+    let mut data = Vec::with_capacity(rows * cols);
+    for r in 0..rows {
+        for col in 0..cols {
+            data.push(match at(&cond, r, col) {
+                Val::Err(e) => Val::Err(e),
+                cv => match truth(&cv) {
+                    Ok(true) => at(&t, r, col),
+                    Ok(false) => at(&f, r, col),
+                    Err(e) => Val::Err(e),
+                },
+            });
+        }
+    }
+    Val::Array(Arc::new(Array::new(rows, cols, data)))
 }
 
 // ---- ABS・PRODUCT ----------------------------------------------------------------------
