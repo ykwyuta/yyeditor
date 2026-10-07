@@ -209,6 +209,12 @@ fn printer_and_ind_file_over_starttls() {
             .wait_event(T, |e| *e == Event::Mode(Mode::Tn3270e))
             .is_some()
     );
+    // 模擬ホストがプリンターを登録するまで待つ（Windows の CI で PRINT が先に届いたことがある）
+    assert!(
+        m.wait_event(T, |e| e.contains("printer ready")).is_some(),
+        "{:#?}",
+        m.events()
+    );
     let script = format!(
         r#"{LOGON}
         type("PRINT"); key("Enter"); wait_text("SCS"); wait_unlocked();
