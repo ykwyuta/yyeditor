@@ -9,6 +9,8 @@
 //! 状態を借りたままにしない。
 
 mod bulkui;
+mod entry;
+mod fillhandle;
 mod filter;
 mod format;
 mod paint;
@@ -112,6 +114,8 @@ const MK_CONTROL: usize = 0x8;
 
 /// 式の再計算をバックグラウンドで始める（編集のあとにフレームへ送る）
 const WM_APP_RECALC: u32 = WM_APP + 40;
+/// 式の入力の補助（候補・参照の枠）を出し直す
+const WM_APP_ENTRY: u32 = WM_APP + 41;
 
 const IDC_FORMULA: u16 = 100;
 const IDC_TABS: u16 = 101;
@@ -142,6 +146,10 @@ struct Editor {
 #[derive(Clone, Copy, Debug)]
 enum Drag {
     Select,
+    /// 式に入れる参照を選んでいる
+    Point,
+    /// フィルハンドル（広げる先）
+    Fill(paint::Range4),
     /// 列の幅（列・始めの x〔DIP〕・始めの幅〔DIP〕）
     ColWidth(u32, f32, f32),
 }
@@ -175,6 +183,12 @@ struct App {
     whole: (bool, bool),
     /// 前の検索・置換
     last_find: Option<yy_sheet::bulk::Replace>,
+    /// 式に入れている参照
+    point: Option<entry::Point>,
+    /// 関数の候補・引数の書き方の小窓
+    assist: entry::Assist,
+    /// 編集中の式の参照の枠（範囲・色）
+    marks: Vec<(paint::Range4, (u8, u8, u8))>,
 }
 
 thread_local! {
@@ -185,8 +199,14 @@ fn with<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|a| a.try_borrow_mut().ok()?.as_mut().map(f))
 }
 
+thread_local! {
+    /// ステータスバー（状態を借りている間にも書けるよう、状態とは別に持つ）
+    static STATUS: std::cell::Cell<HWND> = const { std::cell::Cell::new(HWND(std::ptr::null_mut())) };
+}
+
 fn set_status(text: &str) {
-    if let Some(h) = with(|a| a.status) {
+    let h = STATUS.with(|s| s.get());
+    if !h.is_invalid() {
         let w = HSTRING::from(text);
         unsafe {
             let _ = SendMessageW(
@@ -233,10 +253,13 @@ fn run_inner(initial: Option<PathBuf>) -> Result<()> {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) && key_hook(&msg) {
+                entry::after_dispatch(&msg);
                 continue;
             }
+            entry::before_dispatch(&msg);
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            entry::after_dispatch(&msg);
         }
     }
     APP.with(|a| a.borrow_mut().take());
@@ -392,6 +415,18 @@ fn create() -> Result<HWND> {
         if RegisterClassExW(&grid_class) == 0 {
             return Err(windows::core::Error::from_thread());
         }
+        let assist_class = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_DROPSHADOW,
+            lpfnWndProc: Some(entry::assist_proc),
+            hInstance: instance,
+            hCursor: arrow,
+            lpszClassName: entry::ASSIST_CLASS,
+            ..Default::default()
+        };
+        if RegisterClassExW(&assist_class) == 0 {
+            return Err(windows::core::Error::from_thread());
+        }
         let (config, config_error) = Config::load();
         crate::font::register_gdi();
         let frame = CreateWindowExW(
@@ -487,6 +522,7 @@ fn create() -> Result<HWND> {
             },
         );
         DragAcceptFiles(frame, true);
+        STATUS.with(|s| s.set(status));
         let app = App {
             frame,
             grid,
@@ -517,6 +553,9 @@ fn create() -> Result<HWND> {
             size_px: (0, 0),
             whole: (false, false),
             last_find: None,
+            point: None,
+            assist: entry::Assist::create(frame, instance, ui_font),
+            marks: Vec::new(),
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         with(|a| {
@@ -764,6 +803,13 @@ impl App {
             sel: (t, l, b, r),
             active: self.cur,
             editing: self.editor.is_some(),
+            marks: &self.marks,
+            point: self.point.as_ref().map(|p| p.range()),
+            fill: match self.drag {
+                Some(Drag::Fill(t)) => Some(t),
+                _ => None,
+            },
+            handle: self.handle_shown(),
         };
         let (w, h) = self.size_px;
         if let Err(e) = self.painter.paint(self.grid, w as u32, h as u32, &scene) {
@@ -1130,11 +1176,13 @@ impl App {
             });
         }
         self.invalidate();
+        self.refresh_assist();
     }
 
     fn close_editor(&mut self) -> Option<String> {
         let ed = self.editor.take()?;
         let text = window_text(ed.hwnd);
+        self.entry_reset();
         unsafe {
             let _ = DestroyWindow(ed.hwnd);
             let _ = DeleteObject(HGDIOBJ(ed.font.0));
@@ -1142,6 +1190,36 @@ impl App {
         }
         self.invalidate();
         Some(text)
+    }
+
+    /// 数式バーをクリックした: セルの編集を数式バーへ移す（内容は映してある。確定しない）。
+    fn move_edit_to_formula_bar(&mut self) {
+        let Some(ed) = self.editor.take() else {
+            return;
+        };
+        let text = window_text(ed.hwnd);
+        self.point = None;
+        unsafe {
+            let _ = DestroyWindow(ed.hwnd);
+            let _ = DeleteObject(HGDIOBJ(ed.font.0));
+            if window_text(self.formula) != text {
+                let _ = SetWindowTextW(self.formula, &HSTRING::from(text.as_str()));
+            }
+        }
+        self.invalidate();
+    }
+
+    /// 数式バーで入力していれば確定する（格子をクリックしたとき。Excel と同じ）。
+    fn commit_formula_bar(&mut self) {
+        if unsafe { GetFocus() } != self.formula {
+            return;
+        }
+        let text = window_text(self.formula);
+        let (r, c) = self.cur;
+        self.entry_reset();
+        if text != self.cell_edit_text(r, c) {
+            self.set_cell(r, c, &text);
+        }
     }
 
     /// 編集を確定する（`false` なら取り消す）。
@@ -1152,6 +1230,9 @@ impl App {
         };
         if commit && let Some((r, c)) = cell {
             self.set_cell(r, c, &text);
+        } else {
+            // 数式バーに映していた入力を戻す
+            self.sync_formula();
         }
     }
 
@@ -2134,6 +2215,16 @@ fn key_hook(msg: &MSG) -> bool {
     let vk = VIRTUAL_KEY(msg.wParam.0 as u16);
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+    // 式の入力（候補の一覧・F4・矢印での参照）
+    if msg.message == WM_KEYDOWN
+        && with(|a| {
+            a.entry_target()
+                .filter(|t| *t == msg.hwnd)
+                .is_some_and(|t| a.entry_key(t, vk, shift, ctrl))
+        }) == Some(true)
+    {
+        return true;
+    }
     // 編集中のセル
     let editing = with(|a| a.editor.as_ref().map(|e| (e.hwnd, e.enter_mode))).flatten();
     if let Some((h, enter_mode)) = editing
@@ -2171,6 +2262,7 @@ fn key_hook(msg: &MSG) -> bool {
                 with(|a| {
                     let text = window_text(a.formula);
                     let (r, c) = a.cur;
+                    a.entry_reset();
                     a.set_cell(r, c, &text);
                     unsafe {
                         let _ = SetFocus(Some(a.grid));
@@ -2181,6 +2273,7 @@ fn key_hook(msg: &MSG) -> bool {
             }
             VK_ESCAPE => {
                 with(|a| {
+                    a.entry_reset();
                     unsafe {
                         let _ = SetFocus(Some(a.grid));
                     }
@@ -2245,7 +2338,10 @@ fn key_hook(msg: &MSG) -> bool {
 extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_SIZE => {
-            with(|a| a.layout());
+            with(|a| {
+                a.layout();
+                a.place_editor();
+            });
             LRESULT(0)
         }
         WM_SETFOCUS => {
@@ -2261,7 +2357,12 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             let code = hiword(wparam.0);
             if id == IDC_FORMULA {
                 if code == EN_SETFOCUS {
-                    with(|a| a.end_edit(true));
+                    with(|a| a.move_edit_to_formula_bar());
+                }
+                if code == EN_SETFOCUS || code == EN_KILLFOCUS {
+                    unsafe {
+                        let _ = PostMessageW(Some(hwnd), WM_APP_ENTRY, WPARAM(0), LPARAM(0));
+                    }
                 }
                 return LRESULT(0);
             }
@@ -2340,6 +2441,16 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             recalc_in_background();
             LRESULT(0)
         }
+        WM_APP_ENTRY => {
+            with(|a| a.refresh_assist());
+            LRESULT(0)
+        }
+        WM_ACTIVATE | WM_MOVE => {
+            unsafe {
+                let _ = PostMessageW(Some(hwnd), WM_APP_ENTRY, WPARAM(0), LPARAM(0));
+            }
+            default_proc(hwnd, msg, wparam, lparam)
+        }
         _ => default_proc(hwnd, msg, wparam, lparam),
     }
 }
@@ -2383,9 +2494,27 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
             let (x, y) = mouse_pos(lparam);
             let shift = wparam.0 & MK_SHIFT != 0;
+            let ctrl = wparam.0 & MK_CONTROL != 0;
+            // 式の入力中なら、クリックしたセル・列・行を参照として入れる
+            if with(|a| a.point_click(x, y, shift)) == Some(true) {
+                unsafe {
+                    SetCapture(hwnd);
+                }
+                return LRESULT(0);
+            }
+            with(|a| a.commit_formula_bar());
             unsafe {
                 let _ = SetFocus(Some(hwnd));
                 SetCapture(hwnd);
+            }
+            // フィルハンドル
+            if with(|a| a.handle_down(x, y, msg == WM_LBUTTONDBLCLK, ctrl)) == Some(true) {
+                if msg == WM_LBUTTONDBLCLK {
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                }
+                return LRESULT(0);
             }
             let button = with(|a| a.header_button_at(x, y)).flatten();
             if let Some(c) = button {
@@ -2444,6 +2573,15 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
         WM_MOUSEMOVE => {
             let (x, y) = mouse_pos(lparam);
             with(|a| match a.drag {
+                Some(Drag::Point) => a.point_drag(x, y),
+                Some(Drag::Fill(_)) => {
+                    unsafe {
+                        if let Ok(c) = LoadCursorW(None, IDC_CROSS) {
+                            SetCursor(Some(c));
+                        }
+                    }
+                    a.handle_drag(x, y);
+                }
                 Some(Drag::Select) => {
                     let (row, col) = a.hit(x, y);
                     let r = row.unwrap_or(a.top);
@@ -2466,9 +2604,16 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                     a.invalidate();
                 }
                 None => {
-                    if a.col_border(x, y).is_some() {
+                    let cursor = if a.col_border(x, y).is_some() {
+                        Some(IDC_SIZEWE)
+                    } else if a.on_handle(x, y) {
+                        Some(IDC_CROSS)
+                    } else {
+                        None
+                    };
+                    if let Some(id) = cursor {
                         unsafe {
-                            if let Ok(c) = LoadCursorW(None, IDC_SIZEWE) {
+                            if let Ok(c) = LoadCursorW(None, id) {
                                 SetCursor(Some(c));
                             }
                         }
@@ -2481,12 +2626,17 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
             unsafe {
                 let _ = ReleaseCapture();
             }
+            let ctrl = wparam.0 & MK_CONTROL != 0;
             with(|a| {
                 if matches!(a.drag, Some(Drag::ColWidth(..))) {
                     a.update_title();
                     a.update_scrollbars();
                 }
-                a.drag = None;
+                let drag = a.drag.take();
+                if let Some(Drag::Fill(target)) = drag {
+                    a.do_fill(target, ctrl);
+                }
+                a.invalidate();
             });
             LRESULT(0)
         }
@@ -2502,10 +2652,8 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                 a.top = (a.top as i64 - lines).max(0) as u64;
                 a.update_scrollbars();
                 a.invalidate();
-                if let Some(ed) = &a.editor {
-                    let _ = ed;
-                    a.end_edit(true);
-                }
+                // 編集中はそのまま（式に入れる参照を選べるように）。欄をセルに合わせる
+                a.place_editor();
             });
             LRESULT(0)
         }
@@ -2513,7 +2661,6 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
             let code = SCROLLBAR_COMMAND(loword(wparam.0) as i32);
             let vert = msg == WM_VSCROLL;
             with(|a| {
-                a.end_edit(true);
                 let page = if vert {
                     a.visible_rows() as i64
                 } else {
@@ -2545,6 +2692,7 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                     a.left = (new as u32).min(16_383);
                 }
                 a.update_scrollbars();
+                a.place_editor();
                 a.invalidate();
             });
             LRESULT(0)

@@ -85,7 +85,32 @@ pub(crate) struct Scene<'a> {
     pub row_labels: &'a [(u64, bool)],
     /// ボタンを出す列（列番号・状態）
     pub buttons: &'a [(u32, ButtonState)],
+    /// 編集中の式の参照（範囲・色）
+    pub marks: &'a [(Range4, (u8, u8, u8))],
+    /// 式に入れている参照（点線の枠）
+    pub point: Option<Range4>,
+    /// フィルハンドルで広げる先（点線の枠）
+    pub fill: Option<Range4>,
+    /// フィルハンドルを描く
+    pub handle: bool,
 }
+
+/// 範囲（上・左・下・右。含む）。
+pub(crate) type Range4 = (u64, u32, u64, u32);
+
+/// 式の参照の枠の色（Excel と同じく順に使う）。
+pub(crate) const MARK_COLORS: [(u8, u8, u8); 7] = [
+    (31, 111, 208),
+    (208, 58, 47),
+    (123, 63, 181),
+    (46, 139, 87),
+    (199, 107, 0),
+    (0, 139, 139),
+    (176, 48, 128),
+];
+
+/// フィルハンドルの大きさ（DIP）。
+pub(crate) const HANDLE: f32 = 7.0;
 
 fn rgb_f((r, g, b): (u8, u8, u8)) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
@@ -599,20 +624,57 @@ impl GridPainter {
         let last_c = s.cols.last().map(|c| c.0).unwrap_or(0);
         let first_r = s.rows.first().map(|r| r.0).unwrap_or(0);
         let last_r = s.rows.last().map(|r| r.0).unwrap_or(0);
-        if right >= first_c && left <= last_c && bottom >= first_r && top <= last_r {
-            let lc = left.max(first_c);
-            let rc = right.min(last_c);
-            let tr = top.max(first_r);
-            let br = bottom.min(last_r);
-            if let (Some((lx, _)), Some((rx, rw)), Some(ty), Some(by)) =
-                (col_x(lc), col_x(rc), row_y(tr), row_y(br))
-            {
-                let r = rect(hw + lx, hh + ty, hw + rx + rw, hh + by + hh);
+        // 範囲の見えている部分の長方形
+        let clip = |(top, left, bottom, right): Range4| -> Option<D2D_RECT_F> {
+            if !(right >= first_c && left <= last_c && bottom >= first_r && top <= last_r) {
+                return None;
+            }
+            let (Some((lx, _)), Some((rx, rw)), Some(ty), Some(by)) = (
+                col_x(left.max(first_c)),
+                col_x(right.min(last_c)),
+                row_y(top.max(first_r)),
+                row_y(bottom.min(last_r)),
+            ) else {
+                return None;
+            };
+            Some(rect(hw + lx, hh + ty, hw + rx + rw, hh + by + hh))
+        };
+        // 式の参照の枠
+        for &(range, color) in s.marks {
+            if let Some(r) = clip(range) {
                 unsafe {
-                    brush.SetColor(&rgb_f(ACTIVE));
+                    brush.SetColor(&rgb_f(color));
                     rt.DrawRectangle(&r, brush, 2.0, None);
                 }
             }
+        }
+        if let Some(r) = clip(s.sel) {
+            unsafe {
+                brush.SetColor(&rgb_f(ACTIVE));
+                rt.DrawRectangle(&r, brush, 2.0, None);
+            }
+        }
+        for (range, color) in [(s.point, ACTIVE), (s.fill, (90, 90, 90))] {
+            if let Some(r) = range.and_then(clip) {
+                unsafe {
+                    brush.SetColor(&rgb_f(color));
+                    rt.DrawRectangle(&r, brush, 2.0, self.dash.as_ref());
+                }
+            }
+        }
+        // フィルハンドル（選択範囲の右下の角が見えているとき）
+        if s.handle
+            && let (Some((rx, rw)), Some(by)) = (col_x(right), row_y(bottom))
+        {
+            let (cx, cy) = (hw + rx + rw, hh + by + hh);
+            let d = HANDLE / 2.0;
+            self.fill(
+                rt,
+                brush,
+                rect(cx - d - 1.0, cy - d - 1.0, cx + d + 1.0, cy + d + 1.0),
+                BG,
+            );
+            self.fill(rt, brush, rect(cx - d, cy - d, cx + d, cy + d), ACTIVE);
         }
         if let (Some((ax, aw)), Some(ay)) = (col_x(s.active.1), row_y(s.active.0)) {
             let r = rect(

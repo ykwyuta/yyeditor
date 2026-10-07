@@ -14,6 +14,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+pub mod autofill;
 pub mod budget;
 pub mod bulk;
 pub mod chunk;

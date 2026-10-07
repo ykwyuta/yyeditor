@@ -33,6 +33,27 @@ pub fn shift(e: &Expr, dr: i64) -> Expr {
     }
 }
 
+/// 式の相対参照を `dr` 行・`dc` 列ずらした式（フィルハンドルでのコピー。外に出る参照は `#REF!`）。
+pub fn shift_by(e: &Expr, dr: i64, dc: i64) -> Expr {
+    let f = |x: &Expr| shift_by(x, dr, dc);
+    match e {
+        Expr::Ref(r) => match crate::offset_area2(&r.area, dr, dc) {
+            Some(area) => Expr::Ref(crate::Ref {
+                sheet: r.sheet.clone(),
+                area,
+            }),
+            None => Expr::Err(Error::Ref),
+        },
+        Expr::Neg(x) => Expr::Neg(Box::new(f(x))),
+        Expr::Plus(x) => Expr::Plus(Box::new(f(x))),
+        Expr::Percent(x) => Expr::Percent(Box::new(f(x))),
+        Expr::Paren(x) => Expr::Paren(Box::new(f(x))),
+        Expr::Bin(op, l, r) => Expr::Bin(*op, Box::new(f(l)), Box::new(f(r))),
+        Expr::Call(func, args) => Expr::Call(func.clone(), args.iter().map(f).collect()),
+        e => e.clone(),
+    }
+}
+
 /// 式を `rows` 行に入れたとき、参照する範囲の全体（相対参照の行を広げたもの）。
 pub fn spread(a: &Area, rows: u64) -> Area {
     if rows <= 1 || a.kind == AreaKind::Cols {

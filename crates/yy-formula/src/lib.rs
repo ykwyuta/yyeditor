@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 mod adjust;
+mod assist;
 mod criteria;
 mod eval;
 mod func;
@@ -20,11 +21,12 @@ mod rows;
 mod tests;
 
 pub use adjust::{Edit, adjust};
+pub use assist::{FUNCTIONS, FuncInfo, RefSpan, Typing, area_text, refs_in, toggle_abs, typing};
 pub use eval::{Context, eval};
 pub use index::{Cache, ExactIndex};
 pub use parse::{Area, AreaKind, BinOp, Expr, Func, ParseError, Ref, parse};
 pub use print::formula_text;
-pub use rows::{eval_rows, shift, spread};
+pub use rows::{eval_rows, shift, shift_by, spread};
 
 /// エラー値（Excel と同じ。並びは `yy_sheet::CellError` と同じ）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -210,6 +212,32 @@ pub fn offset_area(a: &Area, dr: i64) -> Option<Area> {
     }
     Some(out)
 }
+
+/// 範囲の相対参照を `dr` 行・`dc` 列ずらす（列全体の参照は行が、行全体の参照は列が動かない）。
+/// 行・列が範囲の外に出れば `None`。
+pub fn offset_area2(a: &Area, dr: i64, dc: i64) -> Option<Area> {
+    let mut out = offset_area(a, dr)?;
+    if dc == 0 || a.kind == AreaKind::Rows {
+        return Some(out);
+    }
+    let mv = |c: u32, abs: bool| -> Option<u32> {
+        if abs {
+            Some(c)
+        } else {
+            u32::try_from(c as i64 + dc).ok().filter(|&c| c <= MAX_COL)
+        }
+    };
+    out.c0 = mv(a.c0, a.abs[1])?;
+    out.c1 = mv(a.c1, a.abs[3])?;
+    if out.c0 > out.c1 {
+        std::mem::swap(&mut out.c0, &mut out.c1);
+        out.abs.swap(1, 3);
+    }
+    Some(out)
+}
+
+/// 最後の列（`XFD`）。
+pub const MAX_COL: u32 = 16_383;
 
 /// 列番号 → 列の名前（0 → `A`）。
 pub fn col_name(mut c: u32) -> String {
