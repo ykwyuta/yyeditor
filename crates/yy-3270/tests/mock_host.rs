@@ -353,8 +353,10 @@ fn ind_file_get_with_a_mock_tso_host() {
     let want = e("IND$FILE GET 'USER.DATA' CRLF");
     assert!(cmd.windows(want.len()).any(|x| x == want), "{cmd:02X?}");
     pump(&mut session, &mut events, &|_, ev| {
+        // 結果のメッセージで終わる。ホストの最後の Close にも答えるまで受け取り続ける
         ev.iter()
             .any(|e| matches!(e, Event::Transfer(FtEvent::Done { .. })))
+            && h.is_finished()
     });
     assert!(events.contains(&Event::Transfer(FtEvent::Started)));
     assert!(events.contains(&Event::Transfer(FtEvent::Done {
@@ -371,7 +373,7 @@ fn ind_file_get_with_a_mock_tso_host() {
     assert_eq!(&acks[2][5..], &[AID_SF, 0, 5, 0xD0, 0x41, 0x09]);
     let raw = file.0.lock().unwrap().clone();
     assert_eq!(
-        ind_file::records_to_text(&raw, Ccsid::Ibm930),
+        ind_file::records_to_text(&raw, Ccsid::Ibm930, 0),
         "日本語のデータ\r\nABC\r\n"
     );
     h.join().unwrap();

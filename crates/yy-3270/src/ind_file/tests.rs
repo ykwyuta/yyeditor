@@ -210,12 +210,12 @@ fn converts_japanese_records_locally() {
     // 1 行目: SO 日本語 SI 空白 ABC CR LF
     assert_eq!(raw[0], 0x0E);
     assert!(raw.windows(2).filter(|w| *w == [0x0D, 0x25]).count() == 4);
-    let back = records_to_text(&raw, Ccsid::Ibm930);
+    let back = records_to_text(&raw, Ccsid::Ibm930, 0);
     // 末尾の空白は除く（固定長のレコードの詰め物）
     assert_eq!(back, "日本語 ABC\r\nｶﾅ\r\n\r\n末尾\r\n");
     // 固定長のホストが詰めた空白、ASCII の LF も区切りとして読む
     assert_eq!(
-        records_to_text(b"\xC1\x40\x40\x0D\x0A\xC2", Ccsid::Ibm037),
+        records_to_text(b"\xC1\x40\x40\x0D\x0A\xC2", Ccsid::Ibm037, 0),
         "A\r\nB\r\n"
     );
     // 変換できない文字は行番号つきで断る
@@ -251,7 +251,88 @@ fn converts_japanese_records_locally() {
     assert_eq!(req.record_limit(), Some(255));
     req.direction = Direction::Receive;
     assert_eq!(req.record_limit(), None);
+    // 区切りのない固定長のレコード（MVS 3.8j の IND$FILE）: 80 の倍数なら 80 バイトずつ
+    let mut fb = vec![0x40u8; 160];
+    fb[0] = 0xC1;
+    fb[80] = 0xC2;
+    assert_eq!(records_to_text(&fb, Ccsid::Ibm037, 0), "A\r\nB\r\n");
+    // レコード長を指定すればその長さで
+    assert_eq!(
+        records_to_text(&fb[..120], Ccsid::Ibm037, 40),
+        "A\r\n\r\nB\r\n"
+    );
     let mut v = b"abc\x1A".to_vec();
     strip_ascii_eof(&mut v);
     assert_eq!(v, b"abc");
+}
+
+#[test]
+fn completes_on_the_message_without_a_close() {
+    // MVS 3.8j の IND$FILE 2.0.5: メッセージの段階を閉じずに READY に戻る
+    let out = Shared::default();
+    let mut dft = Dft::default();
+    dft.start(Local::Sink(Box::new(out.clone())));
+    dft.handle(&open(b"FT:DATA")).unwrap();
+    dft.handle(&data_insert(b"\xC1")).unwrap();
+    dft.handle(&sf(CLOSE_REQ, &[])).unwrap();
+    dft.handle(&open(b"FT:MSG ")).unwrap();
+    let mut msg = b"TRANS03   File transfer complete$".to_vec();
+    msg.resize(85, b' ');
+    dft.handle(&data_insert(&msg)).unwrap();
+    assert!(!dft.active());
+    let ev = dft.take_events();
+    assert_eq!(
+        ev.last(),
+        Some(&FtEvent::Done {
+            ok: true,
+            message: "TRANS03   File transfer complete".into()
+        })
+    );
+    // 後から Close が来ても 2 度は知らせない
+    dft.handle(&sf(CLOSE_REQ, &[])).unwrap();
+    assert!(dft.take_events().is_empty());
+}
+
+#[test]
+fn fixed_length_text_does_not_rely_on_crlf() {
+    let mut r = Request {
+        host: HostKind::Tso,
+        direction: Direction::Send,
+        host_file: "'U.FB'".into(),
+        mode: Mode::Text(Ccsid::Ibm930),
+        recfm: Recfm::Fixed,
+        lrecl: 10,
+        space: 0,
+        append: false,
+    };
+    // 固定長のテキストは CRLF を付けず、LRECL まで空白で詰める
+    assert_eq!(r.fixed_text(), Some(10));
+    assert_eq!(r.command(), "IND$FILE PUT 'U.FB' RECFM(F) LRECL(10)");
+    let up = encode_upload(&r, "AB\n日本\n", Ccsid::Ibm930).unwrap();
+    assert_eq!(up.len(), 20);
+    assert_eq!(&up[..3], &[0xC1, 0xC2, 0x40]);
+    assert_eq!(up[10], 0x0E);
+    assert_eq!(&up[15..], &[0x0F, 0x40, 0x40, 0x40, 0x40]);
+    // 長すぎる行は切り詰めずに断る
+    assert!(matches!(
+        encode_upload(&r, "ABCDEFGHIJK\n", Ccsid::Ibm930),
+        Err(LineError::TooLong {
+            line: 1,
+            len: 11,
+            limit: 10
+        })
+    ));
+    // 受け取りは LRECL ごとに分ける
+    r.direction = Direction::Receive;
+    assert_eq!(r.command(), "IND$FILE GET 'U.FB'");
+    assert_eq!(decode_download(&r, &up, Ccsid::Ibm930), "AB\r\n日本\r\n");
+    // 可変長・LRECL なしは CRLF に頼る
+    r.lrecl = 0;
+    assert_eq!(r.fixed_text(), None);
+    assert_eq!(r.command(), "IND$FILE GET 'U.FB' CRLF");
+    r.direction = Direction::Send;
+    r.recfm = Recfm::Variable;
+    r.lrecl = 255;
+    assert_eq!(r.fixed_text(), None);
+    assert!(r.command().contains("CRLF"));
 }

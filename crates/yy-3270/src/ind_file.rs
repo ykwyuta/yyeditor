@@ -104,6 +104,19 @@ pub struct Request {
 }
 
 impl Request {
+    /// テキスト（端末で変換）を固定長のレコードとして扱うときのレコード長。
+    ///
+    /// 送るときは RECFM F と LRECL、受け取るときは LRECL を指定した場合。`CRLF` を付けず、
+    /// 行を LRECL まで空白で詰めて送り、受け取ったものを LRECL ごとに分ける。ホストの
+    /// `CRLF` の扱いに頼らない（MVS 3.8j の IND$FILE 2.0.5 は、`ASCII` なしの `CRLF` では
+    /// 区切りを入れも除きもしない）。
+    pub fn fixed_text(&self) -> Option<usize> {
+        let fixed = matches!(self.mode, Mode::Text(_))
+            && self.lrecl > 0
+            && (self.direction == Direction::Receive || self.recfm == Recfm::Fixed);
+        fixed.then_some(self.lrecl as usize)
+    }
+
     /// 端末で入力するコマンド。
     pub fn command(&self) -> String {
         let verb = match self.direction {
@@ -116,7 +129,9 @@ impl Request {
                 opts.push("ASCII".into());
                 opts.push("CRLF".into());
             }
-            Mode::Text(_) => opts.push("CRLF".into()),
+            // 固定長のテキストは区切りを使わず、端末側で LRECL ごとに詰める・分ける
+            Mode::Text(_) if self.fixed_text().is_none() => opts.push("CRLF".into()),
+            Mode::Text(_) => {}
             Mode::Binary => {}
         }
         if self.direction == Direction::Send {
@@ -205,6 +220,8 @@ pub struct Dft {
     job: Option<Job>,
     /// 今開いているのがメッセージ（`FT:MSG`）
     message_phase: bool,
+    /// メッセージの段階の結果を知らせた（Close を送らないホストがあるため、メッセージで終える）
+    message_done: bool,
     message: String,
     recnum: u32,
     events: Vec<FtEvent>,
@@ -277,6 +294,7 @@ impl Dft {
         self.message_phase = name.starts_with(b"FT:MSG");
         if self.message_phase {
             self.message.clear();
+            self.message_done = false;
         } else {
             match &mut self.job {
                 Some(j) => {
@@ -299,6 +317,11 @@ impl Dft {
         let data = &sf[10..sf.len().min(10 + len)];
         if self.message_phase {
             self.message.push_str(&message_text(data));
+            // 結果のメッセージ（TRANSnn）で終える。MVS 3.8j の IND$FILE 2.0.5 は、メッセージの
+            // 段階を Close せずに READY の画面に戻る
+            if self.message.starts_with("TRANS") {
+                self.complete();
+            }
         } else {
             let Some(j) = &mut self.job else {
                 return abort(DATA_INSERT);
@@ -369,9 +392,13 @@ impl Dft {
         reply(GET_REPLY, &body)
     }
 
-    fn close(&mut self) -> Vec<u8> {
-        if self.message_phase {
-            // メッセージの段階が終われば転送の終わり
+    /// 転送を終える（メッセージを受け取った・メッセージの段階を閉じた）。2 度目は何もしない。
+    fn complete(&mut self) {
+        if self.message_done {
+            return;
+        }
+        self.message_done = true;
+        {
             let message = std::mem::take(&mut self.message);
             let job = self.job.take();
             let mut ok = message.starts_with("TRANS03") || message.starts_with("TRANS04");
@@ -391,6 +418,13 @@ impl Dft {
                 }
             }
             self.events.push(FtEvent::Done { ok, message });
+        }
+    }
+
+    fn close(&mut self) -> Vec<u8> {
+        if self.message_phase {
+            // メッセージの段階が終われば転送の終わり
+            self.complete();
             self.message_phase = false;
         } else if let Some(j) = &mut self.job
             && let Local::Sink(w) = &mut j.local
@@ -478,10 +512,24 @@ fn split_records(raw: &[u8]) -> Vec<&[u8]> {
 
 /// 受け取った EBCDIC のレコード（CR LF 区切り）を UTF-8 のテキスト（CRLF 区切り）にする。
 /// 固定長のレコードの末尾の空白は除く。変換できないバイトは〓にする。
-pub fn records_to_text(raw: &[u8], ccsid: Ccsid) -> String {
+///
+/// `lrecl` が 0 でなければ固定長のレコードとして `lrecl` バイトずつ分ける。0 なら CR LF で
+/// 分け、区切りが 1 つもなく大きさが 80 の倍数なら 80 バイトずつ分ける（`CRLF` を付けても
+/// 区切りを入れないホストのため）。
+pub fn records_to_text(raw: &[u8], ccsid: Ccsid, lrecl: u32) -> String {
     let enc = Encoding::Ebcdic(ccsid, Records::Nl);
     let mut out = String::with_capacity(raw.len() * 2);
-    for rec in split_records(raw) {
+    let records: Vec<&[u8]> = if lrecl > 0 {
+        raw.chunks(lrecl as usize).collect()
+    } else {
+        let r = split_records(raw);
+        if r.len() <= 1 && !raw.is_empty() && raw.len() % 80 == 0 {
+            raw.chunks(80).collect()
+        } else {
+            r
+        }
+    };
+    for rec in records {
         let (bytes, _) = yy_encoding::decode_all(enc, rec, false);
         let line = String::from_utf8_lossy(&bytes);
         out.push_str(line.trim_end_matches(' ').trim_end_matches('\u{3000}'));
@@ -569,6 +617,30 @@ pub fn text_to_records(
         out.extend_from_slice(&[0x0D, 0x25]);
     }
     Ok(out)
+}
+
+/// UTF-8 のテキストを固定長の EBCDIC のレコード（区切りなし。行を空白で `lrecl` まで詰める）にする。
+pub fn text_to_fixed(text: &str, ccsid: Ccsid, lrecl: usize) -> Result<Vec<u8>, LineError> {
+    let delimited = text_to_records(text, ccsid, Some(lrecl))?;
+    let mut out = Vec::with_capacity(delimited.len() + lrecl);
+    for rec in split_records(&delimited) {
+        out.extend_from_slice(rec);
+        out.resize(out.len() + (lrecl - rec.len()), 0x40);
+    }
+    Ok(out)
+}
+
+/// 送るテキストを、転送の指定（固定長か CRLF か）に合わせて EBCDIC にする（[`Mode::Text`]）。
+pub fn encode_upload(req: &Request, text: &str, ccsid: Ccsid) -> Result<Vec<u8>, LineError> {
+    match req.fixed_text() {
+        Some(lrecl) => text_to_fixed(text, ccsid, lrecl),
+        None => text_to_records(text, ccsid, req.record_limit()),
+    }
+}
+
+/// 受け取ったデータを、転送の指定に合わせてテキストにする（[`Mode::Text`]）。
+pub fn decode_download(req: &Request, raw: &[u8], ccsid: Ccsid) -> String {
+    records_to_text(raw, ccsid, req.fixed_text().unwrap_or(0) as u32)
 }
 
 /// ASCII 変換で受け取ったデータの末尾の EOF（`0x1A`）を除く。

@@ -368,12 +368,10 @@ pub(crate) fn prepare(choice: &Choice) -> Result<(Local, Option<PathBuf>), Strin
             let bytes = std::fs::read(local)
                 .map_err(|e| format!("{} を読めません: {e}", local.display()))?;
             let data = match choice.request.mode {
-                FtMode::Text(ccsid) => ind_file::text_to_records(
-                    &read_local_text(&bytes),
-                    ccsid,
-                    choice.request.record_limit(),
-                )
-                .map_err(|e| format!("{}: {}", local.display(), e.describe(ccsid)))?,
+                FtMode::Text(ccsid) => {
+                    ind_file::encode_upload(&choice.request, &read_local_text(&bytes), ccsid)
+                        .map_err(|e| format!("{}: {}", local.display(), e.describe(ccsid)))?
+                }
                 FtMode::HostAscii | FtMode::Binary => bytes,
             };
             Ok((Local::Source(Box::new(io::Cursor::new(data))), None))
@@ -397,7 +395,9 @@ pub(crate) fn finish(job: &FtJob, ok: bool) -> Result<u64, String> {
     let result = (|| -> io::Result<u64> {
         let mut raw = std::fs::read(part)?;
         let out = match job.choice.request.mode {
-            FtMode::Text(ccsid) => ind_file::records_to_text(&raw, ccsid).into_bytes(),
+            FtMode::Text(ccsid) => {
+                ind_file::decode_download(&job.choice.request, &raw, ccsid).into_bytes()
+            }
             FtMode::HostAscii => {
                 ind_file::strip_ascii_eof(&mut raw);
                 raw

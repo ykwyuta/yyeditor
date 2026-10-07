@@ -316,7 +316,9 @@ fn update_enabled(hwnd: HWND) {
         set(id, put && !cics);
     }
     set(ID_RECFM, put && !cics);
-    set(ID_LRECL, put && !cics);
+    // 受け取るときの LRECL は、ホストが区切りを入れない固定長のレコードを分ける長さ
+    set(ID_LRECL, !cics);
+    set(ID_PUT_LABELS[2], !cics);
     set(ID_SPACE, put && tso);
     set(ID_APPEND, put);
     set(ID_OPEN_AFTER, !put);

@@ -699,7 +699,7 @@ fn dft_text(sf: &[u8]) -> String {
         0x4611 => "Get",
         0x4605 => {
             let n = sf
-                .get(15..17)
+                .get(14..16)
                 .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]).saturating_sub(5));
             return format!("DFT Get の応答（データ {n} バイト）");
         }
