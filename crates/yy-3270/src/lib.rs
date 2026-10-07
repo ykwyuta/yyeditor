@@ -10,6 +10,7 @@ pub mod ind_file;
 pub mod print;
 pub mod query;
 pub mod screen;
+pub mod trace;
 
 use yy_encoding::Ccsid;
 
@@ -116,6 +117,10 @@ pub struct Output {
     /// 画面・状態が変わった（描き直す）
     pub changed: bool,
     pub events: Vec<Event>,
+    /// 通信の記録（[`Session::set_trace`] で始めたときだけ）
+    pub trace: Vec<trace::TraceEntry>,
+    /// `send` のうち記録に書いたところまで
+    traced: usize,
 }
 
 /// OIA（画面の最下行の状態表示）の内容。
@@ -161,6 +166,8 @@ pub struct Session {
     scs: print::Scs,
     lu3: Vec<print::Page>,
     lu3_bytes: usize,
+    /// 通信の記録をとる
+    trace: bool,
 }
 
 impl Session {
@@ -186,6 +193,7 @@ impl Session {
             scs: print::Scs::new(cfg_ccsid),
             lu3: Vec::new(),
             lu3_bytes: 0,
+            trace: false,
         }
     }
 
@@ -226,6 +234,48 @@ impl Session {
         self.emu.screen.display(self.emu.ccsid)
     }
 
+    // ---- 通信の記録 --------------------------------------------------------------------
+
+    /// 通信の記録（[`Output::trace`]）を始める・やめる。
+    pub fn set_trace(&mut self, on: bool) {
+        self.trace = on;
+    }
+
+    pub fn tracing(&self) -> bool {
+        self.trace
+    }
+
+    /// まだ記録していない送るバイト列を記録する（非表示のフィールドの中身は隠す）。
+    fn trace_sent(&self, out: &mut Output) {
+        if !self.trace || out.traced >= out.send.len() {
+            return;
+        }
+        let screen = &self.emu.screen;
+        let entries = trace::split_outbound(&out.send[out.traced..], |rec| {
+            trace::outbound_record(
+                rec,
+                self.mode == Mode::Tn3270e,
+                screen.cols,
+                self.emu.ccsid,
+                |a| {
+                    screen
+                        .field_attr(a)
+                        .is_some_and(|fa| fa & FA_DISPLAY_MASK == FA_NONDISPLAY)
+                },
+            )
+        });
+        out.traced = out.send.len();
+        out.trace.extend(entries);
+    }
+
+    /// 受け取った単位を記録する（その前に送ったものを先に）。
+    fn trace_received(&self, out: &mut Output, entry: impl FnOnce() -> trace::TraceEntry) {
+        if self.trace {
+            self.trace_sent(out);
+            out.trace.push(entry());
+        }
+    }
+
     // ---- 受け取り ----------------------------------------------------------------------
 
     /// ホストから受け取ったバイト列を処理する。
@@ -254,6 +304,14 @@ impl Session {
                         }
                         EOR => {
                             let rec = std::mem::take(&mut self.record);
+                            self.trace_received(&mut out, || {
+                                trace::inbound_record(
+                                    &rec,
+                                    self.mode == Mode::Tn3270e,
+                                    self.emu.screen.cols,
+                                    self.emu.ccsid,
+                                )
+                            });
                             self.process_record(&rec, &mut out);
                         }
                         DO | DONT | WILL | WONT => self.rx = Rx::Opt(b),
@@ -266,6 +324,9 @@ impl Session {
                 }
                 Rx::Opt(cmd) => {
                     self.rx = Rx::Data;
+                    self.trace_received(&mut out, || {
+                        trace::telnet_command(trace::Dir::In, cmd, Some(b))
+                    });
                     self.option(cmd, b, &mut out);
                 }
                 Rx::Sb => {
@@ -279,6 +340,7 @@ impl Session {
                     if b == SE {
                         self.rx = Rx::Data;
                         let sb = std::mem::take(&mut self.sb);
+                        self.trace_received(&mut out, || trace::telnet_sb(trace::Dir::In, &sb));
                         self.subnegotiation(&sb, &mut out);
                     } else {
                         // IAC IAC は 0xFF
@@ -289,7 +351,9 @@ impl Session {
             }
         }
         if !self.nvt.is_empty() && self.rx == Rx::Data {
-            let text: String = String::from_utf8_lossy(&std::mem::take(&mut self.nvt))
+            let raw = std::mem::take(&mut self.nvt);
+            self.trace_received(&mut out, || trace::nvt(trace::Dir::In, &raw));
+            let text: String = String::from_utf8_lossy(&raw)
                 .chars()
                 .filter(|c| !c.is_control() || *c == '\n')
                 .collect();
@@ -297,6 +361,7 @@ impl Session {
                 out.events.push(Event::Text(text.trim().to_owned()));
             }
         }
+        self.trace_sent(&mut out);
         out
     }
 
@@ -628,6 +693,7 @@ impl Session {
         if let Some(d) = r.data {
             self.send_data(&d, &mut out);
         }
+        self.trace_sent(&mut out);
         out
     }
 

@@ -75,6 +75,8 @@ pub struct Tn3270Config {
     pub tn3270e: bool,
     /// ホストにしかないキー（PF13〜24・PA・Clear など）のボタンを画面の右に出す
     pub keypad: bool,
+    /// 3270 のタブを開いたときから通信の記録（`logs\tn3270-trace-*.log`）をとる
+    pub trace: bool,
     /// プリンター（3287）の出力
     pub printer: Tn3270Printer,
     /// マクロ
@@ -92,6 +94,7 @@ impl Default for Tn3270Config {
             terminal_type: String::new(),
             tn3270e: true,
             keypad: true,
+            trace: false,
             printer: Tn3270Printer::default(),
             macros: Tn3270Macro::default(),
             host: BTreeMap::new(),

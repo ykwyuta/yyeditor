@@ -88,6 +88,7 @@ const ID_TN_PRINTER: u16 = 3050;
 const ID_PR_PRINT: u16 = 3051;
 const ID_PR_PDF: u16 = 3052;
 const ID_PR_TEXT: u16 = 3053;
+const ID_TN_TRACE: u16 = 3054;
 const ID_MACRO_RUN: u16 = 3060;
 const ID_MACRO_STOP: u16 = 3061;
 const ID_MACRO_RECORD: u16 = 3062;
@@ -597,6 +598,7 @@ fn create_menu() -> Result<HMENU> {
         )?;
         item(file, ID_TN_CANCEL, w!("3270 のファイル転送を取り消す(&N)"))?;
         item(file, ID_TN_PRINTER, w!("3270 のプリンターを接続(&P)"))?;
+        item(file, ID_TN_TRACE, w!("3270 の通信の記録を開始・終了(&G)"))?;
         item(file, ID_PR_PRINT, w!("受け取った印刷を印刷(&R)..."))?;
         item(file, ID_PR_PDF, w!("受け取った印刷を PDF で保存(&D)..."))?;
         item(
@@ -955,6 +957,15 @@ impl TermApp {
         if let Place::Tn3270(target) = &tab.place {
             let mut tn = tn3270::Tn3270::new(target.clone());
             tn.view_rows = self.grid.1;
+            // 設定の trace = true なら接続（交渉）から記録する
+            if self.config.tn3270.trace
+                && let Some(dir) = yy_config::config_dir().map(|d| d.join("logs"))
+            {
+                match tn.start_trace(&dir) {
+                    Ok(p) => self.tn_log_line(&format!("通信の記録: {}", p.display())),
+                    Err(e) => self.tn_log_line(&format!("通信の記録を始められません: {e}")),
+                }
+            }
             tab.term = tn3270::render(&tn, false);
             tab.tn = Some(Box::new(tn));
             if target.printer {
@@ -1324,6 +1335,7 @@ impl TermApp {
                             events.push(yy_3270::Event::PrintJob(job));
                         }
                         t.term = tn3270::render(tn, true);
+                        tn.trace_note("切断されました");
                         let label = t.place.label();
                         self.tn_note(&format!("{label}: 切断されました"));
                         self.tn_events(i, events);
@@ -2010,6 +2022,7 @@ impl TermApp {
                 return Err(e);
             }
         };
+        tn.write_trace(&o.trace);
         let command = choice.request.command();
         tn.message = "転送のコマンドを送りました".into();
         tn.ft = Some(tn3270::FtJob {
@@ -2053,6 +2066,7 @@ impl TermApp {
         let Some(tn) = t.tn.as_mut() else { return };
         tn.last_data = std::time::Instant::now();
         let mut o = tn.session.receive(data);
+        tn.write_trace(&o.trace);
         let term = o.changed.then(|| tn3270::render(tn, false));
         t.send(std::mem::take(&mut o.send));
         if let Some(term) = term {
@@ -2112,6 +2126,7 @@ impl TermApp {
             return;
         }
         let mut o = tn.session.key(k);
+        tn.write_trace(&o.trace);
         let term = o.changed.then(|| tn3270::render(tn, false));
         t.send(std::mem::take(&mut o.send));
         if let Some(term) = term {
@@ -2186,6 +2201,7 @@ impl TermApp {
                 rec.paste(&text);
             }
             let o = tn.session.paste(&text);
+            tn.write_trace(&o.trace);
             if o.changed {
                 t.selection = None;
                 t.term = tn3270::render(tn, t.exited.is_some());
@@ -2416,6 +2432,7 @@ fn command(hwnd: HWND, id: u16) {
         ID_TN3270 => cmd_tn3270(hwnd),
         ID_TN_TRANSFER => cmd_tn_transfer(hwnd),
         ID_TN_PRINTER => cmd_tn_printer(hwnd),
+        ID_TN_TRACE => cmd_tn_trace(hwnd),
         ID_PR_PRINT | ID_PR_PDF | ID_PR_TEXT => cmd_print_output(hwnd, id),
         ID_MACRO_RUN => cmd_macro_run(hwnd),
         ID_MACRO_STOP => {
@@ -2936,6 +2953,42 @@ fn cmd_macro_record(hwnd: HWND) {
             open_in_editor(hwnd, &path);
         }
         Err(e) => error_box(hwnd, &format!("{} に保存できません: {e}", path.display())),
+    }
+}
+
+/// 「3270 の通信の記録を開始・終了」（表示している 3270 のタブ）。
+fn cmd_tn_trace(hwnd: HWND) {
+    let r = with(|a| {
+        let active = a.active;
+        let label = a.tabs.get(active)?.place.label();
+        let t = a.tabs.get_mut(active)?;
+        let tn = t.tn.as_mut()?;
+        let r = if tn.trace.is_some() {
+            Ok((false, tn.stop_trace()))
+        } else {
+            match yy_config::config_dir() {
+                Some(d) => tn.start_trace(&d.join("logs")).map(|p| (true, Some(p))),
+                None => Err("設定のフォルダが分かりません".to_owned()),
+            }
+        };
+        t.term = tn3270::render(tn, t.exited.is_some());
+        a.invalidate();
+        if let Ok((started, Some(p))) = &r {
+            let what = if *started {
+                "始めました"
+            } else {
+                "終えました"
+            };
+            a.tn_note(&format!("{label}: 通信の記録を{what}: {}", p.display()));
+        }
+        Some(r)
+    });
+    match r {
+        None | Some(None) => info_box(hwnd, "3270 のタブを表示してから選んでください。"),
+        Some(Some(Err(e))) => error_box(hwnd, &e),
+        // 終えたら記録を yyeditor で開く
+        Some(Some(Ok((false, Some(p))))) => open_in_editor(hwnd, &p),
+        Some(Some(Ok(_))) => {}
     }
 }
 

@@ -197,6 +197,20 @@ pub(crate) struct Tn3270 {
     pub last_data: Instant,
     /// プリンター: タブの画面の行数
     pub view_rows: usize,
+    /// 通信の記録のファイル（記録中）
+    pub trace: Option<TraceFile>,
+}
+
+/// 通信の記録のファイル（`logs\tn3270-trace-<日時>-<名前>.log`）。
+pub(crate) struct TraceFile {
+    pub path: PathBuf,
+    w: io::BufWriter<std::fs::File>,
+}
+
+/// 記録の時刻（`HH:MM:SS.mmm`）。
+fn trace_time() -> String {
+    let c = crate::remote::local_clock();
+    c.get(11..).unwrap_or(&c).to_owned()
 }
 
 impl Tn3270 {
@@ -209,6 +223,105 @@ impl Tn3270 {
             jobs: Vec::new(),
             last_data: Instant::now(),
             view_rows: 30,
+            trace: None,
+        }
+    }
+
+    /// 通信の記録を始める（`dir` に新しいファイルを作る）。
+    pub(crate) fn start_trace(&mut self, dir: &Path) -> Result<PathBuf, String> {
+        use std::io::Write;
+        if let Some(t) = &self.trace {
+            return Ok(t.path.clone());
+        }
+        std::fs::create_dir_all(dir).map_err(|e| format!("{} を作れません: {e}", dir.display()))?;
+        let stamp: String = crate::remote::local_clock()
+            .chars()
+            .filter(char::is_ascii_digit)
+            .take(14)
+            .collect();
+        let name: String = self
+            .target
+            .label
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let kind = if self.target.printer { "printer-" } else { "" };
+        let path = dir.join(format!(
+            "tn3270-trace-{}-{}-{kind}{name}.log",
+            &stamp[..8.min(stamp.len())],
+            stamp.get(8..).unwrap_or("")
+        ));
+        let f = std::fs::File::create(&path)
+            .map_err(|e| format!("{} を作れません: {e}", path.display()))?;
+        let mut w = io::BufWriter::new(f);
+        let o = self.session.oia();
+        let _ = writeln!(
+            w,
+            "# yyterm 3270 通信の記録  {}  {}:{}{}  {}  CCSID {}  モデル {}  {} {}\n\
+             # < はホストから、> はホストへ。非表示のフィールドの中身は ** と ****** に置き換えています。\n",
+            crate::remote::local_clock(),
+            self.target.host,
+            self.target.port,
+            self.target
+                .ssh
+                .as_deref()
+                .map(|s| format!("（SSH {s} 経由）"))
+                .unwrap_or_default(),
+            self.session.config().terminal_type(),
+            self.session.ccsid().name(),
+            self.target.model,
+            o.mode.label(),
+            o.device.as_deref().unwrap_or(""),
+        );
+        let _ = w.flush();
+        self.session.set_trace(true);
+        self.trace = Some(TraceFile {
+            path: path.clone(),
+            w,
+        });
+        Ok(path)
+    }
+
+    /// 通信の記録をやめる（ファイルの場所を返す）。
+    pub(crate) fn stop_trace(&mut self) -> Option<PathBuf> {
+        self.session.set_trace(false);
+        let mut t = self.trace.take()?;
+        self.trace_note_to(&mut t, "記録を終えました");
+        Some(t.path)
+    }
+
+    fn trace_note_to(&self, t: &mut TraceFile, text: &str) {
+        use std::io::Write;
+        let _ = writeln!(t.w, "{} -- {text}", trace_time());
+        let _ = t.w.flush();
+    }
+
+    /// 記録に知らせを 1 行書く（切断など）。
+    pub(crate) fn trace_note(&mut self, text: &str) {
+        if let Some(mut t) = self.trace.take() {
+            self.trace_note_to(&mut t, text);
+            self.trace = Some(t);
+        }
+    }
+
+    /// セッションの出力の記録を書く。
+    pub(crate) fn write_trace(&mut self, entries: &[yy_3270::trace::TraceEntry]) {
+        use std::io::Write;
+        if entries.is_empty() {
+            return;
+        }
+        if let Some(t) = &mut self.trace {
+            let time = trace_time();
+            for e in entries {
+                let _ = t.w.write_all(e.format(&time).as_bytes());
+            }
+            let _ = t.w.flush();
         }
     }
 }
@@ -468,6 +581,9 @@ fn oia_text(tn: &Tn3270, exited: bool) -> String {
         o.cursor.1,
         tn.session.ccsid().name(),
     );
+    if tn.trace.is_some() {
+        s.push_str("  TRACE");
+    }
     if !tn.message.is_empty() {
         s.push_str("  ");
         s.push_str(&tn.message);
@@ -815,6 +931,44 @@ mod tests {
         std::fs::write(&choice.local, "ok\n😀\n").unwrap();
         let err = prepare(&choice).err().unwrap();
         assert!(err.contains("2 行目"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn writes_trace_files() {
+        let cfg = Config::default();
+        let mut tn = Tn3270::new(Target3270::parse("mvs01", &cfg).unwrap());
+        let dir = std::env::temp_dir().join(format!("yy3270-trace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = tn.start_trace(&dir).unwrap();
+        assert!(tn.session.tracing());
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("tn3270-trace-") && name.ends_with("-mvs01.log"),
+            "{name}"
+        );
+        // TN3270 の交渉と画面
+        let neg = [255, 253, 25, 255, 251, 25, 255, 253, 0, 255, 251, 0];
+        let o = tn.session.receive(&neg);
+        tn.write_trace(&o.trace);
+        let o = tn
+            .session
+            .receive(&[0xF5, 0xC2, 0x1D, 0x60, 0xC1, 255, 239]);
+        tn.write_trace(&o.trace);
+        tn.trace_note("切断されました");
+        assert_eq!(tn.stop_trace(), Some(path.clone()));
+        assert!(!tn.session.tracing());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# yyterm 3270 通信の記録"), "{text}");
+        assert!(text.contains("< TEL IAC DO EOR"), "{text}");
+        assert!(text.contains("> TEL IAC WILL EOR"), "{text}");
+        assert!(text.contains("| EraseWrite WCC(reset,restore)"), "{text}");
+        assert!(text.contains("-- 切断されました"), "{text}");
+        assert!(text.contains("-- 記録を終えました"), "{text}");
+        // 記録から同じ画面を作れる
+        let mut s2 = Session::new(SessionConfig::default());
+        s2.receive(&yy_3270::trace::replay(&text));
+        assert_eq!(s2.screen().cells, tn.session.screen().cells);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
