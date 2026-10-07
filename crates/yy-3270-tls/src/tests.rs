@@ -325,9 +325,10 @@ fn client_certificate_is_sent_when_required() {
     let (c, _, _) = confirm(false);
     let err = match connect(tcp(port), false, &o, c.clone()) {
         Err(e) => e,
-        // TLS 1.3 では、断られたことが読むときに分かる
+        // TLS 1.3 では、断られたことが読むときに分かる（書かずに読む。読まれないデータを残して
+        // サーバーが閉じると、Windows では RST で警告（alert）ごと捨てられる。TN3270 でも端末は
+        // ホストの交渉を待ってから書く）
         Ok(mut t) => {
-            let _ = t.writer.write_all(b"hello");
             let mut b = [0u8; 5];
             t.reader.read_exact(&mut b).err().unwrap()
         }

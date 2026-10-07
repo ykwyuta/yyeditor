@@ -136,7 +136,7 @@ check "自己署名の証明書は検証で断られる" grep -q "tls failed .*U
 if [ $fail -ne 0 ]; then
     for f in mock-tls.log mock-starttls.log pr3287-starttls.log; do echo "---- $f"; cat "$WORK/$f"; done
     for f in s3270-tls s3270-tls-nocert s3270-starttls s3270-starttls-verify; do
-        echo "---- $f"; grep -v "^ok$" "$WORK/$f.out" | tail -5
+        echo "---- $f"; grep -av "^ok$" "$WORK/$f.out" | tail -5
     done
     echo "---- mock.log"; cat "$L"
     echo "---- s3270"; grep -v "^ok$" "$WORK/s3270.out" | tail -40

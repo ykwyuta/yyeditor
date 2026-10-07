@@ -54,7 +54,11 @@ fn main() {
         eprintln!("[mock] certificates in {}", cert_dir.display());
         cfg.tls = Some(pki.tls(mode, self_signed, client_cert));
     }
-    let host = MockHost::bind(&format!("127.0.0.1:{port}"), cfg).expect("待ち受けできません");
+    let host = MockHost::bind_all(
+        &[&format!("127.0.0.1:{port}"), &format!("[::1]:{port}")],
+        cfg,
+    )
+    .expect("待ち受けできません");
     eprintln!("[mock] listening on {}", host.addr());
     loop {
         std::thread::sleep(Duration::from_secs(3600));

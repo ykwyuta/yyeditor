@@ -153,8 +153,16 @@ impl MockHost {
     }
 
     pub fn bind(addr: &str, cfg: MockConfig) -> io::Result<MockHost> {
-        let listener = TcpListener::bind(addr)?;
-        let addr = listener.local_addr()?;
+        MockHost::bind_all(&[addr], cfg)
+    }
+
+    /// いくつかのアドレスで待ち受ける（最初のものは必須。残りは待ち受けられなければ無視する。
+    /// `localhost` が IPv6 になる環境のため）。状態（LU・データセット・出来事）は共有する。
+    pub fn bind_all(addrs: &[&str], cfg: MockConfig) -> io::Result<MockHost> {
+        let first = TcpListener::bind(addrs[0])?;
+        let addr = first.local_addr()?;
+        let mut listeners = vec![first];
+        listeners.extend(addrs[1..].iter().filter_map(|a| TcpListener::bind(a).ok()));
         let tls = match &cfg.tls {
             Some(t) => Some((t.mode, tls::server_config(t)?)),
             None => None,
@@ -167,34 +175,10 @@ impl MockHost {
             changed: Condvar::new(),
             lus: Mutex::new(LuState::default()),
         });
-        let s = shared.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
-                let s = s.clone();
-                std::thread::spawn(move || {
-                    let peer = stream
-                        .peer_addr()
-                        .map(|a| a.to_string())
-                        .unwrap_or_default();
-                    let _ = stream.set_nodelay(true);
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
-                    let conn = match &s.tls {
-                        None => Conn::new(Box::new(stream)),
-                        Some((mode, cfg)) => match tls::accept(Box::new(stream), *mode, cfg, &s) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                s.log(format!("tls failed {peer}: {e}"));
-                                return;
-                            }
-                        },
-                    };
-                    if let Err(e) = serve(conn, &s) {
-                        s.log(format!("disconnect {peer}: {e}"));
-                    }
-                });
-            }
-        });
+        for listener in listeners {
+            let s = shared.clone();
+            std::thread::spawn(move || accept_loop(listener, s));
+        }
         Ok(MockHost { addr, shared })
     }
 
@@ -728,6 +712,35 @@ fn negotiate(mut conn: Conn, shared: &Shared) -> io::Result<Link> {
         seq: 0,
         awaiting: Vec::new(),
     })
+}
+
+/// 接続を受け付け、それぞれをスレッドで扱う。
+fn accept_loop(listener: TcpListener, s: Arc<Shared>) {
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else { continue };
+        let s = s.clone();
+        std::thread::spawn(move || {
+            let peer = stream
+                .peer_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_default();
+            let _ = stream.set_nodelay(true);
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+            let conn = match &s.tls {
+                None => Conn::new(Box::new(stream)),
+                Some((mode, cfg)) => match tls::accept(Box::new(stream), *mode, cfg, &s) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        s.log(format!("tls failed {peer}: {e}"));
+                        return;
+                    }
+                },
+            };
+            if let Err(e) = serve(conn, &s) {
+                s.log(format!("disconnect {peer}: {e}"));
+            }
+        });
+    }
 }
 
 /// 1 つの接続を扱う。
