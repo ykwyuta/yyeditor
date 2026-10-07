@@ -110,6 +110,16 @@ impl Column {
         Ok(d.get((p.start + off) as usize).to_value())
     }
 
+    /// 差分を見ない値（チャンクのまま）。
+    pub fn get_base(&self, ctx: &Context, row: u64) -> io::Result<Value> {
+        let Some((i, off)) = self.locate(row) else {
+            return Ok(Value::Empty);
+        };
+        let p = &self.pieces[i];
+        let d = p.chunk.data(ctx)?;
+        Ok(d.get((p.start + off) as usize).to_value())
+    }
+
     /// `rows` の範囲の値を順に渡す（チャンクごとに展開して読む。差分も反映する）。
     pub fn for_each(
         &self,

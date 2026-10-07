@@ -312,6 +312,84 @@ pub fn convert(
     map_column(ctx, col, &f)
 }
 
+// ---- 集計（ステータスバー） ------------------------------------------------------------
+
+/// 値の個数・数値の個数・数値の合計。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Totals {
+    pub count: u64,
+    pub numbers: u64,
+    pub sum: f64,
+}
+
+impl Totals {
+    pub fn add(&mut self, v: CellRef<'_>, sign: i64) {
+        match v {
+            CellRef::Empty => {}
+            CellRef::Number(x) => {
+                self.count = self.count.wrapping_add_signed(sign);
+                self.numbers = self.numbers.wrapping_add_signed(sign);
+                self.sum += x * sign as f64;
+            }
+            _ => self.count = self.count.wrapping_add_signed(sign),
+        }
+    }
+
+    pub fn add_value(&mut self, v: &Value) {
+        self.add(CellRef::of(v), 1);
+    }
+
+    fn merge(mut self, o: Totals) -> Totals {
+        self.count += o.count;
+        self.numbers += o.numbers;
+        self.sum += o.sum;
+        self
+    }
+}
+
+/// 列の `rows`（表の行）の集計。区間ごとに並列に、数値のチャンクは配列をそのまま足す。
+pub fn totals(ctx: &Context, col: &Column, rows: std::ops::Range<u64>) -> io::Result<Totals> {
+    let mut starts = Vec::with_capacity(col.pieces().len());
+    let mut row = 0u64;
+    for p in col.pieces() {
+        starts.push(row);
+        row += p.len as u64;
+    }
+    let base = col
+        .pieces()
+        .par_iter()
+        .zip(starts.par_iter())
+        .filter(|(p, s)| **s < rows.end && **s + p.len as u64 > rows.start)
+        .map(|(p, &s)| -> io::Result<Totals> {
+            let d = p.chunk.data(ctx)?;
+            let lo = rows.start.saturating_sub(s) as usize;
+            let hi = ((rows.end - s) as usize).min(p.len as usize);
+            let (a, b) = (p.start as usize + lo, p.start as usize + hi);
+            let mut t = Totals::default();
+            match &*d {
+                Data::Number {
+                    vals,
+                    present: None,
+                } => {
+                    t.count = (b - a) as u64;
+                    t.numbers = t.count;
+                    t.sum = vals[a..b].iter().sum();
+                }
+                Data::Empty(_) => {}
+                d => (a..b).for_each(|i| t.add(d.get(i), 1)),
+            }
+            Ok(t)
+        })
+        .try_reduce(Totals::default, |x, y| Ok(x.merge(y)))?;
+    // 直したセル: チャンクの値を引いて、直した値を足す
+    let mut t = base;
+    for (&r, v) in col.delta().range(rows) {
+        t.add(CellRef::of(&col.get_base(ctx, r)?), -1);
+        t.add(CellRef::of(v), 1);
+    }
+    Ok(t)
+}
+
 // ---- 検索 --------------------------------------------------------------------------
 
 /// 列の中で、`from` 行（表の行）以降で最初に当たる行。

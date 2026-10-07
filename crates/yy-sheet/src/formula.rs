@@ -1294,3 +1294,93 @@ mod shared_tests {
         assert_eq!(get(&d, 0, 2), want.into());
     }
 }
+
+#[cfg(test)]
+mod totals_tests {
+    use super::*;
+    use crate::chunk::{Chunk, Data};
+    use crate::column::{Column, Piece};
+    use crate::sheet::{Document, Table};
+
+    #[test]
+    fn totals_match_cell_by_cell() {
+        let ctx = Context::for_tests();
+        let n = 3000usize;
+        let mk = |f: &dyn Fn(usize) -> Value| {
+            let vals: Vec<Value> = (0..n).map(f).collect();
+            let pieces = vals
+                .chunks(700)
+                .map(|part| {
+                    let ch = Chunk::create(&ctx, Data::from_values(part.iter().map(CellRef::of)))
+                        .unwrap();
+                    Piece {
+                        len: ch.rows,
+                        chunk: ch,
+                        start: 0,
+                    }
+                })
+                .collect();
+            Column::from_pieces("c", pieces)
+        };
+        let mut book = Workbook::default();
+        book.sheets[0].table = Table {
+            columns: Arc::new(vec![
+                mk(&|i| Value::Number(i as f64)),
+                mk(&|i| {
+                    if i % 3 == 0 {
+                        Value::text("x")
+                    } else if i % 3 == 1 {
+                        Value::Number(0.5)
+                    } else {
+                        Value::Empty
+                    }
+                }),
+            ]),
+            rows: n as u64,
+            header: true,
+        };
+        let mut d = Document::with_book(ctx, book);
+        d.edit(|b, ctx| {
+            let s = &mut b.sheets[0];
+            s.set(ctx, 10, 0, Value::text("edited"))?;
+            s.set(ctx, 20, 1, 7.0.into())?;
+            s.set(ctx, n as u64 + 5, 0, 100.0.into())?;
+            s.set(ctx, 5, 3, 2.0.into())?;
+            s.set_formula(ctx, 30, 0, "=1+1")
+                .map_err(std::io::Error::other)?;
+            s.set_formula(ctx, 1, 2, "=A2*2")
+                .map_err(std::io::Error::other)?;
+            s.fill_down(ctx, 1, 2000, 2, 2)
+                .map_err(std::io::Error::other)?;
+            s.set_formula(ctx, 100, 1, "=5")
+                .map_err(std::io::Error::other)
+        })
+        .unwrap();
+        let s = &d.book.sheets[0];
+        for (t, l, b, r) in [
+            (0, 0, n as u64 + 10, 3),
+            (5, 0, 2500, 2),
+            (0, 1, 0, 1),
+            (1500, 2, 2600, 2),
+        ] {
+            let got = s.totals(&d.ctx, t, l, b, r).unwrap().unwrap();
+            let mut want = crate::bulk::Totals::default();
+            for row in t..=b {
+                for col in l..=r {
+                    want.add_value(&s.get(&d.ctx, row, col).unwrap());
+                }
+            }
+            assert_eq!(
+                (got.count, got.numbers),
+                (want.count, want.numbers),
+                "{t},{l},{b},{r}"
+            );
+            assert!(
+                (got.sum - want.sum).abs() < 1e-6,
+                "{} {}",
+                got.sum,
+                want.sum
+            );
+        }
+    }
+}

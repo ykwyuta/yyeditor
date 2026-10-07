@@ -355,6 +355,88 @@ impl Sheet {
         Ok(())
     }
 
+    /// 格子の範囲（行 `t..=b`・列 `l..=r`）の集計（ステータスバー）。表の列は区間ごとに並列に読む。
+    /// 絞り込み・並べ替えの表示中は `None`（呼ぶ側でセルを数える）。
+    pub fn totals(
+        &self,
+        ctx: &Context,
+        t: u64,
+        l: u32,
+        b: u64,
+        r: u32,
+    ) -> io::Result<Option<crate::bulk::Totals>> {
+        if self.view.rows.is_some() {
+            return Ok(None);
+        }
+        let mut tot = crate::bulk::Totals::default();
+        let tb = &self.table;
+        let head = tb.header as u64;
+        for c in l..=r {
+            // 共有式の範囲は結果の列から
+            let shared: Vec<&crate::shared::Shared> = self
+                .formulas
+                .shared
+                .iter()
+                .filter(|s| s.col == c && s.r1 >= t && s.r0 <= b)
+                .collect();
+            for s in &shared {
+                if let Some(res) = &s.results {
+                    let lo = t.max(s.r0) - s.r0;
+                    let hi = b.min(s.r1) - s.r0 + 1;
+                    let x = crate::bulk::totals(ctx, res, lo..hi)?;
+                    tot.count += x.count;
+                    tot.numbers += x.numbers;
+                    tot.sum += x.sum;
+                }
+            }
+            let in_shared = |row: u64| shared.iter().any(|s| (s.r0..=s.r1).contains(&row));
+            for (&(_, row), v) in self.formulas.results.range((c, t)..=(c, b)) {
+                if !in_shared(row) {
+                    tot.add_value(v);
+                }
+            }
+            let is_result = |row: u64| self.formulas.results.contains_key(&(c, row));
+            if c < tb.cols() && t < tb.grid_rows() {
+                let col = &tb.columns[c as usize];
+                if tb.header && t == 0 && !is_result(0) && !in_shared(0) {
+                    tot.count += 1;
+                }
+                let lo = t.max(head) - head;
+                let hi = (b.min(tb.grid_rows() - 1) + 1).saturating_sub(head);
+                if lo < hi {
+                    let mut x = crate::bulk::totals(ctx, col, lo..hi)?;
+                    // 結果・共有式に隠れたセルの分を引く
+                    for (&(_, row), _) in
+                        self.formulas.results.range((c, lo + head)..(c, hi + head))
+                    {
+                        x.add(crate::chunk::CellRef::of(&col.get(ctx, row - head)?), -1);
+                    }
+                    for s in &shared {
+                        for row in s.r0.max(lo + head)..=s.r1.min(hi + head - 1) {
+                            if !is_result(row) {
+                                x.add(crate::chunk::CellRef::of(&col.get(ctx, row - head)?), -1);
+                            }
+                        }
+                    }
+                    tot.count = tot.count.wrapping_add(x.count);
+                    tot.numbers = tot.numbers.wrapping_add(x.numbers);
+                    tot.sum += x.sum;
+                }
+            }
+            // 表の外の自由なセル
+            for (&(row, cc), v) in self.cells.range((t, 0)..=(b, u32::MAX)) {
+                if cc == c
+                    && !is_result(row)
+                    && !in_shared(row)
+                    && self.place_source(row, c) == Place::Free
+                {
+                    tot.add_value(v);
+                }
+            }
+        }
+        Ok(Some(tot))
+    }
+
     /// 絞り込みをしないときの格子の位置の値。
     pub fn get_source(&self, ctx: &Context, row: u64, col: u32) -> io::Result<Value> {
         if let Some(v) = self.formulas.result(row, col) {

@@ -879,7 +879,19 @@ impl App {
                     format!("データの個数: {count}")
                 }
             } else {
-                format!("{} セルを選択", crate::util::group_digits(cells))
+                // 大きな範囲は表の列をチャンクごとに並列に集計する
+                match self.sheet().totals(&self.ctx, t, l, b, rr) {
+                    Ok(Some(x)) if x.numbers > 0 => format!(
+                        "データの個数: {}　合計: {}　平均: {}",
+                        crate::util::group_digits(x.count),
+                        yy_numfmt::general(x.sum),
+                        yy_numfmt::general(x.sum / x.numbers as f64)
+                    ),
+                    Ok(Some(x)) => {
+                        format!("データの個数: {}", crate::util::group_digits(x.count))
+                    }
+                    _ => format!("{} セルを選択", crate::util::group_digits(cells)),
+                }
             };
             set_status(&msg);
         }

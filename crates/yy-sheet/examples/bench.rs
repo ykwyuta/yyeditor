@@ -208,6 +208,17 @@ fn main() {
         let t = Instant::now();
         let (_, n) = bulk::replace(&ctx, table, &[2], &q).unwrap();
         println!("置換（1 列）{:.2} 秒 → {n} セル", t.elapsed().as_secs_f64());
+        let t = Instant::now();
+        let tot = d2.book.sheets[0]
+            .totals(&ctx, 0, 0, rows as u64, cols as u32 - 1)
+            .unwrap()
+            .unwrap();
+        println!(
+            "ステータスバーの集計（全列・全行）{:.3} 秒 → {} 個・合計 {}",
+            t.elapsed().as_secs_f64(),
+            tot.count,
+            tot.sum
+        );
     }
 
     if cols >= 3 {
