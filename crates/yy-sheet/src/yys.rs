@@ -623,16 +623,19 @@ mod tests {
             Value::Number(-1.0)
         );
 
-        // 書き足しの途中で落ちた（末尾が壊れた）: 前の状態で開ける
+        // 書き足しの途中で落ちた（末尾が壊れた）: 前の状態で開ける（開いている間はほかから書けない
+        // 〔Windows〕ので写しで試す）
+        let broken = dir.path().join("broken.yys");
+        std::fs::copy(&path, &broken).unwrap();
         {
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
-                .open(&path)
+                .open(&broken)
                 .unwrap();
             f.write_all(&[7u8; 100]).unwrap();
         }
-        let d4 = open(ctx.clone(), &path).unwrap();
+        let d4 = open(ctx.clone(), &broken).unwrap();
         assert_eq!(
             d4.book.sheets[0].get(&ctx, 5, 0).unwrap(),
             Value::Number(-1.0)

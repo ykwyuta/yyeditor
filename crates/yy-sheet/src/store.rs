@@ -38,7 +38,9 @@ impl Drop for Store {
     }
 }
 
-/// ほかのプロセスに書き込ませない共有モードで開く（Windows）。名前の変更（保存時の退避）は許す。
+/// 開くときの共有モード（Windows）。書くときはほかに書き込ませない（読むこと・名前の変更〔保存時の
+/// 退避〕は許す）。読むだけのときは、ほかが書くために開いていても開けるようにする（同じファイルを
+/// 2 つ目のウィンドウ・別の yysheet で開くとき）。
 fn options(write: bool) -> OpenOptions {
     let mut o = OpenOptions::new();
     o.read(true).write(write);
@@ -46,8 +48,13 @@ fn options(write: bool) -> OpenOptions {
     {
         use std::os::windows::fs::OpenOptionsExt;
         const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
         const FILE_SHARE_DELETE: u32 = 0x4;
-        o.share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
+        o.share_mode(if write {
+            FILE_SHARE_READ | FILE_SHARE_DELETE
+        } else {
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+        });
     }
     o
 }
