@@ -61,6 +61,15 @@ struct Ext2 {
     styles: Vec<(u32, Vec<Layer>)>,
 }
 
+/// シートの式（シートの番号, （行, 列, 式の文字列））。
+type SheetFormulas = (u32, Vec<(u64, u32, String)>);
+
+/// 3 つ目の追加の記録: 数式（結果は開いたときに計算し直す）。
+#[derive(Serialize, Deserialize, Default)]
+struct Ext3 {
+    formulas: Vec<SheetFormulas>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ChunkDir {
     offset: u64,
@@ -367,6 +376,25 @@ fn write_into(
             .collect(),
     };
     bytes.extend(postcard::to_allocvec(&ext2).map_err(|e| invalid(&e.to_string()))?);
+    let ext3 = Ext3 {
+        formulas: book
+            .sheets
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.formulas.cells.is_empty())
+            .map(|(i, s)| {
+                (
+                    i as u32,
+                    s.formulas
+                        .cells
+                        .iter()
+                        .map(|(&(r, c), f)| (r, c, f.text.to_string()))
+                        .collect(),
+                )
+            })
+            .collect(),
+    };
+    bytes.extend(postcard::to_allocvec(&ext3).map_err(|e| invalid(&e.to_string()))?);
     let dir_off = store.append(&bytes)?;
     let mut trailer = Vec::with_capacity(TRAILER as usize);
     trailer.extend_from_slice(&dir_off.to_le_bytes());
@@ -384,7 +412,7 @@ fn write_into(
 }
 
 /// 末尾を探して目次を読む（末尾が壊れていれば、前の末尾を後ろから探す）。
-fn read_dir(store: &Store) -> io::Result<(Dir, Ext, Ext2, u64)> {
+fn read_dir(store: &Store) -> io::Result<(Dir, Ext, Ext2, Ext3, u64)> {
     let len = store.len();
     if len < 16 + TRAILER {
         return Err(invalid("yysheet のファイルではありません（短すぎます）"));
@@ -399,7 +427,7 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Ext, Ext2, u64)> {
             "新しい版（{version}）の yysheet で保存されたファイルです"
         )));
     }
-    let try_at = |end: u64| -> Option<(Dir, Ext, Ext2, u64)> {
+    let try_at = |end: u64| -> Option<(Dir, Ext, Ext2, Ext3, u64)> {
         let t = store.read(end - TRAILER, TRAILER).ok()?;
         if &t[24..32] != END_MAGIC {
             return None;
@@ -416,8 +444,9 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Ext, Ext2, u64)> {
         }
         let (d, rest): (Dir, &[u8]) = postcard::take_from_bytes(&b).ok()?;
         let (ext, rest): (Ext, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
-        let (ext2, _): (Ext2, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
-        Some((d, ext, ext2, off))
+        let (ext2, rest): (Ext2, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        let (ext3, _): (Ext3, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        Some((d, ext, ext2, ext3, off))
     };
     if let Some(r) = try_at(len) {
         return Ok(r);
@@ -455,7 +484,7 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Ext, Ext2, u64)> {
 /// 開く。
 pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
     let store = Store::open(path)?;
-    let (dir, ext, ext2, dir_off) = read_dir(&store)?;
+    let (dir, ext, ext2, ext3, dir_off) = read_dir(&store)?;
     let chunks: Vec<Arc<Chunk>> = dir
         .chunks
         .iter()
@@ -521,6 +550,22 @@ pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
             s.styles = Styles::from_layers(layers);
         }
     }
+    for (i, list) in ext3.formulas {
+        if let Some(s) = sheets.get_mut(i as usize) {
+            let cells = std::sync::Arc::make_mut(&mut s.formulas.cells);
+            for (r, c, text) in list {
+                // 読めない式は文字列として残す
+                match crate::formula::Formula::parse(&text) {
+                    Ok(f) => {
+                        cells.insert((r, c), f);
+                    }
+                    Err(_) => {
+                        std::sync::Arc::make_mut(&mut s.cells).insert((r, c), Value::text(&text));
+                    }
+                }
+            }
+        }
+    }
     let book = Workbook {
         sheets,
         date_system: if dir.date1904 {
@@ -529,6 +574,8 @@ pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
             DateSystem::D1900
         },
     };
+    let mut book = book;
+    crate::formula::recalc(&mut book, &ctx);
     let mut doc = Document::with_book(ctx, book);
     doc.file = Some(store);
     doc.path = Some(path.to_owned());

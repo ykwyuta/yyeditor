@@ -1026,7 +1026,9 @@ fn export_to(
         .iter()
         .all(|l| (l.style.num_fmt.is_none() && !l.clear) || l.rect.whole_cols());
     // 自由なセルがなければ（または行の順が決まっていれば）表だけを速く書く
-    let simple = (sheet.cells.is_empty() || order.is_some()) && whole_col_formats;
+    let simple = (sheet.cells.is_empty() || order.is_some())
+        && whole_col_formats
+        && sheet.formulas.results.is_empty();
     let cols: Vec<&Column> = t.columns.iter().collect();
     let col_formats: Vec<Option<std::sync::Arc<str>>> = (0..cols.len() as u32)
         .map(|c| {

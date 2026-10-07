@@ -18,6 +18,7 @@ pub mod budget;
 pub mod chunk;
 pub mod column;
 pub mod csv;
+pub mod formula;
 pub mod query;
 pub mod sheet;
 pub mod store;

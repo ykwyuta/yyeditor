@@ -14,6 +14,7 @@ use yy_numfmt::DateSystem;
 
 use crate::Context;
 use crate::column::Column;
+use crate::formula::{Formula, Formulas};
 use crate::query::{ColFilter, SortKey};
 use crate::store::Store;
 use crate::style::{Style, Styles};
@@ -113,6 +114,8 @@ pub struct Sheet {
     pub view: View,
     /// セルの書式（範囲の層）
     pub styles: Styles,
+    /// 数式とその結果
+    pub formulas: Formulas,
 }
 
 impl Sheet {
@@ -197,6 +200,69 @@ impl Sheet {
         }
     }
 
+    /// 絞り込み・並べ替えをしないときの格子の位置が、表のどこに当たるか。
+    pub fn place_source(&self, row: u64, col: u32) -> Place {
+        let t = &self.table;
+        if col >= t.cols() || row >= t.grid_rows() {
+            return Place::Free;
+        }
+        if t.header {
+            if row == 0 {
+                Place::Header(col)
+            } else {
+                Place::Data(row - 1, col)
+            }
+        } else {
+            Place::Data(row, col)
+        }
+    }
+
+    /// 絞り込み・並べ替えをしないときの使っている範囲（行数・列数。式の結果を含む）。
+    pub fn source_extent(&self) -> (u64, u32) {
+        let mut rows = self.table.grid_rows();
+        let mut cols = self.table.cols();
+        for &(r, c) in self.cells.keys() {
+            rows = rows.max(r + 1);
+            cols = cols.max(c + 1);
+        }
+        for &(r, c) in self.formulas.cells.keys() {
+            rows = rows.max(r + 1);
+            cols = cols.max(c + 1);
+        }
+        for &(c, r) in self.formulas.results.keys() {
+            rows = rows.max(r + 1);
+            cols = cols.max(c + 1);
+        }
+        (rows, cols)
+    }
+
+    /// 格子のセルの式。
+    pub fn formula_at(&self, row: u64, col: u32) -> Option<&Formula> {
+        if self.formulas.cells.is_empty() {
+            return None;
+        }
+        self.formulas.cells.get(&(self.source_row(row), col))
+    }
+
+    /// 格子のセルに式を入れる（値は消す。計算は [`crate::formula::recalc`]）。
+    pub fn set_formula(
+        &mut self,
+        ctx: &Context,
+        row: u64,
+        col: u32,
+        text: &str,
+    ) -> Result<(), String> {
+        let f = Formula::parse(text)?;
+        if matches!(self.place(row, col), Place::Header(_)) {
+            return Err("表の見出しには式を入れられません".into());
+        }
+        self.set(ctx, row, col, Value::Empty)
+            .map_err(|e| e.to_string())?;
+        let key = (self.source_row(row), col);
+        Arc::make_mut(&mut self.formulas.cells).insert(key, f);
+        Ok(())
+    }
+
     pub fn place(&self, row: u64, col: u32) -> Place {
         let t = &self.table;
         if col >= t.cols() || row >= self.table_grid_rows() {
@@ -225,6 +291,11 @@ impl Sheet {
     }
 
     pub fn get(&self, ctx: &Context, row: u64, col: u32) -> io::Result<Value> {
+        if !self.formulas.results.is_empty()
+            && let Some(v) = self.formulas.result(self.source_row(row), col)
+        {
+            return Ok(v.clone());
+        }
         Ok(match self.place(row, col) {
             Place::Header(c) => Value::Text(self.table.columns[c as usize].name.clone()),
             Place::Data(r, c) => self.table.columns[c as usize].get(ctx, r)?,
@@ -237,6 +308,12 @@ impl Sheet {
     }
 
     pub fn set(&mut self, ctx: &Context, row: u64, col: u32, v: Value) -> io::Result<()> {
+        if !self.formulas.cells.is_empty() {
+            let key = (self.source_row(row), col);
+            if self.formulas.cells.contains_key(&key) {
+                Arc::make_mut(&mut self.formulas.cells).remove(&key);
+            }
+        }
         match self.place(row, col) {
             Place::Header(c) => {
                 let cols = Arc::make_mut(&mut self.table.columns);
@@ -263,7 +340,13 @@ impl Sheet {
     pub fn extent(&self) -> (u64, u32) {
         let mut rows = self.table_grid_rows();
         let mut cols = self.table.cols();
-        for &(r, c) in self.cells.keys() {
+        let keys = self
+            .cells
+            .keys()
+            .copied()
+            .chain(self.formulas.cells.keys().copied())
+            .chain(self.formulas.results.keys().map(|&(c, r)| (r, c)));
+        for (r, c) in keys {
             if let Some(g) = self.grid_row_of_free(r) {
                 rows = rows.max(g + 1);
             }
@@ -287,6 +370,7 @@ impl Sheet {
         }
         self.shift_cells(|r, c| (if r >= at { r + n } else { r }, c), |_, _| true);
         self.styles.insert_rows(at, n);
+        self.formulas.shift(yy_formula::Edit::InsertRows(at, n));
         Ok(())
     }
 
@@ -310,6 +394,7 @@ impl Sheet {
             |r, _| r < at || r >= end,
         );
         self.styles.delete_rows(at, n);
+        self.formulas.shift(yy_formula::Edit::DeleteRows(at, n));
         Ok(())
     }
 
@@ -329,6 +414,7 @@ impl Sheet {
         self.view
             .remap_cols(|c| Some(if c >= at { c + n } else { c }));
         self.styles.insert_cols(at, n);
+        self.formulas.shift(yy_formula::Edit::InsertCols(at, n));
         let w = std::mem::take(Arc::make_mut(&mut self.col_widths));
         self.col_widths = Arc::new(
             w.into_iter()
@@ -367,6 +453,7 @@ impl Sheet {
             self.view = View::default();
         }
         self.styles.delete_cols(at, n);
+        self.formulas.shift(yy_formula::Edit::DeleteCols(at, n));
         let w = std::mem::take(Arc::make_mut(&mut self.col_widths));
         self.col_widths = Arc::new(
             w.into_iter()
@@ -399,6 +486,26 @@ impl Sheet {
 pub struct Workbook {
     pub sheets: Vec<Sheet>,
     pub date_system: DateSystem,
+}
+
+impl Workbook {
+    /// シートの行・列を挿入・削除し、ブックのすべての式の参照を付け替える。
+    pub fn edit_rows_cols(
+        &mut self,
+        ctx: &Context,
+        sheet: usize,
+        edit: yy_formula::Edit,
+    ) -> io::Result<()> {
+        let s = &mut self.sheets[sheet];
+        match edit {
+            yy_formula::Edit::InsertRows(at, n) => s.insert_rows(ctx, at, n)?,
+            yy_formula::Edit::DeleteRows(at, n) => s.delete_rows(ctx, at, n)?,
+            yy_formula::Edit::InsertCols(at, n) => s.insert_cols(ctx, at, n)?,
+            yy_formula::Edit::DeleteCols(at, n) => s.delete_cols(at, n),
+        }
+        crate::formula::adjust_refs(self, sheet, edit);
+        Ok(())
+    }
 }
 
 impl Default for Workbook {
@@ -459,6 +566,7 @@ impl Document {
             self.book = before;
             return Err(e);
         }
+        crate::formula::recalc(&mut self.book, &self.ctx);
         self.undo.push(before);
         if self.undo.len() > UNDO_DEPTH {
             self.undo.remove(0);

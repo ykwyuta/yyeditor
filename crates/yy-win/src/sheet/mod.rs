@@ -558,6 +558,11 @@ fn display(
     }
 }
 
+/// 式の入力か（`=` で始まり、続きがある）。
+fn is_formula(text: &str) -> bool {
+    text.len() > 1 && text.starts_with('=')
+}
+
 /// 入力された文字列をセルの値にする。
 fn parse_entry(text: &str, sys: DateSystem) -> Value {
     if text.is_empty() {
@@ -812,8 +817,7 @@ impl App {
         } else {
             format!("{}R × {}C", b - t + 1, rr - l + 1)
         };
-        let v = self.sheet().get(&self.ctx, r, c).unwrap_or_default();
-        let text = edit_text(&v, self.format_of(r, c).as_deref(), self.sys());
+        let text = self.cell_edit_text(r, c);
         unsafe {
             let _ = SetWindowTextW(self.name_box, &HSTRING::from(name));
             if GetFocus() != self.formula {
@@ -1006,10 +1010,7 @@ impl App {
         let enter_mode = initial.is_some();
         let text = match initial {
             Some(t) => t.to_owned(),
-            None => {
-                let v = self.sheet().get(&self.ctx, r, c).unwrap_or_default();
-                edit_text(&v, self.format_of(r, c).as_deref(), self.sys())
-            }
+            None => self.cell_edit_text(r, c),
         };
         unsafe {
             let font_h = -((self.painter.size_pt() * self.painter.dpi() / 72.0).round() as i32);
@@ -1094,10 +1095,35 @@ impl App {
         }
     }
 
+    /// 編集のときに見せる文字列（式なら式）。
+    fn cell_edit_text(&self, r: u64, c: u32) -> String {
+        if let Some(f) = self.sheet().formula_at(r, c) {
+            return f.text.to_string();
+        }
+        let v = self.sheet().get(&self.ctx, r, c).unwrap_or_default();
+        edit_text(&v, self.format_of(r, c).as_deref(), self.sys())
+    }
+
     fn set_cell(&mut self, r: u64, c: u32, text: &str) {
-        let v = parse_entry(text, self.sys());
         let sheet = self.sheet;
-        let res = self.doc.edit(|b, ctx| b.sheets[sheet].set(ctx, r, c, v));
+        let res = if is_formula(text) {
+            let mut bad = None;
+            let res = self.doc.edit(|b, ctx| {
+                b.sheets[sheet].set_formula(ctx, r, c, text).map_err(|e| {
+                    bad = Some(e.clone());
+                    std::io::Error::other(e)
+                })
+            });
+            if let Some(e) = bad {
+                error_box(self.frame, &format!("式に誤りがあります。\n{e}"));
+                self.after_edit();
+                return;
+            }
+            res
+        } else {
+            let v = parse_entry(text, self.sys());
+            self.doc.edit(|b, ctx| b.sheets[sheet].set(ctx, r, c, v))
+        };
         if let Err(e) = res {
             error_box(self.frame, &format!("入力できませんでした: {e}"));
         }
@@ -1199,7 +1225,16 @@ impl App {
             let s = &mut b.sheets[sheet];
             for (i, row) in rows.iter().enumerate() {
                 for (j, v) in row.iter().enumerate() {
-                    s.set(ctx, r0 + i as u64, c0 + j as u32, parse_entry(v, sys))?;
+                    let (r, c) = (r0 + i as u64, c0 + j as u32);
+                    // 式は式として（読めなければ文字列として）
+                    if !(is_formula(v) && s.set_formula(ctx, r, c, v).is_ok()) {
+                        let value = if is_formula(v) {
+                            Value::text(v)
+                        } else {
+                            parse_entry(v, sys)
+                        };
+                        s.set(ctx, r, c, value)?;
+                    }
                 }
             }
             Ok(())
@@ -1225,18 +1260,13 @@ impl App {
         }
         let (t, l, b, r) = self.selection();
         let sheet = self.sheet;
-        let res = self.doc.edit(|bk, ctx| {
-            let s = &mut bk.sheets[sheet];
-            match id {
-                ID_INSERT_ROWS => s.insert_rows(ctx, t, b - t + 1),
-                ID_DELETE_ROWS => s.delete_rows(ctx, t, b - t + 1),
-                ID_INSERT_COLS => s.insert_cols(ctx, l, r - l + 1),
-                _ => {
-                    s.delete_cols(l, r - l + 1);
-                    Ok(())
-                }
-            }
-        });
+        let edit = match id {
+            ID_INSERT_ROWS => yy_formula::Edit::InsertRows(t, b - t + 1),
+            ID_DELETE_ROWS => yy_formula::Edit::DeleteRows(t, b - t + 1),
+            ID_INSERT_COLS => yy_formula::Edit::InsertCols(l, r - l + 1),
+            _ => yy_formula::Edit::DeleteCols(l, r - l + 1),
+        };
+        let res = self.doc.edit(|bk, ctx| bk.edit_rows_cols(ctx, sheet, edit));
         if let Err(e) = res {
             error_box(self.frame, &format!("できませんでした: {e}"));
         }

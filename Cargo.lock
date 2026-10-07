@@ -3331,6 +3331,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-formula"
+version = "0.1.0"
+dependencies = [
+ "yy-numfmt",
+]
+
+[[package]]
 name = "yy-io"
 version = "0.1.0"
 dependencies = [
@@ -3414,6 +3421,7 @@ dependencies = [
  "tempfile",
  "yy-delimited",
  "yy-encoding",
+ "yy-formula",
  "yy-io",
  "yy-numfmt",
 ]
@@ -3462,6 +3470,7 @@ dependencies = [
  "yy-core",
  "yy-delimited",
  "yy-encoding",
+ "yy-formula",
  "yy-io",
  "yy-jobs",
  "yy-layout",

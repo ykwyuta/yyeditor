@@ -178,4 +178,30 @@ fn main() {
     let t = Instant::now();
     query::permute(&ctx, table, &order).unwrap();
     println!("並べ替えの確定 {:.2} 秒", t.elapsed().as_secs_f64());
+
+    if cols >= 3 {
+        let mut d3 = d2;
+        let last = cols as u32 + 1;
+        for (i, f) in [
+            "=SUMIFS(B:B,C:C,\"東京\",A:A,\">500000\")",
+            "=COUNTIFS(C:C,\"大阪\")",
+            "=XLOOKUP(999999,A:A,C:C,\"なし\")",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let t = Instant::now();
+            d3.edit(|b, ctx| {
+                b.sheets[0]
+                    .set_formula(ctx, i as u64, last, f)
+                    .map_err(std::io::Error::other)
+            })
+            .unwrap();
+            println!(
+                "{f} → {:?}（追加して再計算 {:.2} 秒）",
+                d3.book.sheets[0].get(&ctx, i as u64, last).unwrap(),
+                t.elapsed().as_secs_f64()
+            );
+        }
+    }
 }
