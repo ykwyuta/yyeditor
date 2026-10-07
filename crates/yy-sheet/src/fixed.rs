@@ -23,7 +23,8 @@ use crate::Context;
 use crate::budget::Part;
 use crate::chunk::{Builder, CellRef, Chunk, MAX_ROWS};
 use crate::column::{Column, Piece};
-use crate::sheet::{Sheet, Table};
+use crate::sheet::{Place, Sheet, Table};
+use crate::value::Value;
 
 /// レコードの区切り。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -153,25 +154,127 @@ pub struct FixedReport {
     pub first: Option<(u64, String)>,
 }
 
+/// 10 進数をセルの値に（15 桁までなら数値、それより長ければ桁を落とさないよう文字列）。
+fn num_cell(f: &yy_cobol::Field, n: &yy_cobol::Decimal) -> Option<f64> {
+    let digits = f.kind.digits_scale().map(|d| d.0).unwrap_or(0);
+    (digits <= 15 && n.scale <= 15).then(|| n.to_f64())
+}
+
 /// 読んだ値をセルに。
 fn push_decoded(b: &mut Builder, f: &yy_cobol::Field, d: Decoded, raw: &[u8], invalid: &mut u64) {
     match d {
         Decoded::Empty => b.push(CellRef::Empty),
         Decoded::Text(s) => b.push(CellRef::Text(&s)),
         Decoded::Float(x) => b.push(CellRef::Number(x)),
-        Decoded::Num(n) => {
-            let digits = f.kind.digits_scale().map(|d| d.0).unwrap_or(0);
-            if digits <= 15 && n.scale <= 15 {
-                b.push(CellRef::Number(n.to_f64()))
-            } else {
-                b.push(CellRef::Text(&n.to_string()))
-            }
-        }
+        Decoded::Num(n) => match num_cell(f, &n) {
+            Some(x) => b.push(CellRef::Number(x)),
+            None => b.push(CellRef::Text(&n.to_string())),
+        },
         Decoded::Invalid => {
             *invalid += 1;
             b.push(CellRef::Text(&yy_cobol::hex_text(raw)))
         }
     }
+}
+
+/// 表の列の項目（固定長の設定があって、列が項目に結び付いていれば）。
+pub fn column_field(sheet: &Sheet, col: u32) -> Option<(&FixedSpec, &yy_cobol::Field)> {
+    let spec = sheet.fixed.as_deref()?;
+    let i = sheet.table.columns.get(col as usize)?.field?;
+    Some((spec, spec.layout.fields.get(i as usize)?))
+}
+
+/// 格子のセルが項目の列のデータ（見出し行・表の外は除く）なら、その項目。
+pub fn field_at(sheet: &Sheet, row: u64, col: u32) -> Option<(&FixedSpec, &yy_cobol::Field)> {
+    match sheet.place(row, col) {
+        Place::Data(_, c) => column_field(sheet, c),
+        _ => None,
+    }
+}
+
+/// 項目のセルに入力した文字列を確かめて、セルの値にする（型に合わなければ理由）。先頭の `'` は
+/// 文字列の印として除く。英数字の項目は数字だけでも文字列のまま（`00123` の 0 を残す）。
+pub fn entry_value(spec: &FixedSpec, f: &yy_cobol::Field, text: &str) -> Result<Value, String> {
+    let t = text.strip_prefix('\'').unwrap_or(text);
+    Ok(match spec.codec.accept(f, t)? {
+        Decoded::Empty => Value::Empty,
+        Decoded::Text(s) => Value::text(&s),
+        Decoded::Float(x) => Value::Number(x),
+        Decoded::Num(n) => match num_cell(f, &n) {
+            Some(x) => Value::Number(x),
+            None => Value::text(&n.to_string()),
+        },
+        Decoded::Invalid => Value::text(t),
+    })
+}
+
+/// 自動で付けた表示形式か（なし・`0`・`0.00` など）。
+fn auto_format(f: Option<&str>) -> bool {
+    match f {
+        None => true,
+        Some(f) => {
+            f == "0"
+                || f.strip_prefix("0.")
+                    .is_some_and(|z| !z.is_empty() && z.chars().all(|c| c == '0'))
+        }
+    }
+}
+
+/// 表の列 `col` の項目の型を `ty`（`S9(7)V99 COMP-3` など）にする。項目のない列なら、左の列の項目の
+/// 後ろに項目を足す（名前は列の名前から）。固定長の設定がなければ `codec`・`separator` で作る。
+/// コピーブックは書き直す。数値の列の表示形式（自動で付けたもの）は小数部の桁に合わせる。
+pub fn set_column_type(
+    sheet: &mut Sheet,
+    col: u32,
+    ty: &str,
+    codec: Codec,
+    separator: RecordSep,
+) -> Result<(), String> {
+    let t = &sheet.table;
+    let Some(column) = t.columns.get(col as usize) else {
+        return Err(if t.columns.is_empty() {
+            "COBOL の型は表の列に付けます。先に データ > 固定長のレイアウト でレイアウトを設定するか、\
+             表（CSV など）を開いてください"
+                .into()
+        } else {
+            format!(
+                "COBOL の型は表の列（A〜{}）に付けます",
+                crate::col_name(t.cols() - 1)
+            )
+        });
+    };
+    let (src, codec, separator) = match &sheet.fixed {
+        Some(s) => (s.copybook.to_string(), s.codec, s.separator),
+        None => (String::new(), codec, separator),
+    };
+    let mut cols: Vec<Column> = t.columns.as_ref().clone();
+    let src = match column.field {
+        Some(i) => yy_cobol::retype(&src, i as usize, ty)?,
+        None => {
+            let after = cols[..col as usize].iter().rev().find_map(|c| c.field);
+            let (s, idx) = yy_cobol::add_field(&src, after.map(|x| x as usize), &column.name, ty)?;
+            for c in cols.iter_mut() {
+                if let Some(f) = c.field.as_mut()
+                    && *f as usize >= idx
+                {
+                    *f += 1;
+                }
+            }
+            cols[col as usize].field = Some(idx as u32);
+            s
+        }
+    };
+    let spec = FixedSpec::new(&src, codec, separator)?;
+    for c in cols.iter_mut() {
+        if let Some(f) = c.field.and_then(|i| spec.layout.fields.get(i as usize))
+            && auto_format(c.format.as_deref())
+        {
+            c.format = format_of(f);
+        }
+    }
+    sheet.table.columns = Arc::new(cols);
+    sheet.fixed = Some(Arc::new(spec));
+    Ok(())
 }
 
 /// 項目の列の表示形式（小数部のある数値）。
@@ -790,5 +893,66 @@ mod tests {
         let p2 = dir.path().join("n2.dat");
         export(&ctx, &sh, &p2, &s, None, &|_, _| true).unwrap();
         assert_eq!(std::fs::read(&p2).unwrap(), bytes);
+    }
+
+    #[test]
+    fn column_types_and_entry_values() {
+        let ctx = Context::for_tests();
+        // 固定長の設定のない表（CSV など）に型を付けていく
+        let mut sh = Sheet::new("S");
+        let mut cols = Vec::new();
+        for name in ["code", "name", "amount"] {
+            let mut c = Column::new(name);
+            c.extend_empty(&ctx, 2).unwrap();
+            cols.push(c);
+        }
+        sh.table = Table {
+            columns: Arc::new(cols),
+            rows: 2,
+            header: true,
+        };
+        let ms = Codec::new(Charset::Ms932);
+        assert!(set_column_type(&mut sh, 3, "X", ms, RecordSep::Crlf).is_err());
+        set_column_type(&mut sh, 2, "S9(5)V99 COMP-3", ms, RecordSep::Crlf).unwrap();
+        set_column_type(&mut sh, 0, "9(4)", ms, RecordSep::Lf).unwrap();
+        set_column_type(&mut sh, 1, "X(10)", ms, RecordSep::Lf).unwrap();
+        let spec = sh.fixed.clone().unwrap();
+        // 列の並びの順に項目ができる（最初の設定の区切り）
+        let names: Vec<&str> = spec.layout.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["CODE", "NAME", "AMOUNT"]);
+        assert_eq!(spec.separator, RecordSep::Crlf);
+        assert_eq!(spec.layout.record_len, 4 + 10 + 4);
+        let fields: Vec<Option<u32>> = sh.table.columns.iter().map(|c| c.field).collect();
+        assert_eq!(fields, [Some(0), Some(1), Some(2)]);
+        assert_eq!(sh.table.columns[2].format.as_deref(), Some("0.00"));
+        // 型を変える
+        set_column_type(&mut sh, 2, "S9(7) COMP", ms, RecordSep::Lf).unwrap();
+        let spec = sh.fixed.clone().unwrap();
+        assert_eq!(spec.layout.fields[2].describe, "S9(7) COMP");
+        assert_eq!(spec.layout.record_len, 4 + 10 + 4);
+        assert_eq!(sh.table.columns[2].format, None);
+        assert!(set_column_type(&mut sh, 2, "9(5)Q", ms, RecordSep::Lf).is_err());
+        // 入力
+        assert!(field_at(&sh, 0, 0).is_none());
+        assert!(field_at(&sh, 1, 5).is_none());
+        let (sp, f) = field_at(&sh, 1, 0).unwrap();
+        assert_eq!(entry_value(sp, f, "0012"), Ok(Value::Number(12.0)));
+        assert!(entry_value(sp, f, "12a").is_err());
+        assert!(
+            entry_value(sp, f, "12345")
+                .unwrap_err()
+                .contains("整数部は 4 桁")
+        );
+        let (sp, f) = field_at(&sh, 1, 1).unwrap();
+        assert_eq!(entry_value(sp, f, "00123"), Ok(Value::text("00123")));
+        assert_eq!(entry_value(sp, f, "'abc"), Ok(Value::text("abc")));
+        assert_eq!(entry_value(sp, f, ""), Ok(Value::Empty));
+        // 15 桁を超える数値は文字列
+        let s = super::tests::spec(Charset::Ms932, RecordSep::Crlf);
+        let big = &s.layout.fields[5];
+        assert_eq!(
+            entry_value(&s, big, "-12345678901234567.8"),
+            Ok(Value::text("-12345678901234567.80"))
+        );
     }
 }

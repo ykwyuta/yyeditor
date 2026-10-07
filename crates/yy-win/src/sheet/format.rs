@@ -263,6 +263,29 @@ const D_BORDER: u16 = 21;
 const D_LINE: u16 = 22;
 const D_LINE_COLOR: u16 = 23;
 const D_LINE_LABEL: u16 = 24;
+const D_COBOL: u16 = 25;
+const D_COBOL_INFO: u16 = 26;
+
+/// COBOL の型の候補（固定長）。
+const COBOL_PRESETS: [&str; 17] = [
+    "X(10)",
+    "A(10)",
+    "N(10)",
+    "N(10) NATIONAL",
+    "9(5)",
+    "9(5)V99",
+    "S9(5)",
+    "S9(7)V99",
+    "S9(5) SIGN LEADING SEPARATE",
+    "S9(7)V99 COMP-3",
+    "9(8) COMP-3",
+    "S9(4) COMP",
+    "S9(9) COMP",
+    "S9(9) COMP-5",
+    "COMP-1",
+    "COMP-2",
+    "ZZ,ZZ9.99-",
+];
 
 const ALIGNS: [(Option<HAlign>, &str); 5] = [
     (None, "変更しない"),
@@ -329,16 +352,31 @@ struct FormatState {
     line_color: Rgb,
     current_fill: Rgb,
     current_color: Rgb,
-    /// 結果（書式と罫線）
-    result: Option<(Style, Option<(BorderPreset, Line)>)>,
+    /// COBOL の型（アクティブなセルの列の項目の型。表の列でなければ `None`）
+    cobol: Option<String>,
+    /// 結果（書式と罫線と、変えた COBOL の型）
+    result: Option<(Style, Option<Bordering>, Option<String>)>,
 }
+
+/// 付ける罫線（形と線）。
+type Bordering = (BorderPreset, Line);
 
 /// セルの書式設定（Ctrl+1）。
 pub(super) fn format_dialog() {
     let Some((frame, st, fmt, value, sys)) = active_style() else {
         return;
     };
-    let mut t = Template::dialog("セルの書式設定", 260, 196);
+    // COBOL の型は表の列に付ける
+    let cobol = with(|a| {
+        let s = a.sheet();
+        (a.cur.1 < s.table.cols()).then(|| {
+            yy_sheet::fixed::column_field(s, a.cur.1)
+                .map(|(_, f)| f.describe.clone())
+                .unwrap_or_default()
+        })
+    })
+    .flatten();
+    let mut t = Template::dialog("セルの書式設定", 260, 236);
     let label = |t: &mut Template, x, y, cx, id, text: &str| {
         t.item(0, x, y, cx, 10, id, CLASS_STATIC, text);
     };
@@ -413,17 +451,27 @@ pub(super) fn format_dialog() {
     combo(&mut t, 60, 136, 60, D_LINE, CBS_DROPDOWNLIST as u32);
     button(&mut t, 124, 135, 60, D_LINE_COLOR, "線の色...");
     label(&mut t, 190, 138, 63, D_LINE_LABEL, "");
+    label(&mut t, 7, 160, 52, 0, "COBOL の型:");
+    combo(
+        &mut t,
+        60,
+        158,
+        193,
+        D_COBOL,
+        CBS_DROPDOWN_ | CBS_AUTOHSCROLL as u32,
+    );
+    t.item(0, 60, 175, 193, 34, D_COBOL_INFO, CLASS_STATIC, "");
     t.item(
         WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32,
         149,
-        176,
+        216,
         50,
         14,
         IDOK_,
         CLASS_BUTTON,
         "OK",
     );
-    button(&mut t, 203, 176, 50, IDCANCEL_, "キャンセル");
+    button(&mut t, 203, 216, 50, IDCANCEL_, "キャンセル");
 
     let mut state = FormatState {
         initial_fmt: fmt.as_deref().unwrap_or("General").to_owned(),
@@ -439,6 +487,7 @@ pub(super) fn format_dialog() {
         line_color: 0,
         current_fill: st.fill_rgb().unwrap_or(0xFFFF00),
         current_color: st.color_rgb().unwrap_or(0xC00000),
+        cobol,
         result: None,
     };
     let aligned = t.aligned();
@@ -451,11 +500,10 @@ pub(super) fn format_dialog() {
             LPARAM(&mut state as *mut FormatState as isize),
         );
     }
-    let Some((style, border)) = state.result else {
+    let Some((style, border, cobol)) = state.result else {
         return;
     };
-    // 書式と罫線を 1 回の編集で（Undo 1 回で戻る）
-    apply(|r| {
+    let layers = |r| {
         let mut v = Vec::new();
         if !style.is_empty() {
             v.push((r, style.clone()));
@@ -464,7 +512,85 @@ pub(super) fn format_dialog() {
             v.extend(border_layers(r, preset, line));
         }
         v
+    };
+    match cobol {
+        // 書式と罫線を 1 回の編集で（Undo 1 回で戻る）
+        None => apply(layers),
+        Some(ty) => apply_with_type(&ty, layers),
+    }
+}
+
+/// 選択範囲の表の列の COBOL の型を変え、書式の層も付ける（1 回の編集で）。
+fn apply_with_type(ty: &str, layers: impl Fn(Rect) -> Vec<(Rect, Style)>) {
+    with(|a| {
+        a.end_edit(true);
+        let rects = match selection_rects(a) {
+            Ok(r) => r,
+            Err(e) => {
+                info_box(a.frame, &e);
+                return;
+            }
+        };
+        let (_, l, _, r) = a.selection();
+        let ncols = a.sheet().table.cols();
+        let cols: Vec<u32> = (l..=r.min(ncols.saturating_sub(1))).collect();
+        let (codec, sep) = a
+            .fixed_last
+            .as_ref()
+            .map(|s| (s.codec, s.separator))
+            .unwrap_or((
+                yy_cobol::Codec::new(yy_cobol::Charset::Ms932),
+                yy_sheet::fixed::RecordSep::Crlf,
+            ));
+        let sheet = a.sheet;
+        let mut bad = None;
+        let res = a.doc.edit(|b, _| {
+            let sh = &mut b.sheets[sheet];
+            if cols.is_empty() {
+                bad = Some("COBOL の型は表の列に付けます".to_string());
+                return Err(std::io::Error::other("type"));
+            }
+            for &c in &cols {
+                if let Err(e) = yy_sheet::fixed::set_column_type(sh, c, ty, codec, sep) {
+                    bad = Some(format!("{} 列: {e}", yy_sheet::col_name(c)));
+                    return Err(std::io::Error::other("type"));
+                }
+            }
+            let st = &mut sh.styles;
+            for r in rects {
+                for (rect, style) in layers(r) {
+                    st.set(rect, style);
+                }
+            }
+            Ok(())
+        });
+        if let Some(e) = bad {
+            error_box(a.frame, &format!("COBOL の型を変えられませんでした。\n{e}"));
+        } else if let Err(e) = res {
+            error_box(a.frame, &format!("書式を付けられませんでした: {e}"));
+        } else if let Some(spec) = a.sheet().fixed.clone() {
+            set_status(&format!(
+                "COBOL の型を {ty} にしました（レコード長 {} バイト）",
+                spec.layout.record_len
+            ));
+        }
+        a.after_edit();
+        a.sync_formula();
+        a.invalidate();
     });
+}
+
+/// COBOL の型の欄の下に、長さと意味（誤りなら理由）を出す。
+fn cobol_info(hwnd: HWND, ty: &str) {
+    let text = if ty.trim().is_empty() {
+        "空なら変えません。例: X(10)・S9(7)V99 COMP-3（ヘルプに一覧）".to_string()
+    } else {
+        match yy_cobol::check_type(ty) {
+            Ok((k, len)) => format!("{len} バイト: {}", yy_cobol::meaning(&k, len)),
+            Err(e) => format!("誤り: {e}"),
+        }
+    };
+    set_text(hwnd, D_COBOL_INFO, &text);
 }
 
 fn send(hwnd: HWND, id: u16, msg: u32, w: usize, l: isize) -> isize {
@@ -536,6 +662,26 @@ extern "system" fn format_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 }
                 send(hwnd, D_LINE, CB_SETCURSEL, 0, 0);
                 refresh_labels(hwnd, st);
+                match &st.cobol {
+                    Some(ty) => {
+                        for p in COBOL_PRESETS {
+                            add(hwnd, D_COBOL, p);
+                        }
+                        set_text(hwnd, D_COBOL, ty);
+                        cobol_info(hwnd, ty);
+                    }
+                    None => {
+                        let _ = EnableWindow(
+                            GetDlgItem(Some(hwnd), D_COBOL as i32).unwrap_or_default(),
+                            false,
+                        );
+                        set_text(
+                            hwnd,
+                            D_COBOL_INFO,
+                            "COBOL の型は表の列に付けます（データ > 固定長のレイアウト、または表を開く）",
+                        );
+                    }
+                }
                 1
             }
             WM_COMMAND => {
@@ -551,6 +697,18 @@ extern "system" fn format_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         let i = send(hwnd, D_FMT, CB_GETCURSEL, 0, 0);
                         if let Some((c, _)) = usize::try_from(i).ok().and_then(|i| PRESETS.get(i)) {
                             preview(hwnd, st, c);
+                        }
+                        1
+                    }
+                    D_COBOL if code == CBN_EDITCHANGE_ => {
+                        cobol_info(hwnd, &get_text(hwnd, D_COBOL));
+                        1
+                    }
+                    D_COBOL if code == CBN_SELCHANGE => {
+                        let i = send(hwnd, D_COBOL, CB_GETCURSEL, 0, 0);
+                        if let Some(p) = usize::try_from(i).ok().and_then(|i| COBOL_PRESETS.get(i))
+                        {
+                            cobol_info(hwnd, p);
                         }
                         1
                     }
@@ -608,7 +766,19 @@ extern "system" fn format_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                 },
                             )
                         });
-                        st.result = Some((style, border));
+                        // COBOL の型（変えたときだけ。誤りなら閉じない）
+                        let ty = get_text(hwnd, D_COBOL).trim().to_owned();
+                        let cobol = match &st.cobol {
+                            Some(init) if !ty.is_empty() && ty != *init => {
+                                if let Err(e) = yy_cobol::check_type(&ty) {
+                                    error_box(hwnd, &format!("COBOL の型に誤りがあります。\n{e}"));
+                                    return 1;
+                                }
+                                Some(ty)
+                            }
+                            _ => None,
+                        };
+                        st.result = Some((style, border, cobol));
                         let _ = EndDialog(hwnd, IDOK_ as isize);
                         1
                     }

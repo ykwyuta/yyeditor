@@ -416,7 +416,7 @@ impl Codec {
     pub fn decode(&self, f: &Field, b: &[u8]) -> Decoded {
         let space = self.charset.space();
         match &f.kind {
-            Kind::Alnum { justified } => {
+            Kind::Alnum { justified, .. } => {
                 let s = self.decode_text(b, false);
                 let t = s.trim_end_matches(' ');
                 let t = if *justified {
@@ -605,7 +605,7 @@ impl Codec {
             return;
         }
         match &f.kind {
-            Kind::Alnum { justified } => {
+            Kind::Alnum { justified, .. } => {
                 let s = text_of(v);
                 self.encode_text(&s, out, false, *justified, issues);
             }
@@ -761,6 +761,182 @@ impl Codec {
                     issues.overflow += 1;
                 }
                 self.encode_text(&text, out, false, false, issues);
+            }
+        }
+    }
+
+    // ---- 入力の確かめ ----
+
+    /// 文字が 2 バイト文字（SO / SI なし）で書けるか。
+    fn is_dbcs_char(&self, ch: char) -> bool {
+        match self.charset {
+            Charset::Ms932 => {
+                let mut t = [0u8; 4];
+                matches!(
+                    yy_encoding::encode_all(
+                        Encoding::Cp932,
+                        ch.encode_utf8(&mut t).as_bytes(),
+                        EscapeMode::Restore,
+                    ),
+                    Ok(b) if b.len() == 2
+                )
+            }
+            Charset::Ebcdic(c) => matches!(c.encode_char(ch), Some(EbcdicCode::Double(_))),
+        }
+    }
+
+    /// 文字コードにない最初の文字。
+    fn first_unencodable(&self, s: &str) -> Option<char> {
+        s.chars().find(|&ch| {
+            let mut t = [0u8; 4];
+            let one = ch.encode_utf8(&mut t);
+            let mut buf = [0u8; 8];
+            let mut is = Issues::default();
+            self.encode_text(one, &mut buf, false, false, &mut is);
+            is.unencodable > 0
+        })
+    }
+
+    /// セルに入力する文字列が項目の型に合うかを確かめ、セルに入れる値を返す。合わなければ理由。
+    ///
+    /// - 空（空白だけ）は `Empty`。
+    /// - 英数字は、長さ（バイト）と文字コードにない文字を確かめる（`PIC A` は英字と空白だけ）。2 バイト
+    ///   文字の項目は全角の文字だけ（半角の英数字は全角にして書くので使える）。
+    /// - 数値の項目は、数字（全角も）・符号・小数点・桁区切りの `,` だけで、符号なしの項目に負の数、
+    ///   小数部・整数部の桁数の超え、`COMP-5` の範囲の外は受け付けない。値は小数部の桁を項目に
+    ///   揃えた `Num`（`COMP-1`・`COMP-2` は `Float`）。`X'…'`（元のバイト）はそのまま `Text`。
+    pub fn accept(&self, f: &Field, text: &str) -> Result<Decoded, String> {
+        if text.trim().is_empty() {
+            return Ok(Decoded::Empty);
+        }
+        let mut scratch = vec![0u8; f.len];
+        let mut issues = Issues::default();
+        let not_number = || {
+            format!(
+                "数値の項目（{}）です。数字（0〜9）と符号（+ -）・小数点で入力してください",
+                f.describe
+            )
+        };
+        match &f.kind {
+            Kind::Alnum { justified, alpha } => {
+                if *alpha
+                    && let Some(c) = text
+                        .chars()
+                        .find(|c| !(c.is_ascii_alphabetic() || *c == ' '))
+                {
+                    return Err(format!(
+                        "英字の項目（PIC A）です。英字と空白だけを入力してください（「{c}」は使えません）"
+                    ));
+                }
+                self.encode_text(text, &mut scratch, false, *justified, &mut issues);
+                if issues.unencodable > 0 {
+                    let c = self.first_unencodable(text).unwrap_or('?');
+                    return Err(format!(
+                        "文字コード {} にない文字です（「{c}」）",
+                        self.charset.name()
+                    ));
+                }
+                if issues.truncated > 0 {
+                    return Err(format!("長すぎます（{} バイトまでです）", f.len));
+                }
+                Ok(Decoded::Text(text.to_string()))
+            }
+            Kind::Dbcs => {
+                if let Some(c) = text.chars().find(|&c| !self.is_dbcs_char(to_fullwidth(c))) {
+                    return Err(format!(
+                        "2 バイト文字の項目（{}）です。全角の文字を入力してください（「{c}」は使えません）",
+                        f.describe
+                    ));
+                }
+                if text.chars().count() * 2 > f.len {
+                    return Err(format!("長すぎます（全角 {} 文字までです）", f.len / 2));
+                }
+                Ok(Decoded::Text(text.to_string()))
+            }
+            Kind::National => {
+                if text.encode_utf16().count() * 2 > f.len {
+                    return Err(format!(
+                        "長すぎます（{} 文字〔UTF-16〕までです）",
+                        f.len / 2
+                    ));
+                }
+                Ok(Decoded::Text(text.to_string()))
+            }
+            _ if parse_hex(text, f.len).is_some() => Ok(Decoded::Text(text.trim().to_string())),
+            Kind::Float { .. } => {
+                let d = Decimal::parse(text).ok_or_else(not_number)?;
+                Ok(Decoded::Float(d.to_f64()))
+            }
+            kind => {
+                let d = Decimal::parse(text).ok_or_else(not_number)?;
+                let (digits, scale) = kind.digits_scale().unwrap_or((18, 0));
+                let signed = match kind {
+                    Kind::Zoned { signed, .. }
+                    | Kind::Packed { signed, .. }
+                    | Kind::Binary { signed, .. } => *signed,
+                    Kind::Edited { syms, .. } => syms.iter().any(|s| {
+                        matches!(
+                            s,
+                            crate::Sym::Plus | crate::Sym::Minus | crate::Sym::Cr | crate::Sym::Db
+                        )
+                    }),
+                    _ => true,
+                };
+                if d.value < 0 && !signed {
+                    return Err(format!(
+                        "符号なしの項目（{}）です。負の数は入力できません",
+                        f.describe
+                    ));
+                }
+                // 小数部の末尾の 0 を除いてから桁数を比べる
+                let mut d = d;
+                while d.scale > scale && d.value % 10 == 0 {
+                    d = Decimal::new(d.value / 10, d.scale - 1);
+                }
+                if d.scale > scale {
+                    return Err(if scale > 0 {
+                        format!("小数部は {scale} 桁までです（{}）", f.describe)
+                    } else if scale == 0 {
+                        format!("整数の項目（{}）です。小数は入力できません", f.describe)
+                    } else {
+                        format!(
+                            "{} の倍数で入力してください（{}）",
+                            10i128.pow((-scale) as u32),
+                            f.describe
+                        )
+                    });
+                }
+                let d = d.rescale(scale).ok_or_else(not_number)?;
+                if let Kind::Binary {
+                    signed,
+                    bytes,
+                    native: true,
+                    ..
+                } = kind
+                {
+                    let bits = 8 * *bytes as u32;
+                    let (min, max): (i128, i128) = if *signed {
+                        (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+                    } else {
+                        (0, (1i128 << bits) - 1)
+                    };
+                    if d.value < min || d.value > max {
+                        return Err(format!(
+                            "範囲は {}〜{} です（{}）",
+                            Decimal::new(min, scale),
+                            Decimal::new(max, scale),
+                            f.describe
+                        ));
+                    }
+                } else if d.value.unsigned_abs() >= 10u128.pow(digits.min(38)) {
+                    let int = digits as i32 - scale;
+                    return Err(if int > 0 {
+                        format!("整数部は {int} 桁までです（{}）", f.describe)
+                    } else {
+                        format!("1 より小さい数だけです（{}）", f.describe)
+                    });
+                }
+                Ok(Decoded::Num(d))
             }
         }
     }
@@ -1127,5 +1303,69 @@ mod tests {
         for c in Charset::all() {
             assert_eq!(Charset::from_name(c.name()), Some(c));
         }
+    }
+
+    #[test]
+    fn accept_checks_the_kind() {
+        let ms = Codec::new(Charset::Ms932);
+        let ok = |f: &Field, t: &str| ms.accept(f, t).unwrap();
+        let ng = |f: &Field, t: &str| ms.accept(f, t).unwrap_err();
+        // 数値
+        let u5 = field("PIC 9(5)");
+        assert_eq!(ok(&u5, "12345"), Decoded::Num(Decimal::new(12345, 0)));
+        assert_eq!(ok(&u5, "１２"), Decoded::Num(Decimal::new(12, 0)));
+        assert_eq!(ok(&u5, " "), Decoded::Empty);
+        assert!(ng(&u5, "12a").contains("数値の項目"));
+        assert!(ng(&u5, "-1").contains("符号なし"));
+        assert!(ng(&u5, "123456").contains("整数部は 5 桁"));
+        assert!(ng(&u5, "1.5").contains("小数は入力できません"));
+        assert_eq!(ok(&u5, "7.000"), Decoded::Num(Decimal::new(7, 0)));
+        let s52 = field("PIC S9(5)V99 COMP-3");
+        assert_eq!(ok(&s52, "-1,234.5"), Decoded::Num(Decimal::new(-123450, 2)));
+        assert!(ng(&s52, "1.239").contains("小数部は 2 桁"));
+        assert!(ng(&s52, "123456").contains("整数部は 5 桁"));
+        let c5 = field("PIC S9(4) COMP-5");
+        assert_eq!(ok(&c5, "-32768"), Decoded::Num(Decimal::new(-32768, 0)));
+        assert!(ng(&c5, "32768").contains("-32768〜32767"));
+        let c4 = field("PIC S9(4) COMP");
+        assert!(ng(&c4, "10000").contains("整数部は 4 桁"));
+        let p = field("PIC 99PPP");
+        assert_eq!(ok(&p, "12000"), Decoded::Num(Decimal::new(12, -3)));
+        assert!(ng(&p, "12345").contains("1000 の倍数"));
+        assert!(matches!(ok(&field("COMP-2"), "0.1"), Decoded::Float(_)));
+        let ed = field("PIC ZZ,ZZ9.99");
+        assert!(ng(&ed, "-1").contains("符号なし"));
+        assert_eq!(
+            ok(&field("PIC ZZ9-"), "-12"),
+            Decoded::Num(Decimal::new(-12, 0))
+        );
+        // 元のバイト
+        assert_eq!(ok(&s52, "X'0012345C'"), Decoded::Text("X'0012345C'".into()));
+        // 英数字
+        let x3 = field("PIC X(3)");
+        assert_eq!(ok(&x3, "00A"), Decoded::Text("00A".into()));
+        assert!(ng(&x3, "ABCD").contains("3 バイト"));
+        assert!(ng(&x3, "あい").contains("3 バイト"));
+        assert!(ng(&x3, "😀").contains("MS932 にない"));
+        let a = field("PIC A(4)");
+        assert!(ng(&a, "A1").contains("PIC A"));
+        assert_eq!(ok(&a, "Ab c"), Decoded::Text("Ab c".into()));
+        // 2 バイト文字
+        let g = field("PIC G(2) DISPLAY-1");
+        assert_eq!(ok(&g, "漢A"), Decoded::Text("漢A".into()));
+        assert!(ng(&g, "ｱ").contains("全角"));
+        assert!(ng(&g, "漢字あ").contains("全角 2 文字"));
+        let n = field("PIC N(2) NATIONAL");
+        assert!(ng(&n, "😀😀").contains("2 文字"));
+        // EBCDIC
+        let eb = Codec::new(Charset::Ebcdic(Ccsid::Ibm930));
+        assert!(eb.accept(&x3, "AB").is_ok());
+        assert!(
+            eb.accept(&field("PIC X(4)"), "漢字")
+                .unwrap_err()
+                .contains("4 バイト")
+        );
+        assert!(eb.accept(&field("PIC X(6)"), "漢字").is_ok());
+        assert!(eb.accept(&g, "ｱ").is_err());
     }
 }

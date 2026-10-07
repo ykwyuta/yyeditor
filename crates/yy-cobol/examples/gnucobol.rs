@@ -258,7 +258,15 @@ fn literal(f: &Field, v: &str, compare: bool) -> String {
         v.to_string()
     } else if v.is_empty() {
         "SPACES".into()
-    } else if compare && matches!(f.kind, Kind::Alnum { justified: true }) {
+    } else if compare
+        && matches!(
+            f.kind,
+            Kind::Alnum {
+                justified: true,
+                ..
+            }
+        )
+    {
         format!("'{:>w$}'", v.replace('\'', "''"), w = f.len)
     } else {
         format!("'{}'", v.replace('\'', "''"))
@@ -724,7 +732,10 @@ fn text_vs_iconv() -> Vec<String> {
                 name: "T".into(),
                 offset: 0,
                 len: want.len(),
-                kind: Kind::Alnum { justified: false },
+                kind: Kind::Alnum {
+                    justified: false,
+                    alpha: false,
+                },
                 describe: String::new(),
             };
             let mut mine = vec![0u8; want.len()];

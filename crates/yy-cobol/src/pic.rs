@@ -189,6 +189,12 @@ pub fn kind_of(pic: Option<&str>, a: &Attrs) -> Result<(Kind, usize), String> {
     let has = |p: P| ps.contains(&p);
     // 2 バイト文字
     if has(P::N) || has(P::G) {
+        if !matches!(usage, Usage::Display | Usage::Display1 | Usage::National) {
+            return Err(format!(
+                "PIC {pic}: 2 バイト文字の項目に {} は使えません",
+                usage.name()
+            ));
+        }
         let n = ps.len();
         let kind = if usage == Usage::National {
             Kind::National
@@ -208,6 +214,7 @@ pub fn kind_of(pic: Option<&str>, a: &Attrs) -> Result<(Kind, usize), String> {
         return Ok((
             Kind::Alnum {
                 justified: a.justified,
+                alpha: ps.iter().all(|p| *p == P::A),
             },
             n,
         ));

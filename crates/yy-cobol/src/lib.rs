@@ -13,7 +13,7 @@ mod num;
 mod pic;
 
 pub use codec::{Charset, Codec, Decoded, Input, Issues, hex_text, parse_hex};
-pub use copybook::parse;
+pub use copybook::{add_field, check_type, parse, retype};
 pub use num::Decimal;
 
 /// 符号の位置（`DISPLAY` の数字項目）。
@@ -57,8 +57,9 @@ pub enum Sym {
 /// 項目の型。
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
-    /// 英数字（`PIC X`・`A`・英数字編集）。`justified` は `JUSTIFIED RIGHT`
-    Alnum { justified: bool },
+    /// 英数字（`PIC X`・`A`・英数字編集）。`justified` は `JUSTIFIED RIGHT`、`alpha` は英字だけの
+    /// 項目（`PIC A`）
+    Alnum { justified: bool, alpha: bool },
     /// 2 バイト文字（`PIC G`・`PIC N`〔`DISPLAY-1`〕）。SO / SI なし
     Dbcs,
     /// `PIC N USAGE NATIONAL`（UTF-16 ビッグエンディアン）
@@ -138,4 +139,146 @@ pub struct Layout {
     pub fields: Vec<Field>,
     /// 読めたが注意のいること（使わない `REDEFINES`・2 つ目の 01・`OCCURS DEPENDING ON` など）
     pub warnings: Vec<String>,
+}
+
+/// 数値の型の説明（`十進 5 けたの符号なし整数` など）。
+fn number_words(digits: u32, scale: i32, signed: bool) -> String {
+    let sign = if signed {
+        "符号あり"
+    } else {
+        "符号なし"
+    };
+    if scale == 0 {
+        format!("十進 {digits} けたの{sign}整数")
+    } else if scale < 0 {
+        format!(
+            "十進 {digits} けたに 10 の {} 乗を掛けた{sign}整数（P）",
+            -scale
+        )
+    } else if scale as u32 >= digits {
+        format!("十進小数部 {scale} けた（有効 {digits} けた）の{sign}数")
+    } else {
+        format!(
+            "十進整数部 {} けた、小数部 {scale} けたの{sign}数",
+            digits as i32 - scale
+        )
+    }
+}
+
+impl Field {
+    /// 型の意味（ヘルプ・セルの書式設定に出す。例: `数字 7 文字で十進整数部 5 けた、小数部 2 けたの
+    /// 符号なし数を表す`）。
+    pub fn meaning(&self) -> String {
+        meaning(&self.kind, self.len)
+    }
+}
+
+/// 型の意味（`len` は項目のバイト数）。
+pub fn meaning(kind: &Kind, len: usize) -> String {
+    match kind {
+        Kind::Alnum { alpha: true, .. } => format!("英字 {len} 文字（英字と空白だけ）を表す"),
+        Kind::Alnum { justified, .. } => format!(
+            "英数字 {len} バイトの文字列を表す（漢字は 1 文字 2 バイト。足りない分は空白{}）",
+            if *justified {
+                "を左に詰める〔右寄せ〕"
+            } else {
+                "で埋める"
+            }
+        ),
+        Kind::Dbcs => format!(
+            "2 バイト文字（全角）{} 文字の文字列を表す（SO / SI なし）",
+            len / 2
+        ),
+        Kind::National => format!("UTF-16 の {} 文字の文字列を表す", len / 2),
+        Kind::Zoned {
+            digits,
+            scale,
+            signed,
+            sign,
+        } => {
+            let n = number_words(*digits, *scale, *signed);
+            match (signed, sign) {
+                (false, _) => format!("数字 {digits} 文字で{n}を表す"),
+                (true, SignPos::Trailing) => {
+                    format!("{n}を表す（符号は最後のけたのゾーンに含める）")
+                }
+                (true, SignPos::Leading) => {
+                    format!("{n}を表す（符号は最初のけたのゾーンに含める）")
+                }
+                (true, SignPos::TrailingSeparate) => {
+                    format!("数字 {digits} 文字と最後の符号 1 文字（+ -）で{n}を表す")
+                }
+                (true, SignPos::LeadingSeparate) => {
+                    format!("最初の符号 1 文字（+ -）と数字 {digits} 文字で{n}を表す")
+                }
+            }
+        }
+        Kind::Packed {
+            digits,
+            scale,
+            signed,
+        } => format!(
+            "パック 10 進数（1 バイトに 2 けた、最後の半バイトが符号）で{}を表す",
+            number_words(*digits, *scale, *signed)
+        ),
+        Kind::Binary {
+            digits,
+            scale,
+            signed,
+            bytes,
+            native,
+        } => {
+            let n = number_words(*digits, *scale, *signed);
+            if *native {
+                let bits = 8 * *bytes as u32;
+                let (lo, hi): (i128, i128) = if *signed {
+                    (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+                } else {
+                    (0, (1i128 << bits) - 1)
+                };
+                format!(
+                    "{bytes} バイトの 2 進数で{}{}を表す（PIC のけた数で切り詰めず、{}〜{} まで）",
+                    if *signed {
+                        "符号あり"
+                    } else {
+                        "符号なし"
+                    },
+                    if *scale == 0 { "整数" } else { "数" },
+                    Decimal::new(lo, *scale),
+                    Decimal::new(hi, *scale)
+                )
+            } else {
+                format!("{bytes} バイトの 2 進数で{n}を表す")
+            }
+        }
+        Kind::Float { double: false } => {
+            "4 バイトの単精度浮動小数点数を表す（EBCDIC は IBM の 16 進形式、MS932 は IEEE 754）"
+                .into()
+        }
+        Kind::Float { double: true } => {
+            "8 バイトの倍精度浮動小数点数を表す（EBCDIC は IBM の 16 進形式、MS932 は IEEE 754）"
+                .into()
+        }
+        Kind::Edited {
+            syms,
+            digits,
+            scale,
+            blank_zero,
+        } => {
+            let signed = syms
+                .iter()
+                .any(|s| matches!(s, Sym::Plus | Sym::Minus | Sym::Cr | Sym::Db));
+            let sample = Decimal::new(
+                if signed { -1 } else { 1 } * (12345678901234567890i128 % 10i128.pow(*digits)),
+                *scale,
+            );
+            let (text, _) = edit::format(syms, sample, false);
+            format!(
+                "{}を {len} 文字に編集して表す（例: {}）{}",
+                number_words(*digits, *scale, signed),
+                text.trim_start(),
+                if *blank_zero { "。0 は空白" } else { "" }
+            )
+        }
+    }
 }

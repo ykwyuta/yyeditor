@@ -19,6 +19,52 @@ use crate::util::Context;
 /// ヘルプの本文（Markdown）。
 pub(crate) const HELP_MD: &str = include_str!("../help/help.md");
 
+/// yysheet のヘルプ（利用ガイド）の本文。
+pub(crate) const SHEET_MD: &str = include_str!("../help/sheet.md");
+
+thread_local! {
+    /// 表示するヘルプ（本文・ウィンドウの題名）。yysheet は [`use_sheet_help`] で切り替える
+    static DOC: std::cell::Cell<(&'static str, &'static str)> =
+        const { std::cell::Cell::new((HELP_MD, "yyeditor ヘルプ")) };
+}
+
+fn doc() -> &'static str {
+    DOC.with(|d| d.get().0)
+}
+
+/// yysheet のヘルプを表示するようにし、ヘルプのウィンドウのクラス（とプレビュー）を登録する。
+pub(crate) fn use_sheet_help(hinstance: windows::Win32::Foundation::HINSTANCE) {
+    DOC.with(|d| d.set((SHEET_MD, "yysheet ヘルプ")));
+    unsafe {
+        let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
+        for (class, proc_, bg) in [
+            (
+                HELP_CLASS,
+                help_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+                true,
+            ),
+            (crate::PREVIEW_CLASS, crate::preview::preview_proc, false),
+        ] {
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(proc_),
+                hInstance: hinstance,
+                hCursor: cursor,
+                hbrBackground: if bg {
+                    windows::Win32::Graphics::Gdi::HBRUSH(
+                        (windows::Win32::Graphics::Gdi::COLOR_WINDOW.0 + 1) as usize as *mut _,
+                    )
+                } else {
+                    Default::default()
+                },
+                lpszClassName: class,
+                ..Default::default()
+            };
+            RegisterClassExW(&wc);
+        }
+    }
+}
+
 /// 開いているヘルプのウィンドウ。
 struct HelpWindow {
     hwnd: HWND,
@@ -33,9 +79,12 @@ thread_local! {
 
 /// 見出し `{#section}` の行（0 始まり）。
 pub(crate) fn section_line(section: &str) -> Option<usize> {
+    section_line_in(doc(), section)
+}
+
+fn section_line_in(md: &str, section: &str) -> Option<usize> {
     let tag = format!("{{#{section}}}");
-    HELP_MD
-        .lines()
+    md.lines()
         .position(|l| l.starts_with('#') && l.trim_end().ends_with(&tag))
 }
 
@@ -66,7 +115,7 @@ pub(crate) fn show(section: Option<&str>) -> Result<()> {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             HELP_CLASS,
-            w!("yyeditor ヘルプ"),
+            &HSTRING::from(DOC.with(|d| d.get().1)),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -81,7 +130,7 @@ pub(crate) fn show(section: Option<&str>) -> Result<()> {
     };
     let mut preview = Preview::new(hwnd, hwnd)?;
     let registry = yy_syntax::Registry::builtin();
-    let body = yy_preview::markdown_to_html(HELP_MD, Some(&registry));
+    let body = yy_preview::markdown_to_html(doc(), Some(&registry));
     let opts = PageOptions {
         has_folder: false,
         token_colors: yy_config::Colors::default()
@@ -126,7 +175,7 @@ fn show_text_fallback(hwnd: HWND, line: usize) {
     if already {
         return;
     }
-    let text = plain_text(HELP_MD).replace('\n', "\r\n");
+    let text = plain_text(doc()).replace('\n', "\r\n");
     let edit = unsafe {
         let style = WS_CHILD
             | WS_VISIBLE
@@ -319,15 +368,80 @@ mod tests {
     /// 目次のリンク先の見出しがすべてある。
     #[test]
     fn table_of_contents_links_resolve() {
+        for md in [HELP_MD, SHEET_MD] {
+            let mut n = 0;
+            for part in md.split("](#").skip(1) {
+                let id = &part[..part.find(')').unwrap()];
+                assert!(section_line_in(md, id).is_some(), "見出し {{#{id}}} がない");
+                n += 1;
+            }
+            assert!(n >= 10);
+            let html = yy_preview::markdown_to_html(md, None);
+            assert!(html.contains("<h2 id=\"shortcuts\""));
+            assert_eq!(plain_text(md).lines().count(), md.lines().count());
+        }
+    }
+
+    /// yysheet のヘルプの COBOL の型の表のバイト数が、yy-cobol で求めた長さと合う。
+    #[test]
+    fn sheet_help_cobol_types_match() {
+        let start = section_line_in(SHEET_MD, "cobol-types").unwrap();
         let mut n = 0;
-        for part in HELP_MD.split("](#").skip(1) {
-            let id = &part[..part.find(')').unwrap()];
-            assert!(section_line(id).is_some(), "見出し {{#{id}}} がない");
+        for line in SHEET_MD.lines().skip(start) {
+            if line.starts_with("## ") && n > 0 {
+                break;
+            }
+            let Some(rest) = line.strip_prefix("| `") else {
+                continue;
+            };
+            let (ty, rest) = rest.split_once("` | ").unwrap();
+            let bytes: usize = rest.split(' ').next().unwrap().parse().unwrap();
+            let (_, len) = yy_cobol::check_type(ty).unwrap_or_else(|e| panic!("{ty}: {e}"));
+            assert_eq!(len, bytes, "{ty}");
             n += 1;
         }
-        assert!(n >= 10);
-        let html = yy_preview::markdown_to_html(HELP_MD, None);
-        assert!(html.contains("<h2 id=\"shortcuts\""));
+        assert!(n >= 30, "{n}");
+    }
+
+    /// yysheet のメニューのショートカットと関数が、yysheet のヘルプの表にある。
+    #[test]
+    fn sheet_help_lists_shortcuts_and_functions() {
+        let src = include_str!("sheet/mod.rs");
+        let mut found = 0;
+        // メニューの項目: add(メニュー, ID_…, "文字列")
+        for label in src
+            .split(" add(")
+            .skip(1)
+            .filter_map(|p| p.lines().next())
+            .filter(|head| head.contains(", ID_"))
+            .filter_map(|head| head.split_once('"').map(|(_, r)| r))
+            .filter_map(|p| p.find('"').map(|e| &p[..e]))
+        {
+            let Some((_, key)) = label.split_once("\\t") else {
+                continue;
+            };
+            // 表示形式の候補（{code}）は除く。`Ctrl++（ホイール）` は `Ctrl++`
+            if key.contains('{') {
+                continue;
+            }
+            let key = key.split('（').next().unwrap_or(key);
+            assert!(
+                SHEET_MD.contains(&format!("| {key} |"))
+                    || SHEET_MD.contains(&format!("| {key} /"))
+                    || SHEET_MD.contains(&format!("/ {key} |"))
+                    || SHEET_MD.contains(&format!("/ {key} /")),
+                "yysheet のヘルプのショートカットの表に「{key}」がない"
+            );
+            found += 1;
+        }
+        assert!(found > 10, "{found}");
+        for f in yy_formula::FUNCTIONS {
+            assert!(
+                SHEET_MD.contains(&format!("| `{}` |", f.name)),
+                "yysheet のヘルプの関数の表に {} がない",
+                f.name
+            );
+        }
     }
 
     /// ヘルプのウィンドウを開いて、ショートカットの節まで移動する。WebView2 を使えない環境

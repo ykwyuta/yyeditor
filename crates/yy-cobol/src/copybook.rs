@@ -517,6 +517,16 @@ fn size(
         (None, Some(u)) => u.name().to_string(),
         (None, None) => String::new(),
     };
+    for (on, word) in [
+        (e.justified, "JUSTIFIED"),
+        (e.blank_zero, "BLANK WHEN ZERO"),
+        (e.sync, "SYNC"),
+    ] {
+        if on {
+            e.describe.push(' ');
+            e.describe.push_str(word);
+        }
+    }
     e.kind = Some(kind);
     e.size = len;
     Ok(())
@@ -524,22 +534,32 @@ fn size(
 
 /// 基本項目を並べる。
 struct Flat {
-    fields: Vec<(Field, String, String, String)>,
+    /// （項目, 名前, 添字, 親の名前, 木の中の道〔子の番号の並び〕）
+    fields: Vec<(Field, String, String, String, Vec<usize>)>,
 }
 
-fn place(e: &Entry, at: usize, subs: &[u32], parent: &str, out: &mut Flat) {
+fn place(e: &Entry, at: usize, subs: &[u32], parent: &str, path: &[usize], out: &mut Flat) {
     if e.is_group() {
         let me = if e.filler { parent } else { e.name.as_str() };
         for (k, c) in e.children.iter().enumerate() {
             if c.redefines.is_some() {
                 continue;
             }
+            let mut p = path.to_vec();
+            p.push(k);
             for n in 0..c.occurs {
                 let mut s = subs.to_vec();
                 if c.occurs > 1 {
                     s.push(n + 1);
                 }
-                place(c, at + e.child_off[k] + n as usize * c.size, &s, me, out);
+                place(
+                    c,
+                    at + e.child_off[k] + n as usize * c.size,
+                    &s,
+                    me,
+                    &p,
+                    out,
+                );
             }
         }
         return;
@@ -560,17 +580,37 @@ fn place(e: &Entry, at: usize, subs: &[u32], parent: &str, out: &mut Flat) {
             name: format!("{}{sub}", e.name),
             offset: at,
             len: e.size,
-            kind: e.kind.clone().unwrap_or(Kind::Alnum { justified: false }),
+            kind: e.kind.clone().unwrap_or(Kind::Alnum {
+                justified: false,
+                alpha: false,
+            }),
             describe: e.describe.clone(),
         },
         e.name.clone(),
         sub,
         parent.to_string(),
+        path.to_vec(),
     ));
 }
 
 /// コピーブックを読んで、最初のレコードのレイアウトを作る。
 pub fn parse(src: &str) -> Result<Layout, String> {
+    let (mut root, mut warnings) = tree(src)?;
+    size(&mut root, None, None, &mut warnings)?;
+    let flat = flatten(&root);
+    layout_of(&root, flat, warnings)
+}
+
+/// 基本項目を並べる（大きさを求めた木から）。
+fn flatten(root: &Entry) -> Flat {
+    let mut flat = Flat { fields: Vec::new() };
+    let top = if root.filler { "" } else { root.name.as_str() };
+    place(root, 0, &[], top, &[], &mut flat);
+    flat
+}
+
+/// 最初のレコードの木（大きさはまだ）と注意。
+fn tree(src: &str) -> Result<(Entry, Vec<String>), String> {
     let code = code_text(src);
     let toks = tokenize(&code);
     let mut warnings = Vec::new();
@@ -644,19 +684,19 @@ pub fn parse(src: &str) -> Result<Layout, String> {
         warnings.push(format!("{}: レコードの OCCURS は使いません", root.name));
         root.occurs = 1;
     }
-    size(&mut root, None, None, &mut warnings)?;
-    let redefined = count_redefines(&root);
+    Ok((root, warnings))
+}
+
+fn layout_of(root: &Entry, flat: Flat, mut warnings: Vec<String>) -> Result<Layout, String> {
+    let redefined = count_redefines(root);
     if redefined > 0 {
         warnings.push(format!(
             "REDEFINES する項目（{redefined} 個）は使いません（元の定義で読み書きします）"
         ));
     }
-    if has_sync(&root) {
+    if has_sync(root) {
         warnings.push("SYNC の項目は、集団の先頭から数えた境界に揃えます".into());
     }
-    let mut flat = Flat { fields: Vec::new() };
-    let top = if root.filler { "" } else { root.name.as_str() };
-    place(&root, 0, &[], top, &mut flat);
     // 同じ名前は「名前 OF 親」、FILLER と残りの重なりは #番号
     let mut count = std::collections::HashMap::new();
     for (f, ..) in &flat.fields {
@@ -664,7 +704,7 @@ pub fn parse(src: &str) -> Result<Layout, String> {
     }
     let mut seen = std::collections::HashMap::new();
     let mut fields = Vec::with_capacity(flat.fields.len());
-    for (mut f, base, sub, parent) in flat.fields {
+    for (mut f, base, sub, parent, _) in flat.fields {
         if count[&f.name] > 1 && base != "FILLER" && !parent.is_empty() {
             f.name = format!("{base} OF {parent}{sub}");
         }
@@ -684,6 +724,286 @@ pub fn parse(src: &str) -> Result<Layout, String> {
         fields,
         warnings,
     })
+}
+
+// ---- 型を変える・項目を足す（セルの書式設定の「COBOL の型」） ----
+
+/// 型の指定（`S9(7)V99 COMP-3`・`PIC X(10)`・`COMP-2`・`9(5) SIGN LEADING SEPARATE` など）を読む。
+/// 型の句（`PIC`・`USAGE`・`SIGN`・`JUSTIFIED`・`BLANK WHEN ZERO`・`SYNC`）だけを持つ記述項を返す。
+fn type_entry(ty: &str) -> Result<Entry, String> {
+    let t = ty.trim().trim_end_matches('.').trim();
+    if t.is_empty() {
+        return Err("型が空です（例: X(10)・S9(7)V99 COMP-3）".into());
+    }
+    let first = t
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    // 先頭が句の語でなければ PIC の文字列
+    let body = if is_clause(&first) && !matches!(first.as_str(), "LEADING" | "TRAILING") {
+        t.to_string()
+    } else {
+        format!("PIC {t}")
+    };
+    let toks = tokenize(&format!("05 YYSHEET-TYPE {body}"));
+    let mut w = Vec::new();
+    let e = entry(&toks, &mut w)?.ok_or("型が読めません")?;
+    if let Some(m) = w.first() {
+        return Err(m
+            .replace("YYSHEET-TYPE の ", "")
+            .replace("YYSHEET-TYPE", "型"));
+    }
+    if e.occurs != 1 || e.redefines.is_some() {
+        return Err("型には OCCURS・REDEFINES は書けません".into());
+    }
+    if e.pic.is_none() && !matches!(e.usage, Some(Usage::Comp1 | Usage::Comp2 | Usage::Pointer)) {
+        return Err("PIC がありません（例: X(10)・S9(7)V99 COMP-3）".into());
+    }
+    let attrs = Attrs {
+        usage: e.usage,
+        sign: e.sign,
+        justified: e.justified,
+        blank_zero: e.blank_zero,
+    };
+    kind_of(e.pic.as_deref(), &attrs)?;
+    Ok(e)
+}
+
+/// 型の指定を確かめて、その型と長さ（バイト）を返す。
+pub fn check_type(ty: &str) -> Result<(Kind, usize), String> {
+    let e = type_entry(ty)?;
+    kind_of(
+        e.pic.as_deref(),
+        &Attrs {
+            usage: e.usage,
+            sign: e.sign,
+            justified: e.justified,
+            blank_zero: e.blank_zero,
+        },
+    )
+}
+
+fn entry_at<'a>(root: &'a mut Entry, path: &[usize]) -> &'a mut Entry {
+    let mut e = root;
+    for &k in path {
+        e = &mut e.children[k];
+    }
+    e
+}
+
+/// 基本項目 `field`（レイアウトの番号）の型を `ty` に変えたコピーブックを返す。`OCCURS` の項目は
+/// すべての回の型が変わる。コピーブックは書き直す（注記・`VALUE`・88 は残らない）。
+pub fn retype(src: &str, field: usize, ty: &str) -> Result<String, String> {
+    let t = type_entry(ty)?;
+    let (mut root, mut w) = tree(src)?;
+    size(&mut root, None, None, &mut w)?;
+    let flat = flatten(&root);
+    let path = flat
+        .fields
+        .get(field)
+        .map(|f| f.4.clone())
+        .ok_or("項目がありません")?;
+    let e = entry_at(&mut root, &path);
+    e.pic = t.pic;
+    // 集団の USAGE を引き継がないよう、項目に書く
+    e.usage = Some(t.usage.unwrap_or(Usage::Display));
+    e.sign = t.sign;
+    e.justified = t.justified;
+    e.blank_zero = t.blank_zero;
+    e.sync = t.sync;
+    let out = write(&root);
+    parse(&out)?;
+    Ok(out)
+}
+
+/// COBOL のデータ名にする（使えない文字は `-`、30 文字まで）。
+fn data_name(name: &str) -> String {
+    let mut n: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || !c.is_ascii() && !c.is_whitespace() {
+                c.to_ascii_uppercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while n.contains("--") {
+        n = n.replace("--", "-");
+    }
+    let n: String = n.trim_matches('-').chars().take(30).collect();
+    let n = n.trim_end_matches('-').to_string();
+    if n.is_empty() || n.chars().all(|c| c.is_ascii_digit()) || is_clause(&n) || n == "FILLER" {
+        format!("FIELD-{n}").trim_end_matches('-').to_string()
+    } else {
+        n
+    }
+}
+
+fn all_names(e: &Entry, out: &mut std::collections::HashSet<String>) {
+    out.insert(e.name.clone());
+    for c in &e.children {
+        all_names(c, out);
+    }
+}
+
+/// 基本項目（名前 `name`・型 `ty`）を足したコピーブックと、足した項目のレイアウトでの番号を返す。
+/// 項目は、基本項目 `after` を含むレコード直下の項目の後ろ（`None` ならレコードの先頭）に置く。
+/// `src` が空なら `01 RECORD.` から作る。名前はデータ名に直し、同じ名前があれば `-2` などを付ける。
+pub fn add_field(
+    src: &str,
+    after: Option<usize>,
+    name: &str,
+    ty: &str,
+) -> Result<(String, usize), String> {
+    let t = type_entry(ty)?;
+    let mut root = if src.trim().is_empty() {
+        Entry {
+            level: 1,
+            name: "RECORD".into(),
+            occurs: 1,
+            ..Default::default()
+        }
+    } else {
+        let (mut r, mut w) = tree(src)?;
+        size(&mut r, None, None, &mut w)?;
+        r
+    };
+    let mut pos = match after {
+        None => 0,
+        Some(i) => {
+            let flat = flatten(&root);
+            let path = &flat.fields.get(i).ok_or("項目がありません")?.4;
+            path.first().map_or(root.children.len(), |p| p + 1)
+        }
+    };
+    // REDEFINES は元の項目のすぐ後ろに置くものなので、その後ろへ
+    while root
+        .children
+        .get(pos)
+        .is_some_and(|c| c.redefines.is_some())
+    {
+        pos += 1;
+    }
+    let mut names = std::collections::HashSet::new();
+    all_names(&root, &mut names);
+    let base = data_name(name);
+    let mut n = base.clone();
+    let mut k = 2;
+    while names.contains(&n) {
+        n = format!("{base}-{k}");
+        k += 1;
+    }
+    let level = root.children.first().map(|c| c.level).unwrap_or(5).max(2);
+    root.children.insert(
+        pos,
+        Entry {
+            level,
+            name: n,
+            occurs: 1,
+            pic: t.pic,
+            usage: t.usage,
+            sign: t.sign,
+            justified: t.justified,
+            blank_zero: t.blank_zero,
+            sync: t.sync,
+            ..Default::default()
+        },
+    );
+    let out = write(&root);
+    parse(&out)?;
+    let (mut r, mut w) = tree(&out)?;
+    size(&mut r, None, None, &mut w)?;
+    let index = flatten(&r)
+        .fields
+        .iter()
+        .position(|f| f.4 == [pos])
+        .ok_or("足した項目が見つかりません")?;
+    Ok((out, index))
+}
+
+/// 木をコピーブック（固定形式。8〜72 桁）に書く。
+fn write(root: &Entry) -> String {
+    let mut out = String::new();
+    write_entry(root, 0, None, None, &mut out);
+    out
+}
+
+fn write_entry(
+    e: &Entry,
+    depth: usize,
+    usage: Option<Usage>,
+    sign: Option<SignPos>,
+    out: &mut String,
+) {
+    let indent = 7 + (depth * 4).min(32);
+    let mut parts: Vec<String> = Vec::new();
+    let name = if e.filler && depth > 0 {
+        "FILLER"
+    } else {
+        e.name.as_str()
+    };
+    parts.push(format!("{:02}  {name}", e.level.max(1)));
+    if let Some(r) = &e.redefines {
+        parts.push(format!("REDEFINES {r}"));
+    }
+    if e.occurs > 1 && depth > 0 {
+        parts.push(format!("OCCURS {} TIMES", e.occurs));
+    }
+    if let Some(p) = &e.pic {
+        parts.push(format!("PIC {p}"));
+    }
+    if let Some(u) = e.usage
+        && (u != Usage::Display || usage.is_some_and(|x| x != Usage::Display))
+    {
+        parts.push(u.name().to_string());
+    }
+    if let Some(sp) = e.sign
+        && (sp != SignPos::Trailing || sign.is_some_and(|x| x != SignPos::Trailing))
+    {
+        parts.push(
+            match sp {
+                SignPos::Leading => "SIGN LEADING",
+                SignPos::Trailing => "SIGN TRAILING",
+                SignPos::LeadingSeparate => "SIGN LEADING SEPARATE",
+                SignPos::TrailingSeparate => "SIGN TRAILING SEPARATE",
+            }
+            .to_string(),
+        );
+    }
+    if e.sync {
+        parts.push("SYNC".into());
+    }
+    if e.justified {
+        parts.push("JUSTIFIED RIGHT".into());
+    }
+    if e.blank_zero {
+        parts.push("BLANK WHEN ZERO".into());
+    }
+    let width = |s: &str| s.chars().map(char_width).sum::<usize>();
+    let mut line = " ".repeat(indent);
+    let n = parts.len();
+    for (i, p) in parts.into_iter().enumerate() {
+        let p = if i + 1 == n { format!("{p}.") } else { p };
+        let at_start = line.trim().is_empty();
+        if !at_start && width(&line) + 1 + width(&p) > 72 {
+            out.push_str(line.trim_end());
+            out.push('\n');
+            line = " ".repeat((indent + 4).min(40));
+        } else if !at_start {
+            line.push(' ');
+        }
+        line.push_str(&p);
+    }
+    out.push_str(line.trim_end());
+    out.push('\n');
+    let usage = e.usage.or(usage);
+    let sign = e.sign.or(sign);
+    for c in &e.children {
+        write_entry(c, depth + 1, usage, sign, out);
+    }
 }
 
 fn count_redefines(e: &Entry) -> usize {
@@ -815,5 +1135,118 @@ mod tests {
         let src = "       01  R.\n           05  A  PIC X(30) VALUE 'ABC. DEF\n      -    'GHI'.\n           05  B  PIC 9.\n";
         let l = parse(src).unwrap();
         assert_eq!(l.fields.len(), 2);
+    }
+
+    #[test]
+    fn retype_and_add_field() {
+        let src = "      * 注記\n       01  REC.\n           05  ID      PIC 9(5).\n           05  ITEM    OCCURS 2.\n               10  AMT PIC S9(5)V99 COMP-3.\n           05  NAME    PIC X(10) VALUE 'X'.\n";
+        let l = parse(src).unwrap();
+        assert_eq!(l.record_len, 5 + 2 * 4 + 10);
+        // ID を COMP-3 に
+        let s2 = retype(src, 0, "S9(5) COMP-3").unwrap();
+        let l2 = parse(&s2).unwrap();
+        assert_eq!(l2.fields[0].describe, "S9(5) COMP-3");
+        assert_eq!(l2.record_len, 3 + 2 * 4 + 10);
+        assert_eq!(l2.fields.len(), l.fields.len());
+        assert_eq!(l2.fields[1].name, "AMT(1)");
+        assert_eq!(l2.fields[3].offset, 3 + 8);
+        // OCCURS の項目はすべての回が変わる
+        let s3 = retype(&s2, 2, "PIC 9(3)").unwrap();
+        let l3 = parse(&s3).unwrap();
+        assert_eq!(l3.fields[1].describe, "9(3)");
+        assert_eq!(l3.fields[2].describe, "9(3)");
+        assert_eq!(l3.record_len, 3 + 2 * 3 + 10);
+        // 書いたものは固定形式（8〜72 桁）
+        for line in s3.lines() {
+            assert!(line.starts_with("       "), "{line}");
+            assert!(line.len() <= 72, "{line}");
+        }
+        // 集団の USAGE を引き継がない
+        let g = "01 R.\n 05 G COMP-3.\n  10 A PIC S9(5).\n  10 B PIC S9(5).\n";
+        let g2 = retype(g, 0, "X(4)").unwrap();
+        let lg = parse(&g2).unwrap();
+        assert_eq!(lg.fields[0].describe, "X(4)");
+        assert_eq!(lg.fields[1].describe, "S9(5) COMP-3");
+        let g3 = retype(g, 1, "S9(5)").unwrap();
+        let lg3 = parse(&g3).unwrap();
+        assert_eq!(lg3.fields[1].describe, "S9(5)");
+        assert_eq!(lg3.fields[1].len, 5);
+        assert_eq!(lg3.fields[0].len, 3);
+        // 属性も
+        let j = retype(g, 0, "X(4) JUSTIFIED").unwrap();
+        assert_eq!(parse(&j).unwrap().fields[0].describe, "X(4) JUSTIFIED");
+        let z = retype(g, 0, "ZZ9.99 BLANK WHEN ZERO").unwrap();
+        assert_eq!(
+            parse(&z).unwrap().fields[0].describe,
+            "ZZ9.99 BLANK WHEN ZERO"
+        );
+        let sl = retype(g, 0, "S9(3) SIGN LEADING SEPARATE").unwrap();
+        assert_eq!(parse(&sl).unwrap().fields[0].len, 4);
+        // 誤り
+        assert!(retype(g, 0, "").is_err());
+        assert!(retype(g, 0, "9(5)Q").is_err());
+        assert!(retype(g, 0, "X(3) OCCURS 2").is_err());
+        assert!(retype(g, 0, "N(3) COMP-3").is_err());
+        assert!(retype(g, 9, "X").is_err());
+        // 足す
+        let (a, i) = add_field("", None, "顧客 名", "N(10)").unwrap();
+        assert_eq!(i, 0);
+        let la = parse(&a).unwrap();
+        assert_eq!(la.record, "RECORD");
+        assert_eq!(la.fields[0].name, "顧客-名");
+        assert_eq!(la.record_len, 20);
+        let (a2, i2) = add_field(&a, Some(0), "顧客 名", "COMP-2").unwrap();
+        assert_eq!(i2, 1);
+        let la2 = parse(&a2).unwrap();
+        assert_eq!(la2.fields[1].name, "顧客-名-2");
+        assert_eq!(la2.fields[1].offset, 20);
+        let (a3, i3) = add_field(src, Some(1), "amount (円)", "9(7)").unwrap();
+        let la3 = parse(&a3).unwrap();
+        // ITEM（AMT(1)・AMT(2)）の後ろ
+        assert_eq!(i3, 3);
+        assert_eq!(la3.fields[3].name, "AMOUNT-円");
+        assert_eq!(la3.fields[3].offset, 5 + 8);
+        assert_eq!(la3.fields.len(), l.fields.len() + 1);
+        let (a4, i4) = add_field(src, None, "1", "X").unwrap();
+        assert_eq!(i4, 0);
+        assert_eq!(parse(&a4).unwrap().fields[0].name, "FIELD-1");
+        let r = "01 R.\n 05 A PIC X(4).\n 05 B REDEFINES A PIC 9(4).\n 05 C PIC X.\n";
+        let (r2, ri) = add_field(r, Some(0), "D", "X(2)").unwrap();
+        assert_eq!(ri, 1);
+        assert_eq!(parse(&r2).unwrap().fields[1].offset, 4);
+        assert_eq!(check_type("S9(7)V99 COMP-3").unwrap().1, 5);
+        assert!(check_type("PIC").is_err());
+    }
+
+    #[test]
+    fn meanings() {
+        let m = |ty: &str| {
+            let (k, len) = check_type(ty).unwrap();
+            (len, crate::meaning(&k, len))
+        };
+        assert_eq!(
+            m("9(5)"),
+            (5, "数字 5 文字で十進 5 けたの符号なし整数を表す".into())
+        );
+        assert_eq!(
+            m("9(5)V99"),
+            (
+                7,
+                "数字 7 文字で十進整数部 5 けた、小数部 2 けたの符号なし数を表す".into()
+            )
+        );
+        assert_eq!(
+            m("S9(5)").1,
+            "十進 5 けたの符号あり整数を表す（符号は最後のけたのゾーンに含める）"
+        );
+        assert_eq!(m("S9(7)V99 COMP-3").0, 5);
+        assert!(m("S9(4) COMP-5").1.contains("-32768〜32767"));
+        assert!(
+            m("ZZ,ZZ9.99-").1.contains("例: 45,678.90-"),
+            "{}",
+            m("ZZ,ZZ9.99-").1
+        );
+        assert!(m("X(10)").1.starts_with("英数字 10 バイト"));
+        assert!(m("N(5)").1.contains("全角）5 文字"));
     }
 }

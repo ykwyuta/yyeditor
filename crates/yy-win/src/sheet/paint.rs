@@ -23,6 +23,8 @@ const HEAD_BG: (u8, u8, u8) = (243, 243, 243);
 const HEAD_FG: (u8, u8, u8) = (68, 68, 68);
 const HEAD_SEL_BG: (u8, u8, u8) = (210, 223, 214);
 const HEAD_SEL_FG: (u8, u8, u8) = (16, 92, 52);
+/// 列見出しの COBOL の型（固定長）
+const TYPE_FG: (u8, u8, u8) = (31, 111, 208);
 const SEL_FILL: (u8, u8, u8) = (198, 222, 206);
 const ACTIVE: (u8, u8, u8) = (33, 115, 70);
 const TABLE_HEAD_BG: (u8, u8, u8) = (231, 238, 233);
@@ -85,6 +87,8 @@ pub(crate) struct Scene<'a> {
     pub row_labels: &'a [(u64, bool)],
     /// ボタンを出す列（列番号・状態）
     pub buttons: &'a [(u32, ButtonState)],
+    /// 固定長の項目の列の型（列番号・型。列見出しに列の名前と並べて出す）
+    pub col_types: &'a [(u32, String)],
     /// 編集中の式の参照（範囲・色）
     pub marks: &'a [(Range4, (u8, u8, u8))],
     /// 式に入れている参照（点線の枠）
@@ -584,14 +588,31 @@ impl GridPainter {
                 };
                 self.text(rt, brush, glyph, 3, br, if active { BG } else { HEAD_FG });
             }
-            self.text(
-                rt,
-                brush,
-                &yy_sheet::col_name(col),
-                3,
-                tr,
-                if on { HEAD_SEL_FG } else { HEAD_FG },
-            );
+            let head_fg = if on { HEAD_SEL_FG } else { HEAD_FG };
+            match s.col_types.iter().find(|t| t.0 == col) {
+                Some((_, ty)) => {
+                    // 列の名前を左に、型をその右に（入らなければ切る）
+                    let name = yy_sheet::col_name(col);
+                    let name_w = self.char_w * name.len() as f32 + 8.0;
+                    self.text(
+                        rt,
+                        brush,
+                        &name,
+                        0,
+                        rect(tr.left + 4.0, tr.top, tr.right, tr.bottom),
+                        head_fg,
+                    );
+                    self.text(
+                        rt,
+                        brush,
+                        ty,
+                        0,
+                        rect(tr.left + 4.0 + name_w, tr.top, tr.right - 2.0, tr.bottom),
+                        if on { HEAD_SEL_FG } else { TYPE_FG },
+                    );
+                }
+                None => self.text(rt, brush, &yy_sheet::col_name(col), 3, tr, head_fg),
+            }
             self.line(rt, brush, (r.right - 0.5, 0.0, r.right - 0.5, hh), GRID);
         }
         for (ri, &(row, y)) in s.rows.iter().enumerate() {

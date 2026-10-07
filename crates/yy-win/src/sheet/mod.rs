@@ -109,6 +109,9 @@ const ID_BORDER_BASE: u16 = 70;
 const ID_NUMFMT_BASE: u16 = 80;
 const ID_MEMORY: u16 = 40;
 const ID_ABOUT: u16 = 41;
+const ID_HELP: u16 = 42;
+const ID_HELP_COBOL: u16 = 43;
+const ID_HELP_FUNCS: u16 = 44;
 
 /// STATIC の文字を上下の中央に置く
 const SS_CENTERIMAGE: u32 = 0x200;
@@ -256,6 +259,9 @@ fn run_inner(initial: Option<PathBuf>) -> Result<()> {
         let _ = InitCommonControlsEx(&icc);
     }
     std::thread::spawn(yy_io::remove_stale_temps);
+    if let Ok(m) = unsafe { GetModuleHandleW(None) } {
+        crate::help::use_sheet_help(m.into());
+    }
     let frame = create()?;
     if let Some(p) = initial {
         open_path(&p);
@@ -379,6 +385,10 @@ fn create_menu() -> Result<HMENU> {
         add(data, ID_TO_NUMBER, "列を数値に変換(&V)");
         add(data, ID_TO_TEXT, "列を文字列に変換(&T)");
         let help = CreatePopupMenu()?;
+        add(help, ID_HELP, "yysheet ヘルプ(&H)\tF1");
+        add(help, ID_HELP_FUNCS, "関数の一覧(&F)");
+        add(help, ID_HELP_COBOL, "COBOL の型の一覧(&C)");
+        sep(help);
         add(help, ID_MEMORY, "メモリの使用状況(&M)");
         add(help, ID_ABOUT, "yysheet について(&A)");
         for (m, t) in [
@@ -665,6 +675,14 @@ fn parse_entry(text: &str, sys: DateSystem) -> Value {
     }
 }
 
+/// 固定長の項目の型に合わない入力の知らせ。
+fn type_mismatch(f: &yy_cobol::Field, why: &str) -> String {
+    format!(
+        "入力が項目の型に合いません。\n項目 {}（{}・{} バイト）: {why}",
+        f.name, f.describe, f.len
+    )
+}
+
 /// 編集のときに見せる値（数式バー・編集の初期値）。
 fn edit_text(v: &Value, format: Option<&str>, sys: DateSystem) -> String {
     match v {
@@ -811,7 +829,16 @@ impl App {
             })
             .collect();
         let buttons = self.header_buttons();
+        // 固定長: 列見出しに項目の型
+        let col_types: Vec<(u32, String)> = self
+            .cols
+            .iter()
+            .filter_map(|&(c, _, _)| {
+                yy_sheet::fixed::column_field(self.sheet(), c).map(|(_, f)| (c, f.describe.clone()))
+            })
+            .collect();
         let scene = Scene {
+            col_types: &col_types,
             row_labels: &row_labels,
             buttons: &buttons,
             cols: &self.cols,
@@ -965,6 +992,54 @@ impl App {
             };
             set_status(&msg);
         }
+        self.update_fixed_status();
+    }
+
+    /// ステータスバーの右の欄: 固定長の設定（文字コード・レコード長）と、アクティブなセルの列の
+    /// 項目（名前・型・位置）。固定長でないシートでは欄を出さない。
+    fn update_fixed_status(&self) {
+        let sh = self.sheet();
+        let text = sh.fixed.as_ref().map(|spec| {
+            let mut t = format!(
+                "固定長 {}・レコード長 {} バイト",
+                spec.codec.charset.name(),
+                spec.layout.record_len
+            );
+            if let Some((_, f)) = yy_sheet::fixed::column_field(sh, self.cur.1) {
+                t.push_str(&format!(
+                    "　{}: {}（{}〜{} バイト目）",
+                    f.name,
+                    f.describe,
+                    f.offset + 1,
+                    f.offset + f.len
+                ));
+            }
+            t
+        });
+        unsafe {
+            let dpi = GetDpiForWindow(self.frame).max(96) as i32;
+            let mut rc = RECT::default();
+            let _ = GetClientRect(self.status, &mut rc);
+            let parts: Vec<i32> = match text {
+                Some(_) => vec![(rc.right - 560 * dpi / 96).max(rc.right / 3), -1],
+                None => vec![-1],
+            };
+            SendMessageW(
+                self.status,
+                SB_SETPARTS,
+                Some(WPARAM(parts.len())),
+                Some(LPARAM(parts.as_ptr() as isize)),
+            );
+            if let Some(t) = text {
+                let w = HSTRING::from(t);
+                SendMessageW(
+                    self.status,
+                    SB_SETTEXTW,
+                    Some(WPARAM(1)),
+                    Some(LPARAM(w.as_ptr() as isize)),
+                );
+            }
+        }
     }
 
     fn refresh_tabs(&self) {
@@ -1009,6 +1084,7 @@ impl App {
             let _ = MoveWindow(self.grid, 0, bar_h, w, grid_h, true);
             let _ = MoveWindow(self.tabs, 0, bar_h + grid_h, w, tabs_h, true);
         }
+        self.update_fixed_status();
         // MoveWindow は格子の WM_SIZE をその場で送るが、そのとき状態は借りられていて受け取れないので、
         // ここで大きさを読み直す
         self.sync_grid_size();
@@ -1246,17 +1322,38 @@ impl App {
     }
 
     /// 編集を確定する（`false` なら取り消す）。
-    fn end_edit(&mut self, commit: bool) {
+    /// 入力が受け付けられなかったら `false`。
+    fn end_edit(&mut self, commit: bool) -> bool {
         let cell = self.editor.as_ref().map(|e| e.cell);
         let Some(text) = self.close_editor() else {
-            return;
+            return true;
         };
         if commit && let Some((r, c)) = cell {
-            self.set_cell(r, c, &text);
+            self.set_cell(r, c, &text)
         } else {
             // 数式バーに映していた入力を戻す
             self.sync_formula();
+            true
         }
+    }
+
+    /// 確定して移動するキー（Enter・Tab・矢印）: 受け付けられなければ、入力した文字列で編集を
+    /// 続ける（式の誤り・型に合わない値を直せるように）。受け付けられたら `true`。
+    fn commit_or_reopen(&mut self) -> bool {
+        let Some(ed) = self.editor.as_ref() else {
+            return true;
+        };
+        let (text, cell) = (window_text(ed.hwnd), ed.cell);
+        if self.end_edit(true) {
+            return true;
+        }
+        self.cur = cell;
+        self.anchor = cell;
+        self.begin_edit(Some(&text));
+        if let Some(e) = self.editor.as_mut() {
+            e.enter_mode = false;
+        }
+        false
     }
 
     /// 編集のときに見せる文字列（式なら式）。
@@ -1268,7 +1365,9 @@ impl App {
         edit_text(&v, self.format_of(r, c).as_deref(), self.sys())
     }
 
-    fn set_cell(&mut self, r: u64, c: u32, text: &str) {
+    /// セルに入力する（式・値）。式の誤り・固定長の項目の型に合わない値なら知らせて、入れずに
+    /// `false` を返す。
+    fn set_cell(&mut self, r: u64, c: u32, text: &str) -> bool {
         let sheet = self.sheet;
         let res = if is_formula(text) {
             let mut bad = None;
@@ -1281,17 +1380,29 @@ impl App {
             if let Some(e) = bad {
                 error_box(self.frame, &format!("式に誤りがあります。\n{e}"));
                 self.after_edit();
-                return;
+                return false;
             }
             res
         } else {
-            let v = parse_entry(text, self.sys());
+            let v = match yy_sheet::fixed::field_at(self.sheet(), r, c) {
+                Some((spec, f)) => match yy_sheet::fixed::entry_value(spec, f, text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error_box(self.frame, &type_mismatch(f, &e));
+                        self.after_edit();
+                        return false;
+                    }
+                },
+                None => parse_entry(text, self.sys()),
+            };
             self.doc.edit(|b, ctx| b.sheets[sheet].set(ctx, r, c, v))
         };
+        let ok = res.is_ok();
         if let Err(e) = res {
             error_box(self.frame, &format!("入力できませんでした: {e}"));
         }
         self.after_edit();
+        ok
     }
 
     fn after_edit(&mut self) {
@@ -1390,6 +1501,8 @@ impl App {
         let (r0, c0) = (self.selection().0, self.selection().1);
         let sheet = self.sheet;
         let sys = self.sys();
+        // 固定長の項目の型に合わない値があれば、貼り付けない
+        let mut bad = None;
         let res = self.doc.edit(|b, ctx| {
             let s = &mut b.sheets[sheet];
             for (i, row) in rows.iter().enumerate() {
@@ -1399,6 +1512,16 @@ impl App {
                     if !(is_formula(v) && s.set_formula(ctx, r, c, v).is_ok()) {
                         let value = if is_formula(v) {
                             Value::text(v)
+                        } else if let Some((spec, f)) = yy_sheet::fixed::field_at(s, r, c) {
+                            match yy_sheet::fixed::entry_value(spec, f, v) {
+                                Ok(x) => x,
+                                Err(e) => {
+                                    let at =
+                                        format!("{}{}", yy_sheet::col_name(c), s.source_row(r) + 1);
+                                    bad = Some(format!("{at}: {}", type_mismatch(f, &e)));
+                                    return Err(std::io::Error::other("type"));
+                                }
+                            }
                         } else {
                             parse_entry(v, sys)
                         };
@@ -1408,6 +1531,10 @@ impl App {
             }
             Ok(())
         });
+        if let Some(m) = bad {
+            error_box(self.frame, &format!("貼り付けませんでした。\n{m}"));
+            return;
+        }
         if let Err(e) = res {
             error_box(self.frame, &format!("貼り付けられませんでした: {e}"));
         }
@@ -2268,6 +2395,24 @@ fn command(id: u16) {
         id if (ID_NUMFMT_BASE..ID_NUMFMT_BASE + format::PRESETS.len() as u16).contains(&id) => {
             format::set_number_format(format::PRESETS[(id - ID_NUMFMT_BASE) as usize].0);
         }
+        ID_HELP | ID_HELP_COBOL | ID_HELP_FUNCS => {
+            let section = match id {
+                ID_HELP_COBOL => Some("cobol-types"),
+                ID_HELP_FUNCS => Some("functions"),
+                _ => None,
+            };
+            if let Err(e) = crate::help::show(section)
+                && let Some(f) = with(|a| a.frame)
+            {
+                error_box(
+                    f,
+                    &format!(
+                        "ヘルプを表示できません: {}",
+                        crate::util::describe_error(&e)
+                    ),
+                );
+            }
+        }
         ID_MEMORY => show_memory(),
         ID_ABOUT => {
             if let Some(f) = with(|a| a.frame) {
@@ -2288,6 +2433,11 @@ fn command(id: u16) {
 /// メッセージループでのキーの横取り（ショートカット、編集中の Enter・Esc・Tab・矢印）。
 fn key_hook(msg: &MSG) -> bool {
     let vk = VIRTUAL_KEY(msg.wParam.0 as u16);
+    // F1（ヘルプのウィンドウの中では、そのウィンドウのキーのまま）
+    if vk == VK_F1 && msg.message == WM_KEYDOWN && !crate::help::contains(msg.hwnd) {
+        command(ID_HELP);
+        return true;
+    }
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
     // 式の入力（候補の一覧・F4・矢印での参照）
@@ -2307,7 +2457,9 @@ fn key_hook(msg: &MSG) -> bool {
     {
         let mv = |dr: i64, dc: i64| {
             with(|a| {
-                a.end_edit(true);
+                if !a.commit_or_reopen() {
+                    return;
+                }
                 let (r, c) = a.cur;
                 let nr = (r as i64 + dr).max(0) as u64;
                 let nc = (c as i64 + dc).max(0) as u32;
@@ -2339,7 +2491,14 @@ fn key_hook(msg: &MSG) -> bool {
                     // 別のシートを表示していれば元のシートに戻してから
                     a.entry_reset();
                     let (r, c) = a.cur;
-                    a.set_cell(r, c, &text);
+                    if !a.set_cell(r, c, &text) {
+                        // 直せるよう数式バーに入力を残す
+                        unsafe {
+                            let _ = SetWindowTextW(a.formula, &HSTRING::from(text.as_str()));
+                            let _ = SetFocus(Some(a.formula));
+                        }
+                        return;
+                    }
                     unsafe {
                         let _ = SetFocus(Some(a.grid));
                     }
