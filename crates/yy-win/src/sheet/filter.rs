@@ -295,7 +295,7 @@ pub(crate) fn describe(c: &Cond) -> String {
 
 // ---- テンプレートの部品 --------------------------------------------------------------
 
-fn dlg_text(hwnd: HWND, id: u16) -> String {
+pub(super) fn dlg_text(hwnd: HWND, id: u16) -> String {
     let mut buf = vec![0u16; 4096];
     let n = unsafe { GetDlgItemTextW(hwnd, id as i32, &mut buf) } as usize;
     String::from_utf16_lossy(&buf[..n])
@@ -307,16 +307,16 @@ fn set_dlg_text(hwnd: HWND, id: u16, s: &str) {
     }
 }
 
-fn send(hwnd: HWND, id: u16, msg: u32, w: usize, l: isize) -> isize {
+pub(super) fn send(hwnd: HWND, id: u16, msg: u32, w: usize, l: isize) -> isize {
     unsafe { SendDlgItemMessageW(hwnd, id as i32, msg, WPARAM(w), LPARAM(l)).0 }
 }
 
-fn add_string(hwnd: HWND, id: u16, msg: u32, s: &str) -> isize {
+pub(super) fn add_string(hwnd: HWND, id: u16, msg: u32, s: &str) -> isize {
     let w = HSTRING::from(s);
     send(hwnd, id, msg, 0, w.as_ptr() as isize)
 }
 
-fn message(hwnd: HWND, text: &str) {
+pub(super) fn message(hwnd: HWND, text: &str) {
     unsafe {
         MessageBoxW(
             Some(hwnd),
@@ -327,7 +327,15 @@ fn message(hwnd: HWND, text: &str) {
     }
 }
 
-fn button(t: &mut Template, x: i16, y: i16, cx: i16, id: u16, text: &str, default: bool) {
+pub(super) fn button(
+    t: &mut Template,
+    x: i16,
+    y: i16,
+    cx: i16,
+    id: u16,
+    text: &str,
+    default: bool,
+) {
     let style = if default {
         BS_DEFPUSHBUTTON
     } else {
@@ -345,11 +353,11 @@ fn button(t: &mut Template, x: i16, y: i16, cx: i16, id: u16, text: &str, defaul
     );
 }
 
-fn label(t: &mut Template, x: i16, y: i16, cx: i16, id: u16, text: &str) {
+pub(super) fn label(t: &mut Template, x: i16, y: i16, cx: i16, id: u16, text: &str) {
     t.item(0, x, y, cx, 10, id, CLASS_STATIC, text);
 }
 
-fn combo(t: &mut Template, x: i16, y: i16, cx: i16, id: u16) {
+pub(super) fn combo(t: &mut Template, x: i16, y: i16, cx: i16, id: u16) {
     t.item(
         (WS_TABSTOP | WS_VSCROLL).0 | CBS_DROPDOWNLIST as u32,
         x,
@@ -362,7 +370,7 @@ fn combo(t: &mut Template, x: i16, y: i16, cx: i16, id: u16) {
     );
 }
 
-fn edit(t: &mut Template, x: i16, y: i16, cx: i16, id: u16) {
+pub(super) fn edit(t: &mut Template, x: i16, y: i16, cx: i16, id: u16) {
     t.item(
         (WS_BORDER | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32,
         x,
@@ -375,7 +383,7 @@ fn edit(t: &mut Template, x: i16, y: i16, cx: i16, id: u16) {
     );
 }
 
-fn run<S>(t: &Template, owner: HWND, state: &mut S, proc_: DLGPROC) -> isize {
+pub(super) fn run<S>(t: &Template, owner: HWND, state: &mut S, proc_: DLGPROC) -> isize {
     let aligned = t.aligned();
     unsafe {
         DialogBoxIndirectParamW(
@@ -388,7 +396,7 @@ fn run<S>(t: &Template, owner: HWND, state: &mut S, proc_: DLGPROC) -> isize {
     }
 }
 
-unsafe fn state<'a, S>(hwnd: HWND) -> &'a mut S {
+pub(super) unsafe fn state<'a, S>(hwnd: HWND) -> &'a mut S {
     unsafe { &mut *(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut S) }
 }
 

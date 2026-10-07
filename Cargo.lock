@@ -3417,6 +3417,8 @@ dependencies = [
  "memchr",
  "postcard",
  "rayon",
+ "regex-automata",
+ "regex-syntax",
  "serde",
  "tempfile",
  "yy-delimited",

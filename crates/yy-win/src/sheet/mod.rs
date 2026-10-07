@@ -8,6 +8,7 @@
 //! 状態 [`App`] は UI スレッドのスレッドローカルに置く。ダイアログ・待ち（`remote::wait`）の間は
 //! 状態を借りたままにしない。
 
+mod bulkui;
 mod filter;
 mod format;
 mod paint;
@@ -68,6 +69,12 @@ const ID_PASTE: u16 = 14;
 const ID_DELETE: u16 = 15;
 const ID_SELECT_ALL: u16 = 16;
 const ID_FILL_DOWN: u16 = 17;
+const ID_FIND: u16 = 18;
+const ID_FIND_NEXT: u16 = 19;
+const ID_REPLACE: u16 = 25;
+const ID_DEDUP: u16 = 58;
+const ID_TO_NUMBER: u16 = 59;
+const ID_TO_TEXT: u16 = 66;
 const ID_INSERT_ROWS: u16 = 20;
 const ID_DELETE_ROWS: u16 = 21;
 const ID_INSERT_COLS: u16 = 22;
@@ -166,6 +173,8 @@ struct App {
     size_px: (i32, i32),
     /// 列全体・行全体を選んでいる（列見出し・行番号のクリック、すべて選択）
     whole: (bool, bool),
+    /// 前の検索・置換
+    last_find: Option<yy_sheet::bulk::Replace>,
 }
 
 thread_local! {
@@ -262,6 +271,10 @@ fn create_menu() -> Result<HMENU> {
         add(edit, ID_DELETE, "内容を消す(&D)\tDelete");
         add(edit, ID_FILL_DOWN, "下へコピー(&W)\tCtrl+D");
         sep(edit);
+        add(edit, ID_FIND, "検索(&F)...\tCtrl+F");
+        add(edit, ID_FIND_NEXT, "次を検索(&N)\tF3");
+        add(edit, ID_REPLACE, "置換(&H)...\tCtrl+H");
+        sep(edit);
         add(edit, ID_SELECT_ALL, "すべて選択(&A)\tCtrl+A");
         let insert = CreatePopupMenu()?;
         add(insert, ID_INSERT_ROWS, "行を挿入(&R)\tCtrl++");
@@ -323,6 +336,10 @@ fn create_menu() -> Result<HMENU> {
         add(data, ID_STAGES, "絞り込みの段階(&G)...");
         add(data, ID_REAPPLY, "再適用(&R)\tCtrl+Alt+L");
         add(data, ID_CLEAR_VIEW, "絞り込み・並べ替えを解除(&X)");
+        sep(data);
+        add(data, ID_DEDUP, "重複の削除(&U)...");
+        add(data, ID_TO_NUMBER, "列を数値に変換(&V)");
+        add(data, ID_TO_TEXT, "列を文字列に変換(&T)");
         let help = CreatePopupMenu()?;
         add(help, ID_MEMORY, "メモリの使用状況(&M)");
         add(help, ID_ABOUT, "yysheet について(&A)");
@@ -499,6 +516,7 @@ fn create() -> Result<HWND> {
             header_w: 40.0,
             size_px: (0, 0),
             whole: (false, false),
+            last_find: None,
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         with(|a| {
@@ -1979,6 +1997,12 @@ fn command(id: u16) {
         ID_FILL_DOWN => {
             with(|a| a.fill_down());
         }
+        ID_FIND => bulkui::find_dialog(),
+        ID_FIND_NEXT => bulkui::find_next(),
+        ID_REPLACE => bulkui::replace_dialog(),
+        ID_DEDUP => bulkui::remove_duplicates(),
+        ID_TO_NUMBER => bulkui::convert_columns(yy_sheet::bulk::Convert::Number),
+        ID_TO_TEXT => bulkui::convert_columns(yy_sheet::bulk::Convert::Text),
         ID_SELECT_ALL => {
             with(|a| {
                 let (rows, cols) = a.sheet().extent();
@@ -2134,6 +2158,10 @@ fn key_hook(msg: &MSG) -> bool {
             _ => return false,
         }
     }
+    if vk == VK_F3 && !ctrl && msg.message == WM_KEYDOWN {
+        command(ID_FIND_NEXT);
+        return true;
+    }
     if !ctrl {
         return false;
     }
@@ -2156,6 +2184,8 @@ fn key_hook(msg: &MSG) -> bool {
         (VK_1, false) => ID_FORMAT_CELLS,
         (VK_B, false) => ID_BOLD,
         (VK_D, false) => ID_FILL_DOWN,
+        (VK_F, false) => ID_FIND,
+        (VK_H, false) => ID_REPLACE,
         (VK_I, false) => ID_ITALIC,
         // コピー・貼り付けは格子にフォーカスがあるときだけ（数式バーの EDIT では EDIT に任せる）
         (VK_C | VK_X | VK_V, false) => {

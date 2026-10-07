@@ -219,7 +219,10 @@ impl Hasher for FxHasher {
     }
     #[inline]
     fn finish(&self) -> u64 {
-        self.0
+        // 掛け算の下位ビットは入力の下位ビットでしか決まらない（表は下位ビットで場所を決める）ので、
+        // 上位を下ろして混ぜる
+        let h = self.0;
+        h ^ (h >> 29) ^ (h >> 47)
     }
 }
 

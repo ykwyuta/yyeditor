@@ -17,7 +17,7 @@ use super::*;
 const VALUE_LIMIT: usize = 10_000;
 
 /// バックグラウンドで計算する（Esc で中止。中止・失敗なら `None`）。
-fn run_bg<T: Send + 'static>(
+pub(super) fn run_bg<T: Send + 'static>(
     label: &str,
     f: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> Option<T> {
@@ -45,7 +45,7 @@ fn run_bg<T: Send + 'static>(
 }
 
 /// 表の列の見せる名前（「A: 地域」）。
-fn col_label(t: &Table, c: u32) -> String {
+pub(super) fn col_label(t: &Table, c: u32) -> String {
     let letter = yy_sheet::col_name(c);
     if t.header {
         format!("{letter}: {}", t.columns[c as usize].name)
@@ -55,7 +55,7 @@ fn col_label(t: &Table, c: u32) -> String {
 }
 
 /// 今のシートの番号・表・表示・コンテキスト。
-fn current() -> Option<(usize, Table, View, Arc<SheetCtx>)> {
+pub(super) fn current() -> Option<(usize, Table, View, Arc<SheetCtx>)> {
     with(|a| {
         a.end_edit(true);
         let s = a.sheet();

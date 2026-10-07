@@ -12,6 +12,8 @@ yy-encoding.workspace = true
 yy-io.workspace = true
 yy-numfmt.workspace = true
 yy-formula.workspace = true
+regex-automata.workspace = true
+regex-syntax.workspace = true
 memchr.workspace = true
 rayon.workspace = true
 serde = { workspace = true, features = ["rc"] }

@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub mod budget;
+pub mod bulk;
 pub mod chunk;
 pub mod column;
 pub mod csv;

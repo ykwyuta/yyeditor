@@ -179,6 +179,37 @@ fn main() {
     query::permute(&ctx, table, &order).unwrap();
     println!("並べ替えの確定 {:.2} 秒", t.elapsed().as_secs_f64());
 
+    if cols >= 4 {
+        use yy_sheet::bulk;
+        let t = Instant::now();
+        let keep = bulk::unique_rows(&ctx, table, &[2, 3]).unwrap();
+        println!(
+            "重複の検出（2 列）{:.2} 秒 → {} 行を残す",
+            t.elapsed().as_secs_f64(),
+            keep.len()
+        );
+        let q = bulk::Replace {
+            find: "ID99999".into(),
+            with: "X".into(),
+            regex: false,
+            case: false,
+            whole: true,
+        };
+        let t = Instant::now();
+        let hit = bulk::find_next(&ctx, table, (0, 0), &q).unwrap();
+        println!("検索 {:.2} 秒 → {hit:?}", t.elapsed().as_secs_f64());
+        let q = bulk::Replace {
+            find: "東京".into(),
+            with: "Tokyo".into(),
+            regex: false,
+            case: false,
+            whole: false,
+        };
+        let t = Instant::now();
+        let (_, n) = bulk::replace(&ctx, table, &[2], &q).unwrap();
+        println!("置換（1 列）{:.2} 秒 → {n} セル", t.elapsed().as_secs_f64());
+    }
+
     if cols >= 3 {
         let mut d3 = d2;
         let last = cols as u32 + 1;
