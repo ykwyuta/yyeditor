@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use crate::criteria::Criterion;
-use crate::eval::{Arg, Context, MAX_ARRAY, arg, compare, eval, map, num, num_cmp, text};
+use crate::eval::{Arg, Context, MAX_ARRAY, arg, compare, eval, map, num, num_cmp, text, zip};
 use crate::parse::{Area, Expr, Func, Rounding};
 use crate::{Array, Cell, Error, Val, eq_text, wildcard_match};
 
@@ -27,6 +27,10 @@ pub(crate) fn call(f: &Func, args: &[Expr], cx: &Context<'_>) -> Val {
         Func::Percentile { inc, .. } => percentile(args, cx, *inc),
         Func::Round(mode) => round(args, cx, *mode),
         Func::If => if_(args, cx),
+        Func::Mod => modulo(args, cx),
+        Func::Pi | Func::Logical(_) if !args.is_empty() => Val::Err(Error::Value),
+        Func::Pi => Val::Num(std::f64::consts::PI),
+        Func::Logical(b) => Val::Bool(*b),
         Func::LowValue | Func::HighValue if !args.is_empty() => Val::Err(Error::Value),
         Func::LowValue => Val::text(crate::LOW_VALUE),
         Func::HighValue => Val::text(crate::HIGH_VALUE),
@@ -324,6 +328,37 @@ fn round(args: &[Expr], cx: &Context<'_>, mode: Rounding) -> Val {
             }
         }
         Err(e) => Val::Err(e),
+    })
+}
+
+/// `MOD(数値, 除数)`: 余り（符号は除数と同じ。`MOD(-3,2)` = 1）。除数が 0 なら `#DIV/0!`。商は有効数字
+/// 15 桁にしてから切り捨てるので、`MOD(0.3,0.1)` が 0.1 近くにならない。
+fn modulo(args: &[Expr], cx: &Context<'_>) -> Val {
+    if args.len() != 2 {
+        return Val::Err(Error::Value);
+    }
+    let (a, b) = (eval(&args[0], cx), eval(&args[1], cx));
+    zip(&a, &b, &|x, y| {
+        let (n, d) = match (num(x, cx.sys), num(y, cx.sys)) {
+            (Ok(n), Ok(d)) => (n, d),
+            (Err(e), _) | (_, Err(e)) => return Val::Err(e),
+        };
+        if d == 0.0 {
+            return Val::Err(Error::Div0);
+        }
+        let q = snap15(n / d).floor();
+        let r = n - d * q;
+        // 計算の誤差の残り（0.3 - 0.1*3）は 0
+        let r = if r.abs() <= n.abs().max(d.abs()) * 1e-14 {
+            0.0
+        } else {
+            snap15(r)
+        };
+        if r.is_finite() {
+            Val::Num(r)
+        } else {
+            Val::Err(Error::Num)
+        }
     })
 }
 

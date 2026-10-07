@@ -50,6 +50,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: Some((2, 2)),
     },
     FuncInfo {
+        name: "FALSE",
+        desc: "論理値 FALSE（偽）を返します。",
+        params: &[],
+        repeat: None,
+    },
+    FuncInfo {
         name: "HIGH-VALUE",
         desc: "COBOL の HIGH-VALUE。固定長の項目の列で、項目のすべてのバイトを X'FF' にします（COBOL の型のない列では #VALUE!）。",
         params: &[],
@@ -86,6 +92,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: Some((1, 1)),
     },
     FuncInfo {
+        name: "MOD",
+        desc: "数値を除数で割った余りを返します（符号は除数と同じ。MOD(-3,2) = 1）。除数が 0 なら #DIV/0!。",
+        params: &["数値", "除数"],
+        repeat: None,
+    },
+    FuncInfo {
         name: "PERCENTILE",
         desc: "範囲の数値の百分位数（率は 0〜1。0.9 なら 90 パーセンタイル）を、前後の値の間を比例で求めて返します。PERCENTILE.INC と同じです。",
         params: &["範囲", "率"],
@@ -101,6 +113,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         name: "PERCENTILE.INC",
         desc: "範囲の数値の百分位数を返します（率は 0〜1。位置は 率×(個数−1)）。",
         params: &["範囲", "率"],
+        repeat: None,
+    },
+    FuncInfo {
+        name: "PI",
+        desc: "円周率 π（3.14159265358979）を返します。",
+        params: &[],
         repeat: None,
     },
     FuncInfo {
@@ -156,6 +174,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
             "[一致モード]",
             "[埋める値]",
         ],
+        repeat: None,
+    },
+    FuncInfo {
+        name: "TRUE",
+        desc: "論理値 TRUE（真）を返します。",
+        params: &[],
         repeat: None,
     },
     FuncInfo {

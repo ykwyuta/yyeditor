@@ -701,3 +701,35 @@ fn round_and_if() {
     }
     assert_eq!(FuncInfo::find("if").map(|f| f.name), Some("IF"));
 }
+
+#[test]
+fn pi_logical_and_mod() {
+    let mut g = Mem::new();
+    assert_eq!(g.eval("=PI()"), n(std::f64::consts::PI));
+    assert_eq!(g.eval("=PI()*2"), n(std::f64::consts::PI * 2.0));
+    assert_eq!(g.eval("=PI(1)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=TRUE()"), Val::Bool(true));
+    assert_eq!(g.eval("=FALSE()"), Val::Bool(false));
+    assert_eq!(g.eval("=TRUE"), Val::Bool(true));
+    assert_eq!(g.eval("=IF(FALSE(),1,2)"), n(2.0));
+    assert_eq!(g.eval("=TRUE()+1"), n(2.0));
+    assert_eq!(formula_text(&parse("=true()").unwrap()), "=TRUE()");
+    assert_eq!(formula_text(&parse("=pi()").unwrap()), "=PI()");
+    // MOD（Excel の例。符号は除数と同じ）
+    assert_eq!(g.eval("=MOD(3,2)"), n(1.0));
+    assert_eq!(g.eval("=MOD(-3,2)"), n(1.0));
+    assert_eq!(g.eval("=MOD(3,-2)"), n(-1.0));
+    assert_eq!(g.eval("=MOD(-3,-2)"), n(-1.0));
+    assert_eq!(g.eval("=MOD(10,5)"), n(0.0));
+    assert_eq!(g.eval("=MOD(5.5,2)"), n(1.5));
+    assert_eq!(g.eval("=MOD(0.3,0.1)"), n(0.0));
+    assert_eq!(g.eval("=MOD(7,0)"), Val::Err(Error::Div0));
+    assert_eq!(g.eval("=MOD(\"x\",2)"), Val::Err(Error::Value));
+    g.set(0, "A1", n(17.0));
+    assert_eq!(g.eval("=MOD(A1,5)"), n(2.0));
+    assert_eq!(g.eval("=IF(MOD(A1,2)=1,\"奇数\",\"偶数\")"), t("奇数"));
+    match g.eval("=MOD({5,6,7},3)") {
+        Val::Array(a) => assert_eq!(a.data, vec![n(2.0), n(0.0), n(1.0)]),
+        v => panic!("{v:?}"),
+    }
+}

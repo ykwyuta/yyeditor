@@ -122,6 +122,10 @@ pub enum Func {
     /// `ROUND`・`ROUNDUP`・`ROUNDDOWN`
     Round(Rounding),
     If,
+    Mod,
+    Pi,
+    /// `TRUE()`（`true`）・`FALSE()`
+    Logical(bool),
     /// `LOW-VALUE()`（COBOL の LOW-VALUE。項目をすべて X'00' にする）
     LowValue,
     /// `HIGH-VALUE()`（COBOL の HIGH-VALUE。項目をすべて X'FF' にする）
@@ -165,6 +169,10 @@ impl Func {
             "ROUNDUP" => Func::Round(Rounding::Up),
             "ROUNDDOWN" => Func::Round(Rounding::Down),
             "IF" => Func::If,
+            "MOD" => Func::Mod,
+            "PI" => Func::Pi,
+            "TRUE" => Func::Logical(true),
+            "FALSE" => Func::Logical(false),
             "LOW-VALUE" | "LOW-VALUES" => Func::LowValue,
             "HIGH-VALUE" | "HIGH-VALUES" => Func::HighValue,
             _ => Func::Unknown(Arc::from(name)),
@@ -192,6 +200,10 @@ impl Func {
             Func::Round(Rounding::Up) => "ROUNDUP",
             Func::Round(Rounding::Down) => "ROUNDDOWN",
             Func::If => "IF",
+            Func::Mod => "MOD",
+            Func::Pi => "PI",
+            Func::Logical(true) => "TRUE",
+            Func::Logical(false) => "FALSE",
             Func::LowValue => "LOW-VALUE",
             Func::HighValue => "HIGH-VALUE",
             Func::Unknown(n) => n,

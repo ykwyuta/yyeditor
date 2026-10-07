@@ -273,7 +273,7 @@ yyeditor と共通に使います。
 - **数式**: `=` で始めて入力します（Excel と同じ文法。参照 `A1`・`$A$1`・`A1:C10`・`A:A`・`1:1`・
   `Sheet2!A1`・`'売上 2026'!B:B`、配列定数 `{1,2;3,4}`、演算子 `+ - * / ^ % &` と比較）。使える関数は
   `SUMIFS`・`COUNTIFS`（条件 `"東京"`・`">=100"`・`"<>"`・`"東*"` など）・`XLOOKUP`（一致モード・検索
-  モード・見つからない場合）・`SUM`・`COUNT`・`AVERAGE`・`MAX`・`MIN`・`MEDIAN`・`PERCENTILE`（`.INC`・`.EXC`）・`ROUND`・`ROUNDUP`・`ROUNDDOWN`・`IF`・`PRODUCT`・`ABS`・`CONCAT`（`CONCATENATE`）・`TEXTJOIN`・`TEXTSPLIT`・
+  モード・見つからない場合）・`SUM`・`COUNT`・`AVERAGE`・`MAX`・`MIN`・`MEDIAN`・`PERCENTILE`（`.INC`・`.EXC`）・`ROUND`・`ROUNDUP`・`ROUNDDOWN`・`IF`・`MOD`・`PI`・`TRUE`・`FALSE`・`PRODUCT`・`ABS`・`CONCAT`（`CONCATENATE`）・`TEXTJOIN`・`TEXTSPLIT`・
   `LOW-VALUE`・`HIGH-VALUE`（固定長の項目のすべてのバイトを X'00'・X'FF' に） です
   （ほかの関数は `#NAME?`）。複数の値を返す式（`TEXTSPLIT`、範囲どうしの演算、複数列の `XLOOKUP`）は
   右・下のセルにあふれ（スピル）、あふれる先に値があれば `#SPILL!` になります。値を直すと、そのセルを参照する式
