@@ -97,6 +97,47 @@ impl Bitmap {
     fn heap_bytes(&self) -> usize {
         self.words.len() * 8
     }
+
+    /// `src` の 1 のビットを `offset` からの位置に立てる。
+    pub fn copy_from(&mut self, offset: usize, src: &Bitmap) {
+        if offset % 64 == 0 {
+            let w0 = offset / 64;
+            for (i, &w) in src.words.iter().enumerate() {
+                if let Some(d) = self.words.get_mut(w0 + i) {
+                    *d |= w;
+                }
+            }
+            self.clear_tail();
+            return;
+        }
+        for i in src.ones() {
+            if offset + i < self.len {
+                self.set(offset + i, true);
+            }
+        }
+    }
+
+    /// 両方が 1 のビットだけを残す。
+    pub fn and_assign(&mut self, o: &Bitmap) {
+        for (a, b) in self.words.iter_mut().zip(&o.words) {
+            *a &= *b;
+        }
+    }
+
+    /// 1 のビットの位置。
+    pub fn ones(&self) -> impl Iterator<Item = usize> + '_ {
+        self.words.iter().enumerate().flat_map(|(wi, &w)| {
+            let mut w = w;
+            std::iter::from_fn(move || {
+                if w == 0 {
+                    return None;
+                }
+                let t = w.trailing_zeros() as usize;
+                w &= w - 1;
+                Some(wi * 64 + t)
+            })
+        })
+    }
 }
 
 // ---- 辞書 ----------------------------------------------------------------------------

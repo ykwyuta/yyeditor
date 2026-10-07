@@ -8,6 +8,7 @@
 //! * [`budget`] … メモリの予算（既定 8 GB）
 //! * [`yys`] … 独自形式のファイル（`.yys`）
 //! * [`csv`] … CSV（RFC 4180）の並列の取り込みと書き出し
+//! * [`query`] … 絞り込み（複数段階）・値の一覧・並べ替え（複数のキー）
 
 use std::io;
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ pub mod budget;
 pub mod chunk;
 pub mod column;
 pub mod csv;
+pub mod query;
 pub mod sheet;
 pub mod store;
 pub mod value;
