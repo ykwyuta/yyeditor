@@ -25,6 +25,7 @@ use crate::column::{Column, Piece};
 use crate::query::{ColFilter, SortKey};
 use crate::sheet::{Document, Sheet, Table, Workbook};
 use crate::store::{Region, Store};
+use crate::style::{Layer, Styles};
 use crate::value::Value;
 
 pub const MAGIC: &[u8; 8] = b"YYSHEET\0";
@@ -45,11 +46,19 @@ struct Dir {
     prev: u64,
 }
 
-/// 目次のあとに続ける追加の情報（ないファイルは既定）。
+/// 目次のあとに続ける追加の情報（ないファイルは既定）。版を重ねるごとに記録を後ろに足していき、
+/// 古いファイル（記録が少ない）も読めるようにする。
 #[derive(Serialize, Deserialize, Default)]
 struct Ext {
     /// （シートの番号, 絞り込みの段階, 並べ替えのキー）
     views: Vec<(u32, Vec<ColFilter>, Vec<SortKey>)>,
+}
+
+/// 2 つ目の追加の記録: 書式。
+#[derive(Serialize, Deserialize, Default)]
+struct Ext2 {
+    /// （シートの番号, 書式の層）
+    styles: Vec<(u32, Vec<Layer>)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -348,6 +357,16 @@ fn write_into(
     };
     let mut bytes = postcard::to_allocvec(&dir).map_err(|e| invalid(&e.to_string()))?;
     bytes.extend(postcard::to_allocvec(&ext).map_err(|e| invalid(&e.to_string()))?);
+    let ext2 = Ext2 {
+        styles: book
+            .sheets
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.styles.is_empty())
+            .map(|(i, s)| (i as u32, s.styles.layers().to_vec()))
+            .collect(),
+    };
+    bytes.extend(postcard::to_allocvec(&ext2).map_err(|e| invalid(&e.to_string()))?);
     let dir_off = store.append(&bytes)?;
     let mut trailer = Vec::with_capacity(TRAILER as usize);
     trailer.extend_from_slice(&dir_off.to_le_bytes());
@@ -365,7 +384,7 @@ fn write_into(
 }
 
 /// 末尾を探して目次を読む（末尾が壊れていれば、前の末尾を後ろから探す）。
-fn read_dir(store: &Store) -> io::Result<(Dir, Ext, u64)> {
+fn read_dir(store: &Store) -> io::Result<(Dir, Ext, Ext2, u64)> {
     let len = store.len();
     if len < 16 + TRAILER {
         return Err(invalid("yysheet のファイルではありません（短すぎます）"));
@@ -380,7 +399,7 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Ext, u64)> {
             "新しい版（{version}）の yysheet で保存されたファイルです"
         )));
     }
-    let try_at = |end: u64| -> Option<(Dir, Ext, u64)> {
+    let try_at = |end: u64| -> Option<(Dir, Ext, Ext2, u64)> {
         let t = store.read(end - TRAILER, TRAILER).ok()?;
         if &t[24..32] != END_MAGIC {
             return None;
@@ -396,12 +415,9 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Ext, u64)> {
             return None;
         }
         let (d, rest): (Dir, &[u8]) = postcard::take_from_bytes(&b).ok()?;
-        let ext = if rest.is_empty() {
-            Ext::default()
-        } else {
-            postcard::from_bytes(rest).unwrap_or_default()
-        };
-        Some((d, ext, off))
+        let (ext, rest): (Ext, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        let (ext2, _): (Ext2, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        Some((d, ext, ext2, off))
     };
     if let Some(r) = try_at(len) {
         return Ok(r);
@@ -439,7 +455,7 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Ext, u64)> {
 /// 開く。
 pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
     let store = Store::open(path)?;
-    let (dir, ext, dir_off) = read_dir(&store)?;
+    let (dir, ext, ext2, dir_off) = read_dir(&store)?;
     let chunks: Vec<Arc<Chunk>> = dir
         .chunks
         .iter()
@@ -498,6 +514,11 @@ pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
             let cols = s.table.cols();
             s.view.filters = filters.into_iter().filter(|f| f.col < cols).collect();
             s.view.sort = sort.into_iter().filter(|k| k.col < cols).collect();
+        }
+    }
+    for (i, layers) in ext2.styles {
+        if let Some(s) = sheets.get_mut(i as usize) {
+            s.styles = Styles::from_layers(layers);
         }
     }
     let book = Workbook {
@@ -582,6 +603,15 @@ mod tests {
             },
         });
         b.sheets[0].view.sort.push(SortKey { col: 1, desc: true });
+        let style = crate::style::Style {
+            fill: Some(0x00FF_EE00),
+            bold: Some(true),
+            num_fmt: Some(Arc::from("0.00")),
+            ..Default::default()
+        };
+        b.sheets[0]
+            .styles
+            .set(crate::style::Rect::new(1, 0, 4, 1), style.clone());
         let mut doc = Document::with_book(ctx.clone(), b);
         save(&mut doc, &path, &mut |_, _| true).unwrap();
         let d2 = open(ctx.clone(), &path).unwrap();
@@ -590,6 +620,11 @@ mod tests {
         assert_eq!(v.sort, vec![SortKey { col: 1, desc: true }]);
         assert!(v.rows.is_none());
         assert!(d2.book.sheets[1].view.is_empty());
+        let s = &d2.book.sheets[0];
+        assert_eq!(s.style_at(2, 1), style);
+        assert_eq!(s.format_at(2, 1).as_deref(), Some("0.00"));
+        assert_eq!(s.style_at(5, 1), Default::default());
+        assert!(d2.book.sheets[1].styles.is_empty());
     }
 
     #[test]

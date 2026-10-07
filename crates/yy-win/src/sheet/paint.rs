@@ -41,21 +41,30 @@ pub(crate) struct ButtonState {
 }
 
 /// 文字の寄せ方。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Align {
+    #[default]
     Left,
     Right,
     Center,
 }
 
+/// 罫線（種類・色）。
+pub(crate) type Border = (yy_sheet::style::LineStyle, (u8, u8, u8));
+
 /// 描くセル。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Cell {
     pub text: String,
     pub align: Align,
     pub color: Option<(u8, u8, u8)>,
     /// 表の見出し（列の名前）
     pub table_head: bool,
+    pub fill: Option<(u8, u8, u8)>,
+    pub bold: bool,
+    pub italic: bool,
+    /// 罫線（上・右・下・左）
+    pub borders: [Option<Border>; 4],
 }
 
 /// 描く内容（位置はすべて DIP、格子の左上が原点）。
@@ -104,8 +113,11 @@ pub(crate) struct GridPainter {
     family: String,
     size_pt: f32,
     dpi: f32,
-    /// 左寄せ・右寄せ・中央・見出し（中央）
+    /// 左寄せ・右寄せ・中央・見出し（中央）、続けて太字・斜体・太字斜体の左・右・中央
     formats: Vec<IDWriteTextFormat>,
+    /// 点線・破線
+    dot: Option<ID2D1StrokeStyle>,
+    dash: Option<ID2D1StrokeStyle>,
     /// 数字 1 文字の幅と行の高さ（DIP）
     pub char_w: f32,
     pub row_h: f32,
@@ -128,11 +140,22 @@ impl GridPainter {
                 size_pt,
                 dpi: dpi.max(96) as f32,
                 formats: Vec::new(),
+                dot: None,
+                dash: None,
                 char_w: 7.0,
                 row_h: 20.0,
                 target: None,
             };
             p.make_formats()?;
+            let stroke = |dash: D2D1_DASH_STYLE| {
+                let props = D2D1_STROKE_STYLE_PROPERTIES {
+                    dashStyle: dash,
+                    ..Default::default()
+                };
+                p.d2d.CreateStrokeStyle(&props, None).ok()
+            };
+            p.dot = stroke(D2D1_DASH_STYLE_DOT);
+            p.dash = stroke(D2D1_DASH_STYLE_DASH);
             Ok(p)
         }
     }
@@ -164,20 +187,36 @@ impl GridPainter {
         let family = HSTRING::from(family);
         let size_dip = self.size_pt * 96.0 / 72.0;
         let mut formats = Vec::new();
-        unsafe {
-            for align in [
+        let plain = [
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+            DWRITE_TEXT_ALIGNMENT_TRAILING,
+            DWRITE_TEXT_ALIGNMENT_CENTER,
+            DWRITE_TEXT_ALIGNMENT_CENTER,
+        ]
+        .map(|a| (a, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL));
+        let mut all = plain.to_vec();
+        for (weight, style) in [
+            (DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL),
+            (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_ITALIC),
+            (DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC),
+        ] {
+            for a in [
                 DWRITE_TEXT_ALIGNMENT_LEADING,
                 DWRITE_TEXT_ALIGNMENT_TRAILING,
                 DWRITE_TEXT_ALIGNMENT_CENTER,
-                DWRITE_TEXT_ALIGNMENT_CENTER,
             ] {
+                all.push((a, weight, style));
+            }
+        }
+        unsafe {
+            for (align, weight, style) in all {
                 let f = self
                     .dwrite
                     .CreateTextFormat(
                         &family,
                         collection.as_ref(),
-                        DWRITE_FONT_WEIGHT_NORMAL,
-                        DWRITE_FONT_STYLE_NORMAL,
+                        weight,
+                        style,
                         DWRITE_FONT_STRETCH_NORMAL,
                         size_dip,
                         w!("ja-jp"),
@@ -202,12 +241,12 @@ impl GridPainter {
         Ok(())
     }
 
-    /// 列幅（文字数）を DIP にする（Excel と同じく、数字の幅 × 文字数 ＋ 余白）。
     /// 列見出しのボタンの幅（DIP）。列の右端に置く。
     pub(crate) fn button_w(&self) -> f32 {
         (self.row_h - 4.0).max(8.0)
     }
 
+    /// 列幅（文字数）を DIP にする（Excel と同じく、数字の幅 × 文字数 ＋ 余白）。
     pub(crate) fn col_px(&self, chars: f32) -> f32 {
         (chars * self.char_w + 5.0).round()
     }
@@ -351,6 +390,51 @@ impl GridPainter {
         }
     }
 
+    /// 罫線を 1 本描く。
+    fn border(
+        &self,
+        rt: &ID2D1HwndRenderTarget,
+        brush: &ID2D1SolidColorBrush,
+        (x0, y0, x1, y1): (f32, f32, f32, f32),
+        style: yy_sheet::style::LineStyle,
+        c: (u8, u8, u8),
+    ) {
+        use yy_sheet::style::LineStyle as L;
+        let (width, stroke) = match style {
+            L::None => return,
+            L::Thin | L::Double => (1.0, None),
+            L::Medium => (2.0, None),
+            L::Thick => (3.0, None),
+            L::Dotted => (1.0, self.dot.as_ref()),
+            L::Dashed => (1.0, self.dash.as_ref()),
+        };
+        unsafe {
+            brush.SetColor(&rgb_f(c));
+            let horizontal = y0 == y1;
+            let offsets: &[f32] = if style == L::Double {
+                &[-1.0, 1.0]
+            } else {
+                &[0.0]
+            };
+            for &d in offsets {
+                let (dx, dy) = if horizontal { (0.0, d) } else { (d, 0.0) };
+                rt.DrawLine(
+                    Vector2 {
+                        X: x0 + dx,
+                        Y: y0 + dy,
+                    },
+                    Vector2 {
+                        X: x1 + dx,
+                        Y: y1 + dy,
+                    },
+                    brush,
+                    width,
+                    stroke,
+                );
+            }
+        }
+    }
+
     fn draw(
         &self,
         rt: &ID2D1HwndRenderTarget,
@@ -371,16 +455,24 @@ impl GridPainter {
                 let cell = s.cells.get(ri).and_then(|v| v.get(ci));
                 if selected && (row, col) != s.active {
                     self.fill(rt, brush, r, SEL_FILL);
+                } else if let Some(f) = cell.and_then(|c| c.fill) {
+                    self.fill(rt, brush, r, f);
                 } else if cell.is_some_and(|c| c.table_head) {
                     self.fill(rt, brush, r, TABLE_HEAD_BG);
                 }
                 if let Some(c) = cell
                     && !(s.editing && (row, col) == s.active)
                 {
-                    let fmt = match c.align {
+                    let a = match c.align {
                         Align::Left => 0,
                         Align::Right => 1,
                         Align::Center => 2,
+                    };
+                    let fmt = match (c.bold, c.italic) {
+                        (false, false) => a,
+                        (true, false) => 4 + a,
+                        (false, true) => 7 + a,
+                        (true, true) => 10 + a,
                     };
                     self.text(
                         rt,
@@ -409,6 +501,31 @@ impl GridPainter {
                 (hw, hh + y + hh - 0.5, w, hh + y + hh - 0.5),
                 GRID,
             );
+        }
+        // セルの罫線（重なる辺は太い線を後に描いて勝たせる）
+        let mut lines = Vec::new();
+        for (ri, &(_, y)) in s.rows.iter().enumerate() {
+            for (ci, &(_, x, cw)) in s.cols.iter().enumerate() {
+                let Some(c) = s.cells.get(ri).and_then(|v| v.get(ci)) else {
+                    continue;
+                };
+                let (l, t, r, b) = (
+                    hw + x - 0.5,
+                    hh + y - 0.5,
+                    hw + x + cw - 0.5,
+                    hh + y + hh - 0.5,
+                );
+                let edges = [(l, t, r, t), (r, t, r, b), (l, b, r, b), (l, t, l, b)];
+                for (side, e) in edges.into_iter().enumerate() {
+                    if let Some(bd) = c.borders[side] {
+                        lines.push((bd.0.weight(), e, bd));
+                    }
+                }
+            }
+        }
+        lines.sort_by_key(|l| l.0);
+        for (_, e, (style, color)) in lines {
+            self.border(rt, brush, e, style, color);
         }
         // 見出し
         self.fill(rt, brush, rect(0.0, 0.0, w, hh), HEAD_BG);

@@ -234,6 +234,30 @@ fn export_round_trip() {
         String::from_utf8(text).unwrap(),
         "名前,値,日付\r\n\"q\"\"q\",,2026-03-04\r\n\"a,b\",1.5,2026-10-07\r\n"
     );
+    // 書式の表示形式で書く（列全体は速い道、一部の範囲は格子をたどる）
+    let fmt = |f: &str| crate::style::Style {
+        num_fmt: Some(std::sync::Arc::from(f)),
+        ..Default::default()
+    };
+    let mut s2 = s.clone();
+    s2.styles
+        .set(crate::style::Rect::new(0, 1, u64::MAX, 1), fmt("0.00"));
+    let shown = ExportOptions {
+        crlf: false,
+        ..ExportOptions::default()
+    };
+    export(&ctx, &s2, DateSystem::D1900, &out, &shown, None, OK).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        "名前,値,日付\n\"a,b\",1.50,2026/10/7\n\"改\n行\",-2.00,2026/1/2\n\"q\"\"q\",,2026/3/4\n"
+    );
+    s2.styles
+        .set(crate::style::Rect::new(2, 2, 2, 2), fmt("yyyy年m月d日"));
+    export(&ctx, &s2, DateSystem::D1900, &out, &shown, None, OK).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        "名前,値,日付\n\"a,b\",1.50,2026/10/7\n\"改\n行\",-2.00,2026年1月2日\n\"q\"\"q\",,2026/3/4\n"
+    );
 }
 
 #[test]

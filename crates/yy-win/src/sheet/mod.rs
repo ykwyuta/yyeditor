@@ -9,6 +9,7 @@
 //! 状態を借りたままにしない。
 
 mod filter;
+mod format;
 mod paint;
 mod view;
 
@@ -43,6 +44,12 @@ use yy_sheet::{Context as SheetCtx, Document, Value, Workbook, yys};
 use crate::util::{Context, error_box, info_box, wide};
 use crate::{default_proc, hiword, loword};
 use paint::{Align, ButtonState, Cell, GridPainter, Scene};
+use yy_sheet::style::HAlign;
+
+/// 0xRRGGBB → (r, g, b)。
+fn rgb(c: u32) -> (u8, u8, u8) {
+    ((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
 
 const FRAME_CLASS: PCWSTR = w!("YYSheetFrame");
 const GRID_CLASS: PCWSTR = w!("YYSheetGrid");
@@ -76,6 +83,16 @@ const ID_FILTER: u16 = 54;
 const ID_STAGES: u16 = 55;
 const ID_REAPPLY: u16 = 56;
 const ID_CLEAR_VIEW: u16 = 57;
+const ID_FORMAT_CELLS: u16 = 60;
+const ID_BOLD: u16 = 61;
+const ID_ITALIC: u16 = 62;
+const ID_FILL: u16 = 63;
+const ID_FONT_COLOR: u16 = 64;
+const ID_CLEAR_FORMAT: u16 = 65;
+/// 罫線（なし・格子・外枠・上・下・左・右の順）
+const ID_BORDER_BASE: u16 = 70;
+/// 表示形式（`format::PRESETS` の順）
+const ID_NUMFMT_BASE: u16 = 80;
 const ID_MEMORY: u16 = 40;
 const ID_ABOUT: u16 = 41;
 
@@ -143,6 +160,8 @@ struct App {
     rows: Vec<(u64, f32)>,
     header_w: f32,
     size_px: (i32, i32),
+    /// 列全体・行全体を選んでいる（列見出し・行番号のクリック、すべて選択）
+    whole: (bool, bool),
 }
 
 thread_local! {
@@ -250,6 +269,45 @@ fn create_menu() -> Result<HMENU> {
         add(view, ID_ZOOM_IN, "拡大(&I)\tCtrl++（ホイール）");
         add(view, ID_ZOOM_OUT, "縮小(&O)\tCtrl+-（ホイール）");
         add(view, ID_ZOOM_RESET, "100%(&R)\tCtrl+0");
+        let fmt = CreatePopupMenu()?;
+        add(fmt, ID_FORMAT_CELLS, "セルの書式設定(&E)...\tCtrl+1");
+        sep(fmt);
+        let numfmt = CreatePopupMenu()?;
+        for (i, (code, name)) in format::PRESETS.iter().enumerate() {
+            add(
+                numfmt,
+                ID_NUMFMT_BASE + i as u16,
+                &format!("{name}\t{code}"),
+            );
+        }
+        AppendMenuW(
+            fmt,
+            MF_POPUP,
+            numfmt.0 as usize,
+            &HSTRING::from("表示形式(&N)"),
+        )?;
+        add(fmt, ID_BOLD, "太字(&B)\tCtrl+B");
+        add(fmt, ID_ITALIC, "斜体(&I)\tCtrl+I");
+        add(fmt, ID_FILL, "塗りつぶしの色(&F)...");
+        add(fmt, ID_FONT_COLOR, "文字の色(&C)...");
+        let border = CreatePopupMenu()?;
+        for (i, name) in [
+            "罫線なし(&N)",
+            "格子(&A)",
+            "外枠(&O)",
+            "上罫線(&T)",
+            "下罫線(&B)",
+            "左罫線(&L)",
+            "右罫線(&R)",
+        ]
+        .iter()
+        .enumerate()
+        {
+            add(border, ID_BORDER_BASE + i as u16, name);
+        }
+        AppendMenuW(fmt, MF_POPUP, border.0 as usize, &HSTRING::from("罫線(&R)"))?;
+        sep(fmt);
+        add(fmt, ID_CLEAR_FORMAT, "書式のクリア(&L)");
         let data = CreatePopupMenu()?;
         add(data, ID_SORT_ASC, "昇順に並べ替え(&A)");
         add(data, ID_SORT_DESC, "降順に並べ替え(&D)");
@@ -268,6 +326,7 @@ fn create_menu() -> Result<HMENU> {
             (edit, "編集(&E)"),
             (insert, "挿入・削除(&I)"),
             (view, "表示(&V)"),
+            (fmt, "書式(&O)"),
             (data, "データ(&D)"),
             (help, "ヘルプ(&H)"),
         ] {
@@ -430,6 +489,7 @@ fn create() -> Result<HWND> {
             rows: Vec::new(),
             header_w: 40.0,
             size_px: (0, 0),
+            whole: (false, false),
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         with(|a| {
@@ -561,12 +621,9 @@ impl App {
         self.painter.col_px(self.col_chars(col))
     }
 
-    /// セルの表示形式（表の列の既定の形式）。
+    /// セルの表示形式（セルの書式、なければ表の列の既定の形式）。
     fn format_of(&self, row: u64, col: u32) -> Option<Arc<str>> {
-        match self.sheet().place(row, col) {
-            yy_sheet::Place::Data(_, c) => self.sheet().table.columns[c as usize].format.clone(),
-            _ => None,
-        }
+        self.sheet().format_at(row, col)
     }
 
     /// 見える列と行を求める。
@@ -623,15 +680,31 @@ impl App {
                     .sheet()
                     .get(&self.ctx, row, col)
                     .unwrap_or(Value::Error(yy_sheet::CellError::Value));
-                let fmt = self.format_of(row, col);
+                let st = self.sheet().style_at(row, col);
+                let fmt = st.num_fmt.clone().or_else(|| self.format_of(row, col));
                 let chars = self.col_chars(col);
                 let (text, align, color) = display(&v, fmt.as_deref(), chars, sys);
                 let table_head = matches!(self.sheet().place(row, col), yy_sheet::Place::Header(_));
+                let align = match st.align {
+                    Some(HAlign::Left) => Align::Left,
+                    Some(HAlign::Center) => Align::Center,
+                    Some(HAlign::Right) => Align::Right,
+                    _ => align,
+                };
+                let mut borders = [None; 4];
+                for (side, b) in borders.iter_mut().enumerate() {
+                    *b = st.line(side).map(|l| (l.style, rgb(l.color)));
+                }
                 line.push(Cell {
                     text,
                     align,
-                    color,
+                    // 表示形式の色（[赤] など）が書式の文字の色より優先（Excel と同じ）
+                    color: color.or(st.color_rgb().map(rgb)),
                     table_head,
+                    fill: st.fill_rgb().map(rgb),
+                    bold: st.bold.unwrap_or(false),
+                    italic: st.italic.unwrap_or(false),
+                    borders,
                 });
             }
             cells.push(line);
@@ -848,6 +921,7 @@ impl App {
         self.cur = (r, c.min(16_383));
         if !extend {
             self.anchor = self.cur;
+            self.whole = (false, false);
         }
         self.ensure_visible();
         self.update_scrollbars();
@@ -1797,6 +1871,7 @@ fn command(id: u16) {
                 let (rows, cols) = a.sheet().extent();
                 a.anchor = (0, 0);
                 a.cur = (rows.saturating_sub(1), cols.saturating_sub(1));
+                a.whole = (true, true);
                 a.sync_formula();
                 a.invalidate();
             });
@@ -1839,6 +1914,34 @@ fn command(id: u16) {
         ID_STAGES => view::stages_dialog(),
         ID_REAPPLY => view::reapply(),
         ID_CLEAR_VIEW => view::clear(),
+        ID_FORMAT_CELLS => format::format_dialog(),
+        ID_BOLD => format::toggle(true),
+        ID_ITALIC => format::toggle(false),
+        ID_FILL => format::choose_color(true),
+        ID_FONT_COLOR => format::choose_color(false),
+        ID_CLEAR_FORMAT => format::clear_format(),
+        id if (ID_BORDER_BASE..ID_BORDER_BASE + 7).contains(&id) => {
+            use yy_sheet::style::{BorderPreset as B, Line, LineStyle};
+            let preset = [
+                B::None,
+                B::All,
+                B::Outline,
+                B::Top,
+                B::Bottom,
+                B::Left,
+                B::Right,
+            ][(id - ID_BORDER_BASE) as usize];
+            format::apply_border(
+                preset,
+                Line {
+                    style: LineStyle::Thin,
+                    color: 0,
+                },
+            );
+        }
+        id if (ID_NUMFMT_BASE..ID_NUMFMT_BASE + format::PRESETS.len() as u16).contains(&id) => {
+            format::set_number_format(format::PRESETS[(id - ID_NUMFMT_BASE) as usize].0);
+        }
         ID_MEMORY => show_memory(),
         ID_ABOUT => {
             if let Some(f) = with(|a| a.frame) {
@@ -1937,6 +2040,9 @@ fn key_hook(msg: &MSG) -> bool {
         (VK_OEM_PLUS | VK_ADD, _) => ID_INSERT_ROWS,
         (VK_OEM_MINUS | VK_SUBTRACT, _) => ID_DELETE_ROWS,
         (VK_0 | VK_NUMPAD0, false) => ID_ZOOM_RESET,
+        (VK_1, false) => ID_FORMAT_CELLS,
+        (VK_B, false) => ID_BOLD,
+        (VK_I, false) => ID_ITALIC,
         // コピー・貼り付けは格子にフォーカスがあるときだけ（数式バーの EDIT では EDIT に任せる）
         (VK_C | VK_X | VK_V, false) => {
             let Some(grid) = with(|a| a.grid) else {
@@ -2136,6 +2242,7 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                         let rows = a.sheet().extent().0.max(1);
                         a.anchor = (0, if shift { a.anchor.1 } else { c });
                         a.cur = (rows - 1, c);
+                        a.whole = (true, false);
                         a.sync_formula();
                         a.invalidate();
                     }
@@ -2143,6 +2250,7 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                         let cols = a.sheet().extent().1.max(1);
                         a.anchor = (if shift { a.anchor.0 } else { r }, 0);
                         a.cur = (r, cols - 1);
+                        a.whole = (false, true);
                         a.sync_formula();
                         a.invalidate();
                     }

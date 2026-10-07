@@ -1019,10 +1019,32 @@ fn export_to(
     }
     let t = &sheet.table;
     let (grid_rows, grid_cols) = sheet.extent();
+    // 表示形式の書式が列全体だけなら、列ごとの形式にまとめる（一部の範囲の形式は格子を書く）
+    let whole_col_formats = sheet
+        .styles
+        .layers()
+        .iter()
+        .all(|l| (l.style.num_fmt.is_none() && !l.clear) || l.rect.whole_cols());
     // 自由なセルがなければ（または行の順が決まっていれば）表だけを速く書く
-    let simple = sheet.cells.is_empty() || order.is_some();
+    let simple = (sheet.cells.is_empty() || order.is_some()) && whole_col_formats;
     let cols: Vec<&Column> = t.columns.iter().collect();
-    let formats: Vec<Option<&str>> = cols.iter().map(|c| c.format.as_deref()).collect();
+    let col_formats: Vec<Option<std::sync::Arc<str>>> = (0..cols.len() as u32)
+        .map(|c| {
+            let mut f = cols[c as usize].format.clone();
+            for l in sheet.styles.layers() {
+                if l.rect.whole_cols() && (l.rect.left..=l.rect.right).contains(&c) {
+                    if l.clear {
+                        f = cols[c as usize].format.clone();
+                    }
+                    if let Some(x) = &l.style.num_fmt {
+                        f = Some(x.clone());
+                    }
+                }
+            }
+            f
+        })
+        .collect();
+    let formats: Vec<Option<&str>> = col_formats.iter().map(|f| f.as_deref()).collect();
     let mut line = Vec::new();
     if t.header && !cols.is_empty() {
         let names: Vec<&[u8]> = cols.iter().map(|c| c.name.as_bytes()).collect();
@@ -1111,11 +1133,8 @@ fn export_to(
             let mut row = Vec::with_capacity(grid_cols as usize);
             for c in 0..grid_cols {
                 let v = sheet.get(ctx, r, c)?;
-                let f = match sheet.place(r, c) {
-                    crate::sheet::Place::Data(_, tc) => formats[tc as usize],
-                    _ => None,
-                };
-                row.push(cell_text(CellRef::of(&v), f, opts, sys));
+                let f = sheet.format_at(r, c);
+                row.push(cell_text(CellRef::of(&v), f.as_deref(), opts, sys));
             }
             line.clear();
             yy_delimited::write_record(&row, &opts.dialect, term, &mut line);

@@ -16,6 +16,7 @@ use crate::Context;
 use crate::column::Column;
 use crate::query::{ColFilter, SortKey};
 use crate::store::Store;
+use crate::style::{Style, Styles};
 use crate::value::Value;
 
 /// 表。
@@ -110,6 +111,8 @@ pub struct Sheet {
     pub frozen: (u32, u32),
     /// 絞り込み・並べ替え
     pub view: View,
+    /// セルの書式（範囲の層）
+    pub styles: Styles,
 }
 
 impl Sheet {
@@ -161,6 +164,27 @@ impl Sheet {
             None
         } else {
             Some(row - self.hidden_rows())
+        }
+    }
+
+    /// 格子のセルの書式。
+    pub fn style_at(&self, row: u64, col: u32) -> Style {
+        if self.styles.is_empty() {
+            return Style::default();
+        }
+        self.styles.at(self.source_row(row), col)
+    }
+
+    /// 格子のセルの表示形式（セルの書式、なければ表の列の既定の形式）。
+    pub fn format_at(&self, row: u64, col: u32) -> Option<Arc<str>> {
+        if !self.styles.is_empty()
+            && let Some(f) = self.styles.at(self.source_row(row), col).num_fmt
+        {
+            return Some(f);
+        }
+        match self.place(row, col) {
+            Place::Data(_, c) => self.table.columns[c as usize].format.clone(),
+            _ => None,
         }
     }
 
@@ -262,6 +286,7 @@ impl Sheet {
             self.table.rows += n;
         }
         self.shift_cells(|r, c| (if r >= at { r + n } else { r }, c), |_, _| true);
+        self.styles.insert_rows(at, n);
         Ok(())
     }
 
@@ -284,6 +309,7 @@ impl Sheet {
             |r, c| (if r >= end { r - n } else { r }, c),
             |r, _| r < at || r >= end,
         );
+        self.styles.delete_rows(at, n);
         Ok(())
     }
 
@@ -302,6 +328,7 @@ impl Sheet {
         self.shift_cells(|r, c| (r, if c >= at { c + n } else { c }), |_, _| true);
         self.view
             .remap_cols(|c| Some(if c >= at { c + n } else { c }));
+        self.styles.insert_cols(at, n);
         let w = std::mem::take(Arc::make_mut(&mut self.col_widths));
         self.col_widths = Arc::new(
             w.into_iter()
@@ -339,6 +366,7 @@ impl Sheet {
         if self.table.columns.is_empty() {
             self.view = View::default();
         }
+        self.styles.delete_cols(at, n);
         let w = std::mem::take(Arc::make_mut(&mut self.col_widths));
         self.col_widths = Arc::new(
             w.into_iter()

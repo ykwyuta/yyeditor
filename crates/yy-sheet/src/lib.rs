@@ -21,6 +21,7 @@ pub mod csv;
 pub mod query;
 pub mod sheet;
 pub mod store;
+pub mod style;
 pub mod value;
 pub mod yys;
 
