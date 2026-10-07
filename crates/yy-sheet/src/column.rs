@@ -31,6 +31,8 @@ pub struct Column {
     pub name: Arc<str>,
     /// 既定の表示形式（日付の列など）
     pub format: Option<Arc<str>>,
+    /// 固定長ファイルのレイアウトの項目（[`crate::fixed`]。シートの `fixed` の項目の番号）
+    pub field: Option<u32>,
     pieces: Arc<Vec<Piece>>,
     /// 各区間の終わりの行（累積）
     ends: Arc<Vec<u64>>,

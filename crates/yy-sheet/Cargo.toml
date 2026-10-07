@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 yy-delimited.workspace = true
 yy-encoding.workspace = true
+yy-cobol.workspace = true
 yy-io.workspace = true
 yy-numfmt.workspace = true
 yy-formula.workspace = true

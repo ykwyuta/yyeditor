@@ -20,6 +20,7 @@ pub mod bulk;
 pub mod chunk;
 pub mod column;
 pub mod csv;
+pub mod fixed;
 pub mod formula;
 pub mod query;
 pub mod shared;

@@ -1,0 +1,13 @@
+[package]
+name = "yy-cobol"
+description = "IBM COBOL copybook layouts and field codecs (zoned, packed, binary, float, edited, DBCS) for fixed-length files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+yy-encoding.workspace = true
+
+[lints]
+workspace = true

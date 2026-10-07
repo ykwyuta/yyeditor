@@ -116,6 +116,8 @@ pub struct Sheet {
     pub styles: Styles,
     /// 数式とその結果
     pub formulas: Formulas,
+    /// 固定長ファイルの設定（コピーブックのレイアウト・文字コード）
+    pub fixed: Option<Arc<crate::fixed::FixedSpec>>,
 }
 
 impl Sheet {

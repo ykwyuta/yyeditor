@@ -73,6 +73,22 @@ struct Ext4 {
     shared: Vec<(u32, Vec<SharedDir>)>,
 }
 
+/// 5 つ目の追加の記録: 固定長ファイルの設定（シートの番号ごと）。
+#[derive(Serialize, Deserialize, Default)]
+struct Ext5 {
+    fixed: Vec<(u32, FixedDir)>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FixedDir {
+    copybook: String,
+    charset: String,
+    little_endian: bool,
+    separator: String,
+    /// 列ごとの項目の番号
+    fields: Vec<Option<u32>>,
+}
+
 /// 3 つ目の追加の記録: 数式（結果は開いたときに計算し直す）。
 #[derive(Serialize, Deserialize, Default)]
 struct Ext3 {
@@ -423,6 +439,27 @@ fn write_into(
             .collect(),
     };
     bytes.extend(postcard::to_allocvec(&ext4).map_err(|e| invalid(&e.to_string()))?);
+    let ext5 = Ext5 {
+        fixed: book
+            .sheets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let f = s.fixed.as_ref()?;
+                Some((
+                    i as u32,
+                    FixedDir {
+                        copybook: f.copybook.to_string(),
+                        charset: f.codec.charset.name().to_string(),
+                        little_endian: f.codec.little_endian,
+                        separator: f.separator.name().to_string(),
+                        fields: s.table.columns.iter().map(|c| c.field).collect(),
+                    },
+                ))
+            })
+            .collect(),
+    };
+    bytes.extend(postcard::to_allocvec(&ext5).map_err(|e| invalid(&e.to_string()))?);
     let dir_off = store.append(&bytes)?;
     let mut trailer = Vec::with_capacity(TRAILER as usize);
     trailer.extend_from_slice(&dir_off.to_le_bytes());
@@ -440,7 +477,7 @@ fn write_into(
 }
 
 /// 末尾を探して目次を読む（末尾が壊れていれば、前の末尾を後ろから探す）。
-type Exts = (Ext, Ext2, Ext3, Ext4);
+type Exts = (Ext, Ext2, Ext3, Ext4, Ext5);
 
 fn read_dir(store: &Store) -> io::Result<(Dir, Exts, u64)> {
     let len = store.len();
@@ -476,8 +513,9 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Exts, u64)> {
         let (ext, rest): (Ext, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
         let (ext2, rest): (Ext2, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
         let (ext3, rest): (Ext3, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
-        let (ext4, _): (Ext4, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
-        Some((d, (ext, ext2, ext3, ext4), off))
+        let (ext4, rest): (Ext4, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        let (ext5, _): (Ext5, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        Some((d, (ext, ext2, ext3, ext4, ext5), off))
     };
     if let Some(r) = try_at(len) {
         return Ok(r);
@@ -515,7 +553,7 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Exts, u64)> {
 /// 開く。
 pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
     let store = Store::open(path)?;
-    let (dir, (ext, ext2, ext3, ext4), dir_off) = read_dir(&store)?;
+    let (dir, (ext, ext2, ext3, ext4, ext5), dir_off) = read_dir(&store)?;
     let chunks: Vec<Arc<Chunk>> = dir
         .chunks
         .iter()
@@ -613,6 +651,28 @@ pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
                     });
                 }
             }
+        }
+    }
+    for (i, f) in ext5.fixed {
+        let (Some(s), Some(charset), Some(sep)) = (
+            sheets.get_mut(i as usize),
+            yy_cobol::Charset::from_name(&f.charset),
+            crate::fixed::RecordSep::from_name(&f.separator),
+        ) else {
+            continue;
+        };
+        let codec = yy_cobol::Codec {
+            charset,
+            little_endian: f.little_endian,
+        };
+        // 読めないレイアウト（新しい版の書き方など）は設定ごと外す
+        if let Ok(spec) = crate::fixed::FixedSpec::new(&f.copybook, codec, sep) {
+            let n = spec.layout.fields.len() as u32;
+            let cols = std::sync::Arc::make_mut(&mut s.table.columns);
+            for (c, fi) in cols.iter_mut().zip(f.fields) {
+                c.field = fi.filter(|&x| x < n);
+            }
+            s.fixed = Some(std::sync::Arc::new(spec));
         }
     }
     let book = Workbook {
