@@ -255,7 +255,33 @@ impl Codec {
         issues: &mut Issues,
     ) {
         let len = out.len();
-        let mut bytes: Vec<u8> = Vec::with_capacity(len);
+        let bytes = self.text_bytes(s, len, dbcs_only, issues);
+        // 埋める
+        let pad = len - bytes.len();
+        let (text_at, pad_at) = if justified {
+            (pad, 0)
+        } else {
+            (0, bytes.len())
+        };
+        out[text_at..text_at + bytes.len()].copy_from_slice(&bytes);
+        let sp = self.charset.dbcs_space();
+        for (i, o) in out[pad_at..pad_at + pad].iter_mut().enumerate() {
+            *o = if dbcs_only {
+                sp[i % 2]
+            } else {
+                self.charset.space()
+            };
+        }
+    }
+
+    /// 文字列のバイト列（切らない。集団の MOVE で型のない値を並べるのに使う）。
+    pub fn string_bytes(&self, s: &str) -> Vec<u8> {
+        self.text_bytes(s, usize::MAX, false, &mut Issues::default())
+    }
+
+    /// 文字列のバイト列（`len` バイトまで。文字・SI を割らずに切る）。
+    fn text_bytes(&self, s: &str, len: usize, dbcs_only: bool, issues: &mut Issues) -> Vec<u8> {
+        let mut bytes: Vec<u8> = Vec::with_capacity(len.min(s.len() * 3 + 2));
         let mut truncated = false;
         match self.charset {
             Charset::Ms932 => {
@@ -394,22 +420,7 @@ impl Codec {
         if truncated {
             issues.truncated += 1;
         }
-        // 埋める
-        let pad = len - bytes.len();
-        let (text_at, pad_at) = if justified {
-            (pad, 0)
-        } else {
-            (0, bytes.len())
-        };
-        out[text_at..text_at + bytes.len()].copy_from_slice(&bytes);
-        let sp = self.charset.dbcs_space();
-        for (i, o) in out[pad_at..pad_at + pad].iter_mut().enumerate() {
-            *o = if dbcs_only {
-                sp[i % 2]
-            } else {
-                self.charset.space()
-            };
-        }
+        bytes
     }
 
     // ---- 読む ----

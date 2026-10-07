@@ -14,3 +14,5 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 cd "$ROOT"
 cargo run -q -p yy-cobol --example gnucobol -- "$WORK"
+# CBL.MOVE の送り方（基本項目・集団の MOVE）を GnuCOBOL の MOVE と比べる
+cargo run -q -p yy-cobol --example gnucobol_moves -- "$WORK"

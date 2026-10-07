@@ -129,6 +129,8 @@ pub enum Func {
     Logical(bool),
     /// `CBL.LOW-VALUE()`（COBOL の LOW-VALUE。項目をすべて X'00' にする）
     LowValue,
+    /// `CBL.MOVE(送り出し範囲, 受け取り範囲)`（COBOL の MOVE）
+    CblMove,
     /// `CBL.HIGH-VALUE()`（COBOL の HIGH-VALUE。項目をすべて X'FF' にする）
     HighValue,
     /// 未登録（`#NAME?`）
@@ -177,6 +179,7 @@ impl Func {
             "CBL.LOW-VALUE" | "CBL.LOW-VALUES" => Func::LowValue,
             "CBL.HIGH-VALUE" | "CBL.HIGH-VALUES" => Func::HighValue,
             "IFERROR" => Func::Iferror,
+            "CBL.MOVE" => Func::CblMove,
             _ => Func::Unknown(Arc::from(name)),
         }
     }
@@ -209,6 +212,7 @@ impl Func {
             Func::LowValue => "CBL.LOW-VALUE",
             Func::HighValue => "CBL.HIGH-VALUE",
             Func::Iferror => "IFERROR",
+            Func::CblMove => "CBL.MOVE",
             Func::Unknown(n) => n,
         }
     }

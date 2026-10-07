@@ -570,7 +570,7 @@ fn cobol_figurative_constants() {
             .iter()
             .map(|f| f.name)
             .collect::<Vec<_>>(),
-        ["CBL.HIGH-VALUE", "CBL.LOW-VALUE"]
+        ["CBL.HIGH-VALUE", "CBL.LOW-VALUE", "CBL.MOVE"]
     );
 }
 
@@ -763,5 +763,24 @@ fn iferror() {
     assert_eq!(
         formula_text(&parse("=iferror(A1,0)").unwrap()),
         "=IFERROR(A1,0)"
+    );
+}
+
+#[test]
+fn cbl_move_arguments() {
+    let g = Mem::new();
+    // 送り方はシートが決める（メモリの格子は COBOL の型を知らないので #VALUE!）
+    assert_eq!(g.eval("=CBL.MOVE(A1:A2,B1:B2)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=CBL.MOVE(A1:A3,B1:B2)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=CBL.MOVE(1,B1)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=CBL.MOVE(A1)"), Val::Err(Error::Value));
+    assert_eq!(
+        formula_text(&parse("=cbl.move(A1:B3,D1:D3)").unwrap()),
+        "=CBL.MOVE(A1:B3,D1:D3)"
+    );
+    assert!(
+        FuncInfo::complete("CBL.")
+            .iter()
+            .any(|f| f.name == "CBL.MOVE")
     );
 }

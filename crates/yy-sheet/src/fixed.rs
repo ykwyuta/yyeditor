@@ -253,6 +253,103 @@ pub(crate) fn needs_fit(sheet: &Sheet, src_row: u64, col: u32, v: &yy_formula::V
         || formula_field(sheet, src_row, col).is_some()
 }
 
+/// 読んだ値（MOVE の結果）を式の値に。
+fn decoded_val(f: &yy_cobol::Field, d: Decoded, raw: &[u8]) -> yy_formula::Val {
+    use yy_formula::Val;
+    match d {
+        Decoded::Empty => Val::Empty,
+        Decoded::Text(s) => Val::text(&s),
+        Decoded::Float(x) => Val::Num(x),
+        Decoded::Num(n) => match num_cell(f, &n) {
+            Some(x) => Val::Num(x),
+            None => Val::text(&n.to_string()),
+        },
+        Decoded::Invalid => Val::text(&yy_cobol::hex_text(raw)),
+    }
+}
+
+fn val_input(v: &yy_formula::Val) -> Input<'_> {
+    use yy_formula::Val;
+    match v {
+        Val::Empty | Val::Array(_) => Input::Empty,
+        Val::Num(x) => Input::Number(*x),
+        Val::Text(s) => match yy_formula::figurative(s) {
+            Some(b) => Input::Fill(b),
+            None => Input::Text(s),
+        },
+        Val::Bool(b) => Input::Bool(*b),
+        Val::Err(_) => Input::Error,
+    }
+}
+
+/// `CBL.MOVE(送り出し範囲, 受け取り範囲)` の値（受け取り範囲の大きさの配列）。
+///
+/// - 受け取り範囲は COBOL の型のある列の、見出し行でない行だけ（そうでなければ `#VALUE!`）。式は受け取り
+///   範囲の左上のセルに置く（`at` が分かればそうでなければ `#REF!`）。
+/// - 列の数が同じなら列ごとに基本項目の MOVE、違えば行ごとに集団の MOVE（[`yy_cobol::Codec::move_group`]）。
+///   送り出しの列の型（なければ値のまま）と、受け取りの列の型で送る。文字コードは受け取り側。
+/// - 送れない組み合わせ（小数部のある数値 → 英数字など）・エラー値は `#VALUE!`。
+pub(crate) fn cobol_move(
+    book: &crate::Workbook,
+    at: Option<(usize, u64, u32)>,
+    (ss, sa): (usize, yy_formula::Area),
+    (ds, da): (usize, yy_formula::Area),
+    get: &dyn Fn(usize, u64, u32) -> yy_formula::Val,
+) -> yy_formula::Val {
+    use yy_formula::{Array, Error, Val};
+    if let Some((si, r, c)) = at
+        && (ds != si || da.r0 != r || da.c0 != c)
+    {
+        return Val::Err(Error::Ref);
+    }
+    let dst_sheet = &book.sheets[ds];
+    let Some(spec) = dst_sheet.fixed.as_deref() else {
+        return Val::Err(Error::Value);
+    };
+    if dst_sheet.table.header && da.r0 == 0 {
+        return Val::Err(Error::Value);
+    }
+    let Some(dst): Option<Vec<&yy_cobol::Field>> = (da.c0..=da.c1)
+        .map(|c| column_field(dst_sheet, c).map(|x| x.1))
+        .collect()
+    else {
+        return Val::Err(Error::Value);
+    };
+    let src_sheet = &book.sheets[ss];
+    let src: Vec<Option<&yy_cobol::Field>> = (sa.c0..=sa.c1)
+        .map(|c| column_field(src_sheet, c).map(|x| x.1))
+        .collect();
+    let codec = &spec.codec;
+    let rows = da.rows() as usize;
+    let mut data = Vec::with_capacity(rows * dst.len());
+    for i in 0..rows as u64 {
+        let vals: Vec<Val> = (sa.c0..=sa.c1).map(|c| get(ss, sa.r0 + i, c)).collect();
+        if src.len() == dst.len() {
+            for ((v, sf), df) in vals.iter().zip(&src).zip(&dst) {
+                data.push(match codec.move_elementary(val_input(v), *sf, df) {
+                    Some((d, raw)) => decoded_val(df, d, &raw),
+                    None => match v {
+                        Val::Err(e) => Val::Err(*e),
+                        _ => Val::Err(Error::Value),
+                    },
+                });
+            }
+        } else if let Some(Val::Err(e)) = vals.iter().find(|v| matches!(v, Val::Err(_))) {
+            data.extend(std::iter::repeat_n(Val::Err(*e), dst.len()));
+        } else {
+            let inputs: Vec<(Input<'_>, Option<&yy_cobol::Field>)> = vals
+                .iter()
+                .map(val_input)
+                .zip(src.iter().copied())
+                .collect();
+            for ((d, raw), df) in codec.move_group(&inputs, &dst).into_iter().zip(&dst) {
+                data.push(decoded_val(df, d, &raw));
+            }
+        }
+    }
+    Val::Array(Arc::new(Array::new(rows, dst.len(), data)))
+}
+
 /// 自動で付けた表示形式か（なし・`0`・`0.00` など）。
 fn auto_format(f: Option<&str>) -> bool {
     match f {
@@ -1065,5 +1162,72 @@ mod tests {
         })
         .unwrap();
         assert_eq!(get(&d, 1, 4), Value::Number(99999.0));
+    }
+
+    #[test]
+    fn cobol_move_function() {
+        use crate::{CellError, Document};
+        let ctx = Context::for_tests();
+        let s = super::tests::spec(Charset::Ms932, RecordSep::Crlf);
+        let mut d = Document::new(ctx.clone());
+        // ID 9(5)・NAME X(10)・KANA N(4)・AMT S9(7)V99 COMP-3・CNT S9(4) COMP・BIG・FILLER
+        d.edit(|b, ctx| {
+            let sh = &mut b.sheets[0];
+            apply_layout(ctx, sh, &s)?;
+            for (r, (id, name, amt)) in [(1, "ABC", 1234.5), (2, "XY", -0.01), (3, "", 0.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let r = r as u64 + 1;
+                sh.set(ctx, r, 0, Value::Number(id as f64))?;
+                sh.set(ctx, r, 1, Value::text(name))?;
+                sh.set(ctx, r, 3, Value::Number(amt))?;
+            }
+            let f = |sh: &mut Sheet, r: u64, c: u32, t: &str| sh.set_formula(ctx, r, c, t).unwrap();
+            f(sh, 5, 4, "=CBL.MOVE(D2:D4,E6:E8)");
+            f(sh, 5, 1, "=CBL.MOVE(A2:A4,B6:B8)");
+            f(sh, 9, 1, "=CBL.MOVE(A2:B2,B10)");
+            f(sh, 11, 0, "=CBL.MOVE(B2,A12:B12)");
+            f(sh, 13, 0, "=CBL.MOVE(A2:A4,A14:A15)");
+            f(sh, 13, 9, "=CBL.MOVE(A2,J14)");
+            f(sh, 15, 0, "=CBL.MOVE(A2,B16)");
+            f(sh, 17, 1, "=CBL.MOVE(D2,B18)");
+            f(sh, 19, 3, "=CBL.MOVE(A2:A3,D20:D21)");
+            f(sh, 21, 0, "=CBL.MOVE(B2:B3,A22:A23)");
+            Ok(())
+        })
+        .unwrap();
+        let get = |r: u64, c: u32| d.book.sheets[0].get(&ctx, r, c).unwrap();
+        // 数値 → 数値: 小数部は切り捨て
+        assert_eq!(get(5, 4), Value::Number(1234.0));
+        assert_eq!(get(6, 4), Value::Number(0.0));
+        assert_eq!(get(7, 4), Value::Number(0.0));
+        // 9(5) → X(10): 桁数の数字
+        assert_eq!(get(5, 1), Value::text("00001"));
+        assert_eq!(get(6, 1), Value::text("00002"));
+        // 集団の MOVE: 2 列 → 1 列、1 列 → 2 列
+        assert_eq!(get(9, 1), Value::text("00001ABC"));
+        assert_eq!(get(11, 0), Value::text("X'4142432020'"));
+        assert_eq!(get(11, 1), Value::Empty);
+        // 行数が違う・型のない列・左上でない・送れない組み合わせ
+        assert_eq!(get(13, 0), Value::Error(CellError::Value));
+        assert_eq!(get(13, 9), Value::Error(CellError::Value));
+        assert_eq!(get(15, 0), Value::Error(CellError::Ref));
+        assert_eq!(get(17, 1), Value::Error(CellError::Value));
+        // 9(5) → S9(7)V99 COMP-3、X(10) "ABC" → 9(5) は送れない
+        assert_eq!(get(19, 3), Value::Number(1.0));
+        assert_eq!(get(20, 3), Value::Number(2.0));
+        assert_eq!(get(21, 0), Value::Error(CellError::Value));
+        // 書き出すと受け取りの型のバイト
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mv.dat");
+        export(&ctx, &d.book.sheets[0], &path, &s, None, &|_, _| true).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let stride = s.layout.record_len + 2;
+        let rec = |grid_row: usize| {
+            &bytes[(grid_row - 1) * stride..(grid_row - 1) * stride + s.layout.record_len]
+        };
+        assert_eq!(&rec(9)[5..15], b"00001ABC  ");
+        assert_eq!(&rec(11)[0..5], b"ABC  ");
     }
 }

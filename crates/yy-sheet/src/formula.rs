@@ -295,6 +295,8 @@ struct BookGrid<'a> {
     shared: &'a [Vec<Option<crate::Column>>],
     /// 覚え書き（1 つの式・共有式を計算する間だけ）: シートの使っている範囲・最後に使った索引
     memo: std::cell::RefCell<GridMemo>,
+    /// 計算している式のセル（シート・行・列。共有式は `None`）
+    at: Option<(usize, u64, u32)>,
 }
 
 /// 索引の範囲（シート・列・行）。
@@ -455,6 +457,10 @@ impl BookGrid<'_> {
 }
 
 impl Grid for BookGrid<'_> {
+    fn cobol_move(&self, src: (usize, yy_formula::Area), dst: (usize, yy_formula::Area)) -> Val {
+        crate::fixed::cobol_move(self.book, self.at, src, dst, &|s, r, c| self.get(s, r, c))
+    }
+
     fn stable(&self, sheet: usize, a: &yy_formula::Area) -> bool {
         if self.book.sheets[sheet]
             .formulas
@@ -592,6 +598,12 @@ fn refs(e: &Expr, sheet: usize, book: &Workbook, out: &mut Vec<(usize, yy_formul
         Expr::Bin(_, l, r) => {
             refs(l, sheet, book, out);
             refs(r, sheet, book, out);
+        }
+        // CBL.MOVE の受け取り範囲は形と型を見るだけ（値は読まない。式のセル自身を含む）
+        Expr::Call(yy_formula::Func::CblMove, args) => {
+            if let Some(a) = args.first() {
+                refs(a, sheet, book, out)
+            }
         }
         Expr::Call(_, args) => args.iter().for_each(|a| refs(a, sheet, book, out)),
         _ => {}
@@ -855,6 +867,7 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                     formulas: &index,
                     shared: &shared_res,
                     memo: Default::default(),
+                    at: None,
                 };
                 let cx = yy_formula::Context {
                     grid: &grid,
@@ -880,6 +893,7 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                 formulas: &index,
                 shared: &shared_res,
                 memo: Default::default(),
+                at: Some((si, r, c)),
             };
             yy_formula::eval(
                 &node.expr,
@@ -902,6 +916,7 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                     formulas: &index,
                     shared: &shared_res,
                     memo: Default::default(),
+                    at: Some((si, r, c)),
                 };
                 let is_blocked = (0..a.rows).any(|dr| {
                     (0..a.cols).any(|dc| {

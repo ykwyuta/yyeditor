@@ -28,6 +28,7 @@ pub(crate) fn call(f: &Func, args: &[Expr], cx: &Context<'_>) -> Val {
         Func::Round(mode) => round(args, cx, *mode),
         Func::If => if_(args, cx),
         Func::Iferror => iferror(args, cx),
+        Func::CblMove => cbl_move(args, cx),
         Func::Mod => modulo(args, cx),
         Func::Pi | Func::Logical(_) if !args.is_empty() => Val::Err(Error::Value),
         Func::Pi => Val::Num(std::f64::consts::PI),
@@ -384,6 +385,30 @@ fn iferror(args: &[Expr], cx: &Context<'_>) -> Val {
         }
         v => v,
     }
+}
+
+/// `CBL.MOVE(送り出し範囲, 受け取り範囲)`: どちらも参照で、行数が違えば `#VALUE!`。送り方（COBOL の
+/// MOVE）は [`crate::Grid::cobol_move`] に任せる。
+fn cbl_move(args: &[Expr], cx: &Context<'_>) -> Val {
+    if args.len() != 2 {
+        return Val::Err(Error::Value);
+    }
+    let range = |e: &Expr| match arg(e, cx) {
+        Arg::R(sheet, Some(area)) => Ok((sheet, area)),
+        Arg::V(Val::Err(e)) => Err(e),
+        _ => Err(Error::Value),
+    };
+    let (src, dst) = match (range(&args[0]), range(&args[1])) {
+        (Ok(s), Ok(d)) => (s, d),
+        (Err(e), _) | (_, Err(e)) => return Val::Err(e),
+    };
+    if src.1.rows() != dst.1.rows() {
+        return Val::Err(Error::Value);
+    }
+    if dst.1.rows().saturating_mul(dst.1.cols() as u64) > MAX_ARRAY {
+        return Val::Err(Error::Num);
+    }
+    cx.grid.cobol_move(src, dst)
 }
 
 // ---- IF --------------------------------------------------------------------------------

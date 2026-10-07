@@ -207,6 +207,12 @@ pub trait Grid {
     fn stable(&self, _sheet: usize, _area: &Area) -> bool {
         false
     }
+
+    /// `CBL.MOVE`: 送り出しの範囲（シート・範囲）を受け取りの範囲へ COBOL の MOVE で送った値（受け取りの
+    /// 範囲の大きさの配列）。行数は呼ぶ側が揃えてある。COBOL の型を知る側が作る（既定は `#VALUE!`）。
+    fn cobol_move(&self, _src: (usize, Area), _dst: (usize, Area)) -> Val {
+        Val::Err(Error::Value)
+    }
 }
 
 /// 範囲の相対参照の行を `dr` 行ずらす（列全体の参照は動かない）。行が負になれば `None`。

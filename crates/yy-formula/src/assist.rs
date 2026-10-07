@@ -44,6 +44,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: None,
     },
     FuncInfo {
+        name: "CBL.MOVE",
+        desc: "COBOL の MOVE。送り出し範囲の値を、受け取り範囲（COBOL の型のある列）の型で送ります。受け取り範囲の左上のセルに入力し、結果は受け取り範囲にあふれます。列の数が同じなら列ごとの MOVE、違えば集団の MOVE（バイト列を左詰め）。行数が違えば #VALUE!。",
+        params: &["送り出し範囲", "受け取り範囲"],
+        repeat: None,
+    },
+    FuncInfo {
         name: "CONCAT",
         desc: "文字列をつなげます（範囲はセルの順に）。",
         params: &["文字列1", "[文字列2]"],
