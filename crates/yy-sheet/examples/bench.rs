@@ -227,6 +227,8 @@ fn main() {
         for (i, f) in [
             "=SUMIFS(B:B,C:C,\"東京\",A:A,\">500000\")",
             "=COUNTIFS(C:C,\"大阪\")",
+            "=SUM(B:B)",
+            "=COUNT(A:D)",
             "=XLOOKUP(999999,A:A,C:C,\"なし\")",
         ]
         .iter()

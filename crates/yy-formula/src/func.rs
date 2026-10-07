@@ -12,6 +12,8 @@ pub(crate) fn call(f: &Func, args: &[Expr], cx: &Context<'_>) -> Val {
     match f {
         Func::Abs => abs(args, cx),
         Func::Product => product(args, cx),
+        Func::Sum => sum(args, cx),
+        Func::Count => count(args, cx),
         Func::Sumifs => ifs(args, cx, true),
         Func::Countifs => ifs(args, cx, false),
         Func::Xlookup => xlookup(args, cx),
@@ -58,6 +60,85 @@ fn each_cell(a: &Arg, cx: &Context<'_>, f: &mut dyn FnMut(Cell<'_>)) {
             }
         }
     }
+}
+
+/// 引数の値を順を問わずに渡す（複数列の範囲も列ごとにまとめて読む。`SUM`・`COUNT` 用）。
+fn each_cell_any_order(a: &Arg, cx: &Context<'_>, f: &mut dyn FnMut(Cell<'_>)) {
+    match a {
+        Arg::R(sheet, Some(area)) if area.cols() > 1 => {
+            for c in area.c0..=area.c1 {
+                cx.grid
+                    .scan(*sheet, c, area.r0..area.r1 + 1, &mut |_, v| f(v));
+            }
+        }
+        a => each_cell(a, cx, f),
+    }
+}
+
+// ---- SUM・COUNT ------------------------------------------------------------------------
+
+/// `SUM`: 直接書いた値は数値に変え（文字列の数値・真偽値も足す）、範囲・配列の中は数値だけを足す
+/// （文字列・真偽値・空は無視、エラーは伝える）。
+fn sum(args: &[Expr], cx: &Context<'_>) -> Val {
+    if args.is_empty() {
+        return Val::Err(Error::Value);
+    }
+    let mut total = 0.0;
+    for e in args {
+        let a = arg(e, cx);
+        match &a {
+            Arg::V(v) if !matches!(v, Val::Array(_)) => {
+                if matches!(v, Val::Empty) {
+                    continue;
+                }
+                match num(v, cx.sys) {
+                    Ok(n) => total += n,
+                    Err(e) => return Val::Err(e),
+                }
+            }
+            _ => {
+                let mut err = None;
+                each_cell_any_order(&a, cx, &mut |c| match c {
+                    Cell::Num(n) => total += n,
+                    Cell::Err(e) if err.is_none() => err = Some(e),
+                    _ => {}
+                });
+                if let Some(e) = err {
+                    return Val::Err(e);
+                }
+            }
+        }
+    }
+    if total.is_finite() {
+        Val::Num(total)
+    } else {
+        Val::Err(Error::Num)
+    }
+}
+
+/// `COUNT`: 数値の数。直接書いた値は数値・真偽値・数値に読める文字列を数え、範囲・配列の中は数値だけを
+/// 数える（文字列・真偽値・空・エラーは数えない）。
+fn count(args: &[Expr], cx: &Context<'_>) -> Val {
+    if args.is_empty() {
+        return Val::Err(Error::Value);
+    }
+    let mut n = 0u64;
+    for e in args {
+        let a = arg(e, cx);
+        match &a {
+            Arg::V(v) if !matches!(v, Val::Array(_)) => match v {
+                Val::Num(_) | Val::Bool(_) => n += 1,
+                Val::Text(_) if num(v, cx.sys).is_ok() => n += 1,
+                _ => {}
+            },
+            _ => each_cell_any_order(&a, cx, &mut |c| {
+                if matches!(c, Cell::Num(_)) {
+                    n += 1;
+                }
+            }),
+        }
+    }
+    Val::Num(n as f64)
 }
 
 // ---- ABS・PRODUCT ----------------------------------------------------------------------

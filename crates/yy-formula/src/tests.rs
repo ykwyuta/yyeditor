@@ -165,6 +165,42 @@ fn product_and_abs() {
     assert_eq!(g.eval("=ABS(\"-5\")"), n(5.0));
 }
 
+#[test]
+fn sum_and_count() {
+    let mut g = Mem::new();
+    g.set(0, "A1", n(2.0));
+    g.set(0, "A2", t("3"));
+    g.set(0, "A3", n(4.0));
+    g.set(0, "A4", Val::Bool(true));
+    g.set(0, "B1", n(10.0));
+    g.set(0, "B3", n(0.5));
+    // 範囲の中の文字列・真偽値・空は無視
+    assert_eq!(g.eval("=SUM(A1:A4)"), n(6.0));
+    assert_eq!(g.eval("=SUM(A1:B4)"), n(16.5));
+    assert_eq!(g.eval("=SUM(A:A)"), n(6.0));
+    assert_eq!(g.eval("=SUM(A2)"), n(0.0));
+    // 直接書いた値は数値に変える
+    assert_eq!(g.eval("=SUM(A1,\"3\",TRUE,1.5)"), n(7.5));
+    assert_eq!(g.eval("=SUM(\"x\")"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=SUM({1,2;3,4})"), n(10.0));
+    // 演算では文字列の数値も数値になる（"3"*2 = 6）
+    assert_eq!(g.eval("=SUM(A1:A3*2)"), n(18.0));
+    assert_eq!(g.eval("=SUM()"), Val::Err(Error::Value));
+    // エラーは伝える
+    g.set(0, "C1", Val::Err(Error::Div0));
+    assert_eq!(g.eval("=SUM(C1:C2)"), Val::Err(Error::Div0));
+    // COUNT: 範囲の中は数値だけ、直接書いた値は数値・真偽値・数値の文字列
+    assert_eq!(g.eval("=COUNT(A1:A4)"), n(2.0));
+    assert_eq!(g.eval("=COUNT(A1:C4)"), n(4.0));
+    assert_eq!(g.eval("=COUNT(A:A,B:B)"), n(4.0));
+    assert_eq!(g.eval("=COUNT(1,\"2\",\"x\",TRUE)"), n(3.0));
+    assert_eq!(g.eval("=COUNT(C1)"), n(0.0));
+    assert_eq!(g.eval("=COUNT(D1:D9)"), n(0.0));
+    // 式の中で
+    assert_eq!(g.eval("=SUM(A1:A4)/COUNT(A1:A4)"), n(3.0));
+    assert_eq!(g.eval("=sum(a1,a3)"), n(6.0));
+}
+
 fn sales() -> Mem {
     let mut g = Mem::new();
     let rows = [

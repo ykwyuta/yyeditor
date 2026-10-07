@@ -91,6 +91,8 @@ pub enum BinOp {
 pub enum Func {
     Abs,
     Product,
+    Sum,
+    Count,
     Sumifs,
     Countifs,
     Xlookup,
@@ -108,6 +110,8 @@ impl Func {
         match up {
             "ABS" => Func::Abs,
             "PRODUCT" => Func::Product,
+            "SUM" => Func::Sum,
+            "COUNT" => Func::Count,
             "SUMIFS" => Func::Sumifs,
             "COUNTIFS" => Func::Countifs,
             "XLOOKUP" => Func::Xlookup,
@@ -122,6 +126,8 @@ impl Func {
         match self {
             Func::Abs => "ABS",
             Func::Product => "PRODUCT",
+            Func::Sum => "SUM",
+            Func::Count => "COUNT",
             Func::Sumifs => "SUMIFS",
             Func::Countifs => "COUNTIFS",
             Func::Xlookup => "XLOOKUP",

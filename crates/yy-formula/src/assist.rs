@@ -32,6 +32,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: Some((1, 1)),
     },
     FuncInfo {
+        name: "COUNT",
+        desc: "数値のセルの数を返します（範囲の中の文字列・空・真偽値・エラーは数えません）。",
+        params: &["値1", "[値2]"],
+        repeat: Some((1, 1)),
+    },
+    FuncInfo {
         name: "COUNTIFS",
         desc: "すべての条件に合うセルの数を返します。",
         params: &["条件範囲1", "条件1", "[条件範囲2", "条件2]"],
@@ -40,6 +46,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
     FuncInfo {
         name: "PRODUCT",
         desc: "数値の積を返します。",
+        params: &["数値1", "[数値2]"],
+        repeat: Some((1, 1)),
+    },
+    FuncInfo {
+        name: "SUM",
+        desc: "数値の合計を返します（範囲の中の文字列・真偽値・空は無視します）。",
         params: &["数値1", "[数値2]"],
         repeat: Some((1, 1)),
     },
@@ -589,7 +601,9 @@ mod tests {
     #[test]
     fn completion_and_signature() {
         let names: Vec<_> = FuncInfo::complete("co").iter().map(|f| f.name).collect();
-        assert_eq!(names, ["CONCAT", "COUNTIFS"]);
+        assert_eq!(names, ["CONCAT", "COUNT", "COUNTIFS"]);
+        let names: Vec<_> = FuncInfo::complete("su").iter().map(|f| f.name).collect();
+        assert_eq!(names, ["SUM", "SUMIFS"]);
         assert!(FuncInfo::complete("").is_empty());
         assert_eq!(FuncInfo::find("concatenate").unwrap().name, "CONCAT");
         assert_eq!(FuncInfo::find("_xlfn.XLOOKUP").unwrap().name, "XLOOKUP");
