@@ -14,6 +14,7 @@ use yy_numfmt::DateSystem;
 
 use crate::Context;
 use crate::column::Column;
+use crate::query::{ColFilter, SortKey};
 use crate::store::Store;
 use crate::value::Value;
 
@@ -53,6 +54,49 @@ pub enum Place {
     Free,
 }
 
+/// 絞り込みと並べ替えの表示（15 章 9.1）。表のデータは動かさず、表示する表の行の並びだけを持つ。
+#[derive(Clone, Debug, Default)]
+pub struct View {
+    /// 絞り込みの段階（付けた順。すべてを満たす行を表示する）
+    pub filters: Vec<ColFilter>,
+    /// 並べ替えのキー（先のキーが優先）
+    pub sort: Vec<SortKey>,
+    /// 表示する表の行（表示の順）。`None` なら全行を元の順に
+    pub rows: Option<Arc<Vec<u32>>>,
+    /// 各段階のあとの残りの行数
+    pub counts: Vec<u64>,
+}
+
+impl View {
+    /// 条件もキーもない。
+    pub fn is_empty(&self) -> bool {
+        self.filters.is_empty() && self.sort.is_empty()
+    }
+
+    /// 列 `col` の絞り込みの条件。
+    pub fn filter_of(&self, col: u32) -> Option<&ColFilter> {
+        self.filters.iter().find(|f| f.col == col)
+    }
+
+    /// 列の並びが変わったとき、条件とキーの列を付け替える（`None` を返す列の条件は外す）。
+    pub fn remap_cols(&mut self, map: impl Fn(u32) -> Option<u32>) {
+        self.filters.retain_mut(|f| match map(f.col) {
+            Some(c) => {
+                f.col = c;
+                true
+            }
+            None => false,
+        });
+        self.sort.retain_mut(|k| match map(k.col) {
+            Some(c) => {
+                k.col = c;
+                true
+            }
+            None => false,
+        });
+    }
+}
+
 /// シート。
 #[derive(Clone, Debug, Default)]
 pub struct Sheet {
@@ -64,6 +108,8 @@ pub struct Sheet {
     pub col_widths: Arc<BTreeMap<u32, f32>>,
     /// 固定する行・列の数
     pub frozen: (u32, u32),
+    /// 絞り込み・並べ替え
+    pub view: View,
 }
 
 impl Sheet {
@@ -74,19 +120,75 @@ impl Sheet {
         }
     }
 
+    /// 表示している表の行数（絞り込み中なら残った行の数）。
+    pub fn visible_rows(&self) -> u64 {
+        match &self.view.rows {
+            Some(r) => r.len() as u64,
+            None => self.table.rows,
+        }
+    }
+
+    /// 格子の上での表の行数（見出し行を含む。絞り込み中なら残った行だけ）。
+    pub fn table_grid_rows(&self) -> u64 {
+        let t = &self.table;
+        if t.columns.is_empty() {
+            0
+        } else {
+            self.visible_rows() + t.header as u64
+        }
+    }
+
+    /// 絞り込みで隠れている表の行の数。
+    fn hidden_rows(&self) -> u64 {
+        self.table.rows - self.visible_rows()
+    }
+
+    /// 格子の行 → 表の外のセルを置く行（表より下は隠れた行の分だけずれる）。
+    fn free_row(&self, row: u64) -> u64 {
+        if !self.table.columns.is_empty() && row >= self.table_grid_rows() {
+            row + self.hidden_rows()
+        } else {
+            row
+        }
+    }
+
+    /// 表の外のセルを置く行 → 格子の行（隠れた行の中なら `None`）。
+    fn grid_row_of_free(&self, row: u64) -> Option<u64> {
+        let end = self.table_grid_rows();
+        if self.table.columns.is_empty() || row < end {
+            Some(row)
+        } else if row < self.table.grid_rows() {
+            None
+        } else {
+            Some(row - self.hidden_rows())
+        }
+    }
+
+    /// 格子の行の、絞り込み・並べ替えをしないときの行（行番号の表示・セルの名前に使う）。
+    pub fn source_row(&self, row: u64) -> u64 {
+        match self.place(row, 0) {
+            Place::Data(r, _) if self.view.rows.is_some() => r + self.table.header as u64,
+            Place::Free => self.free_row(row),
+            _ => row,
+        }
+    }
+
     pub fn place(&self, row: u64, col: u32) -> Place {
         let t = &self.table;
-        if col >= t.cols() || row >= t.grid_rows() {
+        if col >= t.cols() || row >= self.table_grid_rows() {
             return Place::Free;
         }
-        if t.header {
+        let r = if t.header {
             if row == 0 {
-                Place::Header(col)
-            } else {
-                Place::Data(row - 1, col)
+                return Place::Header(col);
             }
+            row - 1
         } else {
-            Place::Data(row, col)
+            row
+        };
+        match &self.view.rows {
+            Some(v) => Place::Data(v[r as usize] as u64, col),
+            None => Place::Data(r, col),
         }
     }
 
@@ -102,7 +204,11 @@ impl Sheet {
         Ok(match self.place(row, col) {
             Place::Header(c) => Value::Text(self.table.columns[c as usize].name.clone()),
             Place::Data(r, c) => self.table.columns[c as usize].get(ctx, r)?,
-            Place::Free => self.cells.get(&(row, col)).cloned().unwrap_or_default(),
+            Place::Free => self
+                .cells
+                .get(&(self.free_row(row), col))
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -117,6 +223,7 @@ impl Sheet {
                 cols[c as usize].set(ctx, r, v)?;
             }
             Place::Free => {
+                let row = self.free_row(row);
                 let cells = Arc::make_mut(&mut self.cells);
                 if v.is_empty() {
                     cells.remove(&(row, col));
@@ -128,12 +235,14 @@ impl Sheet {
         Ok(())
     }
 
-    /// 使っている範囲（行数・列数）。
+    /// 使っている範囲（格子の行数・列数。絞り込み中なら見えている範囲）。
     pub fn extent(&self) -> (u64, u32) {
-        let mut rows = self.table.grid_rows();
+        let mut rows = self.table_grid_rows();
         let mut cols = self.table.cols();
         for &(r, c) in self.cells.keys() {
-            rows = rows.max(r + 1);
+            if let Some(g) = self.grid_row_of_free(r) {
+                rows = rows.max(g + 1);
+            }
             cols = cols.max(c + 1);
         }
         (rows, cols)
@@ -141,6 +250,7 @@ impl Sheet {
 
     /// 格子の `at` 行目に `n` 行挿入する（表の中なら表に、表の外の自由なセルはずらす）。
     pub fn insert_rows(&mut self, ctx: &Context, at: u64, n: u64) -> io::Result<()> {
+        self.view.rows = None;
         let t = &self.table;
         let first = t.header as u64;
         if !t.columns.is_empty() && at >= first && at <= t.grid_rows() {
@@ -157,6 +267,7 @@ impl Sheet {
 
     /// 格子の `at` 行目から `n` 行削除する。
     pub fn delete_rows(&mut self, ctx: &Context, at: u64, n: u64) -> io::Result<()> {
+        self.view.rows = None;
         let t = &self.table;
         let first = t.header as u64;
         let end = at + n;
@@ -189,6 +300,8 @@ impl Sheet {
             }
         }
         self.shift_cells(|r, c| (r, if c >= at { c + n } else { c }), |_, _| true);
+        self.view
+            .remap_cols(|c| Some(if c >= at { c + n } else { c }));
         let w = std::mem::take(Arc::make_mut(&mut self.col_widths));
         self.col_widths = Arc::new(
             w.into_iter()
@@ -214,6 +327,18 @@ impl Sheet {
             |r, c| (r, if c >= end { c - n } else { c }),
             |_, c| c < at || c >= end,
         );
+        self.view.remap_cols(|c| {
+            if c < at {
+                Some(c)
+            } else if c >= end {
+                Some(c - n)
+            } else {
+                None
+            }
+        });
+        if self.table.columns.is_empty() {
+            self.view = View::default();
+        }
         let w = std::mem::take(Arc::make_mut(&mut self.col_widths));
         self.col_widths = Arc::new(
             w.into_iter()

@@ -394,3 +394,166 @@ fn sort_matches_simple_sort_on_random_data() {
         assert_eq!(got, want, "安定であること desc {desc}");
     }
 }
+
+#[test]
+fn view_maps_rows_and_free_cells() {
+    let ctx = Context::for_tests();
+    let mut s = crate::sheet::Sheet::new("s");
+    s.table = sample(&ctx);
+    // 表の下（格子の 10 行目）と表の横の自由なセル
+    s.set(&ctx, 10, 0, t("下")).unwrap();
+    s.set(&ctx, 2, 5, t("横")).unwrap();
+    assert_eq!(s.extent(), (11, 6));
+    s.view.filters.push(ColFilter {
+        col: 1,
+        cond: Cond::Number {
+            op: Cmp::Ge,
+            value: 10.0,
+        },
+    });
+    s.view.sort.push(SortKey { col: 1, desc: true });
+    let tb = s.table.clone();
+    apply(&ctx, &tb, &mut s.view).unwrap();
+    // 10・30・20 の行（表の 0・2・4 行目）を降順に
+    assert_eq!(s.view.rows.as_deref().unwrap(), &vec![2, 4, 0]);
+    assert_eq!(s.view.counts, vec![3]);
+    assert_eq!(s.visible_rows(), 3);
+    assert_eq!(s.get(&ctx, 0, 1).unwrap(), t("c1"));
+    assert_eq!(s.get(&ctx, 1, 1).unwrap(), n(30.0));
+    assert_eq!(s.get(&ctx, 3, 0).unwrap(), t("東京"));
+    assert_eq!(s.place(4, 0), crate::sheet::Place::Free);
+    // 表の下のセルは隠れた 5 行の分だけ上に見える
+    assert_eq!(s.extent(), (6, 6));
+    assert_eq!(s.get(&ctx, 5, 0).unwrap(), t("下"));
+    // 見えている行への書き込みは元の行へ
+    s.set(&ctx, 1, 0, t("書いた")).unwrap();
+    assert_eq!(s.table.columns[0].get(&ctx, 2).unwrap(), t("書いた"));
+    s.set(&ctx, 5, 1, t("下2")).unwrap();
+    assert_eq!(s.cells.get(&(10, 1)), Some(&t("下2")));
+    // 解除すれば元どおり
+    s.view = crate::sheet::View::default();
+    assert_eq!(s.get(&ctx, 10, 1).unwrap(), t("下2"));
+    assert_eq!(s.extent(), (11, 6));
+}
+
+#[test]
+fn view_follows_column_edits() {
+    let ctx = Context::for_tests();
+    let mut s = crate::sheet::Sheet::new("s");
+    s.table = sample(&ctx);
+    s.view.filters.push(ColFilter {
+        col: 1,
+        cond: Cond::NonBlank,
+    });
+    s.view.sort.push(SortKey {
+        col: 0,
+        desc: false,
+    });
+    s.insert_cols(&ctx, 0, 2).unwrap();
+    assert_eq!(s.view.filters[0].col, 3);
+    assert_eq!(s.view.sort[0].col, 2);
+    s.delete_cols(3, 1);
+    assert!(s.view.filters.is_empty());
+    assert_eq!(s.view.sort[0].col, 2);
+}
+
+#[test]
+fn permute_rebuilds_columns() {
+    let ctx = Context::for_tests();
+    let tb = sample(&ctx);
+    let order = sort(
+        &ctx,
+        &tb,
+        &[SortKey {
+            col: 1,
+            desc: false,
+        }],
+        None,
+    )
+    .unwrap();
+    let p = permute(&ctx, &tb, &order).unwrap();
+    assert_eq!(p.rows, tb.rows);
+    for (i, &r) in order.iter().enumerate() {
+        for c in 0..2 {
+            assert_eq!(
+                p.columns[c].get(&ctx, i as u64).unwrap(),
+                tb.columns[c].get(&ctx, r as u64).unwrap()
+            );
+        }
+    }
+    // 並べ替えたあとは元の順のまま並ぶ
+    let again = sort(
+        &ctx,
+        &p,
+        &[SortKey {
+            col: 1,
+            desc: false,
+        }],
+        None,
+    )
+    .unwrap();
+    assert_eq!(again, (0..tb.rows as u32).collect::<Vec<_>>());
+}
+
+#[test]
+fn multi_key_sort_matches_naive_stable_sort() {
+    let ctx = Context::for_tests();
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    let words = ["b", "A", "a", "B", "東京", "大阪", "c"];
+    let rows = 3000;
+    let cols: Vec<Vec<Value>> = (0..5)
+        .map(|c| {
+            (0..rows)
+                .map(|_| match (c, next(10)) {
+                    (_, 0) => Value::Empty,
+                    (0 | 3, _) => n(next(7) as f64 - 3.0),
+                    (1, k) if k < 8 => t(words[next(words.len() as u64) as usize]),
+                    (1, _) => Value::Bool(next(2) == 0),
+                    (2, k) if k < 5 => n(next(4) as f64 * 0.5),
+                    (2, _) => t(words[next(3) as usize]),
+                    _ => n(next(1_000_000) as f64 / 7.0),
+                })
+                .collect()
+        })
+        .collect();
+    let tb = table(&ctx, cols.clone());
+    let cmp = |a: &Value, b: &Value, desc: bool| match (a.is_empty(), b.is_empty()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        _ => {
+            let o = cmp_values(a, b);
+            if desc { o.reverse() } else { o }
+        }
+    };
+    for trial in 0..6 {
+        let keys: Vec<SortKey> = (0..5)
+            .map(|i| SortKey {
+                col: ((i + trial) % 5) as u32,
+                desc: next(2) == 0,
+            })
+            .take(1 + trial % 5)
+            .collect();
+        let subset: Option<Vec<u32>> =
+            (trial % 2 == 1).then(|| (0..rows as u32).filter(|r| r % 3 != 0).collect());
+        let got = sort(&ctx, &tb, &keys, subset.as_deref()).unwrap();
+        let mut want: Vec<u32> = subset.unwrap_or_else(|| (0..rows as u32).collect());
+        want.sort_by(|&a, &b| {
+            for k in &keys {
+                let col = &cols[k.col as usize];
+                let o = cmp(&col[a as usize], &col[b as usize], k.desc);
+                if o != Ordering::Equal {
+                    return o;
+                }
+            }
+            Ordering::Equal
+        });
+        assert_eq!(got, want, "keys {keys:?}");
+    }
+}

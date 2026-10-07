@@ -1,4 +1,4 @@
-//! 取り込み・保存・開く・書き出しの速さを測る。
+//! 取り込み・保存・開く・書き出し・絞り込み・並べ替えの速さを測る。
 //!
 //! ```text
 //! cargo run --release -p yy-sheet --example bench -- 列数 行数 [作業フォルダ]
@@ -108,4 +108,74 @@ fn main() {
     )
     .unwrap();
     println!("書き出し {:.2} 秒", t.elapsed().as_secs_f64());
+
+    use yy_sheet::query::{self, Cmp, ColFilter, Cond, SortKey, TextOp};
+    let table = &d2.book.sheets[0].table;
+    let t = Instant::now();
+    let (_, counts) = query::filter(
+        &ctx,
+        table,
+        &[
+            ColFilter {
+                col: 0,
+                cond: Cond::Number {
+                    op: Cmp::Lt,
+                    value: 500_000.0,
+                },
+            },
+            ColFilter {
+                col: 2.min(cols as u32 - 1),
+                cond: Cond::Text {
+                    op: TextOp::Equals,
+                    pattern: "東京".into(),
+                    negate: false,
+                },
+            },
+        ],
+    )
+    .unwrap();
+    println!(
+        "絞り込み（2 段階）{:.2} 秒 → {:?} 行",
+        t.elapsed().as_secs_f64(),
+        counts
+    );
+    let t = Instant::now();
+    let order = query::sort(
+        &ctx,
+        table,
+        &[SortKey {
+            col: 0,
+            desc: false,
+        }],
+        None,
+    )
+    .unwrap();
+    println!("並べ替え（数値 1 キー）{:.2} 秒", t.elapsed().as_secs_f64());
+    if cols >= 3 {
+        let t = Instant::now();
+        query::sort(
+            &ctx,
+            table,
+            &[
+                SortKey {
+                    col: 2,
+                    desc: false,
+                },
+                SortKey { col: 1, desc: true },
+                SortKey {
+                    col: 0,
+                    desc: false,
+                },
+            ],
+            None,
+        )
+        .unwrap();
+        println!(
+            "並べ替え（3 キー・文字列を含む）{:.2} 秒",
+            t.elapsed().as_secs_f64()
+        );
+    }
+    let t = Instant::now();
+    query::permute(&ctx, table, &order).unwrap();
+    println!("並べ替えの確定 {:.2} 秒", t.elapsed().as_secs_f64());
 }

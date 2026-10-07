@@ -298,6 +298,39 @@ impl Column {
         self.compact_if_fragmented(ctx)
     }
 
+    /// 行を `order` の順に並べ替えた列（新しいチャンクに書く）。`order[i]` は新しい `i` 行目の元の行。
+    pub fn permuted(&self, ctx: &Context, order: &[u32]) -> io::Result<Column> {
+        use rayon::prelude::*;
+        let mut me = self.clone();
+        me.flush(ctx)?;
+        let datas: Vec<Arc<Data>> = me
+            .pieces
+            .par_iter()
+            .map(|p| p.chunk.data(ctx))
+            .collect::<io::Result<_>>()?;
+        let pieces: Vec<Piece> = order
+            .par_chunks(MAX_ROWS)
+            .map(|block| {
+                let mut b = Builder::default();
+                for &r in block {
+                    match me.locate(r as u64) {
+                        Some((i, off)) => b.push(datas[i].get((me.pieces[i].start + off) as usize)),
+                        None => b.push(CellRef::Empty),
+                    }
+                }
+                let c = Chunk::create(ctx, b.finish())?;
+                Ok(Piece {
+                    len: c.rows,
+                    chunk: c,
+                    start: 0,
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        let mut out = Column::from_pieces(&self.name, pieces);
+        out.format = self.format.clone();
+        Ok(out)
+    }
+
     /// 小さな区間が増えすぎたら、隣どうしを合わせたチャンクに作り直す。
     fn compact_if_fragmented(&mut self, ctx: &Context) -> io::Result<()> {
         let ideal = self.rows().div_ceil(MAX_ROWS as u64) as usize;

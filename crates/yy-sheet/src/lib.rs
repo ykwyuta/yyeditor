@@ -26,7 +26,7 @@ pub mod yys;
 
 pub use budget::Budget;
 pub use column::Column;
-pub use sheet::{Document, Place, Sheet, Table, Workbook};
+pub use sheet::{Document, Place, Sheet, Table, View, Workbook};
 pub use value::{CellError, Value};
 
 use store::{ChunkCache, Store};

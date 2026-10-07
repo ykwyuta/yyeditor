@@ -12,11 +12,12 @@ use std::io;
 use std::sync::Arc;
 
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::Context;
 use crate::chunk::{Bitmap, CellRef, Data, FxMap};
 use crate::column::Column;
-use crate::sheet::Table;
+use crate::sheet::{Table, View};
 use crate::value::Value;
 
 // ---- 文字列の比べ方 --------------------------------------------------------------------
@@ -112,7 +113,7 @@ pub fn wildcard_match(pattern: &str, text: &str) -> bool {
 // ---- 条件 ------------------------------------------------------------------------------
 
 /// 比較。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Cmp {
     Eq,
     Ne,
@@ -136,7 +137,7 @@ impl Cmp {
 }
 
 /// 文字列の条件。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextOp {
     Equals,
     Contains,
@@ -147,7 +148,7 @@ pub enum TextOp {
 }
 
 /// 値の一覧で選ぶときの値（数値はビット、文字列は小文字）。
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Key {
     Number(u64),
     Text(String),
@@ -169,7 +170,7 @@ impl Key {
 }
 
 /// 列の条件。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Cond {
     /// 値の一覧（チェックボックス）。`blanks` なら空のセルも
     Values {
@@ -206,7 +207,7 @@ pub enum Cond {
 }
 
 /// 列の条件（表の列）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ColFilter {
     pub col: u32,
     pub cond: Cond,
@@ -560,7 +561,7 @@ pub fn cmp_values(a: &Value, b: &Value) -> Ordering {
 }
 
 /// 並べ替えのキー。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SortKey {
     pub col: u32,
     pub desc: bool,
@@ -580,8 +581,16 @@ const C_BOOL: u128 = 2;
 const C_ERR: u128 = 3;
 const C_EMPTY: u128 = 4;
 
-/// 1 列のキー（表の行ごとの 128 ビットの数。昇順に並べればその列の順）。
-fn column_keys(ctx: &Context, col: &Column, rows: usize, desc: bool) -> io::Result<Vec<u128>> {
+/// 1 列のキー（表の行ごとの数。昇順に並べればその列の順）と、キーの幅（ビット数）。
+///
+/// キーは「種類（3 ビット）＋値」で、値は数値なら順序を保つ 64 ビット、文字列なら全チャンクの
+/// 辞書を並べた順位。幅を最小にしておき、複数のキーを 1 つの数に詰めて 1 回で並べられるようにする。
+fn column_keys(
+    ctx: &Context,
+    col: &Column,
+    rows: usize,
+    desc: bool,
+) -> io::Result<(Vec<u128>, u32)> {
     // 文字列の順位: すべてのチャンクの辞書の文字列を集めて並べる
     let datas: Vec<Arc<Data>> = col
         .pieces()
@@ -615,7 +624,8 @@ fn column_keys(ctx: &Context, col: &Column, rows: usize, desc: bool) -> io::Resu
             .binary_search_by(|x| cmp_text(x, s))
             .unwrap_or_else(|i| i) as u64
     };
-    let key = |v: CellRef<'_>, text_rank: Option<u64>| -> u128 {
+    // まず（種類 << 64 | 値）で作り、あとで幅を詰める
+    let raw = |v: CellRef<'_>, text_rank: Option<u64>| -> u128 {
         let (class, payload) = match v {
             CellRef::Empty => return C_EMPTY << 64,
             CellRef::Number(n) => (C_NUM, order_bits(n)),
@@ -623,11 +633,7 @@ fn column_keys(ctx: &Context, col: &Column, rows: usize, desc: bool) -> io::Resu
             CellRef::Bool(b) => (C_BOOL, b as u64),
             CellRef::Error(e) => (C_ERR, e.code() as u64),
         };
-        if desc {
-            ((C_ERR - class) << 64) | (!payload) as u128
-        } else {
-            (class << 64) | payload as u128
-        }
+        (class << 64) | payload as u128
     };
     let mut keys = vec![C_EMPTY << 64; rows];
     // チャンクごとに: 辞書の番号 → 順位
@@ -658,7 +664,7 @@ fn column_keys(ctx: &Context, col: &Column, rows: usize, desc: bool) -> io::Resu
                     }
                     _ => None,
                 };
-                out.push(key(v, tr));
+                out.push(raw(v, tr));
             }
             (start, out)
         })
@@ -669,13 +675,51 @@ fn column_keys(ctx: &Context, col: &Column, rows: usize, desc: bool) -> io::Resu
     }
     for (&r, v) in col.delta() {
         if (r as usize) < rows {
-            keys[r as usize] = key(CellRef::of(v), None);
+            keys[r as usize] = raw(CellRef::of(v), None);
         }
     }
-    Ok(keys)
+    // 値の幅を詰め、降順なら種類（空を除く）と値を逆にする
+    let max_payload = keys
+        .par_iter()
+        .filter(|&&k| (k >> 64) != C_EMPTY)
+        .map(|&k| k as u64)
+        .max()
+        .unwrap_or(0);
+    let pw = (64 - max_payload.leading_zeros()).max(1);
+    let mask = if pw == 64 { u64::MAX } else { (1u64 << pw) - 1 };
+    keys.par_iter_mut().for_each(|k| {
+        let class = *k >> 64;
+        let payload = *k as u64;
+        *k = if class == C_EMPTY {
+            C_EMPTY << pw
+        } else if desc {
+            ((C_ERR - class) << pw) | (mask - payload) as u128
+        } else {
+            (class << pw) | payload as u128
+        };
+    });
+    Ok((keys, pw + 3))
+}
+
+/// 並びを、各位置のキーで安定に並べ直す（キーと元の位置の組を並べる。同じキーは元の順）。
+fn sort_pass<K: Ord + Copy + Send + Sync>(order: &mut Vec<u32>, key: impl Fn(u32) -> K + Sync) {
+    let mut pairs: Vec<(K, u32)> = order
+        .par_iter()
+        .enumerate()
+        .map(|(pos, &r)| (key(r), pos as u32))
+        .collect();
+    pairs.par_sort_unstable();
+    let next: Vec<u32> = pairs
+        .par_iter()
+        .map(|&(_, pos)| order[pos as usize])
+        .collect();
+    *order = next;
 }
 
 /// 行の並べ替え。`rows` があればその行（絞り込みの結果など）だけを並べる（なければ全行）。安定。
+///
+/// 後ろのキーから、128 ビットに収まるだけのキーを 1 つの数に詰めて並べる（詰められなければ何回かに
+/// 分けて、後ろの組から安定に並べる）。
 pub fn sort(
     ctx: &Context,
     table: &Table,
@@ -687,15 +731,82 @@ pub fn sort(
         Some(r) => r.to_vec(),
         None => (0..n as u32).collect(),
     };
-    // 後ろのキーから順に安定に並べる
+    let keys: Vec<SortKey> = keys
+        .iter()
+        .copied()
+        .filter(|k| (k.col as usize) < table.columns.len())
+        .collect();
+    let mut group: Option<(Vec<u128>, u32)> = None;
+    let flush = |order: &mut Vec<u32>, (kv, width): (Vec<u128>, u32)| {
+        if width <= 64 {
+            sort_pass(order, |r| kv[r as usize] as u64);
+        } else {
+            sort_pass(order, |r| kv[r as usize]);
+        }
+    };
     for k in keys.iter().rev() {
-        let Some(col) = table.columns.get(k.col as usize) else {
-            continue;
-        };
-        let kv = column_keys(ctx, col, n, k.desc)?;
-        order.par_sort_by_key(|&r| kv[r as usize]);
+        let (kv, w) = column_keys(ctx, &table.columns[k.col as usize], n, k.desc)?;
+        group = Some(match group.take() {
+            None => (kv, w),
+            Some((mut acc, aw)) if aw + w <= 128 => {
+                // 前のキーほど上位のビットに
+                acc.par_iter_mut()
+                    .zip(kv.par_iter())
+                    .for_each(|(a, &b)| *a |= b << aw);
+                (acc, aw + w)
+            }
+            Some(g) => {
+                flush(&mut order, g);
+                (kv, w)
+            }
+        });
+    }
+    if let Some(g) = group {
+        flush(&mut order, g);
     }
     Ok(order)
+}
+
+// ---- 表示 ------------------------------------------------------------------------------
+
+/// `view` の条件とキーで、表示する行の並びと段階ごとの残りの行数を計算し直す。
+pub fn apply(ctx: &Context, table: &Table, view: &mut View) -> io::Result<()> {
+    if view.is_empty() {
+        view.rows = None;
+        view.counts.clear();
+        return Ok(());
+    }
+    let (rows, counts) = if view.filters.is_empty() {
+        (None, Vec::new())
+    } else {
+        let (mask, counts) = filter(ctx, table, &view.filters)?;
+        let rows: Vec<u32> = mask.ones().map(|r| r as u32).collect();
+        (Some(rows), counts)
+    };
+    let rows = if view.sort.is_empty() {
+        rows.expect("filters are not empty")
+    } else {
+        sort(ctx, table, &view.sort, rows.as_deref())?
+    };
+    view.rows = Some(Arc::new(rows));
+    view.counts = counts;
+    Ok(())
+}
+
+/// 表の行を `order` の順に並べ替えた表（チャンクを作り直す。15 章 9.1 の「並べ替えを確定」）。
+/// `order` は `0..table.rows` の並べ替えであること。
+pub fn permute(ctx: &Context, table: &Table, order: &[u32]) -> io::Result<Table> {
+    assert_eq!(order.len() as u64, table.rows);
+    let columns = table
+        .columns
+        .iter()
+        .map(|c| c.permuted(ctx, order))
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(Table {
+        columns: Arc::new(columns),
+        rows: table.rows,
+        header: table.header,
+    })
 }
 
 #[cfg(test)]

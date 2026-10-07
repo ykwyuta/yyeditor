@@ -8,7 +8,9 @@
 //! 状態 [`App`] は UI スレッドのスレッドローカルに置く。ダイアログ・待ち（`remote::wait`）の間は
 //! 状態を借りたままにしない。
 
+mod filter;
 mod paint;
+mod view;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -40,7 +42,7 @@ use yy_sheet::{Context as SheetCtx, Document, Value, Workbook, yys};
 
 use crate::util::{Context, error_box, info_box, wide};
 use crate::{default_proc, hiword, loword};
-use paint::{Align, Cell, GridPainter, Scene};
+use paint::{Align, ButtonState, Cell, GridPainter, Scene};
 
 const FRAME_CLASS: PCWSTR = w!("YYSheetFrame");
 const GRID_CLASS: PCWSTR = w!("YYSheetGrid");
@@ -66,6 +68,14 @@ const ID_ADD_SHEET: u16 = 24;
 const ID_ZOOM_IN: u16 = 30;
 const ID_ZOOM_OUT: u16 = 31;
 const ID_ZOOM_RESET: u16 = 32;
+const ID_SORT_ASC: u16 = 50;
+const ID_SORT_DESC: u16 = 51;
+const ID_SORT: u16 = 52;
+const ID_COMMIT_SORT: u16 = 53;
+const ID_FILTER: u16 = 54;
+const ID_STAGES: u16 = 55;
+const ID_REAPPLY: u16 = 56;
+const ID_CLEAR_VIEW: u16 = 57;
 const ID_MEMORY: u16 = 40;
 const ID_ABOUT: u16 = 41;
 
@@ -240,6 +250,16 @@ fn create_menu() -> Result<HMENU> {
         add(view, ID_ZOOM_IN, "拡大(&I)\tCtrl++（ホイール）");
         add(view, ID_ZOOM_OUT, "縮小(&O)\tCtrl+-（ホイール）");
         add(view, ID_ZOOM_RESET, "100%(&R)\tCtrl+0");
+        let data = CreatePopupMenu()?;
+        add(data, ID_SORT_ASC, "昇順に並べ替え(&A)");
+        add(data, ID_SORT_DESC, "降順に並べ替え(&D)");
+        add(data, ID_SORT, "並べ替え(&S)...");
+        add(data, ID_COMMIT_SORT, "並べ替えを確定(&C)");
+        sep(data);
+        add(data, ID_FILTER, "列の絞り込み(&F)...\tCtrl+Shift+L");
+        add(data, ID_STAGES, "絞り込みの段階(&G)...");
+        add(data, ID_REAPPLY, "再適用(&R)\tCtrl+Alt+L");
+        add(data, ID_CLEAR_VIEW, "絞り込み・並べ替えを解除(&X)");
         let help = CreatePopupMenu()?;
         add(help, ID_MEMORY, "メモリの使用状況(&M)");
         add(help, ID_ABOUT, "yysheet について(&A)");
@@ -248,6 +268,7 @@ fn create_menu() -> Result<HMENU> {
             (edit, "編集(&E)"),
             (insert, "挿入・削除(&I)"),
             (view, "表示(&V)"),
+            (data, "データ(&D)"),
             (help, "ヘルプ(&H)"),
         ] {
             AppendMenuW(bar, MF_POPUP, m.0 as usize, &HSTRING::from(t))?;
@@ -616,7 +637,20 @@ impl App {
             cells.push(line);
         }
         let (t, l, b, r) = self.selection();
+        let sh = self.sheet();
+        let in_view = sh.view.rows.is_some();
+        let row_labels: Vec<(u64, bool)> = self
+            .rows
+            .iter()
+            .map(|&(row, _)| {
+                let data = matches!(sh.place(row, 0), yy_sheet::Place::Data(..));
+                (sh.source_row(row) + 1, in_view && data)
+            })
+            .collect();
+        let buttons = self.header_buttons();
         let scene = Scene {
+            row_labels: &row_labels,
+            buttons: &buttons,
             cols: &self.cols,
             rows: &self.rows,
             header_w: self.header_w,
@@ -697,7 +731,11 @@ impl App {
         let (r, c) = self.cur;
         let (t, l, b, rr) = self.selection();
         let name = if (t, l) == (b, rr) {
-            format!("{}{}", yy_sheet::col_name(c), r + 1)
+            format!(
+                "{}{}",
+                yy_sheet::col_name(c),
+                self.sheet().source_row(r) + 1
+            )
         } else {
             format!("{}R × {}C", b - t + 1, rr - l + 1)
         };
@@ -1103,6 +1141,14 @@ impl App {
     }
 
     fn insert_or_delete(&mut self, id: u16) {
+        if matches!(id, ID_INSERT_ROWS | ID_DELETE_ROWS) && self.sheet().view.rows.is_some() {
+            info_box(
+                self.frame,
+                "絞り込み・並べ替えの表示中は行を挿入・削除できません。\n\
+                 解除するか、並べ替えを確定してから行ってください。",
+            );
+            return;
+        }
         let (t, l, b, r) = self.selection();
         let sheet = self.sheet;
         let res = self.doc.edit(|bk, ctx| {
@@ -1184,6 +1230,42 @@ impl App {
             Some(self.top + (yd / self.painter.row_h) as u64)
         };
         (row, col)
+    }
+
+    /// 見えている列のうち、見出しに絞り込みのボタンを出す列（表の列）。
+    fn header_buttons(&self) -> Vec<(u32, ButtonState)> {
+        let s = self.sheet();
+        let n = s.table.cols();
+        self.cols
+            .iter()
+            .filter(|c| c.0 < n)
+            .map(|c| {
+                (
+                    c.0,
+                    ButtonState {
+                        filtered: s.view.filter_of(c.0).is_some(),
+                        sorted: s.view.sort.iter().find(|k| k.col == c.0).map(|k| k.desc),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// 列見出しの絞り込みのボタンの上か（列を返す）。
+    fn header_button_at(&self, x: i32, y: i32) -> Option<u32> {
+        let yd = self.painter.to_dip(y);
+        if yd > self.painter.row_h {
+            return None;
+        }
+        let xd = self.painter.to_dip(x) - self.header_w;
+        let bw = self.painter.button_w();
+        let n = self.sheet().table.cols();
+        self.cols
+            .iter()
+            .find(|c| {
+                c.0 < n && c.2 > bw * 2.0 && xd >= c.1 + c.2 - bw - 2.0 && xd < c.1 + c.2 - 2.0
+            })
+            .map(|c| c.0)
     }
 
     /// 列見出しの境目（列の幅を変える）にあるか。
@@ -1448,6 +1530,7 @@ fn open_path(path: &Path) {
         Ok(doc) => {
             with(|a| a.set_document(doc, Origin::Yys));
             set_status("開きました");
+            view::apply_saved();
         }
         Err(e) => error_box(
             frame,
@@ -1559,6 +1642,27 @@ fn export_csv(target: Option<PathBuf>) -> bool {
             None => return false,
         },
     };
+    let mut sheet = sheet;
+    let mut order = None;
+    if let Some(rows) = sheet.view.rows.clone() {
+        let r = unsafe {
+            MessageBoxW(
+                Some(frame),
+                &HSTRING::from(
+                    "絞り込み・並べ替えの表示中です。\n\n\
+                     はい: 見えている行を表示の順に書き出す\n\
+                     いいえ: すべての行を元の順に書き出す",
+                ),
+                &HSTRING::from("yysheet"),
+                MB_YESNOCANCEL | MB_ICONQUESTION,
+            )
+        };
+        match r {
+            IDYES => order = Some(rows),
+            IDNO => sheet.view = yy_sheet::View::default(),
+            _ => return false,
+        }
+    }
     let mut opts = ExportOptions::default();
     if let Origin::Csv(o) = &origin {
         // 開いたときの区切り文字・文字コードで書く
@@ -1567,7 +1671,8 @@ fn export_csv(target: Option<PathBuf>) -> bool {
     }
     let t = target.clone();
     let r = crate::remote::wait(&set_status, move |w| {
-        yy_sheet::csv::export(&ctx, &sheet, sys, &t, &opts, None, &|done, total| {
+        let order = order.as_deref().map(Vec::as_slice);
+        yy_sheet::csv::export(&ctx, &sheet, sys, &t, &opts, order, &|done, total| {
             w.report(format!("書き出し中… {}%", done * 100 / total.max(1)));
             !w.cancelled()
         })
@@ -1726,6 +1831,14 @@ fn command(id: u16) {
         ID_ZOOM_RESET => {
             with(|a| a.zoom(None));
         }
+        ID_SORT_ASC => view::sort_active(false),
+        ID_SORT_DESC => view::sort_active(true),
+        ID_SORT => view::sort_dialog(),
+        ID_COMMIT_SORT => view::commit_sort(),
+        ID_FILTER => view::filter_column(None),
+        ID_STAGES => view::stages_dialog(),
+        ID_REAPPLY => view::reapply(),
+        ID_CLEAR_VIEW => view::clear(),
         ID_MEMORY => show_memory(),
         ID_ABOUT => {
             if let Some(f) = with(|a| a.frame) {
@@ -1807,6 +1920,11 @@ fn key_hook(msg: &MSG) -> bool {
     }
     if !ctrl {
         return false;
+    }
+    let alt = unsafe { GetKeyState(VK_MENU.0 as i32) } < 0;
+    if vk == VK_L && (shift || alt) {
+        command(if alt { ID_REAPPLY } else { ID_FILTER });
+        return true;
     }
     let id = match (vk, shift) {
         (VK_N, false) => ID_NEW,
@@ -1981,6 +2099,21 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
             unsafe {
                 let _ = SetFocus(Some(hwnd));
                 SetCapture(hwnd);
+            }
+            let button = with(|a| a.header_button_at(x, y)).flatten();
+            if let Some(c) = button {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                with(|a| {
+                    a.end_edit(true);
+                    a.anchor = (a.cur.0, c);
+                    a.cur = a.anchor;
+                    a.sync_formula();
+                    a.invalidate();
+                });
+                view::filter_column(Some(c));
+                return LRESULT(0);
             }
             with(|a| {
                 a.end_edit(true);

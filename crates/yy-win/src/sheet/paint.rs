@@ -26,6 +26,19 @@ const HEAD_SEL_FG: (u8, u8, u8) = (16, 92, 52);
 const SEL_FILL: (u8, u8, u8) = (198, 222, 206);
 const ACTIVE: (u8, u8, u8) = (33, 115, 70);
 const TABLE_HEAD_BG: (u8, u8, u8) = (231, 238, 233);
+/// 絞り込み・並べ替えの表示中の行番号
+const VIEW_ROW_FG: (u8, u8, u8) = (0, 84, 166);
+const BUTTON_BG: (u8, u8, u8) = (252, 252, 252);
+const BUTTON_ON_BG: (u8, u8, u8) = (0, 84, 166);
+
+/// 列見出しのボタンの状態。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ButtonState {
+    /// 絞り込みの条件がある
+    pub filtered: bool,
+    /// 並べ替えのキー（`Some(true)` は降順）
+    pub sorted: Option<bool>,
+}
 
 /// 文字の寄せ方。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +72,10 @@ pub(crate) struct Scene<'a> {
     pub active: (u64, u32),
     /// 編集中（アクティブなセルの中身を描かない）
     pub editing: bool,
+    /// 行番号として出す数と、絞り込み・並べ替えの表示中か（`rows` と同じ並び）
+    pub row_labels: &'a [(u64, bool)],
+    /// ボタンを出す列（列番号・状態）
+    pub buttons: &'a [(u32, ButtonState)],
 }
 
 fn rgb_f((r, g, b): (u8, u8, u8)) -> D2D1_COLOR_F {
@@ -186,6 +203,11 @@ impl GridPainter {
     }
 
     /// 列幅（文字数）を DIP にする（Excel と同じく、数字の幅 × 文字数 ＋ 余白）。
+    /// 列見出しのボタンの幅（DIP）。列の右端に置く。
+    pub(crate) fn button_w(&self) -> f32 {
+        (self.row_h - 4.0).max(8.0)
+    }
+
     pub(crate) fn col_px(&self, chars: f32) -> f32 {
         (chars * self.char_w + 5.0).round()
     }
@@ -391,35 +413,63 @@ impl GridPainter {
         // 見出し
         self.fill(rt, brush, rect(0.0, 0.0, w, hh), HEAD_BG);
         self.fill(rt, brush, rect(0.0, 0.0, hw, h), HEAD_BG);
+        let bw = self.button_w();
         for &(col, x, cw) in s.cols {
             let r = rect(hw + x, 0.0, hw + x + cw, hh);
             let on = (left..=right).contains(&col);
             if on {
                 self.fill(rt, brush, r, HEAD_SEL_BG);
             }
+            let button = s.buttons.iter().find(|b| b.0 == col).map(|b| b.1);
+            let mut tr = r;
+            if let Some(b) = button
+                && cw > bw * 2.0
+            {
+                tr.right -= bw + 2.0;
+                let br = rect(r.right - bw - 2.0, 2.0, r.right - 2.0, hh - 2.0);
+                let active = b.filtered || b.sorted.is_some();
+                self.fill(rt, brush, br, if active { BUTTON_ON_BG } else { BUTTON_BG });
+                unsafe {
+                    brush.SetColor(&rgb_f(GRID));
+                    rt.DrawRectangle(&br, brush, 1.0, None);
+                }
+                let glyph = match (b.filtered, b.sorted) {
+                    (_, Some(false)) => "↑",
+                    (_, Some(true)) => "↓",
+                    _ => "▼",
+                };
+                self.text(rt, brush, glyph, 3, br, if active { BG } else { HEAD_FG });
+            }
             self.text(
                 rt,
                 brush,
                 &yy_sheet::col_name(col),
                 3,
-                r,
+                tr,
                 if on { HEAD_SEL_FG } else { HEAD_FG },
             );
             self.line(rt, brush, (r.right - 0.5, 0.0, r.right - 0.5, hh), GRID);
         }
-        for &(row, y) in s.rows {
+        for (ri, &(row, y)) in s.rows.iter().enumerate() {
             let r = rect(0.0, hh + y, hw, hh + y + hh);
             let on = (top..=bottom).contains(&row);
             if on {
                 self.fill(rt, brush, r, HEAD_SEL_BG);
             }
+            let (label, in_view) = s.row_labels.get(ri).copied().unwrap_or((row + 1, false));
             self.text(
                 rt,
                 brush,
-                &(row + 1).to_string(),
+                &label.to_string(),
                 3,
                 r,
-                if on { HEAD_SEL_FG } else { HEAD_FG },
+                if on {
+                    HEAD_SEL_FG
+                } else if in_view {
+                    VIEW_ROW_FG
+                } else {
+                    HEAD_FG
+                },
             );
             self.line(rt, brush, (0.0, r.bottom - 0.5, hw, r.bottom - 0.5), GRID);
         }
