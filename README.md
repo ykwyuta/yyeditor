@@ -124,6 +124,17 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 - TLS（`tn3270s://` の暗黙の TLS と Telnet の STARTTLS。rustls）。検証できない証明書（社内の自己署名など）は SSH のホスト鍵と同じく初めて見たときに確かめて記録し、変わったら接続しません。PEM のクライアント証明書も使えます。
 - 中核は OS に依存しない `yy-3270`・`yy-3270-tls`。テスト用の模擬ホスト `yy-3270-mock`（TN3270E の LU・ASSOCIATE・RESPONSES・PRINT-EOJ、日本語、Query、IND$FILE、SCS/LU3、TLS）を x3270（s3270・pr3287）で確かめたうえで、Linux の CI で yyterm の 3270 の中核を試験しています。
 
+### スプレッドシート（yysheet）
+
+提案書 [15 章](docs/proposal/15-spreadsheet.md) の方式で、50 億セル（1000 列 × 500 万行、100 列 × 5000 万行）のデータを、メモリ 8 GB までで扱う別のアプリ（`yysheet.exe`）を作っています（M1 を実装中）。
+
+- 列指向の保管（6.5 万行ずつの変更しないチャンク。型ごとに詰めた形と統計）、行の挿入・削除はデータをコピーしない区間の付け替え、編集の差分、O(1) のスナップショットと Undo。
+- 独自形式（`.yys`）: 末尾の目次だけを読んで開き、保存は変わったチャンクだけを書き足す（書き足しの途中で落ちても前の状態で開ける）。
+- RFC 4180 の CSV の並列の取り込み（区画ごとに引用符の内外の 2 通りで読んで状態を決める）と書き出し。文字コード・列の型の推定。
+- Excel 互換の表示形式（`yy-numfmt`。区分・条件・色・桁区切り・指数・分数・日付・時刻・経過時間・和暦）。
+- 格子（Direct2D）・セルの編集（IME）・数式バー・シートのタブ・クリップボード・行と列の挿入と削除。
+- 中核（`yy-sheet`・`yy-numfmt`）は OS に依存せず、Linux の CI でテストします。関数（XLOOKUP・SUMIFS など）、絞り込み・並べ替え、色・罫線は次の段階です。
+
 ### ファイル転送（yysftp）
 
 提案書 [13 章](docs/proposal/13-transfer.md) の方式で、エディタ・ターミナルと同じクレートを使った別のアプリとして SFTP・SCP のファイル転送（`yysftp.exe`）を作っています。
@@ -286,16 +297,19 @@ crates/
   yy-3270-macro/ 3270 のマクロ（Rhai。待つ・読む・入力・転送・記録）
   yy-3270-tls/ 3270 の TLS（暗黙の TLS・STARTTLS・証明書の TOFU・クライアント証明書。rustls + ring）
   yy-3270-mock/ 3270 の模擬ホスト（試験用。x3270 で確かめる check-with-x3270.sh）
+  yy-sheet/    スプレッドシートの中核（列のチャンク・差分・スナップショット・メモリの予算・.yys・CSV の並列の取り込み）
+  yy-numfmt/   Excel 互換の表示形式（書式記号・標準・日付のシリアル値・入力の解釈）
   yy-term/     ターミナルの中核（制御シーケンスの解釈、画面、スクロールバック、キーの送り方。OS 非依存）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
 apps/yyterm/   ターミナルの実行ファイル（yy-win の term モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yysftp/   ファイル転送の実行ファイル（yy-win の sftp モジュール。ビルドスクリプトは yyeditor と共通）
+apps/yysheet/  スプレッドシートの実行ファイル（yy-win の sheet モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yy-agent/ SSH 接続先に置くエージェント（Linux 用、musl で静的リンク）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
                     ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
-tools/gen-icon/     アイコン（apps/yyeditor・yyterm・yysftp の res/*.ico）の生成（Python + Pillow）
+tools/gen-icon/     アイコン（apps/yyeditor・yyterm・yysftp・yysheet の res/*.ico）の生成（Python + Pillow）
 tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の取得（npm から）
 ```
 

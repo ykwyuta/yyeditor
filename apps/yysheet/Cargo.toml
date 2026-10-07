@@ -1,0 +1,19 @@
+[package]
+name = "yysheet"
+description = "Spreadsheet for Windows handling billions of cells (columnar storage, .yys, RFC 4180 CSV), built from yyeditor's crates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# マニフェストとアイコンの埋め込みは yyeditor と同じ処理（ファイルは res/yysheet.*）
+build = "../yyeditor/build.rs"
+
+[[bin]]
+name = "yysheet"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+yy-win.workspace = true
+
+[lints]
+workspace = true

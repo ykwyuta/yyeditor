@@ -3465,9 +3465,11 @@ dependencies = [
  "yy-io",
  "yy-jobs",
  "yy-layout",
+ "yy-numfmt",
  "yy-preview",
  "yy-proto",
  "yy-remote",
+ "yy-sheet",
  "yy-syntax",
  "yy-term",
 ]
@@ -3485,6 +3487,13 @@ name = "yysftp"
 version = "0.1.0"
 dependencies = [
  "yy-ssh",
+ "yy-win",
+]
+
+[[package]]
+name = "yysheet"
+version = "0.1.0"
+dependencies = [
  "yy-win",
 ]
 

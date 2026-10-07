@@ -26,6 +26,7 @@ members = [
     "apps/yyeditor",
     "apps/yyterm",
     "apps/yysftp",
+    "apps/yysheet",
     "apps/yy-agent",
     "tools/gen-bigfile",
     "tools/gen-tables",

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""yyeditor・yyterm・yysftp のアイコン（apps/<アプリ>/res/<アプリ>.ico）を作る。
+"""yyeditor・yyterm・yysftp・yysheet のアイコン（apps/<アプリ>/res/<アプリ>.ico）を作る。
 
     python3 tools/gen-icon/gen_icon.py
 
 角丸の四角に白の「YY」を描く。エディタは青地にテキストの行を表す線、ターミナルは黒地に
-プロンプト（`>_`）、ファイル転送は緑地に上下の矢印。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
+プロンプト（`>_`）、ファイル転送は緑地に上下の矢印、スプレッドシートは橙地に表の格子。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
 Pillow が必要。
 """
 
@@ -19,6 +19,7 @@ SCALE = 4
 EDITOR = ((0x3B, 0x82, 0xF6), (0x1D, 0x4E, 0xD8))
 TERMINAL = ((0x37, 0x41, 0x51), (0x11, 0x18, 0x27))
 TRANSFER = ((0x10, 0xB9, 0x81), (0x04, 0x78, 0x57))
+SHEET = ((0xF5, 0x9E, 0x0B), (0xB4, 0x53, 0x09))
 PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
@@ -39,7 +40,7 @@ def draw_y(d, x, y, w, h, t, a):
 
 def render(size, kind="editor"):
     terminal = kind == "terminal"
-    top_c, bottom_c = {"editor": EDITOR, "terminal": TERMINAL, "transfer": TRANSFER}[kind]
+    top_c, bottom_c = {"editor": EDITOR, "terminal": TERMINAL, "transfer": TRANSFER, "sheet": SHEET}[kind]
     n = size * SCALE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     # 縦のグラデーション
@@ -88,6 +89,17 @@ def render(size, kind="editor"):
             d.rectangle([cx - lt / 2, y0 + (lt if up else 0), cx + lt / 2, y1 - (0 if up else lt)], fill=WHITE)
             tip, base = (y0, y0 + ah * 0.6) if up else (y1, y1 - ah * 0.6)
             d.polygon([(cx, tip), (cx - ah / 2, base), (cx + ah / 2, base)], fill=WHITE)
+    elif not small and kind == "sheet":
+        # 表の格子（3 列 × 2 行の枠）
+        lt = n * 0.04
+        left, right = n * 0.2, n * 0.8
+        top_g, bottom_g = n * 0.64, n * 0.88
+        for i in range(4):
+            x = left + (right - left) * i / 3
+            d.rectangle([x - lt / 2, top_g, x + lt / 2, bottom_g], fill=LINE)
+        for j in range(3):
+            y = top_g + (bottom_g - top_g) * j / 2
+            d.rectangle([left, y - lt / 2, right, y + lt / 2], fill=LINE)
     elif not small:
         # テキストの行
         lt = n * 0.055
@@ -131,7 +143,12 @@ def write_ico(path, images):
 
 def main():
     root = Path(__file__).resolve().parents[2]
-    for app, kind in [("yyeditor", "editor"), ("yyterm", "terminal"), ("yysftp", "transfer")]:
+    for app, kind in [
+        ("yyeditor", "editor"),
+        ("yyterm", "terminal"),
+        ("yysftp", "transfer"),
+        ("yysheet", "sheet"),
+    ]:
         res = root / "apps" / app / "res"
         res.mkdir(parents=True, exist_ok=True)
         images = [render(s, kind) for s in SIZES]

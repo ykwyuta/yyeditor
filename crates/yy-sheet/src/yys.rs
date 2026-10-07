@@ -125,12 +125,61 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// 保存の前の状態（文書の外でバックグラウンドに保存するため）。
+#[derive(Clone, Debug)]
+pub struct SaveState {
+    /// 開いた（保存した）独自形式のファイル
+    pub file: Option<Arc<Store>>,
+    /// そのファイルの最後の目次の位置
+    pub last_dir: u64,
+}
+
+/// 保存の結果（[`Document::saved`] で文書に戻す）。
+#[derive(Debug)]
+pub struct Saved {
+    pub kind: SaveKind,
+    pub path: PathBuf,
+    file: Arc<Store>,
+    last_dir: u64,
+}
+
+impl Document {
+    /// 保存に要る状態（ブックは `self.book.clone()` で O(1) に複製できる）。
+    pub fn save_state(&self) -> SaveState {
+        SaveState {
+            file: self.file.clone(),
+            last_dir: self.last_dir,
+        }
+    }
+
+    /// 保存の結果を戻す。
+    pub fn saved(&mut self, s: Saved) {
+        self.file = Some(s.file);
+        self.last_dir = s.last_dir;
+        self.path = Some(s.path);
+        self.dirty = false;
+    }
+}
+
 /// 保存する。
 pub fn save(doc: &mut Document, path: &Path, progress: Progress<'_>) -> io::Result<SaveKind> {
-    let chunks = live_chunks(&doc.book);
+    let s = save_book(&doc.book, doc.save_state(), path, progress)?;
+    let kind = s.kind;
+    doc.saved(s);
+    Ok(kind)
+}
+
+/// ブックを保存する（文書を借りずに。結果は [`Document::saved`] で戻す）。
+pub fn save_book(
+    book: &Workbook,
+    state: SaveState,
+    path: &Path,
+    progress: Progress<'_>,
+) -> io::Result<Saved> {
+    let chunks = live_chunks(book);
     let total: u64 = chunks.iter().map(|c| c.loc().len).sum();
     // 書き足せるか
-    if let Some(store) = doc.file.clone()
+    if let Some(store) = state.file.clone()
         && store.writable()
         && same_path(&store.path(), path)
     {
@@ -144,8 +193,13 @@ pub fn save(doc: &mut Document, path: &Path, progress: Progress<'_>) -> io::Resu
         let after = store.len() + new_bytes;
         let garbage = after.saturating_sub(live_in_file + new_bytes);
         if (garbage as f64) <= after as f64 * GARBAGE_RATIO {
-            write_into(doc, &store, &chunks, progress, total)?;
-            return Ok(SaveKind::Appended);
+            let last_dir = write_into(book, state.last_dir, &store, &chunks, progress, total)?;
+            return Ok(Saved {
+                kind: SaveKind::Appended,
+                path: path.to_owned(),
+                file: store,
+                last_dir,
+            });
         }
     }
     // 新しいファイルに書いて置き換える
@@ -166,15 +220,17 @@ pub fn save(doc: &mut Document, path: &Path, progress: Progress<'_>) -> io::Resu
         header.extend_from_slice(&VERSION.to_le_bytes());
         header.extend_from_slice(&0u32.to_le_bytes());
         store.append(&header)?;
-        doc_prev_reset(doc);
-        write_into(doc, &store, &chunks, progress, total)
+        write_into(book, 0, &store, &chunks, progress, total)
     })();
-    if let Err(e) = r {
-        store.delete_when_dropped();
-        return Err(e);
-    }
+    let last_dir = match r {
+        Ok(d) => d,
+        Err(e) => {
+            store.delete_when_dropped();
+            return Err(e);
+        }
+    };
     // 開いているファイルを置き換えるなら、退避してから
-    if let Some(old) = doc.file.clone()
+    if let Some(old) = state.file.clone()
         && same_path(&old.path(), path)
         && path.exists()
     {
@@ -185,23 +241,23 @@ pub fn save(doc: &mut Document, path: &Path, progress: Progress<'_>) -> io::Resu
     }
     std::fs::rename(&tmp, path)?;
     store.set_path(path);
-    doc.file = Some(store);
-    doc.path = Some(path.to_owned());
-    Ok(SaveKind::Rewritten)
+    Ok(Saved {
+        kind: SaveKind::Rewritten,
+        path: path.to_owned(),
+        file: store,
+        last_dir,
+    })
 }
 
-fn doc_prev_reset(doc: &mut Document) {
-    doc.last_dir = 0;
-}
-
-/// チャンク（`store` にないもの）・目次・末尾を `store` に書き足す。
+/// チャンク（`store` にないもの）・目次・末尾を `store` に書き足す。書いた目次の位置を返す。
 fn write_into(
-    doc: &mut Document,
+    book: &Workbook,
+    prev: u64,
     store: &Arc<Store>,
     chunks: &[Arc<Chunk>],
     progress: Progress<'_>,
     total: u64,
-) -> io::Result<()> {
+) -> io::Result<u64> {
     let mut index = HashMap::new();
     let mut dirs = Vec::with_capacity(chunks.len());
     let mut moved: Vec<(Arc<Chunk>, Region)> = Vec::new();
@@ -235,7 +291,6 @@ fn write_into(
             stats: c.stats,
         });
     }
-    let book = &doc.book;
     let sheets = book
         .sheets
         .iter()
@@ -272,7 +327,7 @@ fn write_into(
         date1904: book.date_system == DateSystem::D1904,
         chunks: dirs,
         sheets,
-        prev: doc.last_dir,
+        prev,
     };
     let bytes = postcard::to_allocvec(&dir).map_err(|e| invalid(&e.to_string()))?;
     let dir_off = store.append(&bytes)?;
@@ -287,10 +342,8 @@ fn write_into(
     for (c, loc) in moved {
         c.relocate(loc);
     }
-    doc.last_dir = dir_off;
-    doc.dirty = false;
     progress(total, total);
-    Ok(())
+    Ok(dir_off)
 }
 
 /// 末尾を探して目次を読む（末尾が壊れていれば、前の末尾を後ろから探す）。
