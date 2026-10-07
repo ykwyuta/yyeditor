@@ -77,6 +77,9 @@ pub struct Tn3270Config {
     pub keypad: bool,
     /// プリンター（3287）の出力
     pub printer: Tn3270Printer,
+    /// マクロ
+    #[serde(rename = "macro")]
+    pub macros: Tn3270Macro,
     /// 接続先ごとの設定（名前 → 値）
     pub host: BTreeMap<String, Tn3270Host>,
 }
@@ -90,7 +93,30 @@ impl Default for Tn3270Config {
             tn3270e: true,
             keypad: true,
             printer: Tn3270Printer::default(),
+            macros: Tn3270Macro::default(),
             host: BTreeMap::new(),
+        }
+    }
+}
+
+/// 3270 のマクロ（14 章 13）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tn3270Macro {
+    /// マクロのフォルダ（空なら `%APPDATA%\yyeditor\macros`）
+    pub folder: String,
+    /// マクロが書き出すフォルダ（空ならドキュメントの `yyterm\macros-out`）
+    pub output: String,
+    /// 待つ操作の既定の時間の上限（秒）
+    pub timeout: u64,
+}
+
+impl Default for Tn3270Macro {
+    fn default() -> Self {
+        Tn3270Macro {
+            folder: String::new(),
+            output: String::new(),
+            timeout: 30,
         }
     }
 }
@@ -137,6 +163,8 @@ pub struct Tn3270Host {
     pub printer_lu: Option<String>,
     /// `auto` なら端末を開いたらプリンターも開く（既定は `manual`）
     pub printer: Option<String>,
+    /// 接続したら実行するマクロ（マクロのフォルダからの名前。例: `logon.rhai`）
+    pub on_connect: Option<String>,
 }
 
 /// ファイル転送（yysftp）の設定。

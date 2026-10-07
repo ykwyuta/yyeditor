@@ -53,6 +53,8 @@ pub(crate) struct Target3270 {
     pub printer_lu: Option<String>,
     /// 端末を開いたらプリンターも開く
     pub auto_printer: bool,
+    /// 接続したら実行するマクロ
+    pub on_connect: Option<String>,
 }
 
 impl Target3270 {
@@ -90,6 +92,7 @@ impl Target3270 {
                     .printer
                     .as_deref()
                     .is_some_and(|p| p.eq_ignore_ascii_case("auto")),
+                on_connect: h.on_connect.clone().filter(|m| !m.trim().is_empty()),
             });
         }
         let rest = text
@@ -127,6 +130,7 @@ impl Target3270 {
             associate: None,
             printer_lu: None,
             auto_printer: false,
+            on_connect: None,
         })
     }
 
@@ -149,6 +153,7 @@ impl Target3270 {
             printer: true,
             associate,
             auto_printer: false,
+            on_connect: None,
             tn3270e: true,
             terminal_type: None,
             ..self.clone()

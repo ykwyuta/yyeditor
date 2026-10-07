@@ -311,6 +311,46 @@ yyterm のタブで、IBM メインフレーム（z/OS など）に 3270 端末�
     出せます。PDF は Windows の「Microsoft Print to PDF」で作ります。テキストは UTF-8 で、改ページは FF です。
   - 印刷は用紙に合わせて文字の大きさを決め（桁数はジョブの最大の桁数、行数は 60 行以上）、
     全角は 2 桁に置きます（MS ゴシック）。受け取りと出力は `logs\tn3270-transfer.log` に残します。
+- **マクロ**（マクロ メニュー）: 3270 の操作を Rhai のスクリプトで自動化します。マクロは
+  `%APPDATA%\yyeditor\macros\*.rhai`（設定の `folder` で変えられます）に置き、「マクロを実行」
+  （Ctrl+Shift+F5）で表示している 3270 のタブで動かします。実行中は利用者のキー入力を止め、画面の
+  下の行に「マクロ実行中」と出します。Ctrl+Break か「マクロを止める」で止めます。接続先の設定の
+  `on_connect = "logon.rhai"` で、接続したときに実行することもできます。
+  - 使える操作（行・桁は 1 から。全角は 2 桁）:
+
+    | 操作 | 説明 |
+    |------|------|
+    | `wait_unlocked(秒)` | キーボードのロックが解けるまで待つ（ホストの応答を待つ基本） |
+    | `wait_text("文字", 秒)`・`wait_text_at(行, 桁, "文字", 秒)` | 画面（その位置）に文字が出るまで待つ。秒が 0 なら今あるかを返す |
+    | `text_at(行, 桁, 長さ)`・`row(行)`・`screen_lines()`・`cursor()`・`fields()`・`field_at(行, 桁)` | 画面を読む |
+    | `move_to(行, 桁)`・`tab()`・`home()`・`type("文字")`・`key("PF8")` | 入力する（`key` の後は自動では待たない） |
+    | `password("名前")` | 資格情報マネージャーの `tn3270/名前` のパスワードを入れる（なければ尋ねる。スクリプトには渡さない） |
+    | `transfer_get("ホスト", "手元", #{mode: "binary"})`・`transfer_put(…)` | IND$FILE。終わるまで待ち、`#{ok, message}` を返す |
+    | `print_screen()` | 画面をプリンターの出力先へ |
+    | `csv_open("名前.csv")`・`text_open(…)` → `write_row([…])`・`write_line(…)` | マクロの出力のフォルダに書く（その外には書けない） |
+    | `log(…)`・`sleep(ミリ秒)`・`ask("質問")`・`message(…)` | 記録・待ち・問い合わせ・表示 |
+
+  - 待つ操作は時間の上限（既定 30 秒、`timeout`）を過ぎる・切断・停止でエラーになり、行番号つきで表示します。
+    キーボードのロック中に `type`・`key` を使うとエラーです（先打ちはしません）。
+  - **操作の記録**（Ctrl+Shift+F6 で開始・終了）: 入力した文字・キー・クリックを Rhai のスクリプトにして保存し、
+    yyeditor で開きます。AID のキーの後には `wait_unlocked()` を入れ、非表示のフィールド（パスワード）への入力は
+    記録せず `password("名前")` に置き換えます。
+  - 実行の記録（開始・終了・エラー・送ったキー。パスワードは `******`）は `logs\tn3270-macro.log` に残します。
+
+  ```rhai
+  // データセットの一覧を最後までめくって CSV に書き出す
+  wait_unlocked();
+  let out = csv_open("datasets.csv");
+  loop {
+      for r in 5..23 {
+          let name = text_at(r, 11, 44).trim();
+          if name != "" { out.write_row([name, text_at(r, 60, 10).trim()]); }
+      }
+      if wait_text_at(24, 2, "BOTTOM OF DATA", 0) { break; }
+      key("PF8");
+      wait_unlocked();
+  }
+  ```
 - 設定（`config.toml`）:
 
 ```toml
@@ -327,12 +367,18 @@ printer_name = ""    # 空なら Windows の既定のプリンター
 folder = ""          # pdf・text の保存先（空ならドキュメントの yyterm-print）
 eoj_timeout = 5      # PRINT-EOJ がないとき、ジョブの終わりとみなす秒数
 
+[tn3270.macro]
+folder = ""          # マクロのフォルダ（空なら %APPDATA%\yyeditor\macros）
+output = ""          # マクロが書き出すフォルダ（空ならドキュメントの yyterm\macros-out）
+timeout = 30         # 待つ操作の既定の時間の上限（秒）
+
 [tn3270.host.prod]
 host = "mvs01.example.co.jp"
 port = 23
 lu = "TCP00042"      # TN3270E で求める LU 名
 printer_lu = ""      # プリンターの LU 名（空なら端末の LU に対応するプリンター）
 printer = "manual"   # auto なら端末と一緒にプリンターも開く
+on_connect = ""      # 接続したら実行するマクロ（例: "logon.rhai"）
 ccsid = 939
 ssh = "bastion"      # この SSH の接続を経由する
 ```
@@ -411,7 +457,7 @@ ssh = "bastion"      # この SSH の接続を経由する
 - ファイルの種類（拡張子・ファイル名・先頭行など）から自動で色を付けます。
   表示メニューの「ハイライト」で種類を選び直せます（「なし」で色を付けません）。
 - C / C++ / C# / Java / JavaScript / TypeScript / Python / Rust / Go / HTML / CSS / SQL / Markdown /
-  COBOL / JCL など 37 種類に対応しています。
+  COBOL / JCL・Rhai（3270 のマクロ）など 38 種類に対応しています。
 - 独自の定義を追加できます（[設定](#settings) の `syntax` フォルダ）。
 
 ## Markdown・HTML のプレビュー {#preview}

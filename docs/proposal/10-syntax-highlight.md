@@ -231,7 +231,7 @@ invalid      = { fg = "#FFFFFF", bg = "#F44747" }
 | プログラミング言語 | C / C++、C#、Java、Rust、Go、Python、JavaScript / TypeScript、PHP、Ruby、Perl、Visual Basic / VBA、Kotlin、Swift |
 | スクリプト | バッチ（.bat / .cmd）、PowerShell、シェルスクリプト |
 | マークアップ・データ | HTML（JavaScript・CSS を埋め込み）、XML、CSS、JSON、YAML、TOML、INI、Markdown（コードブロックを埋め込み）、SQL |
-| 業務・メインフレーム | COBOL（固定形式 / 自由形式）、JCL、PL/I、RPG（固定桁） |
+| 業務・メインフレーム | COBOL（固定形式 / 自由形式）、JCL、PL/I、RPG（固定桁）、Rhai（3270 のマクロ。14 章 13） |
 | ログ・差分 | ログ（日時・ERROR / WARN / INFO の色分け、IP アドレス、URL）、diff / patch |
 | その他 | Makefile、Dockerfile、.gitignore、正規表現（検索バー内での色付け） |
 

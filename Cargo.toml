@@ -17,6 +17,7 @@ members = [
     "crates/yy-ssh",
     "crates/yy-term",
     "crates/yy-3270",
+    "crates/yy-3270-macro",
     "crates/yy-win",
     "apps/yyeditor",
     "apps/yyterm",
@@ -40,6 +41,7 @@ yy-jobs = { path = "crates/yy-jobs" }
 yy-config = { path = "crates/yy-config" }
 yy-encoding = { path = "crates/yy-encoding" }
 yy-3270 = { path = "crates/yy-3270" }
+yy-3270-macro = { path = "crates/yy-3270-macro" }
 yy-io = { path = "crates/yy-io" }
 yy-search = { path = "crates/yy-search" }
 yy-delimited = { path = "crates/yy-delimited" }

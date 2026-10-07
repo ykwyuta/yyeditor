@@ -12,6 +12,7 @@
 //! 書き込み用のスレッドが送る（UI スレッドを止めない）。
 
 mod ftdlg;
+mod macros;
 mod paint;
 mod printer;
 mod pty;
@@ -65,6 +66,11 @@ const WM_APP_TERM_LAYOUT: u32 = WM_APP + 64;
 const WM_APP_TERM_PRINTER: u32 = WM_APP + 65;
 /// プリンターのジョブの区切り（PRINT-EOJ のないホスト）を見るタイマー
 const TIMER_PRINTER: usize = 0x3287;
+/// マクロのスレッドからの頼みごとがある
+const WM_APP_TERM_MACRO: u32 = WM_APP + 66;
+/// マクロがロック中に入力しようとした
+const LOCKED: &str =
+    "キーボードがロックされています（wait_unlocked() でホストの応答を待ってから入力してください）";
 
 const ID_TABS: u16 = 2001;
 const ID_VIEW: u16 = 2002;
@@ -82,6 +88,10 @@ const ID_TN_PRINTER: u16 = 3050;
 const ID_PR_PRINT: u16 = 3051;
 const ID_PR_PDF: u16 = 3052;
 const ID_PR_TEXT: u16 = 3053;
+const ID_MACRO_RUN: u16 = 3060;
+const ID_MACRO_STOP: u16 = 3061;
+const ID_MACRO_RECORD: u16 = 3062;
+const ID_MACRO_FOLDER: u16 = 3063;
 const ID_COPY: u16 = 3010;
 const ID_PASTE: u16 = 3011;
 const ID_CLEAR: u16 = 3012;
@@ -248,6 +258,12 @@ struct TermApp {
     pending_printers: Vec<tn3270::Target3270>,
     /// 受け取った印刷の通し番号
     print_jobs: usize,
+    /// 実行中のマクロ（同時に 1 つ）
+    macro_run: Option<macros::MacroRun>,
+    /// 操作の記録（タブの ID と記録）
+    recorder: Option<(u64, yy_3270_macro::Recorder)>,
+    /// マクロの記録（`logs\tn3270-macro.log`）
+    macro_log: Option<std::sync::Arc<yy_remote::log::TransferLog>>,
 }
 
 thread_local! {
@@ -516,6 +532,9 @@ fn create(
             ft_last: None,
             pending_printers: Vec::new(),
             print_jobs: 0,
+            macro_run: None,
+            recorder: None,
+            macro_log: None,
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         FRAME.with(|f| f.set(frame.0 as isize));
@@ -615,6 +634,16 @@ fn create_menu() -> Result<HMENU> {
             ID_WS_USE_AGENT,
             w!("リモートのフォルダの一覧に接続先のエージェントを使う(&G)"),
         )?;
+        let mac = CreatePopupMenu()?;
+        item(mac, ID_MACRO_RUN, w!("マクロを実行(&R)...\tCtrl+Shift+F5"))?;
+        item(mac, ID_MACRO_STOP, w!("マクロを止める(&S)\tCtrl+Break"))?;
+        sep(mac)?;
+        item(
+            mac,
+            ID_MACRO_RECORD,
+            w!("操作の記録を開始・終了(&C)\tCtrl+Shift+F6"),
+        )?;
+        item(mac, ID_MACRO_FOLDER, w!("マクロのフォルダを開く(&F)"))?;
         let help = CreatePopupMenu()?;
         item(help, ID_HELP_KEYS, w!("キーボードショートカット(&K)"))?;
         item(help, ID_SETTINGS, w!("設定ファイルを開く(&S)"))?;
@@ -630,6 +659,7 @@ fn create_menu() -> Result<HMENU> {
         AppendMenuW(bar, MF_POPUP, edit.0 as usize, w!("編集(&E)"))?;
         AppendMenuW(bar, MF_POPUP, view.0 as usize, w!("表示(&V)"))?;
         AppendMenuW(bar, MF_POPUP, ws.0 as usize, w!("ワークスペース(&W)"))?;
+        AppendMenuW(bar, MF_POPUP, mac.0 as usize, w!("マクロ(&A)"))?;
         AppendMenuW(bar, MF_POPUP, help.0 as usize, w!("ヘルプ(&H)"))?;
         Ok(bar)
     }
@@ -700,6 +730,8 @@ fn shortcut(msg: &MSG) -> bool {
         (true, true, VK_O) => ID_SSH,
         (true, true, VK_M) => ID_TN3270,
         (true, true, VK_I) => ID_TN_TRANSFER,
+        (true, true, VK_F5) => ID_MACRO_RUN,
+        (true, true, VK_F6) => ID_MACRO_RECORD,
         (true, false, VK_TAB) => ID_NEXT_TAB,
         (true, true, VK_TAB) => ID_PREV_TAB,
         (true, false, VK_OEM_PLUS | VK_ADD) => ID_ZOOM_IN,
@@ -1295,6 +1327,7 @@ impl TermApp {
                         let label = t.place.label();
                         self.tn_note(&format!("{label}: 切断されました"));
                         self.tn_events(i, events);
+                        self.macro_notify(i);
                         if i == self.active {
                             active_dirty = true;
                         }
@@ -1374,7 +1407,10 @@ impl TermApp {
         for e in events {
             match e {
                 E::Negotiation(s) => self.tn_log_line(&format!("{label}: {s}")),
-                E::Mode(m) => self.tn_note(&format!("{label}: {} で接続しました", m.label())),
+                E::Mode(m) => {
+                    self.tn_note(&format!("{label}: {} で接続しました", m.label()));
+                    self.macro_on_connect(i);
+                }
                 E::Device(d) => {
                     self.tn_log_line(&format!("{label}: LU {d} が割り当てられました"));
                     self.update_tab_label(i);
@@ -1420,7 +1456,9 @@ impl TermApp {
                     let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_OK);
                 },
                 E::Transfer(ev) => {
-                    self.tn_transfer_event(i, ev);
+                    if let Some(result) = self.tn_transfer_event(i, ev) {
+                        self.macro_transfer_done(i, result);
+                    }
                     rerender = true;
                 }
             }
@@ -1436,13 +1474,11 @@ impl TermApp {
         }
     }
 
-    /// ファイル転送の進み具合・結果。
-    fn tn_transfer_event(&mut self, i: usize, ev: yy_3270::FtEvent) {
+    /// ファイル転送の進み具合・結果。終わったら成否と知らせを返す。
+    fn tn_transfer_event(&mut self, i: usize, ev: yy_3270::FtEvent) -> Option<(bool, String)> {
         use yy_3270::FtEvent;
         let label = self.tabs[i].place.label();
-        let Some(tn) = self.tabs[i].tn.as_mut() else {
-            return;
-        };
+        let tn = self.tabs[i].tn.as_mut()?;
         match ev {
             FtEvent::Started => {
                 tn.message = "転送を始めました".into();
@@ -1458,7 +1494,7 @@ impl TermApp {
                 let Some(job) = tn.ft.take() else {
                     tn.message = message.clone();
                     self.ft_note(&format!("{label}: {message}"));
-                    return;
+                    return Some((false, message));
                 };
                 let secs = job.started.elapsed().as_secs_f64();
                 let what = format!(
@@ -1470,8 +1506,10 @@ impl TermApp {
                     },
                     job.choice.local.display()
                 );
+                let mut done = false;
                 let text = match tn3270::finish(&job, ok) {
                     Ok(size) if ok => {
+                        done = true;
                         let open = job.choice.open_after
                             && job.choice.request.direction
                                 == yy_3270::ind_file::Direction::Receive;
@@ -1488,8 +1526,10 @@ impl TermApp {
                 };
                 tn.message = message;
                 self.ft_note(&format!("{label}: {text}"));
+                return Some((done, text));
             }
         }
+        None
     }
 
     /// プリンターのタブ `i` が印刷を受け取った: 一覧に加え、設定の出力先に出す。
@@ -1606,9 +1646,350 @@ impl TermApp {
         self.invalidate();
     }
 
+    // ---- マクロ ---------------------------------------------------------------------
+
+    /// マクロの記録に 1 行書く（`logs\tn3270-macro.log`）。
+    fn macro_log_line(&mut self, text: &str) {
+        let log = self.macro_log.get_or_insert_with(|| {
+            let path = yy_config::config_dir().map(|d| d.join("logs").join("tn3270-macro.log"));
+            std::sync::Arc::new(yy_remote::log::TransferLog::new(
+                path,
+                crate::remote::local_clock,
+            ))
+        });
+        log.line(None, text);
+    }
+
+    /// マクロを動かしているタブの位置。
+    fn macro_tab(&self) -> Option<usize> {
+        let id = self.macro_run.as_ref()?.tab_id;
+        self.tabs.iter().position(|t| t.id == id)
+    }
+
+    /// タブ `i` の画面が変わった: そのタブのマクロを起こす。
+    fn macro_notify(&self, i: usize) {
+        if let Some(m) = &self.macro_run
+            && self.tabs.get(i).is_some_and(|t| t.id == m.tab_id)
+        {
+            m.generation.bump();
+        }
+    }
+
+    /// タブ `i` でマクロを始める。
+    fn macro_start(&mut self, i: usize, path: &Path) -> std::result::Result<(), String> {
+        if self.macro_run.is_some() {
+            return Err("ほかのマクロを実行中です".into());
+        }
+        let t = self.tabs.get(i).ok_or("タブがありません")?;
+        let tn = t.tn.as_ref().ok_or("3270 のタブではありません")?;
+        if tn.target.printer {
+            return Err("プリンターのタブではマクロを実行できません".into());
+        }
+        let script = std::fs::read_to_string(path)
+            .map_err(|e| format!("{} を読めません: {e}", path.display()))?;
+        yy_3270_macro::check(&script).map_err(|e| format!("{}: {e}", path.display()))?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mc = &self.config.tn3270.macros;
+        let out_dir = macros::output_folder(&mc.output);
+        let run = macros::start(
+            t.id,
+            &name,
+            script,
+            out_dir,
+            mc.timeout,
+            self.frame,
+            WM_APP_TERM_MACRO,
+        );
+        let label = t.place.label();
+        self.macro_run = Some(run);
+        self.macro_log_line(&format!("{label}: 開始 {}", path.display()));
+        self.tn_note(&format!(
+            "{label}: マクロ {name} を実行しています（Ctrl+Break で停止）"
+        ));
+        let t = &mut self.tabs[i];
+        if let Some(tn) = t.tn.as_mut() {
+            tn.message = format!("マクロ実行中: {name}");
+            t.term = tn3270::render(tn, t.exited.is_some());
+        }
+        self.invalidate();
+        Ok(())
+    }
+
+    /// 接続したら実行するマクロ（設定の `on_connect`）。
+    fn macro_on_connect(&mut self, i: usize) {
+        let Some(name) = self.tabs[i]
+            .tn
+            .as_ref()
+            .filter(|tn| !tn.target.printer)
+            .and_then(|tn| tn.target.on_connect.clone())
+        else {
+            return;
+        };
+        let folder = macros::macro_folder(&self.config.tn3270.macros.folder);
+        let path = macros::resolve(folder.as_deref(), &name);
+        if let Err(e) = self.macro_start(i, &path) {
+            let label = self.tabs[i].place.label();
+            self.tn_note(&format!("{label}: 接続時のマクロを実行できません: {e}"));
+        }
+    }
+
+    fn macro_stop(&mut self) {
+        match &self.macro_run {
+            Some(m) => {
+                m.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                m.generation.bump();
+                if let Some(tx) = self
+                    .macro_run
+                    .as_mut()
+                    .and_then(|m| m.transfer_reply.take())
+                {
+                    let _ = tx.send(Err("停止しました".into()));
+                }
+                // 転送中なら取り消す
+                if let Some(i) = self.macro_tab()
+                    && let Some(tn) = self.tabs[i].tn.as_mut()
+                    && tn.session.transferring()
+                {
+                    let events = tn.session.cancel_transfer();
+                    self.tn_events(i, events);
+                }
+                self.tn_note("マクロを止めています…");
+            }
+            None => self.tn_note("実行中のマクロはありません"),
+        }
+    }
+
+    /// マクロの画面の写し。
+    fn macro_snapshot(&self) -> std::result::Result<yy_3270_macro::Snapshot, String> {
+        let i = self.macro_tab().ok_or("タブが閉じられました")?;
+        let t = &self.tabs[i];
+        let tn = t.tn.as_ref().ok_or("3270 のタブではありません")?;
+        Ok(yy_3270_macro::Snapshot::of(&tn.session, t.exited.is_none()))
+    }
+
+    /// マクロの入力（`secret` なら記録に値を残さない）。
+    fn macro_type(&mut self, text: &str, secret: bool) -> std::result::Result<(), String> {
+        let i = self.macro_tab().ok_or("タブが閉じられました")?;
+        if self.tabs[i].exited.is_some() {
+            return Err("切断されています".into());
+        }
+        // 先打ちはしない: ロック中に入れた文字は捨てられるので、誤りにする
+        if self.tabs[i]
+            .tn
+            .as_ref()
+            .is_some_and(|tn| tn.session.oia().lock != yy_3270::Lock::None)
+        {
+            return Err(LOCKED.into());
+        }
+        let hidden = self.tabs[i].tn.as_ref().is_some_and(|tn| {
+            let s = tn.session.screen();
+            s.field_attr(s.cursor).is_some_and(|fa| {
+                fa & yy_3270::codes::FA_DISPLAY_MASK == yy_3270::codes::FA_NONDISPLAY
+            })
+        });
+        self.macro_log_line(&format!(
+            "type {}",
+            if secret || hidden {
+                "******".to_owned()
+            } else {
+                format!("{text:?}")
+            }
+        ));
+        for c in text.chars() {
+            self.tn_key_at(i, yy_3270::Key::Char(c));
+            let lock = self.tabs[i].tn.as_ref().map(|tn| tn.session.oia().lock);
+            if let Some(yy_3270::Lock::Operator(e)) = lock {
+                self.tn_key_at(i, yy_3270::Key::Reset);
+                return Err(format!("入力できません（{}）", e.label()));
+            }
+        }
+        Ok(())
+    }
+
+    /// マクロの操作（UI のスレッドで、ダイアログを出さないもの）。返事は `tx` に送る
+    /// （転送は終わってから）。
+    fn macro_act(
+        &mut self,
+        op: yy_3270_macro::Op,
+        tx: std::sync::mpsc::Sender<std::result::Result<yy_3270_macro::Answer, String>>,
+    ) {
+        use yy_3270_macro::{Answer, Op};
+        let Some(i) = self.macro_tab() else {
+            let _ = tx.send(Err("タブが閉じられました".into()));
+            return;
+        };
+        let r: std::result::Result<Answer, String> = match op {
+            Op::Key(k) => {
+                self.macro_log_line(&format!(
+                    "key {}",
+                    yy_3270_macro::record::key_name(&k).unwrap_or_default()
+                ));
+                let locked = self.tabs[i]
+                    .tn
+                    .as_ref()
+                    .is_some_and(|tn| tn.session.oia().lock != yy_3270::Lock::None);
+                if self.tabs[i].exited.is_some() {
+                    Err("切断されています".into())
+                } else if locked
+                    && !matches!(
+                        k,
+                        yy_3270::Key::Reset | yy_3270::Key::Attn | yy_3270::Key::SysReq
+                    )
+                {
+                    Err(LOCKED.into())
+                } else {
+                    self.tn_key_at(i, k);
+                    Ok(Answer::Done)
+                }
+            }
+            Op::Type(text) => self.macro_type(&text, false).map(|()| Answer::Done),
+            Op::MoveTo(r, c) => {
+                let size = self.tabs[i]
+                    .tn
+                    .as_ref()
+                    .map(|tn| (tn.session.screen().rows, tn.session.screen().cols));
+                match size {
+                    Some((rows, cols)) if r <= rows && c <= cols => {
+                        self.tn_key_at(i, yy_3270::Key::MoveTo((r - 1) * cols + c - 1));
+                        Ok(Answer::Done)
+                    }
+                    _ => Err(format!("{r} 行 {c} 桁は画面の外です")),
+                }
+            }
+            Op::Transfer { request, local } => {
+                let choice = ftdlg::Choice {
+                    request,
+                    local,
+                    open_after: false,
+                };
+                self.macro_log_line(&format!("transfer {}", choice.request.command()));
+                match self.tn_start_transfer_at(i, choice) {
+                    Ok(()) => {
+                        if let Some(m) = self.macro_run.as_mut() {
+                            m.transfer_reply = Some(tx);
+                        }
+                        return;
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Op::PrintScreen => self.macro_print_screen(i).map(|()| Answer::Done),
+            Op::Log(text) => {
+                let label = self.tabs[i].place.label();
+                self.macro_log_line(&format!("{label}: {text}"));
+                self.status_text = format!("マクロ: {text}");
+                self.update_status();
+                Ok(Answer::Done)
+            }
+            // ダイアログを出すものは呼び出し側で扱う
+            Op::Password(_) | Op::Ask(_) | Op::Message(_) => Ok(Answer::Done),
+        };
+        let _ = tx.send(r);
+    }
+
+    /// マクロの転送が終わった。
+    fn macro_transfer_done(&mut self, i: usize, (ok, message): (bool, String)) {
+        if self.macro_tab() != Some(i) {
+            return;
+        }
+        if let Some(tx) = self
+            .macro_run
+            .as_mut()
+            .and_then(|m| m.transfer_reply.take())
+        {
+            let _ = tx.send(Ok(yy_3270_macro::Answer::Transfer { ok, message }));
+        }
+    }
+
+    /// 画面を印刷の出力先へ（`print_screen()`）。
+    fn macro_print_screen(&mut self, i: usize) -> std::result::Result<(), String> {
+        let t = &self.tabs[i];
+        let tn = t.tn.as_ref().ok_or("3270 のタブではありません")?;
+        let snap = yy_3270_macro::Snapshot::of(&tn.session, true);
+        let job = yy_3270::PrintJob {
+            pages: vec![
+                snap.lines()
+                    .into_iter()
+                    .map(|l| l.trim_end().to_owned())
+                    .collect(),
+            ],
+            columns: snap.cols(),
+            lines_per_page: 0,
+            bytes: 0,
+        };
+        let label = t.place.label();
+        let pc = &self.config.tn3270.printer;
+        let clock = crate::remote::local_clock();
+        let stamp: String = clock
+            .chars()
+            .filter(char::is_ascii_digit)
+            .take(14)
+            .collect();
+        let r = match printer::Output::from_config(&pc.output) {
+            out @ (printer::Output::Pdf | printer::Output::Text) => {
+                let ext = if out == printer::Output::Pdf {
+                    "pdf"
+                } else {
+                    "txt"
+                };
+                let path = printer::output_folder(&pc.folder)
+                    .join(printer::output_name(&label, &stamp, 0, ext));
+                if out == printer::Output::Pdf {
+                    printer::save_pdf(&job, &path, &label).map(|_| path.display().to_string())
+                } else {
+                    printer::save_text(&job, &path).map(|()| path.display().to_string())
+                }
+            }
+            _ if pc
+                .printer_name
+                .trim()
+                .eq_ignore_ascii_case(printer::PDF_PRINTER) =>
+            {
+                Err("PDF にするときは設定の output を \"pdf\" にしてください".into())
+            }
+            _ => printer::print(&job, &pc.printer_name, None, &label)
+                .map(|_| "プリンター".to_owned()),
+        };
+        r.map(|to| self.macro_log_line(&format!("print_screen → {to}")))
+    }
+
+    /// マクロが終わった。
+    fn macro_finished(&mut self, r: &std::result::Result<(), yy_3270_macro::MacroError>) -> String {
+        let Some(run) = self.macro_run.take() else {
+            return String::new();
+        };
+        let text = match r {
+            Ok(()) => format!("マクロ {} が終わりました", run.name),
+            Err(e) if e.stopped => format!("マクロ {} を止めました", run.name),
+            Err(e) => format!("マクロ {} のエラー: {e}", run.name),
+        };
+        self.macro_log_line(&text);
+        if let Some(i) = self.tabs.iter().position(|t| t.id == run.tab_id) {
+            let t = &mut self.tabs[i];
+            if let Some(tn) = t.tn.as_mut() {
+                tn.message = text.clone();
+                t.term = tn3270::render(tn, t.exited.is_some());
+            }
+            self.invalidate();
+        }
+        self.tn_note(&text);
+        text
+    }
+
     /// 表示している 3270 のタブのファイル転送を始める。
     fn tn_start_transfer(&mut self, choice: ftdlg::Choice) -> std::result::Result<(), String> {
-        let active = self.active;
+        self.tn_start_transfer_at(self.active, choice)
+    }
+
+    /// 3270 のタブ `active` のファイル転送を始める。
+    fn tn_start_transfer_at(
+        &mut self,
+        active: usize,
+        choice: ftdlg::Choice,
+    ) -> std::result::Result<(), String> {
         let label = self
             .tabs
             .get(active)
@@ -1678,6 +2059,7 @@ impl TermApp {
             t.term = term;
         }
         self.tn_events(i, o.events);
+        self.macro_notify(i);
         if i == self.active {
             // 画面の大きさ（モデル）が変わったらキーパッド・画面を並べ直す
             self.invalidate();
@@ -1687,6 +2069,33 @@ impl TermApp {
     /// 表示している 3270 のタブにキーを送る。
     fn tn_key(&mut self, k: yy_3270::Key) {
         let active = self.active;
+        let Some(t) = self.tabs.get(active) else {
+            return;
+        };
+        // マクロの実行中は利用者のキーを止める
+        if t.exited.is_none() && self.macro_run.as_ref().is_some_and(|m| m.tab_id == t.id) {
+            self.status_text =
+                "マクロの実行中です（Ctrl+Break かマクロ メニューで止められます）".into();
+            self.update_status();
+            return;
+        }
+        // 操作の記録
+        if let Some((id, rec)) = self.recorder.as_mut()
+            && *id == t.id
+            && t.exited.is_none()
+            && let Some(tn) = t.tn.as_ref()
+        {
+            let s = tn.session.screen();
+            let hidden = s.field_attr(s.cursor).is_some_and(|fa| {
+                fa & yy_3270::codes::FA_DISPLAY_MASK == yy_3270::codes::FA_NONDISPLAY
+            });
+            rec.key(&k, hidden, s.cols);
+        }
+        self.tn_key_at(active, k);
+    }
+
+    /// 3270 のタブ `i` にキーを送る（利用者の入力・マクロ）。
+    fn tn_key_at(&mut self, active: usize, k: yy_3270::Key) {
         let Some(t) = self.tabs.get_mut(active) else {
             return;
         };
@@ -1767,6 +2176,14 @@ impl TermApp {
             // プリンターには入力しない
             if tn.target.printer {
                 return;
+            }
+            if self.macro_run.as_ref().is_some_and(|m| m.tab_id == t.id) {
+                return;
+            }
+            if let Some((id, rec)) = self.recorder.as_mut()
+                && *id == t.id
+            {
+                rec.paste(&text);
             }
             let o = tn.session.paste(&text);
             if o.changed {
@@ -1883,6 +2300,10 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             }
             LRESULT(0)
         }
+        WM_APP_TERM_MACRO => {
+            macro_pump(hwnd);
+            LRESULT(0)
+        }
         WM_TIMER if wparam.0 == TIMER_PRINTER => {
             with(|a| a.tn_print_tick());
             LRESULT(0)
@@ -1996,6 +2417,18 @@ fn command(hwnd: HWND, id: u16) {
         ID_TN_TRANSFER => cmd_tn_transfer(hwnd),
         ID_TN_PRINTER => cmd_tn_printer(hwnd),
         ID_PR_PRINT | ID_PR_PDF | ID_PR_TEXT => cmd_print_output(hwnd, id),
+        ID_MACRO_RUN => cmd_macro_run(hwnd),
+        ID_MACRO_STOP => {
+            with(|a| a.macro_stop());
+        }
+        ID_MACRO_RECORD => cmd_macro_record(hwnd),
+        ID_MACRO_FOLDER => {
+            let folder = with(|a| macros::macro_folder(&a.config.tn3270.macros.folder)).flatten();
+            if let Some(f) = folder {
+                let _ = std::fs::create_dir_all(&f);
+                let _ = std::process::Command::new("explorer.exe").arg(&f).spawn();
+            }
+        }
         ID_TN_CANCEL => {
             with(|a| a.tn_cancel_transfer());
         }
@@ -2344,6 +2777,166 @@ fn cmd_tn_transfer(hwnd: HWND) {
         error_box(hwnd, &format!("ファイル転送を始められません。\n{e}"));
     }
     focus_view();
+}
+
+/// マクロのスレッドからの頼みごとを処理する（ダイアログを出すものは状態を借りずに）。
+fn macro_pump(hwnd: HWND) {
+    use macros::Request;
+    use yy_3270_macro::{Answer, Op};
+    use yy_remote::PasswordStore;
+    loop {
+        let Some(Some(req)) = with(|a| a.macro_run.as_ref().and_then(|m| m.rx.try_recv().ok()))
+        else {
+            return;
+        };
+        match req {
+            Request::Snapshot(tx) => {
+                let s = with(|a| a.macro_snapshot()).unwrap_or_else(|| Err("終了しました".into()));
+                let _ = tx.send(s);
+            }
+            Request::Act(Op::Ask(q), tx) => {
+                let r = crate::goto::prompt_text(hwnd, "マクロ", &q, "");
+                let _ = tx.send(Ok(Answer::Text(r)));
+            }
+            Request::Act(Op::Message(m), tx) => {
+                info_box(hwnd, &m);
+                let _ = tx.send(Ok(Answer::Done));
+            }
+            Request::Act(Op::Password(name), tx) => {
+                let store = crate::credstore::WindowsCredentials;
+                let key = macros::password_key(&name);
+                let password = match store.load(&key) {
+                    Some(s) => Some(s.password),
+                    None => crate::goto::prompt_secret_with_check(
+                        hwnd,
+                        "マクロのパスワード",
+                        &format!("「{name}」のパスワード（マクロには渡さず、画面のフィールドに入れます）:"),
+                        "資格情報マネージャーに保存する",
+                    )
+                    .map(|(p, save)| {
+                        if save {
+                            let _ = store.save(
+                                &key,
+                                &yy_remote::SavedPassword {
+                                    user: String::new(),
+                                    password: p.clone(),
+                                },
+                            );
+                        }
+                        p
+                    }),
+                };
+                let r = match password {
+                    Some(p) => with(|a| a.macro_type(&p, true))
+                        .unwrap_or_else(|| Err("終了しました".into()))
+                        .map(|()| Answer::Done),
+                    None => Err("パスワードの入力が取り消されました".into()),
+                };
+                let _ = tx.send(r);
+            }
+            Request::Act(op, tx) => {
+                with(|a| a.macro_act(op, tx));
+            }
+            Request::Finished(r) => {
+                let text = with(|a| a.macro_finished(&r)).unwrap_or_default();
+                if let Err(e) = &r
+                    && !e.stopped
+                {
+                    error_box(hwnd, &text);
+                }
+            }
+        }
+    }
+}
+
+/// 「マクロを実行」: マクロのファイルを選んで、表示している 3270 のタブで実行する。
+fn cmd_macro_run(hwnd: HWND) {
+    let Some(Some(folder)) = with(|a| {
+        let tn = a.tab()?.tn.as_ref()?;
+        (!tn.target.printer).then(|| macros::macro_folder(&a.config.tn3270.macros.folder))
+    }) else {
+        info_box(hwnd, "3270 の端末のタブを表示してから選んでください。");
+        return;
+    };
+    if with(|a| a.macro_run.is_some()) == Some(true) {
+        info_box(hwnd, "ほかのマクロを実行中です。止めてから選んでください。");
+        return;
+    }
+    let Some(path) = macros::pick_file(hwnd, folder.as_deref(), None) else {
+        return;
+    };
+    if let Some(Err(e)) = with(|a| a.macro_start(a.active, &path)) {
+        error_box(hwnd, &format!("マクロを実行できません。\n{e}"));
+    }
+    focus_view();
+}
+
+/// 「操作の記録を開始・終了」。
+fn cmd_macro_record(hwnd: HWND) {
+    let recording = with(|a| a.recorder.is_some()).unwrap_or(false);
+    if !recording {
+        let started = with(|a| {
+            let t = a.tab()?;
+            let tn = t.tn.as_ref()?;
+            if tn.target.printer {
+                return None;
+            }
+            let id = t.id;
+            a.recorder = Some((id, yy_3270_macro::Recorder::new()));
+            a.tn_note("操作の記録を始めました（もう一度選ぶと終えて保存します）");
+            Some(())
+        })
+        .flatten();
+        if started.is_none() {
+            info_box(hwnd, "3270 の端末のタブを表示してから選んでください。");
+        }
+        return;
+    }
+    let Some(Some((id, rec))) = with(|a| a.recorder.take()) else {
+        return;
+    };
+    if rec.is_empty() {
+        with(|a| a.tn_note("記録した操作はありません"));
+        return;
+    }
+    let (label, folder) = with(|a| {
+        (
+            a.tabs
+                .iter()
+                .find(|t| t.id == id)
+                .map(|t| t.place.label())
+                .unwrap_or_default(),
+            macros::macro_folder(&a.config.tn3270.macros.folder),
+        )
+    })
+    .unwrap_or_default();
+    let password_name = if rec.has_password() {
+        crate::goto::prompt_text(
+            hwnd,
+            "記録したマクロ",
+            "パスワードの入力は記録していません。password(\"名前\") に使う資格情報の名前:",
+            &label,
+        )
+        .unwrap_or_else(|| label.clone())
+    } else {
+        String::new()
+    };
+    let Some(path) = macros::pick_file(hwnd, folder.as_deref(), Some("recorded.rhai")) else {
+        return;
+    };
+    let script = rec.finish(&label, &password_name);
+    match std::fs::write(&path, script) {
+        Ok(()) => {
+            with(|a| {
+                a.tn_note(&format!(
+                    "記録したマクロを {} に保存しました",
+                    path.display()
+                ))
+            });
+            open_in_editor(hwnd, &path);
+        }
+        Err(e) => error_box(hwnd, &format!("{} に保存できません: {e}", path.display())),
+    }
 }
 
 /// 「3270 のプリンターを接続」: 表示している 3270 の端末に対応するプリンターのタブを開く。
@@ -2750,6 +3343,13 @@ extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
             let m = mods();
             // 3270 のタブは独自のキーの割り当て（14 章 7）
             if with(|a| a.is_tn()) == Some(true) {
+                // マクロの実行中は Ctrl+Break（Pause）で止める
+                if (vk == VK_CANCEL || vk == VK_PAUSE)
+                    && with(|a| a.macro_tab() == Some(a.active)) == Some(true)
+                {
+                    with(|a| a.macro_stop());
+                    return LRESULT(0);
+                }
                 if let Some(k) = tn3270::map_key(vk, m) {
                     with(|a| a.tn_key(k));
                     return LRESULT(0);

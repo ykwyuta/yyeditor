@@ -50,6 +50,7 @@ static BUILTIN: &[(&str, &str)] = builtin!(
     "cobol",
     "cobol-free",
     "jcl",
+    "rhai",
     "pli",
     "rpg",
     "log",

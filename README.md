@@ -63,7 +63,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 | EBCDIC（IBM-930/939/1390/1399 ほか。SO/SI、改行 NL・LF・固定長レコード、不正なデータも含めてバイト列が往復） | ✅ |
 | 外部の対応表（`.map`）によるベンダー漢字コード（JEF・KEIS・JIPS など）・外字 | ✅ |
 | 保存できない文字を似た文字に置き換え（① → (1)、ｶﾞ → ガ、全角英数 → 半角 など） | ✅ |
-| シンタックスハイライト（37 種類。C / C++・C#・Java・Rust・Go・Python・JavaScript / TypeScript・PHP・Ruby・Perl・VB・Kotlin・Swift・バッチ・PowerShell・シェル・HTML・XML・CSS・JSON・YAML・TOML・INI・Markdown・SQL・COBOL（固定 / 自由形式）・JCL・PL/I・RPG・ログ・diff・Makefile・Dockerfile・.gitignore） | ✅ |
+| シンタックスハイライト（38 種類。C / C++・C#・Java・Rust・Go・Python・JavaScript / TypeScript・PHP・Ruby・Perl・VB・Kotlin・Swift・バッチ・PowerShell・シェル・HTML・XML・CSS・JSON・YAML・TOML・INI・Markdown・SQL・COBOL（固定 / 自由形式）・JCL・PL/I・RPG・Rhai（3270 のマクロ）・ログ・diff・Makefile・Dockerfile・.gitignore） | ✅ |
 | ファイル種類の判定（設定・モードライン・ファイル名・拡張子・先頭行）、表示メニューの「ハイライト」で切り替え | ✅ |
 | 巨大ファイルでも表示範囲だけを色付け（行の開始状態の記録、編集後は変わった位置から読み直し） | ✅ |
 | 対応する括弧の強調表示と移動（Ctrl+]）、コメント化 / 解除（Ctrl+/）。文字列・コメント内の括弧は数えない | ✅ |
@@ -111,15 +111,16 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 
 ### 3270（yyterm のタブ）
 
-提案書 [14 章](docs/proposal/14-tn3270.md) の方式で、yyterm のタブとして IBM メインフレームの 3270 端末（TN3270・TN3270E）を作っています（M1〜M4）。
+提案書 [14 章](docs/proposal/14-tn3270.md) の方式で、yyterm のタブとして IBM メインフレームの 3270 端末（TN3270・TN3270E）を作っています（M1〜M5）。
 
 - 3270 データストリーム（フィールド・拡張属性・色・Query Reply）と端末の入力の規則（保護・数字・自動スキップ・挿入・AID）、TN3270E の LU 名の指定、モデル 2〜5。
 - 日本語（CCSID 930・939・1390・1399）。IME で漢字を入れると SO/SI を自動で入れます。
 - 独自のキー割り当てと、PF13〜24・PA・Clear・Attn などを押せる画面のキーパッド。
 - 直接の TCP か、組み込みの SSH の direct-tcpip（踏み台・プロキシの先のホスト）で接続します。
+- マクロ（Rhai）: 画面の文字を待つ・読む・入力する・IND$FILE・CSV への書き出し。操作の記録からマクロを作れます。パスワードは資格情報マネージャーから入れ、スクリプトには渡しません。
 - プリンター（3287。TN3270E のプリンター LU、LU1 の SCS・LU3、日本語）。受け取った印刷を Windows のプリンター・PDF・テキストに出します。
 - IND$FILE のファイル転送（DFT。TSO・CMS・CICS の GET・PUT）。日本語のテキストはバイナリで転送して端末で CCSID と UTF-8 を変換します。
-- 中核は OS に依存しない `yy-3270`（Linux の CI で、模擬ホストとの往復・転送を含めてテスト）。マクロ・TLS は次の段階です。
+- 中核は OS に依存しない `yy-3270`（Linux の CI で、模擬ホストとの往復・転送を含めてテスト）。TLS は次の段階です。
 
 ### ファイル転送（yysftp）
 
@@ -280,6 +281,7 @@ crates/
                ファイル転送の中核（SFTP v3・SCP・ジャーナル付きのレジューム・転送の記録）
   yy-ssh/      組み込みの SSH クライアント（russh + ring。OpenSSH を使わない）
   yy-3270/     3270 の中核（Telnet・TN3270E・3270 データストリーム・フィールド・入力の規則・DBCS・IND$FILE・SCS と LU3 の印刷）
+  yy-3270-macro/ 3270 のマクロ（Rhai。待つ・読む・入力・転送・記録）
   yy-term/     ターミナルの中核（制御シーケンスの解釈、画面、スクロールバック、キーの送り方。OS 非依存）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
