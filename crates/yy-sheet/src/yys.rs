@@ -96,6 +96,12 @@ struct Ext6 {
     multi: Vec<(u32, Vec<(String, String)>)>,
 }
 
+/// 7 つ目の追加の記録: マルチレイアウトの 1 行のデータ長（シートの番号, バイト数）。
+#[derive(Serialize, Deserialize, Default)]
+struct Ext7 {
+    data_len: Vec<(u32, u64)>,
+}
+
 /// 3 つ目の追加の記録: 数式（結果は開いたときに計算し直す）。
 #[derive(Serialize, Deserialize, Default)]
 struct Ext3 {
@@ -485,6 +491,18 @@ fn write_into(
             .collect(),
     };
     bytes.extend(postcard::to_allocvec(&ext6).map_err(|e| invalid(&e.to_string()))?);
+    let ext7 = Ext7 {
+        data_len: book
+            .sheets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let f = s.fixed.as_ref().filter(|f| f.is_multi())?;
+                Some((i as u32, f.data_len as u64))
+            })
+            .collect(),
+    };
+    bytes.extend(postcard::to_allocvec(&ext7).map_err(|e| invalid(&e.to_string()))?);
     let dir_off = store.append(&bytes)?;
     let mut trailer = Vec::with_capacity(TRAILER as usize);
     trailer.extend_from_slice(&dir_off.to_le_bytes());
@@ -502,7 +520,7 @@ fn write_into(
 }
 
 /// 末尾を探して目次を読む（末尾が壊れていれば、前の末尾を後ろから探す）。
-type Exts = (Ext, Ext2, Ext3, Ext4, Ext5, Ext6);
+type Exts = (Ext, Ext2, Ext3, Ext4, Ext5, Ext6, Ext7);
 
 fn read_dir(store: &Store) -> io::Result<(Dir, Exts, u64)> {
     let len = store.len();
@@ -540,8 +558,9 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Exts, u64)> {
         let (ext3, rest): (Ext3, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
         let (ext4, rest): (Ext4, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
         let (ext5, rest): (Ext5, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
-        let (ext6, _): (Ext6, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
-        Some((d, (ext, ext2, ext3, ext4, ext5, ext6), off))
+        let (ext6, rest): (Ext6, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        let (ext7, _): (Ext7, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        Some((d, (ext, ext2, ext3, ext4, ext5, ext6, ext7), off))
     };
     if let Some(r) = try_at(len) {
         return Ok(r);
@@ -579,7 +598,7 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Exts, u64)> {
 /// 開く。
 pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
     let store = Store::open(path)?;
-    let (dir, (ext, ext2, ext3, ext4, ext5, ext6), dir_off) = read_dir(&store)?;
+    let (dir, (ext, ext2, ext3, ext4, ext5, ext6, ext7), dir_off) = read_dir(&store)?;
     let chunks: Vec<Arc<Chunk>> = dir
         .chunks
         .iter()
@@ -693,7 +712,18 @@ pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
         };
         // 読めないレイアウト（新しい版の書き方など）は設定ごと外す
         let spec = match ext6.multi.iter().find(|m| m.0 == i) {
-            Some((_, layouts)) => crate::fixed::FixedSpec::new_multi(layouts, codec, sep),
+            Some((_, layouts)) => {
+                // 1 行のデータ長（なければ、いちばん長いレイアウトのレコード長）
+                let len = match ext7.data_len.iter().find(|d| d.0 == i) {
+                    Some(&(_, n)) => n as usize,
+                    None => layouts
+                        .iter()
+                        .filter_map(|(_, c)| yy_cobol::parse(c).ok().map(|l| l.record_len))
+                        .max()
+                        .unwrap_or(0),
+                };
+                crate::fixed::FixedSpec::new_multi(layouts, len, codec, sep)
+            }
             None => crate::fixed::FixedSpec::new(&f.copybook, codec, sep),
         };
         if let Ok(spec) = spec {

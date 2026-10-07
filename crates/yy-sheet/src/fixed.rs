@@ -104,6 +104,9 @@ pub struct FixedSpec {
     pub separator: RecordSep,
     /// マルチレイアウトのレイアウト（単一のレイアウトなら空）
     pub multi: Vec<NamedLayout>,
+    /// 1 行（1 レコード）のデータ長（バイト）。マルチレイアウトでは最初に決め、どのレイアウトもこの長さに
+    /// 収まり、短いレイアウトの残りは空白で書く。単一のレイアウトではレイアウトのレコード長
+    pub data_len: usize,
 }
 
 impl FixedSpec {
@@ -114,6 +117,7 @@ impl FixedSpec {
             return Err("レコード長が 0 です".into());
         }
         Ok(FixedSpec {
+            data_len: layout.record_len,
             copybook: Arc::from(copybook),
             layout: Arc::new(layout),
             codec,
@@ -122,13 +126,18 @@ impl FixedSpec {
         })
     }
 
-    /// マルチレイアウト（（名前, コピーブック）の並び）から。名前は空でなく、重ならない
-    /// （大文字・小文字を区別しない）。
+    /// マルチレイアウト（（名前, コピーブック）の並び）から。`data_len` は 1 行のデータ長（必須）で、
+    /// どのレイアウトのレコード長もこれを超えられない。名前は空でなく、重ならない（大文字・小文字を
+    /// 区別しない）。
     pub fn new_multi(
         layouts: &[(String, String)],
+        data_len: usize,
         codec: Codec,
         separator: RecordSep,
     ) -> Result<FixedSpec, String> {
+        if data_len == 0 {
+            return Err("最初に 1 行のデータ長（バイト）を入力してください".into());
+        }
         if layouts.is_empty() {
             return Err("レイアウトがありません".into());
         }
@@ -146,6 +155,12 @@ impl FixedSpec {
             if layout.record_len == 0 {
                 return Err(format!("レイアウト {name}: レコード長が 0 です"));
             }
+            if layout.record_len > data_len {
+                return Err(format!(
+                    "レイアウト {name} のレコード長 {} バイトが、1 行のデータ長 {data_len} バイトを超えています",
+                    layout.record_len
+                ));
+            }
             multi.push(NamedLayout {
                 name: Arc::from(name),
                 copybook: Arc::from(copybook.as_str()),
@@ -158,6 +173,7 @@ impl FixedSpec {
             codec,
             separator,
             multi,
+            data_len,
         })
     }
 
@@ -416,7 +432,7 @@ fn row_bytes(ctx: &Context, sheet: &Sheet, src_row: u64) -> io::Result<Option<Ve
     let cols = field_columns(sheet);
     match row_layout(ctx, sheet, src_row) {
         RowLayout::Known(l) => {
-            let mut rec = vec![spec.codec.charset.space(); l.layout.record_len];
+            let mut rec = vec![spec.codec.charset.space(); spec.data_len.max(l.layout.record_len)];
             let mut issues = Issues::default();
             for (k, f) in l.layout.fields.iter().enumerate() {
                 let v = match cols.iter().find(|x| x.0 == k as u32) {
@@ -507,8 +523,9 @@ pub fn set_row_layout(
     match &new {
         Some(n) => {
             let mut rec = bytes;
-            if rec.len() < n.layout.record_len {
-                rec.resize(n.layout.record_len, spec.codec.charset.space());
+            let need = spec.data_len.max(n.layout.record_len);
+            if rec.len() < need {
+                rec.resize(need, spec.codec.charset.space());
             }
             for (k, c) in cols {
                 let v = match n.layout.fields.get(k as usize) {
@@ -577,35 +594,12 @@ pub fn apply_multi(ctx: &Context, sheet: &mut Sheet, spec: &FixedSpec) -> Result
     Ok(added)
 }
 
-/// レコードの切れ目（始め・長さ）。区切りがあれば区切りで分け、なければ決まった長さ（すべての
-/// レイアウトのレコード長が同じときだけ）。
-fn split_records(raw: &[u8], spec: &FixedSpec) -> io::Result<Vec<(usize, usize)>> {
-    let sep = spec.separator.bytes();
-    let mut out = Vec::new();
-    if sep.is_empty() {
-        let len = spec.layout.record_len;
-        if spec.multi.iter().any(|m| m.layout.record_len != len) {
-            return Err(io::Error::other(
-                "レコードの区切りのないマルチレイアウトのファイルは、すべてのレイアウトのレコード長が同じときだけ読めます（区切りを選んでください）",
-            ));
-        }
-        let mut at = 0;
-        while at + len <= raw.len() {
-            out.push((at, len));
-            at += len;
-        }
-        return Ok(out);
-    }
-    let mut at = 0;
-    while at < raw.len() {
-        let end = raw[at..]
-            .windows(sep.len())
-            .position(|w| w == sep)
-            .map_or(raw.len(), |p| at + p);
-        out.push((at, end - at));
-        at = end + sep.len();
-    }
-    Ok(out)
+/// レコードの切れ目（始め）と、レコードにならない末尾のバイト数。どのレコードも 1 行のデータ長
+/// （最後のレコードの後の区切りはなくてもよい）。
+fn split_records(raw: &[u8], spec: &FixedSpec) -> (Vec<usize>, u64) {
+    let (n, rest) = record_count(raw.len() as u64, spec.data_len, spec.separator);
+    let stride = spec.data_len + spec.separator.bytes().len();
+    ((0..n as usize).map(|k| k * stride).collect(), rest)
 }
 
 /// マルチレイアウトのファイルを取り込む。どの行もレイアウト未確定で、項目1 に元のバイト（`X'…'`）、
@@ -618,7 +612,8 @@ pub fn import_multi(
 ) -> io::Result<(Sheet, FixedReport)> {
     let file = yy_io::open_file(path)?;
     let raw = file.bytes();
-    let recs = split_records(raw, spec)?;
+    let (recs, remainder) = split_records(raw, spec);
+    let len = spec.data_len;
     let nf = spec.max_fields().max(2);
     let total = recs.len() as u64;
     let mut builders: Vec<Builder> = (0..nf).map(|_| Builder::default()).collect();
@@ -635,7 +630,7 @@ pub fn import_multi(
         Ok(())
     };
     let mut in_chunk = 0usize;
-    for (i, &(at, len)) in recs.iter().enumerate() {
+    for (i, &at) in recs.iter().enumerate() {
         let rec = &raw[at..at + len];
         for (k, b) in builders.iter_mut().enumerate() {
             match raw_row_values(spec, rec, k as u32) {
@@ -684,14 +679,15 @@ pub fn import_multi(
         sheet,
         FixedReport {
             records: total,
+            remainder,
             undetermined: total,
             ..Default::default()
         },
     ))
 }
 
-/// マルチレイアウトのシートを書き出す: 行ごとに、その行のレイアウトで項目を書く（レコード長は
-/// レイアウトごと）。レイアウト未確定の行は、元のバイト（項目1 の `X'…'`）があればそのまま書き、
+/// マルチレイアウトのシートを書き出す: 行ごとに、その行のレイアウトで項目を書く（どの行も 1 行の
+/// データ長。短いレイアウトの残りは空白）。レイアウト未確定の行は、元のバイト（項目1 の `X'…'`）があればそのまま書き、
 /// なければ書かない（どちらも `undetermined` に数える）。
 fn export_multi_to(
     ctx: &Context,
@@ -722,7 +718,8 @@ fn export_multi_to(
         let src = row + head;
         match row_layout(ctx, sheet, src) {
             RowLayout::Known(l) => {
-                let mut rec = vec![spec.codec.charset.space(); l.layout.record_len];
+                // 1 行のデータ長で（短いレイアウトの残りは空白）
+                let mut rec = vec![spec.codec.charset.space(); spec.data_len];
                 for (k, f) in l.layout.fields.iter().enumerate() {
                     let v = match cols.iter().find(|x| x.0 == k as u32) {
                         Some(&(_, c)) => sheet.get_source(ctx, src, c)?,
@@ -759,7 +756,8 @@ fn export_multi_to(
                 if report.first_undetermined.is_none() {
                     report.first_undetermined = Some(row);
                 }
-                if let Some(b) = raw {
+                if let Some(mut b) = raw {
+                    b.resize(spec.data_len, spec.codec.charset.space());
                     out.write_all(&b)?;
                     out.write_all(sep)?;
                     report.records += 1;
@@ -1888,6 +1886,7 @@ mod tests {
     fn multi_spec(cs: Charset, sep: RecordSep) -> FixedSpec {
         FixedSpec::new_multi(
             &[("HDR".into(), HDR.into()), ("DTL".into(), DTL.into())],
+            20,
             Codec::new(cs),
             sep,
         )
@@ -2065,22 +2064,34 @@ mod tests {
     #[test]
     fn multi_layout_setup() {
         let ctx = Context::for_tests();
+        let ms = Codec::new(Charset::Ms932);
         let spec = multi_spec(Charset::Ms932, RecordSep::Crlf);
+        assert_eq!(spec.data_len, 20);
+        // 1 行のデータ長は必須で、レイアウトはそれを超えられない
+        let l2 = |a: &str, b: &str| -> Vec<(String, String)> {
+            vec![("A".into(), a.into()), ("B".into(), b.into())]
+        };
+        assert!(
+            FixedSpec::new_multi(&l2(HDR, DTL), 0, ms, RecordSep::Crlf)
+                .unwrap_err()
+                .contains("データ長")
+        );
+        assert!(
+            FixedSpec::new_multi(&l2(HDR, DTL), 19, ms, RecordSep::Crlf)
+                .unwrap_err()
+                .contains("超えて")
+        );
         assert!(
             FixedSpec::new_multi(
                 &[("A".into(), HDR.into()), ("a".into(), DTL.into())],
-                Codec::new(Charset::Ms932),
+                20,
+                ms,
                 RecordSep::Crlf
             )
             .is_err()
         );
         assert!(
-            FixedSpec::new_multi(
-                &[(" ".into(), HDR.into())],
-                Codec::new(Charset::Ms932),
-                RecordSep::Crlf
-            )
-            .is_err()
+            FixedSpec::new_multi(&[(" ".into(), HDR.into())], 20, ms, RecordSep::Crlf).is_err()
         );
         // 空のシートに設定すると、レイアウトの列と項目の列ができる（手で入力する行）
         let mut sh = Sheet::new("S");
@@ -2096,17 +2107,38 @@ mod tests {
         let mut t = Sheet::new("T");
         t.set(&ctx, 0, 0, Value::Number(1.0)).unwrap();
         assert!(apply_multi(&ctx, &mut t, &spec).is_err());
-        // 区切りなしでレコード長が違えば読めない
-        let odd = FixedSpec::new_multi(
+        assert!(set_column_type(&mut sh, 1, "X", spec.codec, spec.separator).is_err());
+        // 長さの違うレイアウト: 区切りがなくても 1 行のデータ長で読み、短いレイアウトの残りは空白で書く
+        let short = FixedSpec::new_multi(
             &[
-                ("A".into(), HDR.into()),
-                ("B".into(), "01 B.\n 05 X PIC X(3).\n".into()),
+                ("LONG".into(), DTL.into()),
+                ("SHORT".into(), "01 S.\n 05 C PIC X(3).\n".into()),
             ],
-            Codec::new(Charset::Ms932),
+            20,
+            ms,
             RecordSep::None,
         )
         .unwrap();
-        assert!(split_records(b"abc", &odd).is_err());
-        assert!(set_column_type(&mut sh, 1, "X", spec.codec, spec.separator).is_err());
+        let mut sh = Sheet::new("S");
+        apply_multi(&ctx, &mut sh, &short).unwrap();
+        sh.set(&ctx, 1, 0, Value::text("short")).unwrap();
+        sh.set(&ctx, 1, 1, Value::text("ABC")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("short.dat");
+        let rep = export(&ctx, &sh, &out, &short, None, &|_, _| true).unwrap();
+        assert_eq!(rep.records, 1);
+        let mut want = b"ABC".to_vec();
+        want.resize(20, b' ');
+        assert_eq!(std::fs::read(&out).unwrap(), want);
+        // 取り込みは 1 行のデータ長ごと（余りは数える）
+        let mut file = want.clone();
+        file.extend_from_slice(&want);
+        file.extend_from_slice(b"xyz");
+        std::fs::write(&out, &file).unwrap();
+        let (back, rep) = import_multi(&ctx, &out, &short, &|_, _| true).unwrap();
+        assert_eq!((rep.records, rep.remainder), (2, 3));
+        let mut back = back;
+        set_row_layout(&ctx, &mut back, 2, "SHORT").unwrap();
+        assert_eq!(back.get(&ctx, 2, 1).unwrap(), Value::text("ABC"));
     }
 }

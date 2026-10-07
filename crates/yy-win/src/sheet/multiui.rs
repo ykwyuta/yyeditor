@@ -35,9 +35,12 @@ const M_CHARSET: u16 = 16;
 const M_SEP: u16 = 17;
 const M_LE: u16 = 18;
 const M_SUMMARY: u16 = 19;
+const M_LEN: u16 = 20;
 
 struct MultiState {
     layouts: Vec<(String, String)>,
+    /// 1 行のデータ長（入力の文字列。必須）
+    data_len: String,
     cur: usize,
     charset: Charset,
     /// `None` は自動（開くときだけ）
@@ -51,7 +54,17 @@ struct MultiState {
     result: Option<FixedSpec>,
 }
 
-fn initial() -> (Vec<(String, String)>, Charset, Option<RecordSep>, bool) {
+/// 初期値（レイアウト・1 行のデータ長・文字コード・区切り・2 進数の並び）。データ長は、マルチレイアウトの
+/// シートを設定し直すときだけ入れておく（新しく作るときは必ず入力してもらう）。
+type Initial = (
+    Vec<(String, String)>,
+    String,
+    Charset,
+    Option<RecordSep>,
+    bool,
+);
+
+fn initial() -> Initial {
     let spec = with(|a| {
         a.sheet()
             .fixed
@@ -66,18 +79,21 @@ fn initial() -> (Vec<(String, String)>, Charset, Option<RecordSep>, bool) {
                 .iter()
                 .map(|m| (m.name.to_string(), m.copybook.to_string()))
                 .collect(),
+            s.data_len.to_string(),
             s.codec.charset,
             Some(s.separator),
             s.codec.little_endian,
         ),
         Some(s) => (
             vec![("LAYOUT1".into(), s.copybook.to_string())],
+            String::new(),
             s.codec.charset,
             Some(s.separator),
             s.codec.little_endian,
         ),
         None => (
             vec![("LAYOUT1".into(), String::new())],
+            String::new(),
             Charset::Ms932,
             None,
             false,
@@ -86,6 +102,7 @@ fn initial() -> (Vec<(String, String)>, Charset, Option<RecordSep>, bool) {
 }
 
 fn read_controls(hwnd: HWND, st: &mut MultiState) {
+    st.data_len = dlg_text_long(hwnd, M_LEN);
     if let Some(l) = st.layouts.get_mut(st.cur) {
         l.0 = dlg_text_long(hwnd, M_NAME);
         l.1 = dlg_text_long(hwnd, M_TEXT);
@@ -107,17 +124,18 @@ fn spec_of(st: &MultiState) -> std::result::Result<FixedSpec, String> {
         charset: st.charset,
         little_endian: st.little_endian,
     };
-    let mut spec = FixedSpec::new_multi(&st.layouts, codec, st.sep.unwrap_or(RecordSep::Crlf))?;
+    let len: usize = match st.data_len.trim() {
+        "" => 0,
+        t => t
+            .parse()
+            .map_err(|_| format!("1 行のデータ長「{t}」はバイト数（整数）で入力してください"))?,
+    };
+    let mut spec =
+        FixedSpec::new_multi(&st.layouts, len, codec, st.sep.unwrap_or(RecordSep::Crlf))?;
     if st.sep.is_none()
         && let Some((sample, _)) = &st.open
     {
-        // どれかのレイアウトのレコード長で区切りが見つかれば、その区切り
-        spec.separator = spec
-            .multi
-            .iter()
-            .map(|m| fixed::detect_separator(sample, m.layout.record_len))
-            .find(|s| *s != RecordSep::None)
-            .unwrap_or(RecordSep::None);
+        spec.separator = fixed::detect_separator(sample, spec.data_len);
     }
     Ok(spec)
 }
@@ -130,15 +148,32 @@ fn update_summary(hwnd: HWND, st: &mut MultiState) {
     let mut lines = Vec::new();
     match spec_of(st) {
         Ok(spec) => {
+            lines.push(format!("1 行のデータ長: {} バイト", spec.data_len));
             if st.sep.is_none() {
                 lines.push(format!("区切りの推定: {}", spec.separator.label()));
             }
+            if let Some((_, len)) = &st.open {
+                let (n, rest) = fixed::record_count(*len, spec.data_len, spec.separator);
+                let mut l = format!("ファイル: {n} 行");
+                if rest > 0 {
+                    l.push_str(&format!(
+                        "（末尾の {rest} バイトは行になりません。データ長・区切りを確かめてください）"
+                    ));
+                }
+                lines.push(l);
+            }
             for m in &spec.multi {
+                let rest = spec.data_len - m.layout.record_len;
                 lines.push(format!(
-                    "{}: レコード {} バイト・項目 {} 個",
+                    "{}: レコード {} バイト・項目 {} 個{}",
                     m.name,
                     m.layout.record_len,
-                    m.layout.fields.len()
+                    m.layout.fields.len(),
+                    if rest > 0 {
+                        format!("（残りの {rest} バイトは空白）")
+                    } else {
+                        String::new()
+                    }
                 ));
                 for w in &m.layout.warnings {
                     lines.push(format!("　注意: {w}"));
@@ -188,27 +223,38 @@ fn load_current(hwnd: HWND, st: &mut MultiState) {
 
 /// マルチレイアウトのダイアログ。`open` は開くファイルの見本。
 fn multi_dialog(owner: HWND, open: Option<(Vec<u8>, u64)>, title: &str) -> Option<FixedSpec> {
-    let (layouts, charset, sep, le) = initial();
-    let mut t = Template::dialog(title, 460, 340);
-    label(&mut t, 7, 8, 110, 0, "レイアウト:");
+    let (layouts, data_len, charset, sep, le) = initial();
+    let mut t = Template::dialog(title, 460, 360);
+    label(&mut t, 7, 8, 118, 0, "1 行のデータ長（バイト・必須）:");
+    edit(&mut t, 127, 6, 50, M_LEN);
+    label(
+        &mut t,
+        183,
+        8,
+        270,
+        0,
+        "どのレイアウトもこの長さに収め、短いレイアウトの残りは空白で書きます。",
+    );
+    let y = 20;
+    label(&mut t, 7, 8 + y, 110, 0, "レイアウト:");
     t.item(
         (WS_BORDER | WS_TABSTOP | WS_VSCROLL).0 | LBS_NOTIFY as u32,
         7,
-        20,
+        20 + y,
         110,
         152,
         M_LIST,
         CLASS_LISTBOX,
         "",
     );
-    button(&mut t, 7, 174, 53, M_ADD, "追加(&A)", false);
-    button(&mut t, 64, 174, 53, M_DEL, "削除(&D)", false);
-    label(&mut t, 125, 8, 30, 0, "名前:");
-    edit(&mut t, 155, 6, 140, M_NAME);
+    button(&mut t, 7, 174 + y, 53, M_ADD, "追加(&A)", false);
+    button(&mut t, 64, 174 + y, 53, M_DEL, "削除(&D)", false);
+    label(&mut t, 125, 8 + y, 30, 0, "名前:");
+    edit(&mut t, 155, 6 + y, 140, M_NAME);
     button(
         &mut t,
         340,
-        4,
+        4 + y,
         113,
         M_LOAD,
         "ファイルから読み込む(&F)...",
@@ -216,15 +262,15 @@ fn multi_dialog(owner: HWND, open: Option<(Vec<u8>, u64)>, title: &str) -> Optio
     );
     let multi = (WS_BORDER | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL).0
         | (ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_WANTRETURN) as u32;
-    t.item(multi, 125, 22, 328, 166, M_TEXT, CLASS_EDIT, "");
-    label(&mut t, 7, 198, 50, 0, "文字コード:");
-    combo(&mut t, 55, 196, 175, M_CHARSET);
-    label(&mut t, 240, 198, 70, 0, "レコードの区切り:");
-    combo(&mut t, 308, 196, 145, M_SEP);
+    t.item(multi, 125, 22 + y, 328, 166, M_TEXT, CLASS_EDIT, "");
+    label(&mut t, 7, 198 + y, 50, 0, "文字コード:");
+    combo(&mut t, 55, 196 + y, 175, M_CHARSET);
+    label(&mut t, 240, 198 + y, 70, 0, "レコードの区切り:");
+    combo(&mut t, 308, 196 + y, 145, M_SEP);
     t.item(
         WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32,
         7,
-        214,
+        214 + y,
         446,
         10,
         M_LE,
@@ -235,17 +281,18 @@ fn multi_dialog(owner: HWND, open: Option<(Vec<u8>, u64)>, title: &str) -> Optio
         (WS_BORDER | WS_VSCROLL | WS_HSCROLL).0
             | (ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY) as u32,
         7,
-        228,
+        228 + y,
         446,
         88,
         M_SUMMARY,
         CLASS_EDIT,
         "",
     );
-    button(&mut t, 346, 321, 50, IDOK_, "OK", true);
-    button(&mut t, 403, 321, 50, IDCANCEL_, "キャンセル", false);
+    button(&mut t, 346, 321 + y, 50, IDOK_, "OK", true);
+    button(&mut t, 403, 321 + y, 50, IDCANCEL_, "キャンセル", false);
     let mut st = MultiState {
         layouts,
+        data_len,
         cur: 0,
         charset,
         sep: if open.is_some() {
@@ -314,9 +361,17 @@ extern "system" fn multi_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 if st.little_endian {
                     let _ = CheckDlgButton(hwnd, M_LE as i32, BST_CHECKED);
                 }
+                let _ = SetDlgItemTextW(hwnd, M_LEN as i32, &HSTRING::from(st.data_len.as_str()));
                 st.loading = false;
                 refresh_list(hwnd, st);
                 load_current(hwnd, st);
+                // 1 行のデータ長を最初に入力してもらう
+                if st.data_len.trim().is_empty()
+                    && let Ok(h) = GetDlgItem(Some(hwnd), M_LEN as i32)
+                {
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(h));
+                    return 0;
+                }
                 1
             }
             WM_DESTROY if GetWindowLongPtrW(hwnd, GWLP_USERDATA) != 0 => {
@@ -348,7 +403,7 @@ extern "system" fn multi_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                         }
                         1
                     }
-                    M_TEXT if code == EN_CHANGE => {
+                    M_LEN | M_TEXT if code == EN_CHANGE => {
                         update_summary(hwnd, st);
                         1
                     }
@@ -403,7 +458,16 @@ extern "system" fn multi_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                                 st.result = Some(s);
                                 let _ = EndDialog(hwnd, IDOK_ as isize);
                             }
-                            Err(e) => message(hwnd, &format!("レイアウトを読めません。\n{e}")),
+                            Err(e) => {
+                                message(hwnd, &format!("設定できません。\n{e}"));
+                                if st.data_len.trim().is_empty()
+                                    && let Ok(h) = GetDlgItem(Some(hwnd), M_LEN as i32)
+                                {
+                                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(
+                                        Some(h),
+                                    );
+                                }
+                            }
                         }
                         1
                     }

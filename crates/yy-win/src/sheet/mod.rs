@@ -1077,9 +1077,10 @@ impl App {
                     yy_sheet::fixed::RowLayout::NotMulti => String::new(),
                 };
                 format!(
-                    "固定長 {}・マルチレイアウト {} 種{row}",
+                    "固定長 {}・マルチレイアウト {} 種・1 行 {} バイト{row}",
                     spec.codec.charset.name(),
-                    spec.multi.len()
+                    spec.multi.len(),
+                    spec.data_len
                 )
             } else {
                 format!(
