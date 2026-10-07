@@ -3359,6 +3359,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-numfmt"
+version = "0.1.0"
+
+[[package]]
 name = "yy-preview"
 version = "0.1.0"
 dependencies = [
@@ -3397,6 +3401,21 @@ dependencies = [
  "regex-automata",
  "regex-syntax",
  "yy-buffer",
+]
+
+[[package]]
+name = "yy-sheet"
+version = "0.1.0"
+dependencies = [
+ "memchr",
+ "postcard",
+ "rayon",
+ "serde",
+ "tempfile",
+ "yy-delimited",
+ "yy-encoding",
+ "yy-io",
+ "yy-numfmt",
 ]
 
 [[package]]
