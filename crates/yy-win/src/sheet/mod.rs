@@ -702,6 +702,7 @@ impl App {
     }
 
     fn paint(&mut self) {
+        self.sync_grid_size();
         self.compute_layout();
         let sys = self.sys();
         let mut cells = Vec::with_capacity(self.rows.len());
@@ -938,6 +939,26 @@ impl App {
             let grid_h = (h - bar_h - tabs_h).max(1);
             let _ = MoveWindow(self.grid, 0, bar_h, w, grid_h, true);
             let _ = MoveWindow(self.tabs, 0, bar_h + grid_h, w, tabs_h, true);
+        }
+        // MoveWindow は格子の WM_SIZE をその場で送るが、そのとき状態は借りられていて受け取れないので、
+        // ここで大きさを読み直す
+        self.sync_grid_size();
+    }
+
+    /// 格子の大きさ（クライアント領域）を読み直す。変わっていれば描画先と配置を合わせる。
+    fn sync_grid_size(&mut self) {
+        let mut rc = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.grid, &mut rc);
+        }
+        let size = (rc.right - rc.left, rc.bottom - rc.top);
+        if size != self.size_px {
+            self.size_px = size;
+            self.painter
+                .resize_target(size.0.max(1) as u32, size.1.max(1) as u32);
+            self.compute_layout();
+            self.update_scrollbars();
+            self.invalidate();
         }
     }
 
