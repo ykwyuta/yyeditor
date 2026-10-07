@@ -1,0 +1,13 @@
+[package]
+name = "yy-3270"
+description = "TN3270/TN3270E terminal emulation core (Telnet, 3270 data stream, fields, keyboard) for yyterm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+yy-encoding.workspace = true
+
+[lints]
+workspace = true

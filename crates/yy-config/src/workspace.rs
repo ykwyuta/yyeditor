@@ -23,6 +23,10 @@ pub const EXTENSION: &str = "yyworkspace";
 pub const UNTITLED_FILE: &str = "untitled.yyworkspace";
 /// 最後に使ったワークスペースを記録するファイル名（設定フォルダの中）。
 pub const LAST_FILE: &str = "last-workspace.txt";
+/// ターミナル（yyterm）の、名前を付けていないワークスペースのファイル名。
+pub const TERMINAL_UNTITLED_FILE: &str = "terminal-untitled.yyworkspace";
+/// ターミナル（yyterm）が最後に使ったワークスペースを記録するファイル名。
+pub const TERMINAL_LAST_FILE: &str = "terminal-last-workspace.txt";
 /// 一覧に表示しないフォルダ・ファイル。
 pub const EXCLUDED: &[&str] = &[".git", ".svn", ".hg"];
 /// 1 つのフォルダに表示する項目の上限。
@@ -179,6 +183,50 @@ pub fn list_dir(dir: &Path) -> io::Result<(Vec<Entry>, usize)> {
     Ok((entries, skipped))
 }
 
+/// 束ねるフォルダの深さの上限
+pub const COMPACT_DEPTH: usize = 32;
+/// 手元のフォルダで、先に中身を調べて束ねるフォルダの数の上限（多いフォルダで遅くしない）
+pub const COMPACT_LIMIT: usize = 200;
+
+/// VS Code の「フォルダを束ねる」（Compact Folders）: フォルダ `entry` の中身がフォルダ 1 つだけなら、
+/// 名前を `a/b` とつなげてパスをその中のフォルダにする（続く限り）。`list` はフォルダの中身を返す
+/// （読めなければ `None` で止める）。束ねたら `true`。
+pub fn compact(entry: &mut Entry, mut list: impl FnMut(&Path) -> Option<Vec<Entry>>) -> bool {
+    if !entry.is_dir {
+        return false;
+    }
+    let mut merged = false;
+    for _ in 0..COMPACT_DEPTH {
+        let Some(children) = list(&entry.path) else {
+            break;
+        };
+        match children.as_slice() {
+            [only] if only.is_dir => {
+                entry.name = format!("{}/{}", entry.name, only.name);
+                entry.path = only.path.clone();
+                merged = true;
+            }
+            _ => break,
+        }
+    }
+    merged
+}
+
+/// 手元のフォルダの項目を束ねる（[`compact`]）。束ねる前のパス（束ねた並びの先頭）を項目ごとに返す。
+/// フォルダが [`COMPACT_LIMIT`] を超える分は調べない。
+pub fn compact_local(entries: &mut [Entry]) -> Vec<PathBuf> {
+    let mut heads = Vec::with_capacity(entries.len());
+    let mut checked = 0;
+    for e in entries.iter_mut() {
+        heads.push(e.path.clone());
+        if e.is_dir && checked < COMPACT_LIMIT {
+            checked += 1;
+            compact(e, |p| list_dir(p).ok().map(|(v, _)| v));
+        }
+    }
+    heads
+}
+
 /// フォルダを先に、名前順（大文字・小文字を区別せず、数字は数として比べる）に並べる。
 pub fn sort_entries(entries: &mut [Entry]) {
     entries.sort_by(|a, b| {
@@ -232,14 +280,24 @@ pub fn config_file(name: &str) -> Option<PathBuf> {
 
 /// 最後に使ったワークスペースのファイル（記録がなければ `None`）。
 pub fn last_used() -> Option<PathBuf> {
-    let text = std::fs::read_to_string(config_file(LAST_FILE)?).ok()?;
-    let line = text.lines().next()?.trim();
-    (!line.is_empty()).then(|| PathBuf::from(line))
+    last_used_in(LAST_FILE)
 }
 
 /// 最後に使ったワークスペースを記録する。
 pub fn set_last_used(path: &Path) -> io::Result<()> {
-    let Some(file) = config_file(LAST_FILE) else {
+    set_last_used_in(LAST_FILE, path)
+}
+
+/// 記録のファイル `record`（設定フォルダの中）にある、最後に使ったワークスペース。
+pub fn last_used_in(record: &str) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(config_file(record)?).ok()?;
+    let line = text.lines().next()?.trim();
+    (!line.is_empty()).then(|| PathBuf::from(line))
+}
+
+/// 最後に使ったワークスペースを `record` に記録する。
+pub fn set_last_used_in(record: &str, path: &Path) -> io::Result<()> {
+    let Some(file) = config_file(record) else {
         return Ok(());
     };
     if let Some(dir) = file.parent() {
@@ -581,5 +639,37 @@ mod tests {
         assert_eq!(copy_name("a.tar.gz", 2, false), "a.tar - コピー (2).gz");
         assert_eq!(copy_name(".bashrc", 1, false), ".bashrc - コピー");
         assert_eq!(copy_name("v1.2", 1, true), "v1.2 - コピー");
+    }
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+
+    #[test]
+    fn compacts_single_folder_chains_like_vscode() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        // a/b/c/（ファイル 2 つ）、x/（フォルダ 1 つとファイル 1 つ）、y/z/（空）、e/（空）
+        std::fs::create_dir_all(d.join("a/b/c")).unwrap();
+        std::fs::write(d.join("a/b/c/1.txt"), b"").unwrap();
+        std::fs::write(d.join("a/b/c/2.txt"), b"").unwrap();
+        std::fs::create_dir_all(d.join("x/inner")).unwrap();
+        std::fs::write(d.join("x/f.txt"), b"").unwrap();
+        std::fs::create_dir_all(d.join("y/z")).unwrap();
+        std::fs::create_dir_all(d.join("e")).unwrap();
+        std::fs::write(d.join("top.txt"), b"").unwrap();
+        let (mut entries, _) = list_dir(d).unwrap();
+        let heads = compact_local(&mut entries);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["a/b/c", "e", "x", "y/z", "top.txt"]);
+        assert_eq!(entries[0].path, d.join("a").join("b").join("c"));
+        assert_eq!(heads[0], d.join("a"));
+        assert_eq!(entries[3].path, d.join("y").join("z"));
+        assert_eq!(heads[3], d.join("y"));
+        assert_eq!(heads[2], entries[2].path);
+        // ファイルは束ねない
+        let mut f = entries[4].clone();
+        assert!(!compact(&mut f, |_| unreachable!()));
     }
 }

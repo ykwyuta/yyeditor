@@ -173,8 +173,33 @@ impl Agent {
                 copy(&to_path(&from), &to_path(&to))?;
                 Response::Done
             }
+            Request::Hash { path, len } => Response::Hash(hash_prefix(&to_path(&path), len)?),
         })
     }
+}
+
+/// ファイルの先頭から `len` バイトの SHA-256。
+fn hash_prefix(path: &Path, len: u64) -> io::Result<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let file = File::open(path)?;
+    let size = file.metadata()?.len();
+    if size < len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("ファイルが短すぎます（{size} / {len} バイト）"),
+        ));
+    }
+    let mut r = BufReader::with_capacity(1 << 20, file.take(len));
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().to_vec())
 }
 
 fn bad_handle() -> io::Error {

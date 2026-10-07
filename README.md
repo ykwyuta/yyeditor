@@ -63,7 +63,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 | EBCDIC（IBM-930/939/1390/1399 ほか。SO/SI、改行 NL・LF・固定長レコード、不正なデータも含めてバイト列が往復） | ✅ |
 | 外部の対応表（`.map`）によるベンダー漢字コード（JEF・KEIS・JIPS など）・外字 | ✅ |
 | 保存できない文字を似た文字に置き換え（① → (1)、ｶﾞ → ガ、全角英数 → 半角 など） | ✅ |
-| シンタックスハイライト（37 種類。C / C++・C#・Java・Rust・Go・Python・JavaScript / TypeScript・PHP・Ruby・Perl・VB・Kotlin・Swift・バッチ・PowerShell・シェル・HTML・XML・CSS・JSON・YAML・TOML・INI・Markdown・SQL・COBOL（固定 / 自由形式）・JCL・PL/I・RPG・ログ・diff・Makefile・Dockerfile・.gitignore） | ✅ |
+| シンタックスハイライト（38 種類。C / C++・C#・Java・Rust・Go・Python・JavaScript / TypeScript・PHP・Ruby・Perl・VB・Kotlin・Swift・バッチ・PowerShell・シェル・HTML・XML・CSS・JSON・YAML・TOML・INI・Markdown・SQL・COBOL（固定 / 自由形式）・JCL・PL/I・RPG・Rhai（3270 のマクロ）・ログ・diff・Makefile・Dockerfile・.gitignore） | ✅ |
 | ファイル種類の判定（設定・モードライン・ファイル名・拡張子・先頭行）、表示メニューの「ハイライト」で切り替え | ✅ |
 | 巨大ファイルでも表示範囲だけを色付け（行の開始状態の記録、編集後は変わった位置から読み直し） | ✅ |
 | 対応する括弧の強調表示と移動（Ctrl+]）、コメント化 / 解除（Ctrl+/）。文字列・コメント内の括弧は数えない | ✅ |
@@ -88,16 +88,52 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 
 ### リモート（SSH）のファイル
 
-提案書 [11 章](docs/proposal/11-remote-ssh.md) の方式で、SSH 接続先（Linux x86_64）のファイルを編集できます。
+提案書 [11 章](docs/proposal/11-remote-ssh.md) の方式で、SSH 接続先（Linux の x86_64・aarch64）のファイルを編集できます。
 
 - SSH は Pure Rust の `russh`（暗号は `ring`）で yyeditor に組み込んであり、`ssh.exe` など OpenSSH のプログラムは使いません。`~/.ssh/config` と `~/.ssh/known_hosts` は読むだけで使います（承認したホスト鍵は `%APPDATA%\yyeditor\known_hosts` に記録します）。
 - 踏み台（`ProxyJump`、多段も可）は踏み台の SSH 接続の `direct-tcpip` チャネルの上で次の SSH を話し、HTTP CONNECT・SOCKS5・SOCKS4 のプロキシも組み込みで扱います（設定の `proxy_jump`・`proxy`）。`ProxyCommand` は外部のプログラムを起動しないため、`ssh -W`・`nc -X`・`ncat --proxy`・`connect -S/-H` の形だけを読み替えます。
-- パスワードは入力欄で選ぶと Windows の資格情報マネージャーに保存し、次からは自動で使います（受け付けられなければ保存を消して尋ね直す。設定 `remember_passwords`）。
+- パスワード・秘密鍵のパスフレーズは入力欄で選んだ場合だけ Windows の資格情報マネージャーに保存し、次からは自動で使います（受け付けられなければ保存を消して尋ね直す。設定 `remember_passwords`）。
 - 接続の各段階（経路、ホスト鍵の照合、試した認証方式、エージェントの配置）を `%APPDATA%\yyeditor\logs\remote-ssh.log` に記録し、接続に失敗したときはその最後の部分をメッセージに表示します（ヘルプ メニューの「リモート接続の記録を開く」）。
 - 初めて接続するとき、接続先の `~/.yyeditor/agent/<版>-<ハッシュ>/yy-agent` にエージェント（静的リンクの Linux 用バイナリ、約 0.5 MB）を SSH 越しに置き、SHA-256 を照合します。`curl`・`sftp-server`・インターネット接続は使いません。エージェントはポートを待ち受けず、SSH のチャネルの標準入出力だけで通信します。
-- エージェントは配布物の `agents\yy-agent-x86_64-linux`（exe と同じフォルダ）を使います。開発中は環境変数 `YY_AGENT_DIR` でフォルダを指定できます。
+- エージェントは配布物の `agents\yy-agent-x86_64-linux`・`agents\yy-agent-aarch64-linux`（exe と同じフォルダ）から、接続先の CPU（`uname -m`）に合うものを使います。開発中は環境変数 `YY_AGENT_DIR` でフォルダを指定できます。
 - 保存は、接続先の同じフォルダの一時ファイルに書いてから置き換えます（権限・所有者・シンボリックリンク・ハードリンクを保つ）。開いたあとで外部で変更されていれば、上書きするか尋ねます。
 - 今のところ、ファイルは全体を取り寄せてから開きます（M9.2 で表示範囲だけの取り寄せにします）。`sudo` による保存には対応しません。
+
+### ターミナル（yyterm）
+
+提案書 [12 章](docs/proposal/12-terminal.md) の方式で、エディタと同じクレートを使った別のアプリとしてターミナル（`yyterm.exe`）を作っています。
+
+- 手元のシェルは ConPTY（Windows 10 1809 以降）で動かします。既定は PowerShell 7、なければ Windows PowerShell、なければコマンド プロンプト（設定 `[terminal] shell`）。
+- SSH はエディタと同じ組み込みの SSH（OpenSSH を使わない）で、接続設定・踏み台・プロキシ・ホスト鍵・保存したパスワード・接続の記録も共通です（Ctrl+Shift+O）。シェルにはエージェントを使わないので、Linux 以外の接続先にも使えます。ポートフォワーディング（`-L`・`-R`・`-D`。「SSH で接続」の入力、接続設定の `forward`、`~/.ssh/config` の LocalForward など）に対応し、始められなかったものはタブに警告を表示するだけで接続は続けます（エディタと yysftp は無視します）。ワークスペースのリモートのフォルダの一覧にエージェントを使うかは選べます（設定 `[terminal] use_agent`・ワークスペース メニュー。使わなければ SFTP で、接続先に何も置きません）。
+- フォントはエディタと同じ同梱の UDEV Gothic。全角・結合文字、256 色・24 ビット色、代替画面（vim・less など）、マウス、ブラケット ペースト、IME の入力に対応します。
+- ワークスペースはエディタと同じ `*.yyworkspace`。中身がフォルダ 1 つだけのフォルダは、VS Code のように `src/main/java` と束ねて表示します（エディタも同じ）。サイドバー（Ctrl+Shift+E）のフォルダをダブルクリックするとそこでターミナルを開き（リモートのフォルダは SSH）、ファイルはエディタで開きます。エディタのワークスペースの「ターミナルで開く」は、yyterm.exe が同じフォルダにあれば yyterm で開きます。
+- タブ（Ctrl+Shift+T・Ctrl+Shift+W・Ctrl+Tab。エディタと同じ「×」・中ボタンで閉じる。右クリックで、ほかのタブ・右側・左側をまとめて閉じる）、コピー・貼り付け（Ctrl+Shift+C/V、右クリック）、スクロールバック（Shift+PageUp/PageDown、ホイール）、文字の大きさ（Ctrl++/-/0）。
+
+### 3270（yyterm のタブ）
+
+提案書 [14 章](docs/proposal/14-tn3270.md) の方式で、yyterm のタブとして IBM メインフレームの 3270 端末（TN3270・TN3270E）を作っています（M1〜M6）。
+
+- 3270 データストリーム（フィールド・拡張属性・色・Query Reply）と端末の入力の規則（保護・数字・自動スキップ・挿入・AID）、TN3270E の LU 名の指定、モデル 2〜5。
+- 日本語（CCSID 930・939・1390・1399）。IME で漢字を入れると SO/SI を自動で入れます。
+- 独自のキー割り当てと、PF13〜24・PA・Clear・Attn などを押せる画面のキーパッド。
+- 直接の TCP か、組み込みの SSH の direct-tcpip（踏み台・プロキシの先のホスト）で接続します。
+- マクロ（Rhai）: 画面の文字を待つ・読む・入力する・IND$FILE・CSV への書き出し。操作の記録からマクロを作れます。パスワードは資格情報マネージャーから入れ、スクリプトには渡しません。
+- プリンター（3287。TN3270E のプリンター LU、LU1 の SCS・LU3、日本語）。受け取った印刷を Windows のプリンター・PDF・テキストに出します。
+- 通信の記録（トレース）: 送受信の 16 進と解釈（オーダー・属性・AID など）。パスワードは伏せ字にし、記録から画面を再現できます。
+- IND$FILE のファイル転送（DFT。TSO・CMS・CICS の GET・PUT）。日本語のテキストはバイナリで転送して端末で CCSID と UTF-8 を変換します。
+- TLS（`tn3270s://` の暗黙の TLS と Telnet の STARTTLS。rustls）。検証できない証明書（社内の自己署名など）は SSH のホスト鍵と同じく初めて見たときに確かめて記録し、変わったら接続しません。PEM のクライアント証明書も使えます。
+- 中核は OS に依存しない `yy-3270`・`yy-3270-tls`。テスト用の模擬ホスト `yy-3270-mock`（TN3270E の LU・ASSOCIATE・RESPONSES・PRINT-EOJ、日本語、Query、IND$FILE、SCS/LU3、TLS）を x3270（s3270・pr3287）で確かめたうえで、Linux の CI で yyterm の 3270 の中核を試験しています。
+
+### ファイル転送（yysftp）
+
+提案書 [13 章](docs/proposal/13-transfer.md) の方式で、エディタ・ターミナルと同じクレートを使った別のアプリとして SFTP・SCP のファイル転送（`yysftp.exe`）を作っています。
+
+- エクスプローラー風の画面です。左に接続先とフォルダのツリー、右にフォルダの中身（名前・更新日時・種類・サイズ・属性。エクスプローラーと同じアイコン）、上に戻る・進む・上へとアドレスバー（`ユーザー@ホスト:/パス`）、下に転送の一覧と記録。
+- エクスプローラーからドラッグ＆ドロップ（ファイル・フォルダ）でアップロード、選んだ項目を Ctrl+D でダウンロード。名前の変更（F2）、削除（Del）、新しいフォルダ（Ctrl+Shift+N）。
+- 数十 GB のファイルも送れます（SFTP は要求を並べて送り、回線の遅延を隠します）。送り先には `<名前>.yypart` に書き、大きさを確かめてから本来の名前にします。
+- 途中で切断されたら、間を空けて自動で接続し直し、続きから送ります（レジューム）。送り終えた位置はジャーナルに書くので、一時停止やアプリの終了の後でも、アプリが落ちた後でも（次の起動で）続きから送れます（ジャーナルと途中のファイルはディスクに書き出しながら進めます）。SFTP のアップロードでは続ける位置の直前を照合します。
+- 転送の様子（接続、続ける位置の決め方、進みと速さ、切断と再接続、確認、名前の変更）を `%APPDATA%\yyeditor\logs\transfer.log` と画面の「記録」に細かく残します。
+- 接続（組み込みの SSH、踏み台・プロキシ・ホスト鍵・保存したパスワード・接続の記録）、設定ファイル、同梱フォントはエディタ・ターミナルと共通です。転送は sftp-server（SFTP）か scp（SCP）を使います（`sudo` は使いません）。接続先にエージェントを置いて使うかは選べます（設定 `[transfer] use_agent`・転送メニュー。既定は使わない）。使うと、一覧・ファイル操作をエージェントで行い（sftp-server がなくても一覧を表示できる）、送り終えた内容をファイル全体の SHA-256 で照合します（一致しなければ 1 回送り直す）。
 
 ### 対応している文字コード
 
@@ -243,15 +279,23 @@ crates/
   yy-syntax/   シンタックスハイライト（TOML の定義、複数パターンの正規表現、行の開始状態の記録、ファイル種類の判定）
   yy-preview/  Markdown・HTML のプレビュー（Markdown → HTML、ページ、同梱の Mermaid・KaTeX・d3）
   yy-proto/    リモート編集のプロトコル（端末とエージェントで共有するメッセージとフレーム）
-  yy-remote/   リモート編集の端末側（エージェントの配置、要求と応答、~/.ssh/config・known_hosts の読み取り）
+  yy-remote/   リモート編集の端末側（エージェントの配置、要求と応答、~/.ssh/config・known_hosts の読み取り）、
+               ファイル転送の中核（SFTP v3・SCP・ジャーナル付きのレジューム・転送の記録）
   yy-ssh/      組み込みの SSH クライアント（russh + ring。OpenSSH を使わない）
+  yy-3270/     3270 の中核（Telnet・TN3270E・3270 データストリーム・フィールド・入力の規則・DBCS・IND$FILE・SCS と LU3 の印刷・通信の記録）
+  yy-3270-macro/ 3270 のマクロ（Rhai。待つ・読む・入力・転送・記録）
+  yy-3270-tls/ 3270 の TLS（暗黙の TLS・STARTTLS・証明書の TOFU・クライアント証明書。rustls + ring）
+  yy-3270-mock/ 3270 の模擬ホスト（試験用。x3270 で確かめる check-with-x3270.sh）
+  yy-term/     ターミナルの中核（制御シーケンスの解釈、画面、スクロールバック、キーの送り方。OS 非依存）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
+apps/yyterm/   ターミナルの実行ファイル（yy-win の term モジュール。ビルドスクリプトは yyeditor と共通）
+apps/yysftp/   ファイル転送の実行ファイル（yy-win の sftp モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yy-agent/ SSH 接続先に置くエージェント（Linux 用、musl で静的リンク）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
                     ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
-tools/gen-icon/     アイコン（apps/yyeditor/res/yyeditor.ico）の生成（Python + Pillow）
+tools/gen-icon/     アイコン（apps/yyeditor・yyterm・yysftp の res/*.ico）の生成（Python + Pillow）
 tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の取得（npm から）
 ```
 
@@ -262,16 +306,24 @@ tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の�
 Windows（MSVC）:
 
 ```sh
-cargo build --release -p yyeditor
+cargo build --release -p yyeditor -p yyterm -p yysftp
 target\release\yyeditor.exe [開くファイル]
+target\release\yyterm.exe [フォルダ | ssh://接続先/パス | ユーザー@ホスト]
+target\release\yysftp.exe [ssh://接続先/パス | ユーザー@ホスト:/パス | ユーザー@ホスト]
 ```
 
-リモート編集のエージェント（Linux 用。exe と同じフォルダの `agents\yy-agent-x86_64-linux` に置く）:
+リモート編集のエージェント（Linux 用。exe と同じフォルダの `agents\yy-agent-<x86_64|aarch64>-linux` に置く）:
 
 ```sh
-rustup target add x86_64-unknown-linux-musl
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 cargo build --release -p yy-agent --target x86_64-unknown-linux-musl
+# aarch64: Arm の Linux ではそのまま。x86_64 の Linux からは同梱の rust-lld でリンクできる
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker-flavor=ld.lld" \
+cargo build --release -p yy-agent --target aarch64-unknown-linux-musl
 ```
+
+CI では aarch64 を Arm のランナー（`ubuntu-24.04-arm`）で作り、そこでエージェント・組み込みの SSH・転送の結合テストも行います。
 
 テスト・静的解析:
 
@@ -281,7 +333,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Linux から Windows UI 層の型検査のみ行う場合
 rustup target add x86_64-pc-windows-msvc
 # （組み込みの SSH が使う ring は Windows SDK がないと C のビルドができないので外す）
-cargo check -p yy-win -p yyeditor --no-default-features --target x86_64-pc-windows-msvc
+cargo check -p yy-win -p yyeditor -p yyterm -p yysftp --no-default-features --target x86_64-pc-windows-msvc
 ```
 
 巨大ファイルでの性能確認:

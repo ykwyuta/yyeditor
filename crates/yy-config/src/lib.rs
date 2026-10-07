@@ -38,6 +38,11 @@ pub struct Config {
     pub filetype: BTreeMap<String, FileType>,
     /// SSH 接続先のファイルの編集（11 章 4.4）
     pub remote: RemoteConfig,
+    /// ターミナル（yyterm。12 章）
+    pub terminal: TerminalConfig,
+    /// ファイル転送（yysftp。13 章）
+    pub transfer: TransferConfig,
+    pub tn3270: Tn3270Config,
 }
 
 impl Default for Config {
@@ -49,6 +54,206 @@ impl Default for Config {
             workspace: WorkspaceConfig::default(),
             filetype: default_filetypes(),
             remote: RemoteConfig::default(),
+            terminal: TerminalConfig::default(),
+            transfer: TransferConfig::default(),
+            tn3270: Tn3270Config::default(),
+        }
+    }
+}
+
+/// 3270 のセッション（yyterm。14 章）の設定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tn3270Config {
+    /// モデル（2: 24×80、3: 32×80、4: 43×80、5: 27×132）
+    pub model: u8,
+    /// 文字コード（CCSID。037・1047・930・939・1390・1399 など）
+    pub ccsid: u32,
+    /// 端末の種類（空なら IBM-3278-<model>-E）
+    pub terminal_type: String,
+    /// TN3270E を使う（断られたら TN3270）
+    pub tn3270e: bool,
+    /// ホストにしかないキー（PF13〜24・PA・Clear など）のボタンを画面の右に出す
+    pub keypad: bool,
+    /// 3270 のタブを開いたときから通信の記録（`logs\tn3270-trace-*.log`）をとる
+    pub trace: bool,
+    /// TLS で加えて信頼する認証局の証明書（PEM のファイル。空なら OS の信頼する認証局だけ）
+    pub ca_file: String,
+    /// TLS のクライアント証明書（PEM のファイル。秘密鍵も入っていてよい。空なら使わない）
+    pub client_cert: String,
+    /// クライアント証明書の秘密鍵（PEM。空なら `client_cert` から読む）
+    pub client_key: String,
+    /// プリンター（3287）の出力
+    pub printer: Tn3270Printer,
+    /// マクロ
+    #[serde(rename = "macro")]
+    pub macros: Tn3270Macro,
+    /// 接続先ごとの設定（名前 → 値）
+    pub host: BTreeMap<String, Tn3270Host>,
+}
+
+impl Default for Tn3270Config {
+    fn default() -> Self {
+        Tn3270Config {
+            model: 2,
+            ccsid: 930,
+            terminal_type: String::new(),
+            tn3270e: true,
+            keypad: true,
+            trace: false,
+            ca_file: String::new(),
+            client_cert: String::new(),
+            client_key: String::new(),
+            printer: Tn3270Printer::default(),
+            macros: Tn3270Macro::default(),
+            host: BTreeMap::new(),
+        }
+    }
+}
+
+/// 3270 のマクロ（14 章 13）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tn3270Macro {
+    /// マクロのフォルダ（空なら `%APPDATA%\yyeditor\macros`）
+    pub folder: String,
+    /// マクロが書き出すフォルダ（空ならドキュメントの `yyterm\macros-out`）
+    pub output: String,
+    /// 待つ操作の既定の時間の上限（秒）
+    pub timeout: u64,
+}
+
+impl Default for Tn3270Macro {
+    fn default() -> Self {
+        Tn3270Macro {
+            folder: String::new(),
+            output: String::new(),
+            timeout: 30,
+        }
+    }
+}
+
+/// 3270 のプリンター（3287）の出力（14 章 12.3）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tn3270Printer {
+    /// 印刷を受け取ったら: `printer`（Windows のプリンター）・`pdf`・`text`・`ask`（一覧に溜める）
+    pub output: String,
+    /// Windows のプリンターの名前（空なら既定のプリンター）
+    pub printer_name: String,
+    /// PDF・テキストを保存するフォルダー（空ならドキュメントの `yyterm-print`）
+    pub folder: String,
+    /// PRINT-EOJ のないホストで、この秒数データが来なければジョブの終わりとみなす
+    pub eoj_timeout: u64,
+}
+
+impl Default for Tn3270Printer {
+    fn default() -> Self {
+        Tn3270Printer {
+            output: "ask".into(),
+            printer_name: String::new(),
+            folder: String::new(),
+            eoj_timeout: 5,
+        }
+    }
+}
+
+/// 3270 の接続先ごとの設定（書いていない項目は `[tn3270]` の値）。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tn3270Host {
+    pub host: String,
+    /// ポート（省略すると 23。`tls = "tls"` なら 992）
+    pub port: Option<u16>,
+    /// TLS: `none`（既定）・`tls`（暗黙の TLS）・`starttls`（Telnet の STARTTLS）
+    pub tls: Option<String>,
+    /// TLS で加えて信頼する認証局の証明書（省略すると `[tn3270]` の値）
+    pub ca_file: Option<String>,
+    /// TLS のクライアント証明書（省略すると `[tn3270]` の値。空の文字列なら使わない）
+    pub client_cert: Option<String>,
+    /// クライアント証明書の秘密鍵
+    pub client_key: Option<String>,
+    /// TN3270E で求める LU 名
+    pub lu: Option<String>,
+    pub model: Option<u8>,
+    pub ccsid: Option<u32>,
+    /// この SSH の接続（`~/.ssh/config` の Host・`ユーザー@ホスト`）を経由する
+    pub ssh: Option<String>,
+    /// プリンターの LU 名（省略すると端末の LU に対応するプリンター。ASSOCIATE）
+    pub printer_lu: Option<String>,
+    /// `auto` なら端末を開いたらプリンターも開く（既定は `manual`）
+    pub printer: Option<String>,
+    /// 接続したら実行するマクロ（マクロのフォルダからの名前。例: `logon.rhai`）
+    pub on_connect: Option<String>,
+}
+
+/// ファイル転送（yysftp）の設定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TransferConfig {
+    /// 転送の方式（`sftp` か `scp`）
+    pub protocol: String,
+    /// 進みがないまま再接続してよい回数
+    pub retries: u32,
+    /// SCP のアップロードで 1 回に送る量（MiB。切断で失うのは多くてもこの量）
+    pub scp_chunk_mb: u32,
+    /// 名前が `.` で始まるファイルも表示する
+    pub show_hidden: bool,
+    /// ダウンロードの既定の保存先（空ならダウンロード フォルダ）
+    pub download_dir: String,
+    /// 接続先にエージェントを置いて使う（一覧・ファイル操作と、送り終えた内容の SHA-256 の照合）。
+    /// 使わなければ SFTP だけ（接続先に何も置かない）
+    pub use_agent: bool,
+}
+
+impl Default for TransferConfig {
+    fn default() -> Self {
+        TransferConfig {
+            protocol: "sftp".into(),
+            retries: 10,
+            scp_chunk_mb: 32,
+            show_hidden: false,
+            download_dir: String::new(),
+            use_agent: false,
+        }
+    }
+}
+
+/// ターミナル（yyterm）の設定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TerminalConfig {
+    /// 手元で起動するシェルのコマンドと引数。空なら PowerShell 7（pwsh.exe）、なければ
+    /// Windows PowerShell、なければコマンド プロンプト
+    pub shell: Vec<String>,
+    /// フォント名（空ならエディタと同じ。既定は同梱の UDEV Gothic）
+    pub font_family: String,
+    /// フォントサイズ（ポイント。0 ならエディタと同じ）
+    pub font_size: f32,
+    /// スクロールバックの行数
+    pub scrollback: u32,
+    /// 東アジアの幅が曖昧な文字（○、※ など）を全角として扱う（接続先の設定と合わせる）
+    pub ambiguous_wide: bool,
+    /// SSH の接続先に知らせる端末の種類（TERM）
+    pub term: String,
+    /// 選択したら自動でコピーする
+    pub copy_on_select: bool,
+    /// ワークスペースのリモートのフォルダの一覧に、接続先のエージェントを使う（使わなければ SFTP。
+    /// 接続先に何も置かない）。シェルにはエージェントを使わない
+    pub use_agent: bool,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        TerminalConfig {
+            shell: Vec::new(),
+            font_family: String::new(),
+            font_size: 0.0,
+            scrollback: 10_000,
+            ambiguous_wide: false,
+            term: "xterm-256color".into(),
+            copy_on_select: false,
+            use_agent: false,
         }
     }
 }
@@ -337,6 +542,9 @@ pub struct RemoteHost {
     pub proxy: Option<String>,
     /// この接続先でエージェントを置くフォルダ（ホームが noexec の場合など）
     pub agent_dir: Option<String>,
+    /// ポートフォワーディング（ターミナルだけが使う。`L 8080:localhost:80`・`R 9000:localhost:3000`・
+    /// `D 1080`。`~/.ssh/config` の LocalForward なども使う）
+    pub forward: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -529,6 +737,10 @@ mod tests {
         .unwrap();
         assert!(c.remote.read_ssh_config);
         assert!(c.remote.remember_passwords);
+        assert_eq!(c.terminal.scrollback, 10_000);
+        assert_eq!(c.terminal.term, "xterm-256color");
+        assert_eq!(c.transfer.protocol, "sftp");
+        assert_eq!(c.transfer.retries, 10);
         assert_eq!(c.remote.agent_dir, "/work/agent");
         let h = &c.remote.host["build"];
         assert_eq!(h.hostname.as_deref(), Some("build01.example.co.jp"));

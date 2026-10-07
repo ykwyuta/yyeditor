@@ -32,12 +32,24 @@ pub(crate) fn human_size(n: u64) -> String {
     format!("{v:.2} {}", UNITS[i])
 }
 
+static APP_NAME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// アプリの名前（メッセージボックスの見出し。既定は yyeditor）。
+pub(crate) fn app_name() -> &'static str {
+    APP_NAME.get().copied().unwrap_or("yyeditor")
+}
+
+/// アプリの名前を決める（ターミナルは yyterm）。
+pub(crate) fn set_app_name(name: &'static str) {
+    let _ = APP_NAME.set(name);
+}
+
 pub(crate) fn error_box(owner: HWND, text: &str) {
     unsafe {
         MessageBoxW(
             Some(owner),
             &HSTRING::from(text),
-            &HSTRING::from("yyeditor"),
+            &HSTRING::from(crate::util::app_name()),
             MB_OK | MB_ICONERROR,
         );
     }
@@ -48,7 +60,7 @@ pub(crate) fn info_box(owner: HWND, text: &str) {
         MessageBoxW(
             Some(owner),
             &HSTRING::from(text),
-            &HSTRING::from("yyeditor"),
+            &HSTRING::from(crate::util::app_name()),
             MB_OK | MB_ICONINFORMATION,
         );
     }

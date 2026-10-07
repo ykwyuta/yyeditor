@@ -31,7 +31,9 @@ mod recorddlg;
 mod remote;
 mod remotedlg;
 mod render;
+mod sftp;
 mod tabclose;
+mod term;
 mod util;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -43,6 +45,10 @@ use windows::core::{PCWSTR, Result, w};
 
 use crate::util::Context;
 
+/// ファイル転送（yysftp）を起動する
+pub use sftp::run_sftp;
+/// ターミナル（yyterm）を起動する
+pub use term::run_terminal;
 /// SSH の接続の実装を作る関数（`yy-ssh`。実行ファイルが [`run`] に渡す）
 pub use yy_remote::ConnectorFactory;
 
@@ -59,7 +65,7 @@ const APP_ICON_ID: usize = 1;
 
 /// 埋め込んだアイコンを大小 2 つのサイズで読み込む（システムの DPI に合わせる）。
 /// 埋め込まれていなければ（テストの実行ファイルなど）標準のアイコンにする。
-fn app_icons(hinstance: windows::Win32::Foundation::HINSTANCE) -> (HICON, HICON) {
+pub(crate) fn app_icons(hinstance: windows::Win32::Foundation::HINSTANCE) -> (HICON, HICON) {
     unsafe {
         let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem();
         let load = |metric| {

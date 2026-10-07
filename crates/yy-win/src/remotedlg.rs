@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::HSTRING;
 use yy_core::Encoding;
 use yy_remote::uri::{RemoteUri, Target};
-use yy_remote::{DirEntry, FileInfo, Session};
+use yy_remote::{DirEntry, FileInfo, RemoteFs, Session};
 
 use crate::goto::{CLASS_BUTTON, CLASS_EDIT, CLASS_STATIC, Template};
 use crate::remote::{self, RemoteDest};
@@ -42,7 +42,8 @@ pub(crate) enum Mode {
 /// 選んだファイル。
 pub(crate) struct Picked {
     pub(crate) uri: RemoteUri,
-    pub(crate) session: Arc<Session>,
+    /// エージェントのセッション（エージェントを使うときだけ。保存に使う）
+    pub(crate) session: Option<Arc<Session>>,
     /// 開く: 指定した文字コード（`None` なら自動判別）。保存: 保存する文字コード
     pub(crate) encoding: Option<Encoding>,
     pub(crate) bom: bool,
@@ -51,14 +52,15 @@ pub(crate) struct Picked {
 }
 
 impl Picked {
-    /// 保存先（既にあるファイルは上書きを確かめてあるので置き換える）。
-    pub(crate) fn dest(&self) -> RemoteDest {
-        RemoteDest {
+    /// 保存先（既にあるファイルは上書きを確かめてあるので置き換える）。エージェントを
+    /// 使っていなければ `None`。
+    pub(crate) fn dest(&self) -> Option<RemoteDest> {
+        Some(RemoteDest {
             uri: self.uri.clone(),
-            session: self.session.clone(),
+            session: self.session.clone()?,
             expected: self.existing.as_ref().map(|i| i.id),
             force: self.existing.is_some(),
-        }
+        })
     }
 }
 
@@ -66,7 +68,8 @@ struct State {
     mode: Mode,
     targets: Vec<String>,
     target: Option<Target>,
-    session: Option<Arc<Session>>,
+    /// 一覧・ファイル操作（エージェントか SFTP。[`remote::fs`]）
+    fs: Option<Arc<dyn RemoteFs>>,
     /// 表示しているフォルダ（接続前は初期値）
     dir: Vec<u8>,
     /// 一覧の各行の項目（先頭の「..」は `None`）
@@ -85,7 +88,7 @@ pub(crate) fn show(
     encoding: Option<Encoding>,
     bom: bool,
 ) -> Option<Picked> {
-    let targets = crate::app::with_app(|a| a.remote.known_targets()).unwrap_or_default();
+    let targets = crate::remote::with_state(|r| r.known_targets()).unwrap_or_default();
     let (target, dir, name) = match &initial {
         Some(u) => {
             let is_file = mode == Mode::Save || (mode == Mode::Open && !u.path.ends_with(b"/"));
@@ -106,7 +109,7 @@ pub(crate) fn show(
         mode,
         targets,
         target,
-        session: None,
+        fs: None,
         dir,
         shown: Vec::new(),
         name,
@@ -330,7 +333,7 @@ fn connect(hwnd: HWND) {
         return;
     };
     let show = |t: &str| set_info(hwnd, t);
-    match remote::session(&target, &show) {
+    match remote::fs(&target, &show) {
         Ok(s) => {
             // 前とは別の接続先なら、フォルダは接続先のホームから
             let same = st.target.as_ref().is_some_and(|t| t.same(&target));
@@ -338,7 +341,7 @@ fn connect(hwnd: HWND) {
                 st.dir = s.home().to_vec();
             }
             st.target = Some(target);
-            st.session = Some(s);
+            st.fs = Some(s);
             let dir = st.dir.clone();
             list(hwnd, &dir);
         }
@@ -352,7 +355,7 @@ fn connect(hwnd: HWND) {
 /// フォルダ `dir`（`~` も可）を表示する。
 fn list(hwnd: HWND, dir: &[u8]) {
     let st = unsafe { state(hwnd) };
-    let Some(session) = st.session.clone() else {
+    let Some(session) = st.fs.clone() else {
         set_info(hwnd, "先に接続してください");
         return;
     };
@@ -457,7 +460,7 @@ fn go_to_dir_field(hwnd: HWND) {
     if typed.is_empty() {
         return;
     }
-    let Some(session) = st.session.clone() else {
+    let Some(session) = st.fs.clone() else {
         connect(hwnd);
         return;
     };
@@ -487,7 +490,7 @@ fn go_to_dir_field(hwnd: HWND) {
 /// 表示しているフォルダに決める（フォルダを選ぶとき）。
 fn accept_folder(hwnd: HWND) {
     let st = unsafe { state(hwnd) };
-    let (Some(session), Some(target)) = (st.session.clone(), st.target.clone()) else {
+    let (Some(_), Some(target)) = (st.fs.clone(), st.target.clone()) else {
         connect(hwnd);
         return;
     };
@@ -498,7 +501,7 @@ fn accept_folder(hwnd: HWND) {
             port: target.port,
             path: st.dir.clone(),
         },
-        session,
+        session: remote::with_state(|r| r.connected(&target)).flatten(),
         encoding: None,
         bom: false,
         existing: None,
@@ -511,7 +514,7 @@ fn accept_folder(hwnd: HWND) {
 /// ファイル名の欄のファイルに決める。
 fn accept_name(hwnd: HWND) {
     let st = unsafe { state(hwnd) };
-    let (Some(session), Some(target)) = (st.session.clone(), st.target.clone()) else {
+    let (Some(session), Some(target)) = (st.fs.clone(), st.target.clone()) else {
         connect(hwnd);
         return;
     };
@@ -559,7 +562,7 @@ fn accept_name(hwnd: HWND) {
                 MessageBoxW(
                     Some(hwnd),
                     &HSTRING::from(text),
-                    &HSTRING::from("yyeditor"),
+                    &HSTRING::from(crate::util::app_name()),
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
                 )
             };
@@ -571,6 +574,7 @@ fn accept_name(hwnd: HWND) {
     }
     let bom = st.mode == Mode::Save
         && unsafe { SendMessageW(item(hwnd, ID_BOM), BM_GETCHECK, None, None).0 } == 1;
+    let session = remote::with_state(|r| r.connected(&target)).flatten();
     st.result = Some(Picked {
         uri,
         session,

@@ -1858,7 +1858,7 @@ fn utf8_index(text: &str, u16_idx: usize) -> usize {
 /// 指定のフォントがインストールされていなければ、等幅の代替フォントを選ぶ。
 ///
 /// 選んだフォント名と、それを含むコレクション（`None` はシステムのフォント）を返す。
-fn resolve_family(
+pub(crate) fn resolve_family(
     dwrite: &IDWriteFactory,
     bundled: Option<&IDWriteFontCollection>,
     requested: &str,

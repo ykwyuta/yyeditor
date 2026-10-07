@@ -1,0 +1,25 @@
+[package]
+name = "yy-3270-tls"
+description = "TLS for yyterm's 3270 sessions (implicit TLS, Telnet STARTTLS, TOFU for certificates, client certificates)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["rustls"]
+# rustls（ring）による TLS の実装。なければ型と設定だけ（C のビルドが要らない）
+rustls = ["dep:rustls", "dep:rustls-native-certs"]
+
+[dependencies]
+rustls = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
+sha2.workspace = true
+
+[dev-dependencies]
+rustls.workspace = true
+rcgen.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

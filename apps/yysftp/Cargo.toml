@@ -1,0 +1,25 @@
+[package]
+name = "yysftp"
+description = "SFTP/SCP file transfer for Windows with resumable transfers, built from yyeditor's crates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# マニフェストとアイコンの埋め込みは yyeditor と同じ処理（ファイルは res/yysftp.*）
+build = "../yyeditor/build.rs"
+
+[[bin]]
+name = "yysftp"
+path = "src/main.rs"
+
+[features]
+default = ["ssh"]
+# OpenSSH を使わない組み込みの SSH クライアント
+ssh = ["dep:yy-ssh"]
+
+[target.'cfg(windows)'.dependencies]
+yy-win.workspace = true
+yy-ssh = { workspace = true, optional = true }
+
+[lints]
+workspace = true

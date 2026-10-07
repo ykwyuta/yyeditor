@@ -12,6 +12,7 @@
 //! 接続し、次の接続先へは踏み台の `direct-tcpip` チャネルの上で SSH を話す。最初の接続先
 //! （踏み台がなければ接続先そのもの）への TCP 接続には HTTP・SOCKS のプロキシを使える。
 
+mod forward;
 mod proxy;
 
 use std::io::{self, Read, Write};
@@ -29,8 +30,8 @@ use tokio::sync::mpsc;
 use yy_remote::known_hosts::{self, HostKeyStatus};
 use yy_remote::{
     ConnectLog, Connector, ConnectorFactory, ConnectorOptions, Exit, HostKeyCheck, HostKeyQuestion,
-    HostSpec, PasswordAnswer, PasswordRequest, PasswordStore, Process, Prompter, STDERR_LIMIT,
-    SavedPassword, Transport,
+    HostSpec, PassphraseRequest, PasswordAnswer, PasswordRequest, PasswordStore, Process, Prompter,
+    STDERR_LIMIT, SavedPassword, Shell, Transport,
 };
 
 /// 接続を待つ時間の上限
@@ -74,6 +75,8 @@ fn ssh_error(e: russh::Error) -> io::Error {
 /// russh から呼ばれる処理。ホスト鍵は受け取っておくだけで、照合は認証の前に行う。
 struct Client {
     server_key: Arc<Mutex<Option<PublicKey>>>,
+    /// `-R` の振り分け表（接続先から開かれた forwarded-tcpip チャネル）
+    routes: forward::Routes,
 }
 
 impl client::Handler for Client {
@@ -90,6 +93,26 @@ impl client::Handler for Client {
         };
         *self.server_key.lock().unwrap() = Some(key);
         Ok(true)
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        originator_address: &str,
+        originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        forward::on_forwarded(
+            &self.routes,
+            channel,
+            connected_port,
+            format!("{originator_address}:{originator_port}"),
+            reply,
+        );
+        Ok(())
     }
 }
 
@@ -197,12 +220,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
 impl SshConnector {
     /// 1 つのホストに接続し、ホスト鍵を照合して認証する。`via` があればその踏み台を経由する。
+    #[allow(clippy::too_many_arguments)]
     fn connect_hop(
         &self,
         rt: &Runtime,
         config: &Arc<client::Config>,
         spec: &HostSpec,
         via: Option<&Handle<Client>>,
+        routes: forward::Routes,
         prompter: &dyn Prompter,
         log: &ConnectLog,
     ) -> io::Result<Handle<Client>> {
@@ -231,6 +256,7 @@ impl SshConnector {
         let server_key = Arc::new(Mutex::new(None));
         let handler = Client {
             server_key: server_key.clone(),
+            routes,
         };
         let mut handle = rt.block_on(async {
             let connect = async {
@@ -335,9 +361,16 @@ impl Connector for SshConnector {
             ..client::Config::default()
         });
         let mut handles: Vec<Arc<Handle<Client>>> = Vec::new();
+        // 接続先（最後のホップ）の -R の振り分け表
+        let routes = forward::Routes::default();
         for (i, hop) in hops.iter().enumerate() {
             let via = handles.last().map(|h| h.as_ref());
-            match self.connect_hop(rt, &config, hop, via, prompter, log) {
+            let r = if i + 1 == hops.len() {
+                routes.clone()
+            } else {
+                forward::Routes::default()
+            };
+            match self.connect_hop(rt, &config, hop, via, r, prompter, log) {
                 Ok(h) => handles.push(Arc::new(h)),
                 Err(e) => {
                     for h in handles.iter().rev() {
@@ -357,6 +390,7 @@ impl Connector for SshConnector {
         Ok(Arc::new(SshTransport {
             handle,
             jumps: handles,
+            routes,
         }))
     }
 }
@@ -526,7 +560,7 @@ impl ProxyAsk<'_> {
     }
 }
 
-/// 認証に成功したパスワードを保存する（失敗しても接続は続ける）。
+/// 使えたパスワード・パスフレーズを保存する（失敗しても接続は続ける）。
 fn save_password(
     store: &dyn PasswordStore,
     key: &str,
@@ -539,8 +573,8 @@ fn save_password(
         password: password.to_owned(),
     };
     match store.save(key, &saved) {
-        Ok(()) => log.note(format!("パスワードを保存しました（{key}）")),
-        Err(e) => log.note(format!("パスワードを保存できませんでした（{key}）: {e}")),
+        Ok(()) => log.note(format!("保存しました（{key}）")),
+        Err(e) => log.note(format!("保存できませんでした（{key}）: {e}")),
     }
 }
 
@@ -596,7 +630,7 @@ fn authenticate(
             log.note("サーバーが公開鍵認証を受け付けないため、残りの秘密鍵は使いません");
             break;
         }
-        let Some(key) = load_key(path, prompter, log)? else {
+        let Some(key) = load_key(path, prompter, store, log)? else {
             continue;
         };
         let what = format!("公開鍵（{}、{}）", path.display(), key.algorithm());
@@ -740,10 +774,12 @@ fn cancelled() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "接続を中止しました")
 }
 
-/// 秘密鍵を読む。暗号化されていればパスフレーズを尋ねる（答えなければ `None`）。
+/// 秘密鍵を読む。暗号化されていれば、保存したパスフレーズ、なければ尋ねたパスフレーズで開く
+/// （答えなければ `None`）。保存を選んだパスフレーズは、鍵を開けたら保存する。
 fn load_key(
     path: &Path,
     prompter: &dyn Prompter,
+    store: Option<&dyn PasswordStore>,
     log: &ConnectLog,
 ) -> io::Result<Option<PrivateKey>> {
     match russh::keys::load_secret_key(path, None) {
@@ -758,15 +794,43 @@ fn load_key(
             return Ok(None);
         }
     }
+    let key = yy_remote::passphrase_key(path);
+    let mut notice = None;
+    if let Some(store) = store
+        && let Some(saved) = store.load(&key)
+    {
+        if let Ok(k) = russh::keys::load_secret_key(path, Some(&saved.password)) {
+            log.note(format!(
+                "秘密鍵 {} を保存したパスフレーズで開きました",
+                path.display()
+            ));
+            return Ok(Some(k));
+        }
+        store.delete(&key);
+        log.note(format!(
+            "保存したパスフレーズで秘密鍵 {} を開けなかったため、保存を削除しました",
+            path.display()
+        ));
+        notice = Some("保存したパスフレーズでは開けませんでした（保存を削除しました）。");
+    }
     for _ in 0..RETRIES {
-        let Some(pass) = prompter.passphrase(path) else {
+        let Some(answer) = prompter.ask_passphrase(&PassphraseRequest {
+            key_file: path,
+            can_save: store.is_some(),
+            note: notice.take(),
+        }) else {
             log.note(format!(
                 "秘密鍵 {} のパスフレーズが入力されなかったため使いません",
                 path.display()
             ));
             return Ok(None);
         };
-        if let Ok(k) = russh::keys::load_secret_key(path, Some(&pass)) {
+        if let Ok(k) = russh::keys::load_secret_key(path, Some(&answer.password)) {
+            if answer.save
+                && let Some(store) = store
+            {
+                save_password(store, &key, "", &answer.password, log);
+            }
             return Ok(Some(k));
         }
         log.note(format!(
@@ -782,6 +846,8 @@ struct SshTransport {
     handle: Arc<Handle<Client>>,
     /// 経由している踏み台の接続（最初の踏み台から順に）
     jumps: Vec<Arc<Handle<Client>>>,
+    /// `-R` の振り分け表
+    routes: forward::Routes,
 }
 
 impl Drop for SshTransport {
@@ -802,17 +868,56 @@ impl Drop for SshTransport {
     }
 }
 
-impl Transport for SshTransport {
-    fn exec(&self, command: &[u8]) -> io::Result<Process> {
+/// チャネルで始めること。
+enum Start {
+    Exec(Vec<u8>),
+    /// サブシステム（`sftp` など）
+    Subsystem(String),
+    /// 端末つき（`command` がなければログインシェル）
+    Shell {
+        term: String,
+        cols: u16,
+        rows: u16,
+        command: Option<Vec<u8>>,
+    },
+}
+
+/// 開いたチャネル。
+struct Opened {
+    writer: ChannelWriter,
+    reader: ChannelReader,
+    finish: Box<dyn FnOnce() -> io::Result<Exit> + Send>,
+    half: Arc<russh::ChannelWriteHalf<client::Msg>>,
+}
+
+impl SshTransport {
+    /// セッションのチャネルを開いて `start` を行う。`merge_stderr` なら標準エラー出力も出力に流す。
+    fn open(&self, start: Start, merge_stderr: bool) -> io::Result<Opened> {
         let rt = runtime()?;
         let channel = rt.block_on(async {
             let ch = self.handle.channel_open_session().await?;
-            ch.exec(true, command.to_vec()).await?;
+            match start {
+                Start::Exec(command) => ch.exec(true, command).await?,
+                Start::Subsystem(name) => ch.request_subsystem(true, name).await?,
+                Start::Shell {
+                    term,
+                    cols,
+                    rows,
+                    command,
+                } => {
+                    ch.request_pty(true, &term, u32::from(cols), u32::from(rows), 0, 0, &[])
+                        .await?;
+                    match command {
+                        Some(c) => ch.exec(true, c).await?,
+                        None => ch.request_shell(true).await?,
+                    }
+                }
+            }
             Ok::<_, russh::Error>(ch)
         });
         let channel = channel.map_err(ssh_error)?;
         let (mut read_half, write_half) = channel.split();
-        // 標準出力は数を限った受け渡し口に流す（読む側が遅ければ SSH のウィンドウで送信を止める）
+        // 出力は数を限った受け渡し口に流す（読む側が遅ければ SSH のウィンドウで送信を止める）
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
         let (exit_tx, exit_rx) = std::sync::mpsc::channel::<Exit>();
         rt.spawn(async move {
@@ -825,6 +930,13 @@ impl Transport for SshTransport {
                             && tx.send(data.to_vec()).await.is_err()
                         {
                             // 読む側がいなくなった
+                            out = None;
+                        }
+                    }
+                    ChannelMsg::ExtendedData { data, ext: 1 } if merge_stderr => {
+                        if let Some(tx) = &out
+                            && tx.send(data.to_vec()).await.is_err()
+                        {
                             out = None;
                         }
                     }
@@ -847,9 +959,10 @@ impl Transport for SshTransport {
             drop(out);
             let _ = exit_tx.send(exit);
         });
+        let half = Arc::new(write_half);
         let writer = ChannelWriter {
-            inner: Some(Box::pin(write_half.make_writer())),
-            half: Some(write_half),
+            inner: Some(Box::pin(half.make_writer())),
+            half: Some(half.clone()),
         };
         let reader = ChannelReader {
             rx: out_rx,
@@ -861,11 +974,134 @@ impl Transport for SshTransport {
                 .recv()
                 .map_err(|_| io::Error::other("コマンドの終了を受け取れませんでした"))
         });
-        Ok(Process::new(Box::new(writer), Box::new(reader), finish))
+        Ok(Opened {
+            writer,
+            reader,
+            finish,
+            half,
+        })
+    }
+}
+
+impl Transport for SshTransport {
+    fn exec(&self, command: &[u8]) -> io::Result<Process> {
+        let o = self.open(Start::Exec(command.to_vec()), false)?;
+        Ok(Process::new(
+            Box::new(o.writer),
+            Box::new(o.reader),
+            o.finish,
+        ))
+    }
+
+    fn subsystem(&self, name: &str) -> io::Result<Process> {
+        let o = self.open(Start::Subsystem(name.to_owned()), false)?;
+        Ok(Process::new(
+            Box::new(o.writer),
+            Box::new(o.reader),
+            o.finish,
+        ))
+    }
+
+    fn shell(&self, term: &str, size: (u16, u16), command: Option<&[u8]>) -> io::Result<Shell> {
+        let o = self.open(
+            Start::Shell {
+                term: term.to_owned(),
+                cols: size.0,
+                rows: size.1,
+                command: command.map(<[u8]>::to_vec),
+            },
+            true,
+        )?;
+        let half = o.half;
+        let h = half.clone();
+        let close = Box::new(move || {
+            if let Ok(rt) = runtime() {
+                let h = h.clone();
+                rt.spawn(async move {
+                    let _ = h.close().await;
+                });
+            }
+        });
+        let resize = Box::new(move |cols: u16, rows: u16| {
+            // 送るだけ（応答は待たない）。入力より先に届くよう、この場で送る
+            if let Ok(rt) = runtime() {
+                let _ = rt.block_on(half.window_change(u32::from(cols), u32::from(rows), 0, 0));
+            }
+        });
+        Ok(Shell {
+            input: Box::new(o.writer),
+            output: Box::new(o.reader),
+            resize,
+            finish: o.finish,
+            close,
+        })
     }
 
     fn is_closed(&self) -> bool {
         self.handle.is_closed() || self.jumps.iter().any(|h| h.is_closed())
+    }
+
+    fn direct_tcpip(&self, host: &str, port: u16) -> io::Result<Process> {
+        let rt = runtime()?;
+        let ch = rt
+            .block_on(
+                self.handle
+                    .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0),
+            )
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    format!("接続先から {host}:{port} に接続できませんでした: {e}"),
+                )
+            })?;
+        let (mut read_half, write_half) = ch.split();
+        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel::<Exit>();
+        rt.spawn(async move {
+            let mut out = Some(out_tx);
+            while let Some(msg) = read_half.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } => {
+                        if let Some(tx) = &out
+                            && tx.send(data.to_vec()).await.is_err()
+                        {
+                            out = None;
+                        }
+                    }
+                    ChannelMsg::Eof | ChannelMsg::Close => break,
+                    _ => {}
+                }
+            }
+            drop(out);
+            let _ = exit_tx.send(Exit::default());
+        });
+        let half = Arc::new(write_half);
+        let writer = ChannelWriter {
+            inner: Some(Box::pin(half.make_writer())),
+            half: Some(half),
+        };
+        let reader = ChannelReader {
+            rx: out_rx,
+            buf: Vec::new(),
+            pos: 0,
+        };
+        Ok(Process::new(
+            Box::new(writer),
+            Box::new(reader),
+            Box::new(move || {
+                exit_rx
+                    .recv()
+                    .map_err(|_| io::Error::other("中継が終わりました"))
+            }),
+        ))
+    }
+
+    fn forward(
+        &self,
+        f: &yy_remote::Forward,
+        note: yy_remote::ForwardNote,
+    ) -> io::Result<yy_remote::ActiveForward> {
+        forward::start(runtime()?, &self.handle, &self.routes, f, note)
     }
 }
 
@@ -897,7 +1133,7 @@ type AsyncWriter = Pin<Box<dyn tokio::io::AsyncWrite + Send>>;
 
 struct ChannelWriter {
     inner: Option<AsyncWriter>,
-    half: Option<russh::ChannelWriteHalf<client::Msg>>,
+    half: Option<Arc<russh::ChannelWriteHalf<client::Msg>>>,
 }
 
 impl Write for ChannelWriter {

@@ -155,6 +155,11 @@ impl Session {
         })
     }
 
+    /// SSH の接続（ターミナルのシェルなど、エージェントを使わない用途にも使う）。
+    pub fn transport(&self) -> Arc<dyn Transport> {
+        self.transport.clone()
+    }
+
     /// 接続先のホームフォルダ。
     pub fn home(&self) -> &[u8] {
         &self.home
@@ -236,6 +241,17 @@ impl Session {
             from: from.to_vec(),
             to: to.to_vec(),
         })?)
+    }
+
+    /// ファイルの先頭から `len` バイトの SHA-256（接続先のエージェントで計算する）。
+    pub fn hash(&self, path: &[u8], len: u64) -> io::Result<Vec<u8>> {
+        match self.client.call(&Request::Hash {
+            path: path.to_vec(),
+            len,
+        })? {
+            Response::Hash(h) => Ok(h),
+            r => Err(unexpected(r)),
+        }
     }
 
     /// 空のファイルを作る（既にあればエラー）。

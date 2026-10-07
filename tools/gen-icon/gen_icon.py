@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""yyeditor のアイコン（apps/yyeditor/res/yyeditor.ico）を作る。
+"""yyeditor・yyterm・yysftp のアイコン（apps/<アプリ>/res/<アプリ>.ico）を作る。
 
     python3 tools/gen-icon/gen_icon.py
 
-角丸の青い四角に白の「YY」と、その下にテキストの行を表す線を描く。文字は図形で描くので
-フォントに依存しない。各サイズを 4 倍で描いて縮小する。Pillow が必要。
+角丸の四角に白の「YY」を描く。エディタは青地にテキストの行を表す線、ターミナルは黒地に
+プロンプト（`>_`）、ファイル転送は緑地に上下の矢印。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
+Pillow が必要。
 """
 
 import io
@@ -15,8 +16,10 @@ from PIL import Image, ImageDraw
 
 SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256]
 SCALE = 4
-TOP = (0x3B, 0x82, 0xF6)
-BOTTOM = (0x1D, 0x4E, 0xD8)
+EDITOR = ((0x3B, 0x82, 0xF6), (0x1D, 0x4E, 0xD8))
+TERMINAL = ((0x37, 0x41, 0x51), (0x11, 0x18, 0x27))
+TRANSFER = ((0x10, 0xB9, 0x81), (0x04, 0x78, 0x57))
+PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
 
@@ -34,7 +37,9 @@ def draw_y(d, x, y, w, h, t, a):
     )
 
 
-def render(size):
+def render(size, kind="editor"):
+    terminal = kind == "terminal"
+    top_c, bottom_c = {"editor": EDITOR, "terminal": TERMINAL, "transfer": TRANSFER}[kind]
     n = size * SCALE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     # 縦のグラデーション
@@ -42,7 +47,7 @@ def render(size):
     gd = ImageDraw.Draw(grad)
     for yy in range(n):
         f = yy / max(n - 1, 1)
-        c = tuple(round(TOP[i] + (BOTTOM[i] - TOP[i]) * f) for i in range(3))
+        c = tuple(round(top_c[i] + (bottom_c[i] - top_c[i]) * f) for i in range(3))
         gd.line([(0, yy), (n, yy)], fill=c + (255,))
     mask = Image.new("L", (n, n), 0)
     margin = n * (0.03 if size >= 32 else 0.0)
@@ -66,7 +71,24 @@ def render(size):
     x0 = (n - (w * 2 + gap)) / 2
     draw_y(d, x0, top, w, h, t, a)
     draw_y(d, x0 + w + gap, top, w, h, t, a)
-    if not small:
+    if not small and terminal:
+        # プロンプト「>_」
+        lt = n * 0.06
+        left, yy = n * 0.2, n * 0.7
+        size_p = n * 0.16
+        d.line([(left, yy), (left + size_p * 0.7, yy + size_p / 2), (left, yy + size_p)], fill=PROMPT, width=round(lt))
+        ux = left + size_p * 0.95
+        d.rectangle([ux, yy + size_p - lt, ux + size_p * 0.9, yy + size_p], fill=PROMPT)
+    elif not small and kind == "transfer":
+        # 上向きと下向きの矢印
+        lt = n * 0.06
+        ah = n * 0.2
+        for cx, up in [(n * 0.38, True), (n * 0.62, False)]:
+            y0, y1 = n * 0.64, n * 0.88
+            d.rectangle([cx - lt / 2, y0 + (lt if up else 0), cx + lt / 2, y1 - (0 if up else lt)], fill=WHITE)
+            tip, base = (y0, y0 + ah * 0.6) if up else (y1, y1 - ah * 0.6)
+            d.polygon([(cx, tip), (cx - ah / 2, base), (cx + ah / 2, base)], fill=WHITE)
+    elif not small:
         # テキストの行
         lt = n * 0.055
         left = n * 0.18
@@ -109,11 +131,13 @@ def write_ico(path, images):
 
 def main():
     root = Path(__file__).resolve().parents[2]
-    out = root / "apps" / "yyeditor" / "res" / "yyeditor.ico"
-    images = [render(s) for s in SIZES]
-    write_ico(out, images)
-    images[-1].save(root / "apps" / "yyeditor" / "res" / "yyeditor-256.png")
-    print(out)
+    for app, kind in [("yyeditor", "editor"), ("yyterm", "terminal"), ("yysftp", "transfer")]:
+        res = root / "apps" / app / "res"
+        res.mkdir(parents=True, exist_ok=True)
+        images = [render(s, kind) for s in SIZES]
+        write_ico(res / f"{app}.ico", images)
+        images[-1].save(res / f"{app}-256.png")
+        print(res / f"{app}.ico")
 
 
 if __name__ == "__main__":

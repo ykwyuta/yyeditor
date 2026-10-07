@@ -1,0 +1,13 @@
+[package]
+name = "yy-term"
+description = "Terminal emulation core (VT parser, screen, scrollback, key encoding) for yyterm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+unicode-width.workspace = true
+
+[lints]
+workspace = true

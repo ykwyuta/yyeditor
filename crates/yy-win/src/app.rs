@@ -44,7 +44,7 @@ mod csvmode;
 mod hexmode;
 mod previewmode;
 mod syntaxmode;
-mod workspacemode;
+pub(crate) mod workspacemode;
 
 pub(crate) use csvmode::colhead_proc;
 use previewmode::ID_PREVIEW;
@@ -297,7 +297,6 @@ pub(crate) struct App {
     /// Markdown・HTML のプレビュー（右側）
     preview: previewmode::PreviewPane,
     /// SSH 接続先のファイルの編集（11 章）
-    pub(crate) remote: crate::remote::RemoteState,
     /// ワークスペースとサイドバー（左側）
     ws: WorkspacePane,
 }
@@ -776,7 +775,15 @@ impl App {
                 ambiguous_wide: config.editor.ambiguous_wide,
                 wide_box_line: renderer.wide_box_line(),
             };
-            let remote = crate::remote::RemoteState::new(ssh, config.remote.clone());
+            crate::remote::install(
+                crate::remote::RemoteState::new(ssh, config.remote.clone()),
+                crate::remote::Host {
+                    frame,
+                    status: |t| {
+                        with_app(|a| a.show_status_message(t));
+                    },
+                },
+            );
             let ws = create_pane(frame, hinstance)?;
             let app = App {
                 frame,
@@ -844,7 +851,6 @@ impl App {
                 colhead_h: 0,
                 ui_font: crate::util::ui_font(dpi),
                 preview: Default::default(),
-                remote,
                 ws,
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
@@ -2781,10 +2787,6 @@ impl App {
         }
     }
 
-    pub(crate) fn frame_hwnd(&self) -> HWND {
-        self.frame
-    }
-
     /// ステータスバーに案内を出す（空なら消す）。
     pub(crate) fn show_status_message(&mut self, text: &str) {
         self.status_msg = text.to_owned();
@@ -3774,18 +3776,18 @@ impl App {
 
 /// 変更を保存するか確認する。続行してよければ `true`。
 /// タブ `index` を閉じる（閉じるボタン・中ボタンのクリック）。変更があれば確認する。
-/// 別のタブを閉じた場合は、元のタブに戻る。
-fn close_tab_at(hwnd: HWND, index: usize) {
+/// 別のタブを閉じた場合は、元のタブに戻る。閉じたら `true`（取り消したら `false`）。
+fn close_tab_at(hwnd: HWND, index: usize) -> bool {
     let Some((active, count)) = with_app(|a| (a.active_tab, a.tabs.len())) else {
-        return;
+        return false;
     };
     if index >= count {
-        return;
+        return false;
     }
     with_app(|a| a.switch_tab(index));
     if !confirm_discard(hwnd) {
         with_app(|a| a.switch_tab(active));
-        return;
+        return false;
     }
     with_app(|a| {
         a.close_tab();
@@ -3794,6 +3796,33 @@ fn close_tab_at(hwnd: HWND, index: usize) {
             a.switch_tab(back);
         }
     });
+    true
+}
+
+/// タブの右クリックのメニュー（閉じる・ほかのタブ・右側・左側を閉じる）。変更のある文書は
+/// 1 つずつ確認し、取り消したらそこでやめる。最後に右クリックしたタブを表に出す。
+fn tab_menu(hwnd: HWND, index: usize) {
+    let Some(count) = with_app(|a| a.tabs.len()) else {
+        return;
+    };
+    let Some(which) = crate::tabclose::menu(hwnd, index, count) else {
+        return;
+    };
+    if which == crate::tabclose::TabMenu::Close {
+        close_tab_at(hwnd, index);
+        return;
+    }
+    // 右から閉じる（閉じていないタブの番号が変わらないように）
+    let mut keep = index;
+    for i in which.targets(index, count).into_iter().rev() {
+        if !close_tab_at(hwnd, i) {
+            break;
+        }
+        if i < keep {
+            keep -= 1;
+        }
+    }
+    with_app(|a| a.switch_tab(keep));
 }
 
 /// 作業中のタブの文書を閉じてよいか確かめる。保存中なら終わるまで待ち、変更があれば
@@ -3915,8 +3944,8 @@ fn cmd_open_remote(hwnd: HWND) {
             .remote()
             .and_then(|r| yy_remote::RemoteUri::parse(&r.uri));
         (
-            a.remote.available(),
-            current.or_else(|| a.remote.last.clone()),
+            crate::remote::available(),
+            current.or_else(crate::remote::last),
         )
     }) else {
         return;
@@ -4066,13 +4095,10 @@ fn cmd_save_to(hwnd: HWND, as_new: bool, place: SaveWhere) -> bool {
             remote: None,
         },
         _ if to_remote => {
-            let initial = with_app(|a| {
-                remote
-                    .as_ref()
-                    .and_then(|f| yy_remote::RemoteUri::parse(&f.uri))
-                    .or_else(|| a.remote.last.clone())
-            })
-            .flatten();
+            let initial = remote
+                .as_ref()
+                .and_then(|f| yy_remote::RemoteUri::parse(&f.uri))
+                .or_else(crate::remote::last);
             let Some(p) = crate::remotedlg::show(
                 hwnd,
                 crate::remotedlg::Mode::Save,
@@ -4095,7 +4121,7 @@ fn cmd_save_to(hwnd: HWND, as_new: bool, place: SaveWhere) -> bool {
                 encoding: enc,
                 bom: p.bom && enc.supports_bom(),
                 eol: None,
-                remote: Some(p.dest()),
+                remote: p.dest(),
             }
         }
         (_, current) => match show_save_dialog(hwnd, current.as_deref(), encoding, bom, eol) {
@@ -4224,7 +4250,7 @@ fn handle_save_result(hwnd: HWND, flow: Option<SaveFlow>, done: yy_core::SaveDon
                     .remote()
                     .and_then(|r| yy_remote::RemoteUri::parse(&r.uri))
                 {
-                    a.remote.last = Some(u);
+                    crate::remote::set_last(u);
                 }
                 a.doc.location()
             });
@@ -5320,6 +5346,10 @@ pub(crate) extern "system" fn frame_proc(
         crate::remote::WM_APP_REMOTE_WAKE => LRESULT(0),
         crate::tabclose::WM_APP_CLOSE_TAB => {
             close_tab_at(hwnd, wparam.0);
+            LRESULT(0)
+        }
+        crate::tabclose::WM_APP_TAB_MENU => {
+            tab_menu(hwnd, wparam.0);
             LRESULT(0)
         }
         WM_DPICHANGED => {

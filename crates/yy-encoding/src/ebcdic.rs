@@ -111,11 +111,53 @@ impl Ccsid {
         )
     }
 
+    /// 1 バイト部の 1 文字（3270 の画面など、セルごとに変換するとき）。未定義・制御文字なら `None`。
+    pub fn decode_single(self, b: u8) -> Option<char> {
+        let v = self.table().sb_dec[b as usize];
+        if v == NONE || v & PAIR != 0 {
+            return None;
+        }
+        char::from_u32(v & CP_MASK).filter(|c| !c.is_control())
+    }
+
+    /// 2 バイト部の 1 文字（`code` は 2 バイトの符号）。結合する 2 文字の符号は合成した文字列で返す。
+    pub fn decode_double(self, code: u16) -> Option<String> {
+        let t = self.table();
+        if !t.mixed {
+            return None;
+        }
+        match t.db_dec[code as usize] {
+            0 => None,
+            v if v & PAIR != 0 => {
+                let (a, b) = t.pairs[(v & CP_MASK) as usize];
+                Some([char::from_u32(a)?, char::from_u32(b)?].iter().collect())
+            }
+            v => char::from_u32(v & CP_MASK).map(String::from),
+        }
+    }
+
+    /// 文字の符号（1 バイト部なら `Single`、2 バイト部なら `Double`）。変換できなければ `None`。
+    pub fn encode_char(self, c: char) -> Option<EbcdicCode> {
+        let code = *self.table().enc.get(&(c as u32))?;
+        Some(if code >= 0x10000 {
+            EbcdicCode::Double(code as u16)
+        } else {
+            EbcdicCode::Single(code as u8)
+        })
+    }
+
     pub(crate) fn table(self) -> &'static Table {
         static TABLES: [OnceLock<Table>; 9] = [const { OnceLock::new() }; 9];
         let i = Ccsid::ALL.iter().position(|c| *c == self).unwrap();
         TABLES[i].get_or_init(|| TableBuilder::from_ccsid(self).finish())
     }
+}
+
+/// 1 文字の EBCDIC の符号（[`Ccsid::encode_char`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EbcdicCode {
+    Single(u8),
+    Double(u16),
 }
 
 /// 生成した対応表の 1 行（符号, 文字, 結合する 2 文字目または 0, 精度）。
@@ -730,5 +772,31 @@ impl Encoder {
             }
         }
         lone_base
+    }
+}
+
+#[cfg(test)]
+mod cell_tests {
+    use super::*;
+
+    #[test]
+    fn converts_single_cells() {
+        assert_eq!(Ccsid::Ibm037.decode_single(0xC1), Some('A'));
+        assert_eq!(Ccsid::Ibm037.decode_single(0x40), Some(' '));
+        assert_eq!(Ccsid::Ibm037.decode_single(0x15), None);
+        assert_eq!(
+            Ccsid::Ibm037.encode_char('a'),
+            Some(EbcdicCode::Single(0x81))
+        );
+        // 930: 1 バイト部はカタカナ、2 バイト部は漢字
+        assert_eq!(Ccsid::Ibm930.decode_single(0x81), Some('ｱ'));
+        let kan = Ccsid::Ibm930.encode_char('漢').unwrap();
+        let EbcdicCode::Double(code) = kan else {
+            panic!("{kan:?}")
+        };
+        assert_eq!(Ccsid::Ibm930.decode_double(code).as_deref(), Some("漢"));
+        assert_eq!(Ccsid::Ibm037.decode_double(code), None);
+        // 939: 英小文字
+        assert_eq!(Ccsid::Ibm939.decode_single(0x81), Some('a'));
     }
 }

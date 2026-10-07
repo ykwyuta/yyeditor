@@ -23,7 +23,8 @@ use yy_remote::ssh_config::{HostOverride, Resolver};
 use yy_remote::uri::{RemoteUri, Target};
 use yy_remote::{
     AgentFiles, ConnectLog, Connector, ConnectorFactory, ConnectorOptions, FileInfo, HostKeyCheck,
-    HostKeyQuestion, PasswordAnswer, PasswordRequest, Prompter, Session, UploadOutcome,
+    HostKeyQuestion, PassphraseRequest, PasswordAnswer, PasswordRequest, Prompter, RemoteFs,
+    Session, SftpFs, Transport, UploadOutcome,
 };
 
 use crate::app::with_app;
@@ -42,9 +43,26 @@ pub(crate) struct RemoteState {
     factory: Option<ConnectorFactory>,
     connector: Option<Arc<dyn Connector>>,
     sessions: Vec<(Target, Arc<Session>)>,
+    /// エージェントを使わない接続（ターミナル）
+    transports: Vec<(Target, Arc<dyn Transport>)>,
     config: RemoteConfig,
     /// 最後に使った場所（ファイル選択の初期値）
     pub(crate) last: Option<RemoteUri>,
+    /// 接続先にエージェントを置いて使う（エディタは常に。ターミナルとファイル転送は設定・メニュー）。
+    /// 使わなければ、一覧・ファイル操作は SFTP（[`fs`]）
+    pub(crate) use_agent: bool,
+    /// エージェントを使わないときの一覧・ファイル操作（SFTP）
+    sftps: Vec<(Target, Arc<SftpFs>)>,
+    /// 接続ごとのポートフォワーディング（ターミナル）
+    forwards: Vec<ForwardSet>,
+}
+
+/// 1 つの接続のポートフォワーディング。試した指定を覚えて、同じものは二度始めない。
+struct ForwardSet {
+    transport: std::sync::Weak<dyn Transport>,
+    tried: Vec<yy_remote::Forward>,
+    /// drop すると止まる
+    _active: Vec<yy_remote::ActiveForward>,
 }
 
 impl RemoteState {
@@ -53,8 +71,12 @@ impl RemoteState {
             factory,
             connector: None,
             sessions: Vec::new(),
+            transports: Vec::new(),
             config,
             last: None,
+            use_agent: true,
+            sftps: Vec::new(),
+            forwards: Vec::new(),
         }
     }
 
@@ -104,6 +126,7 @@ impl RemoteState {
                         proxy_jump: h.proxy_jump.clone(),
                         proxy: h.proxy.clone(),
                         agent_dir: h.agent_dir.clone(),
+                        forward: h.forward.clone(),
                     },
                 )
             })
@@ -219,8 +242,52 @@ impl Work {
     }
 }
 
+/// リモート接続を使うアプリ（エディタ・ターミナル）。
+pub(crate) struct Host {
+    /// 問い合わせ・進みの知らせを受けるフレームのウィンドウ
+    pub frame: HWND,
+    /// ステータスバーに表示する
+    pub status: fn(&str),
+}
+
+thread_local! {
+    static STATE: std::cell::RefCell<Option<RemoteState>> = const { std::cell::RefCell::new(None) };
+    static HOST: std::cell::RefCell<Option<Host>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 接続先の状態とアプリを登録する（UI スレッドで 1 回）。
+pub(crate) fn install(state: RemoteState, host: Host) {
+    STATE.with(|s| *s.borrow_mut() = Some(state));
+    HOST.with(|h| *h.borrow_mut() = Some(host));
+}
+
+/// 接続先の状態を使う（モーダルな処理の間は借りたままにしないこと）。
+pub(crate) fn with_state<R>(f: impl FnOnce(&mut RemoteState) -> R) -> Option<R> {
+    STATE.with(|s| s.try_borrow_mut().ok()?.as_mut().map(f))
+}
+
+/// SSH の実装が組み込まれているか。
+pub(crate) fn available() -> bool {
+    with_state(|r| r.available()).unwrap_or(false)
+}
+
+/// 最後に使った場所。
+pub(crate) fn last() -> Option<RemoteUri> {
+    with_state(|r| r.last.clone()).flatten()
+}
+
+pub(crate) fn set_last(uri: RemoteUri) {
+    with_state(|r| r.last = Some(uri));
+}
+
+/// 接続済みなら `target` のセッション（接続はしない）。
+pub(crate) fn connected(target: &Target) -> Option<Arc<Session>> {
+    with_state(|r| r.connected(target)).flatten()
+}
+
 fn frame() -> HWND {
-    with_app(|a| a.frame_hwnd()).unwrap_or_default()
+    HOST.with(|h| h.borrow().as_ref().map(|h| h.frame))
+        .unwrap_or_default()
 }
 
 /// `f` をバックグラウンドで実行し、終わるまで UI のメッセージを処理しながら待つ。
@@ -293,19 +360,24 @@ pub(crate) fn wait<T: Send + 'static>(
 
 /// 進みをステータスバーに表示する。
 pub(crate) fn show_status(text: &str) {
-    with_app(|a| a.show_status_message(text));
+    if let Some(f) = HOST.with(|h| h.borrow().as_ref().map(|h| h.status)) {
+        f(text);
+    }
 }
 
 // ---- 接続中の問い合わせ -----------------------------------------------------------
 
 enum Question {
     HostKey(HostKeyQuestion),
+    /// 3270 の TLS で、検証できないサーバーの証明書
+    TlsCert(yy_3270_tls::CertQuestion),
     Password(String),
-    /// 保存を選べるパスワード（保存したものが受け付けられなかった場合はその説明つき）
-    SavablePassword {
-        label: String,
-        can_save: bool,
-        note: Option<String>,
+    /// 保存を選べるパスワード・パスフレーズ（`check` は「保存する」のチェックボックスの文言。
+    /// `None` ならチェックボックスを出さない）
+    SavableSecret {
+        title: &'static str,
+        prompt: String,
+        check: Option<&'static str>,
     },
     Passphrase(PathBuf),
     Keyboard {
@@ -372,14 +444,31 @@ impl Prompter for UiPrompter {
                 save: false,
             });
         }
-        match self.ask(Question::SavablePassword {
-            label: req.label.to_owned(),
-            can_save: req.can_save,
-            note: req.note.map(str::to_owned),
-        }) {
-            Some(Answer::Secret(Some((password, save)))) => Some(PasswordAnswer { password, save }),
-            _ => None,
+        self.ask_secret(
+            "パスワード",
+            req.note,
+            &format!("{} のパスワード:", req.label),
+            req.can_save
+                .then_some("このパスワードを保存する（Windows の資格情報マネージャー）"),
+        )
+    }
+
+    fn ask_passphrase(&self, req: &PassphraseRequest<'_>) -> Option<PasswordAnswer> {
+        if !req.can_save && req.note.is_none() {
+            return self
+                .passphrase(req.key_file)
+                .map(|password| PasswordAnswer {
+                    password,
+                    save: false,
+                });
         }
+        self.ask_secret(
+            "秘密鍵のパスフレーズ",
+            req.note,
+            &format!("秘密鍵 {} のパスフレーズ:", key_name(req.key_file)),
+            req.can_save
+                .then_some("このパスフレーズを保存する（Windows の資格情報マネージャー）"),
+        )
     }
 
     fn passphrase(&self, key: &Path) -> Option<String> {
@@ -408,6 +497,38 @@ impl Prompter for UiPrompter {
     }
 }
 
+impl UiPrompter {
+    /// 保存を選べるパスワード・パスフレーズを尋ねる（`note` は問いの前に添える）。
+    fn ask_secret(
+        &self,
+        title: &'static str,
+        note: Option<&str>,
+        prompt: &str,
+        check: Option<&'static str>,
+    ) -> Option<PasswordAnswer> {
+        let prompt = match note {
+            Some(n) => format!("{n}\n{prompt}"),
+            None => prompt.to_owned(),
+        };
+        match self.ask(Question::SavableSecret {
+            title,
+            prompt,
+            check,
+        }) {
+            Some(Answer::Secret(Some((password, save)))) => Some(PasswordAnswer { password, save }),
+            _ => None,
+        }
+    }
+}
+
+/// 秘密鍵のファイル名（表示用）。
+fn key_name(key: &Path) -> String {
+    key.file_name().map_or_else(
+        || key.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
 /// 問い合わせのダイアログの持ち主（ファイル選択などのダイアログを開いていればそれ）。
 fn prompt_owner(frame: HWND) -> HWND {
     unsafe {
@@ -422,40 +543,22 @@ pub(crate) fn on_prompt(frame: HWND, lparam: LPARAM) {
     let owner = prompt_owner(frame);
     let answer = match req.question {
         Question::HostKey(q) => Answer::Yes(confirm_host_key(owner, &q)),
+        Question::TlsCert(q) => Answer::Yes(confirm_tls_cert(owner, &q)),
         Question::Password(user_host) => Answer::Text(crate::goto::prompt_secret(
             owner,
             "パスワード",
             &format!("{user_host} のパスワード:"),
         )),
-        Question::SavablePassword {
-            label,
-            can_save,
-            note,
-        } => {
-            let mut prompt = String::new();
-            if let Some(n) = &note {
-                prompt.push_str(n);
-                prompt.push('\n');
-            }
-            prompt.push_str(&format!("{label} のパスワード:"));
-            if can_save {
-                Answer::Secret(crate::goto::prompt_secret_with_check(
-                    owner,
-                    "パスワード",
-                    &prompt,
-                    "このパスワードを保存する（Windows の資格情報マネージャー）",
-                ))
-            } else {
-                Answer::Secret(
-                    crate::goto::prompt_secret(owner, "パスワード", &prompt).map(|p| (p, false)),
-                )
-            }
-        }
+        Question::SavableSecret {
+            title,
+            prompt,
+            check,
+        } => Answer::Secret(match check {
+            Some(check) => crate::goto::prompt_secret_with_check(owner, title, &prompt, check),
+            None => crate::goto::prompt_secret(owner, title, &prompt).map(|p| (p, false)),
+        }),
         Question::Passphrase(key) => {
-            let name = key.file_name().map_or_else(
-                || key.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            );
+            let name = key_name(&key);
             Answer::Text(crate::goto::prompt_secret(
                 owner,
                 "秘密鍵のパスフレーズ",
@@ -532,12 +635,57 @@ fn confirm_host_key(owner: HWND, q: &HostKeyQuestion) -> bool {
     }
 }
 
+/// 3270 の TLS の証明書を利用者に確かめる [`yy_3270_tls::Confirm`]（接続のスレッドで、[`wait`] の
+/// 中から使う）。
+pub(crate) fn tls_confirm() -> yy_3270_tls::Confirm {
+    let frame = SendHwnd(frame().0 as isize);
+    Arc::new(move |q: &yy_3270_tls::CertQuestion| {
+        let p = UiPrompter { frame };
+        matches!(p.ask(Question::TlsCert(q.clone())), Some(Answer::Yes(true)))
+    })
+}
+
+fn confirm_tls_cert(owner: HWND, q: &yy_3270_tls::CertQuestion) -> bool {
+    let host = format!("{}:{}", q.host, q.port);
+    match &q.check {
+        yy_3270_tls::CertCheck::Unknown => {
+            let text = format!(
+                "{host} の TLS の証明書を検証できません。\n\n理由: {}\n\n{}\n\n\
+                 この指紋が、接続先の管理者から知らされたものと一致する場合だけ「はい」を選んで\n\
+                 ください（社内の認証局が発行した証明書なら、設定の ca_file にその認証局の証明書を\n\
+                 書くと、尋ねずに検証できます）。\n\n\
+                 接続して、この証明書を記録しますか？",
+                q.problem,
+                q.cert.describe()
+            );
+            message_box(owner, &text, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES
+        }
+        yy_3270_tls::CertCheck::Changed {
+            file,
+            line,
+            recorded,
+        } => {
+            let text = format!(
+                "警告: {host} の TLS の証明書が記録と違います。\n\n\
+                 通信を盗み見られている（中間者攻撃の）おそれがあるため、接続しません。\n\n\
+                 記録: {} の {line} 行目（指紋 {recorded}）\n\n受け取った証明書:\n{}\n\n\
+                 接続先の証明書が正しく更新されたことを管理者に確かめた場合は、記録の該当する行を\n\
+                 削除してから接続し直してください。",
+                file.display(),
+                q.cert.describe()
+            );
+            message_box(owner, &text, MB_OK | MB_ICONERROR);
+            false
+        }
+    }
+}
+
 fn message_box(owner: HWND, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
     unsafe {
         MessageBoxW(
             Some(owner),
             &HSTRING::from(text),
-            &HSTRING::from("yyeditor"),
+            &HSTRING::from(crate::util::app_name()),
             style,
         )
     }
@@ -547,17 +695,222 @@ fn message_box(owner: HWND, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_R
 
 /// `target` のセッション。なければ接続してエージェントを起動する（接続中は `show` に表示）。
 pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Session>, String> {
-    enum Prepared {
-        Ready(Arc<Session>),
-        Connect(Arc<dyn Connector>, Box<yy_remote::HostSpec>),
-        Unavailable,
+    if let Some(s) = with_state(|r| r.live_session(target)).flatten() {
+        return Ok(s);
     }
-    let log = Arc::new(ConnectLog::new());
-    let prepared = with_app(|a| {
-        let r = &mut a.remote;
-        if let Some(s) = r.live_session(target) {
-            return Prepared::Ready(s);
+    let files = AgentFiles::beside_exe();
+    let s = connect(target, show, move |connector, spec, prompter, log| {
+        Session::connect(connector.as_ref(), &spec, &prompter, &files, &log)
+    })?;
+    let s = Arc::new(s);
+    with_state(|r| r.sessions.push((target.clone(), s.clone())));
+    Ok(s)
+}
+
+/// 接続先にエージェントを置いて使うか（エディタは常に。ターミナル・ファイル転送は設定・メニュー）。
+pub(crate) fn use_agent() -> bool {
+    with_state(|r| r.use_agent).unwrap_or(true)
+}
+
+/// エージェントを使うかを変える（変えた後の一覧・ファイル操作から）。
+pub(crate) fn set_use_agent(on: bool) {
+    with_state(|r| r.use_agent = on);
+}
+
+/// `target` のファイル操作（一覧・情報・作成・名前の変更・削除）。エージェントを使う設定なら
+/// エージェント（[`session`]）、でなければ SFTP（接続先に何も置かない）。
+pub(crate) fn fs(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<dyn RemoteFs>, String> {
+    if use_agent() {
+        return session(target, show).map(|s| s as Arc<dyn RemoteFs>);
+    }
+    let cached = with_state(|r| {
+        r.sftps.retain(|(_, f)| !f.is_closed());
+        r.sftps
+            .iter()
+            .find(|(t, _)| t.same(target))
+            .map(|(_, f)| f.clone())
+    })
+    .flatten();
+    if let Some(f) = cached {
+        return Ok(f);
+    }
+    let t = transport(target, show)?;
+    show(&format!("{target} で SFTP を始めています…（Esc で中止）"));
+    let r = wait(show, move |_| SftpFs::connect(t.as_ref()));
+    show("");
+    let f = Arc::new(r.map_err(|e| {
+        format!(
+            "{target} で SFTP を使えません（接続先で sftp-server が使えないなど）。\n\
+             エージェントを使う設定にすると、SFTP がなくても一覧を表示できます。\n{e}"
+        )
+    })?);
+    with_state(|r| r.sftps.push((target.clone(), f.clone())));
+    Ok(f)
+}
+
+/// 転送の照合に使う、接続先のエージェントで SHA-256 を計算する関数（どのスレッドからでも
+/// 呼べる）。転送に使っている接続にエージェントを配置して起動する（接続ごとに 1 つ）。
+pub(crate) type BackgroundHasher =
+    Arc<dyn Fn(&Arc<dyn Transport>, &[u8], u64) -> std::io::Result<Vec<u8>> + Send + Sync>;
+
+pub(crate) fn background_hasher(target: &Target) -> BackgroundHasher {
+    let agent_dir = with_state(|r| r.resolver().resolve(target).agent_dir).flatten();
+    let files = AgentFiles::beside_exe();
+    let target = target.clone();
+    let cache: Mutex<Option<(usize, Arc<Session>)>> = Mutex::new(None);
+    Arc::new(move |t, path, len| {
+        let key = Arc::as_ptr(t) as *const () as usize;
+        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        let s = match &*c {
+            Some((k, s)) if *k == key && !s.is_closed() => s.clone(),
+            _ => {
+                let log = ConnectLog::new();
+                let r = Session::start(t.clone(), &files, agent_dir.as_deref(), &log);
+                save_log(&target, &log);
+                let s = Arc::new(r?);
+                *c = Some((key, s.clone()));
+                s
+            }
+        };
+        drop(c);
+        s.hash(path, len)
+    })
+}
+
+/// ポートフォワーディングの結果の 1 行（`true` なら始めた、`false` なら警告）。
+pub(crate) type ForwardReport = (bool, String);
+
+/// 接続 `t`（`target` への）でポートフォワーディングを始める（ターミナルだけが呼ぶ。エディタと
+/// ファイル転送は呼ばないので、指定があっても無視される）。指定は接続設定・`~/.ssh/config` と
+/// `extra`（「SSH で接続」の入力）。同じ接続で試した指定は二度は始めない。始められなかったものは
+/// 警告の行にするだけで、接続はそのまま使う。結果は接続の記録にも残す。
+pub(crate) fn start_forwards(
+    target: &Target,
+    t: &Arc<dyn Transport>,
+    extra: &[yy_remote::Forward],
+    note: yy_remote::ForwardNote,
+) -> Vec<ForwardReport> {
+    let Some(spec) = with_state(|r| r.resolver().resolve(target)) else {
+        return Vec::new();
+    };
+    // この接続で試したもの（接続が切れたものは止めて忘れる）
+    let (first, tried) = with_state(|r| {
+        r.forwards
+            .retain(|s| s.transport.upgrade().is_some_and(|t| !t.is_closed()));
+        match r
+            .forwards
+            .iter()
+            .find(|s| s.transport.upgrade().is_some_and(|x| Arc::ptr_eq(&x, t)))
+        {
+            Some(s) => (false, s.tried.clone()),
+            None => (true, Vec::new()),
         }
+    })
+    .unwrap_or((true, Vec::new()));
+    let mut wanted: Vec<yy_remote::Forward> = Vec::new();
+    for f in spec.forwards.iter().chain(extra) {
+        if !tried.contains(f) && !wanted.contains(f) {
+            wanted.push(f.clone());
+        }
+    }
+    let mut out = Vec::new();
+    if first {
+        for e in &spec.forward_errors {
+            out.push((
+                false,
+                format!("ポートフォワーディングの指定を読めません: {e}"),
+            ));
+        }
+    }
+    let log = ConnectLog::new();
+    let mut active = Vec::new();
+    for f in &wanted {
+        match t.forward(f, note.clone()) {
+            Ok(a) => {
+                log.note(format!(
+                    "ポートフォワーディングを始めました: {}",
+                    a.description
+                ));
+                out.push((true, format!("ポートフォワーディング: {}", a.description)));
+                active.push(a);
+            }
+            Err(e) => {
+                log.note(format!("ポートフォワーディング {f} を始められません: {e}"));
+                out.push((
+                    false,
+                    format!(
+                        "警告: ポートフォワーディング {f} を始められません: {e}（SSH の接続はそのまま使えます）"
+                    ),
+                ));
+            }
+        }
+    }
+    if !wanted.is_empty() || !out.is_empty() {
+        save_log(target, &log);
+    }
+    with_state(|r| {
+        match r
+            .forwards
+            .iter_mut()
+            .find(|s| s.transport.upgrade().is_some_and(|x| Arc::ptr_eq(&x, t)))
+        {
+            Some(s) => {
+                s.tried.extend(wanted);
+                s._active.extend(active);
+            }
+            None => r.forwards.push(ForwardSet {
+                transport: Arc::downgrade(t),
+                tried: wanted,
+                _active: active,
+            }),
+        }
+    });
+    out
+}
+
+/// `target` への SSH の接続（ターミナル用。エージェントは使わない）。接続済みのセッションが
+/// あればその接続を使い、なければ接続する（接続中は `show` に表示）。
+pub(crate) fn transport(
+    target: &Target,
+    show: &dyn Fn(&str),
+) -> Result<Arc<dyn Transport>, String> {
+    let live = with_state(|r| {
+        if let Some(s) = r.live_session(target) {
+            return Some(s.transport());
+        }
+        r.transports.retain(|(_, t)| !t.is_closed());
+        r.transports
+            .iter()
+            .find(|(t, _)| t.same(target))
+            .map(|(_, t)| t.clone())
+    })
+    .flatten();
+    if let Some(t) = live {
+        return Ok(t);
+    }
+    let t = connect(target, show, move |connector, spec, prompter, log| {
+        connector.connect(&spec, &prompter, &log)
+    })?;
+    with_state(|r| r.transports.push((target.clone(), t.clone())));
+    Ok(t)
+}
+
+/// `target` に接続する（`op` を接続中の問い合わせを受けるスレッドで行う）。接続の記録を残し、
+/// 失敗したらその最後の部分を添えた説明を返す。
+fn connect<T: Send + 'static>(
+    target: &Target,
+    show: &dyn Fn(&str),
+    op: impl FnOnce(
+        Arc<dyn Connector>,
+        yy_remote::HostSpec,
+        UiPrompter,
+        Arc<ConnectLog>,
+    ) -> std::io::Result<T>
+    + Send
+    + 'static,
+) -> Result<T, String> {
+    let log = Arc::new(ConnectLog::new());
+    let prepared = with_state(|r| {
         log.note(format!(
             "yyeditor {}、~/.ssh/config: {}、~/.ssh/known_hosts: {}",
             env!("CARGO_PKG_VERSION"),
@@ -583,15 +936,11 @@ pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Sessio
             ));
         }
         let spec = r.resolver().resolve(target);
-        match r.connector() {
-            Some(c) => Prepared::Connect(c, Box::new(spec)),
-            None => Prepared::Unavailable,
-        }
+        r.connector().map(|c| (c, spec))
     });
     let (connector, spec) = match prepared {
-        Some(Prepared::Ready(s)) => return Ok(s),
-        Some(Prepared::Connect(c, spec)) => (c, *spec),
-        Some(Prepared::Unavailable) => {
+        Some(Some(p)) => p,
+        Some(None) => {
             return Err("この yyeditor には SSH の機能が組み込まれていません。".into());
         }
         None => return Err("処理中のため接続できません。".into()),
@@ -600,19 +949,14 @@ pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Sessio
     let prompter = UiPrompter {
         frame: SendHwnd(frame().0 as isize),
     };
-    let files = AgentFiles::beside_exe();
     let l = log.clone();
-    let r = wait(show, move |_| {
-        Session::connect(connector.as_ref(), &spec, &prompter, &files, &l)
-    });
+    let r = wait(show, move |_| op(connector, spec, prompter, l));
     match r {
-        Ok(s) => {
+        Ok(v) => {
             log.note("接続しました");
             save_log(target, &log);
-            let s = Arc::new(s);
-            with_app(|a| a.remote.sessions.push((target.clone(), s.clone())));
             show(&format!("{target} に接続しました"));
-            Ok(s)
+            Ok(v)
         }
         Err(e) => {
             log.note(format!("接続できませんでした: {e}"));
@@ -634,13 +978,59 @@ pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Sessio
     }
 }
 
+/// バックグラウンドのスレッドから接続する関数（転送の再接続に使う。13 章）。
+pub(crate) type BackgroundConnect = Arc<
+    dyn Fn(&yy_remote::log::TransferLog, u64) -> std::io::Result<Arc<dyn Transport>> + Send + Sync,
+>;
+
+/// `target` に、どのスレッドからでも接続できる関数を作る（UI スレッドで呼ぶ）。接続中の
+/// 問い合わせ（パスワードなど）は UI スレッドのダイアログで尋ね、接続の記録は
+/// `remote-ssh.log` と転送の記録の両方に残す。
+pub(crate) fn background_connector(target: &Target) -> Result<BackgroundConnect, String> {
+    let prepared = with_state(|r| {
+        let spec = r.resolver().resolve(target);
+        r.connector().map(|c| (c, spec))
+    })
+    .flatten();
+    let Some((connector, spec)) = prepared else {
+        return Err("SSH の機能が組み込まれていません。".into());
+    };
+    let prompter = UiPrompter {
+        frame: SendHwnd(frame().0 as isize),
+    };
+    let target = target.clone();
+    Ok(Arc::new(move |tlog, id| {
+        let log = ConnectLog::new();
+        let r = connector.connect(&spec, &prompter, &log);
+        match &r {
+            Ok(_) => log.note("接続しました"),
+            Err(e) => log.note(format!("接続できませんでした: {e}")),
+        }
+        save_log(&target, &log);
+        tlog.connect_log(Some(id), &log);
+        r
+    }))
+}
+
+/// 手元の日時（記録の行の先頭。`2026-10-06 12:34:56.789`）。
+pub(crate) fn local_clock() -> String {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
+    )
+}
+
 /// 資格情報マネージャーに保存したパスワードを確かめて削除する（ヘルプ メニュー）。
 pub(crate) fn forget_passwords(owner: HWND) {
     use yy_remote::PasswordStore;
     let store = crate::credstore::WindowsCredentials;
     let keys = store.keys();
     if keys.is_empty() {
-        crate::util::info_box(owner, "保存したリモート接続のパスワードはありません。");
+        crate::util::info_box(
+            owner,
+            "保存したリモート接続のパスワード・パスフレーズはありません。",
+        );
         return;
     }
     let shown: Vec<&str> = keys.iter().take(20).map(String::as_str).collect();
@@ -650,8 +1040,8 @@ pub(crate) fn forget_passwords(owner: HWND) {
         String::new()
     };
     let text = format!(
-        "Windows の資格情報マネージャーに保存した、次の {} 件のパスワードを削除しますか？\n\n{}{more}\n\n\
-         削除すると、次に接続するときにパスワードを尋ねます。",
+        "Windows の資格情報マネージャーに保存した、次の {} 件のパスワード・パスフレーズを削除しますか？\n\n{}{more}\n\n\
+         削除すると、次に接続するときに尋ねます。",
         keys.len(),
         shown.join("\n")
     );
@@ -663,11 +1053,11 @@ pub(crate) fn forget_passwords(owner: HWND) {
     }
     let left = store.keys().len();
     if left == 0 {
-        crate::util::info_box(owner, "保存したパスワードを削除しました。");
+        crate::util::info_box(owner, "保存したパスワード・パスフレーズを削除しました。");
     } else {
         message_box(
             owner,
-            &format!("{left} 件のパスワードを削除できませんでした。"),
+            &format!("{left} 件を削除できませんでした。"),
             MB_OK | MB_ICONERROR,
         );
     }
@@ -780,7 +1170,7 @@ pub(crate) fn open(
             OpenAs::NewTab => a.add_document(doc),
             OpenAs::Replace => a.set_document(doc),
         }
-        a.remote.last = Some(uri.clone());
+        set_last(uri.clone());
         a.show_status_message("");
         Ok::<_, String>(())
     });
@@ -869,9 +1259,9 @@ pub(crate) fn current_dest(file: &RemoteFile) -> Result<RemoteDest, String> {
 /// リモートのフォルダの中身（ワークスペースのサイドバー用）。項目のパスは `ssh://…`。
 /// フォルダを先に名前順、[`workspace::EXCLUDED`] を除き、[`workspace::MAX_ENTRIES`] を超えた数も返す。
 pub(crate) fn list_dir(dir: &RemoteUri) -> Result<(Vec<workspace::Entry>, usize), String> {
-    let session = session(&dir.target(), &show_status)?;
+    let fs = fs(&dir.target(), &show_status)?;
     let path = dir.path.clone();
-    let listed = wait(&show_status, move |_| session.read_dir(&path));
+    let listed = wait(&show_status, move |_| fs.read_dir(&path));
     show_status("");
     let items = listed.map_err(|e| describe(dir, &e))?;
     let mut entries = Vec::new();

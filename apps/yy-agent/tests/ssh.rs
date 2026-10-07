@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Read as _, Write as _};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,8 +22,8 @@ use yy_remote::proxy::Proxy;
 use yy_remote::uri::Target;
 use yy_remote::{
     AgentFiles, ConnectLog, Connector, HostKeyCheck, HostKeyQuestion, HostSpec, MemoryPasswords,
-    PasswordAnswer, PasswordRequest, PasswordStore, Prompter, SavedPassword, Session as Remote,
-    UploadOutcome,
+    PassphraseRequest, PasswordAnswer, PasswordRequest, PasswordStore, Prompter, SavedPassword,
+    Session as Remote, UploadOutcome,
 };
 use yy_ssh::SshConnector;
 
@@ -41,6 +42,8 @@ struct TestServer {
     auth_attempts: Arc<AtomicUsize>,
     /// 踏み台として中継を頼まれた接続先
     forwards: Arc<Mutex<Vec<String>>>,
+    /// 端末の要求（`pty xterm-256color 80x24`・`resize 100x30`）
+    ptys: Arc<Mutex<Vec<String>>>,
     _rt: tokio::runtime::Runtime,
 }
 
@@ -50,6 +53,7 @@ struct Handler {
     auth_attempts: Arc<AtomicUsize>,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     forwards: Arc<Mutex<Vec<String>>>,
+    ptys: Arc<Mutex<Vec<String>>>,
 }
 
 impl server::Handler for Handler {
@@ -110,6 +114,123 @@ impl server::Handler for Handler {
                 });
             }
             Err(_) => reply.reject(ChannelOpenFailure::ConnectFailed).await,
+        }
+        Ok(())
+    }
+
+    /// `-R`: 接続先（このサーバー）で待ち受け、来た接続を forwarded-tcpip で端末に渡す。
+    /// ポート 1 は断る（失敗の確認用）。
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        if *port == 1 {
+            return Ok(false);
+        }
+        let bind = if address.is_empty() || address == "localhost" {
+            "127.0.0.1"
+        } else {
+            address
+        };
+        let Ok(listener) = tokio::net::TcpListener::bind((bind, *port as u16)).await else {
+            return Ok(false);
+        };
+        let actual = listener.local_addr().unwrap().port();
+        *port = u32::from(actual);
+        let handle = session.handle();
+        let address = address.to_owned();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, peer)) = listener.accept().await {
+                let h = handle.clone();
+                let address = address.clone();
+                tokio::spawn(async move {
+                    if let Ok(ch) = h
+                        .channel_open_forwarded_tcpip(
+                            address,
+                            u32::from(actual),
+                            peer.ip().to_string(),
+                            u32::from(peer.port()),
+                        )
+                        .await
+                    {
+                        let mut s = ch.into_stream();
+                        let _ = tokio::io::copy_bidirectional(&mut s, &mut tcp).await;
+                    }
+                });
+            }
+        });
+        Ok(true)
+    }
+
+    async fn pty_request(
+        &mut self,
+        id: ChannelId,
+        term: &str,
+        cols: u32,
+        rows: u32,
+        _: u32,
+        _: u32,
+        _: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.ptys
+            .lock()
+            .unwrap()
+            .push(format!("pty {term} {cols}x{rows}"));
+        session.channel_success(id)?;
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        _: ChannelId,
+        cols: u32,
+        rows: u32,
+        _: u32,
+        _: u32,
+        _: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.ptys
+            .lock()
+            .unwrap()
+            .push(format!("resize {cols}x{rows}"));
+        Ok(())
+    }
+
+    /// 対話シェル（端末はないので、標準入力からコマンドを読む `sh`）
+    async fn shell_request(
+        &mut self,
+        id: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let Some(channel) = self.channels.lock().unwrap().remove(&id) else {
+            return Ok(());
+        };
+        session.channel_success(id)?;
+        tokio::spawn(run_command(channel, b"exec sh".to_vec()));
+        Ok(())
+    }
+
+    /// `sftp` サブシステム（手元の sftp-server を動かす）
+    async fn subsystem_request(
+        &mut self,
+        id: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let server = yy_remote::local::sftp_server();
+        let Some(channel) = self.channels.lock().unwrap().remove(&id) else {
+            return Ok(());
+        };
+        match (name, server) {
+            ("sftp", Some(p)) => {
+                session.channel_success(id)?;
+                let cmd = format!("exec {}", p.display()).into_bytes();
+                tokio::spawn(run_command(channel, cmd));
+            }
+            _ => session.channel_failure(id)?,
         }
         Ok(())
     }
@@ -200,7 +321,9 @@ impl TestServer {
         });
         let auth_attempts = Arc::new(AtomicUsize::new(0));
         let forwards = Arc::new(Mutex::new(Vec::new()));
+        let ptys = Arc::new(Mutex::new(Vec::new()));
         let handler = Handler {
+            ptys: ptys.clone(),
             allowed_keys: Arc::new(allowed_keys),
             auth_attempts: auth_attempts.clone(),
             channels: Arc::default(),
@@ -226,6 +349,7 @@ impl TestServer {
             host_key,
             auth_attempts,
             forwards,
+            ptys,
             _rt: rt,
         }
     }
@@ -241,6 +365,8 @@ impl TestServer {
             proxy: None,
             route_error: None,
             agent_dir: None,
+            forwards: Vec::new(),
+            forward_errors: Vec::new(),
         }
     }
 }
@@ -286,6 +412,18 @@ impl Prompter for Answers {
             password,
             save: self.save,
         })
+    }
+
+    fn ask_passphrase(&self, req: &PassphraseRequest<'_>) -> Option<PasswordAnswer> {
+        if let Some(n) = req.note {
+            self.notes.lock().unwrap().push(n.to_owned());
+        }
+        assert!(req.can_save || !self.save);
+        self.passphrase(req.key_file)
+            .map(|password| PasswordAnswer {
+                password,
+                save: self.save,
+            })
     }
 
     fn passphrase(&self, _: &Path) -> Option<String> {
@@ -865,4 +1003,412 @@ fn remembers_passwords() {
     let p = Answers::default();
     c.connect(&spec, &p, &ConnectLog::new()).unwrap();
     assert!(p.log().is_empty(), "{:?}", p.log());
+}
+
+#[test]
+fn remembers_passphrases_when_asked() {
+    let key = random_key();
+    let server = TestServer::start(vec![key.public_key().clone()]);
+    let dir = tempfile::tempdir().unwrap();
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let key_file = dir.path().join("id_ed25519");
+    let encrypted = key.encrypt(&mut rand::rng(), PASSPHRASE).unwrap();
+    fs::write(
+        &key_file,
+        encrypted
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    let store = Arc::new(MemoryPasswords::default());
+    let mut c = connector(dir.path());
+    c.passwords = Some(store.clone());
+    let spec = server.spec(vec![key_file.clone()]);
+    let saved_key = yy_remote::passphrase_key(&key_file);
+
+    // 選ばなければ保存しない
+    let p = Answers {
+        passphrase: Some(PASSPHRASE.into()),
+        ..Answers::default()
+    };
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert!(store.keys().is_empty());
+
+    // 選べば、鍵を開けたパスフレーズを保存し、次からは尋ねない
+    let p = Answers {
+        passphrase: Some(PASSPHRASE.into()),
+        save: true,
+        ..Answers::default()
+    };
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert_eq!(store.load(&saved_key).unwrap().password, PASSPHRASE);
+    let p = Answers::default();
+    let log = ConnectLog::new();
+    c.connect(&spec, &p, &log).unwrap();
+    assert!(p.log().is_empty(), "{:?}", p.log());
+    assert!(
+        log.contains("保存したパスフレーズで開きました"),
+        "{:#?}",
+        log.lines()
+    );
+    assert!(!log.contains(PASSPHRASE));
+
+    // 開けなければ保存を消して尋ねる
+    store
+        .save(
+            &saved_key,
+            &SavedPassword {
+                user: String::new(),
+                password: "old".into(),
+            },
+        )
+        .unwrap();
+    let p = Answers {
+        passphrase: Some(PASSPHRASE.into()),
+        ..Answers::default()
+    };
+    c.connect(&spec, &p, &ConnectLog::new()).unwrap();
+    assert_eq!(p.log(), ["passphrase"]);
+    assert!(p.notes.lock().unwrap()[0].contains("保存したパスフレーズでは開けませんでした"));
+    assert!(store.keys().is_empty());
+}
+
+#[test]
+fn opens_interactive_shells() {
+    use std::io::{Read, Write};
+    let server = TestServer::start(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let p = Answers {
+        passwords: Mutex::new(vec![PASSWORD.into()]),
+        ..Answers::default()
+    };
+    let t = connector(dir.path())
+        .connect(&server.spec(vec![]), &p, &ConnectLog::new())
+        .unwrap();
+
+    // ログインシェル: 入力したコマンドを実行し、終了コードを返す
+    let mut sh = t.shell("xterm-256color", (80, 24), None).unwrap();
+    (sh.resize)(100, 30);
+    sh.input
+        .write_all(b"echo hello; echo oops >&2; exit 3\n")
+        .unwrap();
+    sh.input.flush().unwrap();
+    let mut out = Vec::new();
+    sh.output.read_to_end(&mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("hello") && out.contains("oops"), "{out:?}");
+    assert_eq!((sh.finish)().unwrap().status, Some(3));
+    let ptys = server.ptys.lock().unwrap().clone();
+    assert_eq!(ptys[0], "pty xterm-256color 80x24");
+    assert!(ptys.contains(&"resize 100x30".to_owned()), "{ptys:?}");
+
+    // コマンドを端末つきで実行する（接続先のフォルダで始めるのに使う）
+    let mut sh = t
+        .shell("xterm-256color", (80, 24), Some(b"cd /tmp && pwd"))
+        .unwrap();
+    drop(sh.input);
+    let mut out = String::new();
+    sh.output.read_to_string(&mut out).unwrap();
+    assert_eq!(out.trim(), "/tmp");
+}
+
+#[test]
+fn transfers_files_over_sftp_with_the_journal() {
+    use yy_remote::xfer;
+    if yy_remote::local::sftp_server().is_none() {
+        eprintln!("sftp-server がないため飛ばします");
+        return;
+    }
+    let server = TestServer::start(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let store = Arc::new(MemoryPasswords::default());
+    store
+        .save(
+            &format!("ssh/tester@127.0.0.1:{}", server.port),
+            &SavedPassword {
+                user: "tester".into(),
+                password: PASSWORD.into(),
+            },
+        )
+        .unwrap();
+    let mut c = connector(dir.path());
+    c.passwords = Some(store);
+    let spec = server.spec(vec![]);
+
+    let src = dir.path().join("big.bin");
+    let content: Vec<u8> = (0..5_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    fs::write(&src, &content).unwrap();
+    let dst = dir.path().join("up/big.bin");
+    let remote = yy_remote::RemoteUri {
+        user: None,
+        host: "127.0.0.1".into(),
+        port: Some(server.port),
+        path: dst.as_os_str().as_bytes().to_vec(),
+    };
+    let log = yy_remote::log::TransferLog::new(None, || "T".into());
+    let connect = |l: &yy_remote::log::TransferLog, id: u64| {
+        let cl = ConnectLog::new();
+        let r = c.connect(&spec, &Answers::default(), &cl);
+        l.connect_log(Some(id), &cl);
+        r
+    };
+    // エージェントを使う設定: 送り終えたら接続先のエージェントで SHA-256 を計算して照合する
+    let agents = dir.path().join("agents");
+    fs::create_dir_all(&agents).unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_yy-agent"),
+        agents.join(format!("yy-agent-{}-linux", std::env::consts::ARCH)),
+    )
+    .unwrap();
+    let files = AgentFiles::new(&agents);
+    let agent_dir = dir.path().join("remote").to_string_lossy().into_owned();
+    let hasher = |t: &Arc<dyn yy_remote::Transport>, path: &[u8], len: u64| {
+        let s = yy_remote::Session::start(t.clone(), &files, Some(&agent_dir), &ConnectLog::new())?;
+        s.hash(path, len)
+    };
+    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    let l = lines.clone();
+    log.set_sink(Box::new(move |s| l.lock().unwrap().push(s.to_owned())));
+    let journal = xfer::Journal::new(dir.path().join("journal"));
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut progress = |_: &xfer::Job| {};
+    let mut cx = xfer::Context {
+        connect: &connect,
+        log: &log,
+        journal: Some(&journal),
+        cancel: &cancel,
+        progress: &mut progress,
+        retry: xfer::Retry::default(),
+        scp_chunk: 1 << 20,
+        transport: None,
+        hasher: Some(&hasher),
+    };
+    let mut job = xfer::upload_job(1, xfer::Protocol::Sftp, &src, remote.clone(), false).unwrap();
+    xfer::run(&mut job, &mut cx);
+    assert_eq!(job.state, xfer::State::Done, "{}", job.message);
+    assert_eq!(fs::read(&dst).unwrap(), content);
+
+    // 同じ接続で受け取る
+    let back = dir.path().join("down/big.bin");
+    let meta = fs::metadata(&dst).unwrap();
+    let mut job = xfer::download_job(
+        2,
+        xfer::Protocol::Sftp,
+        remote,
+        meta.len(),
+        xfer::mtime_of(&meta),
+        &back,
+        false,
+    );
+    xfer::run(&mut job, &mut cx);
+    assert_eq!(job.state, xfer::State::Done, "{}", job.message);
+    assert_eq!(fs::read(&back).unwrap(), content);
+    assert!(journal.load().is_empty());
+    let lines = lines.lock().unwrap();
+    let verified = lines
+        .iter()
+        .filter(|l| l.contains("照合: SHA-256") && l.contains("が一致しました"))
+        .count();
+    assert_eq!(verified, 2, "{lines:#?}");
+}
+
+/// 1 行ずつ「echo: 」を付けて返すサーバー（転送先）。ポートを返す。
+fn echo_server() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut r = std::io::BufReader::new(s.try_clone().unwrap());
+                let mut w = s;
+                let mut line = String::new();
+                while std::io::BufRead::read_line(&mut r, &mut line).unwrap_or(0) > 0 {
+                    let _ = w.write_all(format!("echo: {line}").as_bytes());
+                    line.clear();
+                }
+            });
+        }
+    });
+    port
+}
+
+/// 空いている手元のポート。
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// `stream` に 1 行送って、返ってきた 1 行を返す。
+fn round_trip(stream: &mut std::net::TcpStream, text: &str) -> String {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream.write_all(format!("{text}\n").as_bytes()).unwrap();
+    let mut r = std::io::BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut r, &mut line).unwrap();
+    line.trim_end().to_owned()
+}
+
+#[test]
+fn forwards_ports_and_reports_failures() {
+    use yy_remote::Forward;
+    let server = TestServer::start(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    record_host_key(&dir.path().join("known_hosts"), &server, &server.host_key);
+    let p = Answers {
+        passwords: Mutex::new(vec![PASSWORD.into()]),
+        ..Answers::default()
+    };
+    let c = connector(dir.path());
+    let t = c
+        .connect(&server.spec(vec![]), &p, &ConnectLog::new())
+        .unwrap();
+    let notes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let n = notes.clone();
+    let note: yy_remote::ForwardNote =
+        Arc::new(move |s: &str| n.lock().unwrap().push(s.to_owned()));
+    let echo = echo_server();
+
+    // -L: 手元のポート → 接続先から転送先へ
+    let lport = free_port();
+    let l = t
+        .forward(
+            &Forward::parse_option('L', &format!("{lport}:127.0.0.1:{echo}")).unwrap(),
+            note.clone(),
+        )
+        .unwrap();
+    assert_eq!(l.port, lport);
+    assert!(
+        l.description
+            .contains(&format!("-L {lport}:127.0.0.1:{echo}")),
+        "{}",
+        l.description
+    );
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", lport)).unwrap();
+    assert_eq!(round_trip(&mut s, "hello"), "echo: hello");
+    assert!(
+        server
+            .forwards
+            .lock()
+            .unwrap()
+            .contains(&format!("127.0.0.1:{echo}"))
+    );
+
+    // 同じポートはもう使えない（警告にするだけ。接続はそのまま）
+    let e = t
+        .forward(
+            &Forward::parse_option('L', &format!("{lport}:127.0.0.1:{echo}")).unwrap(),
+            note.clone(),
+        )
+        .unwrap_err();
+    assert!(e.to_string().contains("待ち受けられません"), "{e}");
+    assert!(!t.is_closed());
+
+    // 転送先に接続できない: 手元の接続は閉じ、出来事を知らせる
+    let closed = free_port();
+    let bad = t
+        .forward(
+            &Forward::parse_option('L', &format!("{}:127.0.0.1:{closed}", free_port())).unwrap(),
+            note.clone(),
+        )
+        .unwrap();
+    let mut s2 = std::net::TcpStream::connect(("127.0.0.1", bad.port)).unwrap();
+    s2.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut buf = [0u8; 1];
+    assert_eq!(s2.read(&mut buf).unwrap_or(0), 0);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !notes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|n| n.contains("接続できません"))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{:?}",
+            notes.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // -D: SOCKS5（ホスト名）と SOCKS4a
+    let dport = free_port();
+    let d = t
+        .forward(
+            &Forward::parse_option('D', &dport.to_string()).unwrap(),
+            note.clone(),
+        )
+        .unwrap();
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", d.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.write_all(&[5, 1, 0]).unwrap();
+    let mut hello = [0u8; 2];
+    s.read_exact(&mut hello).unwrap();
+    assert_eq!(hello, [5, 0]);
+    let host = b"localhost";
+    let mut req = vec![5, 1, 0, 3, host.len() as u8];
+    req.extend_from_slice(host);
+    req.extend_from_slice(&echo.to_be_bytes());
+    s.write_all(&req).unwrap();
+    let mut rep = [0u8; 10];
+    s.read_exact(&mut rep).unwrap();
+    assert_eq!(rep[1], 0, "{rep:?}");
+    assert_eq!(round_trip(&mut s, "socks5"), "echo: socks5");
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", d.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut req = vec![4, 1];
+    req.extend_from_slice(&echo.to_be_bytes());
+    req.extend_from_slice(&[0, 0, 0, 1, b'u', 0]);
+    req.extend_from_slice(b"127.0.0.1\0");
+    s.write_all(&req).unwrap();
+    let mut rep = [0u8; 8];
+    s.read_exact(&mut rep).unwrap();
+    assert_eq!(rep[1], 0x5a, "{rep:?}");
+    assert_eq!(round_trip(&mut s, "socks4a"), "echo: socks4a");
+
+    // -R: 接続先のポート（0 なら接続先が選ぶ）→ 手元から転送先へ
+    let r = t
+        .forward(
+            &Forward::parse_option('R', &format!("0:127.0.0.1:{echo}")).unwrap(),
+            note.clone(),
+        )
+        .unwrap();
+    assert!(r.port > 0);
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", r.port)).unwrap();
+    assert_eq!(round_trip(&mut s, "remote"), "echo: remote");
+    // 接続先が断った
+    let e = t
+        .forward(
+            &Forward::parse_option('R', &format!("1:127.0.0.1:{echo}")).unwrap(),
+            note.clone(),
+        )
+        .unwrap_err();
+    assert!(e.to_string().contains("接続先が断りました"), "{e}");
+
+    // 止めたら待ち受けない
+    drop(l);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(std::net::TcpStream::connect(("127.0.0.1", lport)).is_err());
+    // 接続はそのまま使える
+    assert!(!t.is_closed());
+    let out = yy_remote::run(t.as_ref(), b"echo ok", b"").unwrap();
+    assert_eq!(out.stdout.trim_ascii(), b"ok");
+
+    // direct-tcpip の中継（3270 のセッションに使う）: 手元のポートを開かずに往復する
+    let p = t.direct_tcpip("127.0.0.1", echo).unwrap();
+    let (mut w, r, _finish) = p.into_parts();
+    w.write_all(b"relay\n").unwrap();
+    w.flush().unwrap();
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(r), &mut line).unwrap();
+    assert_eq!(line.trim_end(), "echo: relay");
+    let e = t.direct_tcpip("127.0.0.1", free_port()).err().unwrap();
+    assert!(e.to_string().contains("接続できませんでした"), "{e}");
 }

@@ -6,22 +6,29 @@
 //! 依存しないので、UI からも、SSH を使わないテスト（[`local`]）からも使える。
 
 pub mod deploy;
+pub mod forward;
+pub mod fs;
 pub mod known_hosts;
 #[cfg(unix)]
 pub mod local;
 pub mod log;
 pub mod proxy;
 pub mod rpc;
+pub mod scp;
 pub mod session;
+pub mod sftp;
 pub mod ssh_config;
 pub mod transfer;
 pub mod uri;
+pub mod xfer;
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use deploy::AgentFiles;
+pub use forward::{ActiveForward, Forward, ForwardNote};
+pub use fs::{RemoteFs, SftpFs};
 pub use log::ConnectLog;
 pub use session::{Session, UploadOutcome};
 pub use ssh_config::HostSpec;
@@ -34,6 +41,51 @@ pub trait Transport: Send + Sync {
     fn exec(&self, command: &[u8]) -> io::Result<Process>;
     /// 接続が切れているか。
     fn is_closed(&self) -> bool;
+    /// 端末（PTY）つきの対話シェルを起動する（ターミナル。12 章）。`command` を指定すると
+    /// シェルの代わりにそのコマンドを端末つきで実行する。
+    /// サブシステム（`sftp` など）を起動する（13 章）。
+    fn subsystem(&self, name: &str) -> io::Result<Process> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("この接続ではサブシステム {name} を起動できません"),
+        ))
+    }
+    fn shell(&self, _term: &str, _size: (u16, u16), _command: Option<&[u8]>) -> io::Result<Shell> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "この接続では対話シェルを起動できません",
+        ))
+    }
+    /// 接続先から `host:port` への TCP の通り道（SSH の direct-tcpip。3270 のセッションの中継に使う。
+    /// 14 章 4.3）。`stdin` に書いたものが届き、`stdout` から読める。
+    fn direct_tcpip(&self, host: &str, port: u16) -> io::Result<Process> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("この接続では {host}:{port} への中継を使えません"),
+        ))
+    }
+    /// ポートフォワーディングを始める（ターミナルだけが使う。[`forward`]）。返した値を drop すると
+    /// 止める。転送の途中の出来事（転送先に接続できないなど）は `note` に知らせる。
+    fn forward(&self, f: &Forward, _note: ForwardNote) -> io::Result<ActiveForward> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("この接続ではポートフォワーディング（{f}）を使えません"),
+        ))
+    }
+}
+
+/// 端末つきの対話シェル。
+pub struct Shell {
+    /// キー入力（閉じると相手には EOF が届く）
+    pub input: Box<dyn Write + Send>,
+    /// 端末への出力（標準出力と標準エラー出力をまとめたもの）
+    pub output: Box<dyn Read + Send>,
+    /// 端末の大きさ（桁, 行）を知らせる
+    pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
+    /// 終わるまで待って結果を返す
+    pub finish: Box<dyn FnOnce() -> io::Result<Exit> + Send>,
+    /// チャネルを閉じる（タブを閉じたとき。動いているプログラムには SIGHUP が届く）
+    pub close: Box<dyn Fn() + Send + Sync>,
 }
 
 /// 起動したコマンド。
@@ -168,6 +220,12 @@ pub fn ssh_password_key(spec: &HostSpec) -> String {
     format!("ssh/{}", spec.address())
 }
 
+/// 秘密鍵のパスフレーズの名前（`key/秘密鍵のファイルの絶対パス`）。
+pub fn passphrase_key(key_file: &Path) -> String {
+    let path = std::path::absolute(key_file).unwrap_or_else(|_| key_file.to_owned());
+    format!("key/{}", path.display())
+}
+
 /// プロキシのパスワードの名前（`proxy/http://ホスト:ポート` など。ユーザー名は保存した値に持つ）。
 pub fn proxy_password_key(proxy: &proxy::Proxy) -> String {
     let p = proxy::Proxy {
@@ -211,7 +269,16 @@ pub struct PasswordRequest<'a> {
     pub note: Option<&'a str>,
 }
 
-/// パスワードの問い合わせへの答え。
+/// 秘密鍵のパスフレーズの問い合わせ。
+pub struct PassphraseRequest<'a> {
+    pub key_file: &'a Path,
+    /// 「保存する」を選べるようにするか
+    pub can_save: bool,
+    /// 添える説明（保存したパスフレーズで開けなかった、など）
+    pub note: Option<&'a str>,
+}
+
+/// パスワード・パスフレーズの問い合わせへの答え。
 pub struct PasswordAnswer {
     pub password: String,
     /// 認証に成功したら保存する
@@ -269,6 +336,14 @@ pub trait Prompter: Send + Sync {
     }
     /// 秘密鍵のパスフレーズ。`None` ならこの鍵を使わない
     fn passphrase(&self, key: &Path) -> Option<String>;
+    /// 「保存する」を選べるパスフレーズの問い合わせ（既定は [`Prompter::passphrase`] で、保存しない）。
+    fn ask_passphrase(&self, req: &PassphraseRequest<'_>) -> Option<PasswordAnswer> {
+        self.passphrase(req.key_file)
+            .map(|password| PasswordAnswer {
+                password,
+                save: false,
+            })
+    }
     /// keyboard-interactive 認証の質問（`(質問, 入力を表示するか)` の並び）への答え。
     /// `None` なら中止
     fn keyboard_interactive(
@@ -304,6 +379,16 @@ impl Prompter for NoPrompt {
     }
 }
 
+/// 接続先のパスの表示。
+pub fn display(path: &[u8]) -> String {
+    yy_proto::display_path(path)
+}
+
+/// 接続先のフォルダ `dir` の中の `name`。
+pub fn join_remote(dir: &[u8], name: &[u8]) -> Vec<u8> {
+    yy_proto::join_path(dir, name)
+}
+
 /// シェルの引数として安全に渡せるよう単一引用符で囲む。
 pub fn shell_quote(arg: &[u8]) -> Vec<u8> {
     let mut out = vec![b'\''];
@@ -334,6 +419,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(proxy_password_key(&p), "proxy/http://proxy:3128");
+        let k = passphrase_key(Path::new("id_ed25519"));
+        assert!(k.starts_with("key/") && k.ends_with("id_ed25519"), "{k}");
+        assert!(Path::new(&k[4..]).is_absolute(), "{k}");
     }
 
     #[test]

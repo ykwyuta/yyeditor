@@ -41,6 +41,10 @@ pub struct HostSpec {
     pub route_error: Option<String>,
     /// エージェントの配置先（`None` なら `~/.yyeditor/agent`）
     pub agent_dir: Option<String>,
+    /// ポートフォワーディング（ターミナルだけが使う。yyeditor の設定、`~/.ssh/config` の順）
+    pub forwards: Vec<crate::Forward>,
+    /// 読めなかったポートフォワーディングの指定（ターミナルが警告する）
+    pub forward_errors: Vec<String>,
 }
 
 impl HostSpec {
@@ -97,6 +101,13 @@ impl HostSpec {
         if let Some(p) = self.proxy.as_ref().filter(|_| self.jumps.is_empty()) {
             out.push(format!("プロキシ: {p}"));
         }
+        if !self.forwards.is_empty() {
+            let list: Vec<String> = self.forwards.iter().map(ToString::to_string).collect();
+            out.push(format!(
+                "ポートフォワーディング: {}（ターミナルだけが使う）",
+                list.join("、")
+            ));
+        }
         if self.jumps.is_empty() && self.proxy.is_none() {
             out.push("経路: 直接接続".into());
         }
@@ -124,6 +135,8 @@ pub struct HostOverride {
     /// プロキシ（`http://…`・`socks5://…`・`none`）
     pub proxy: Option<String>,
     pub agent_dir: Option<String>,
+    /// ポートフォワーディング（`L 8080:localhost:80`・`R 9000:localhost:3000`・`D 1080`）
+    pub forward: Vec<String>,
 }
 
 /// 接続先を解決するための材料。
@@ -215,7 +228,18 @@ impl Resolver {
             proxy: None,
             route_error: None,
             agent_dir: own.agent_dir.clone().or_else(|| self.agent_dir.clone()),
+            forwards: Vec::new(),
+            forward_errors: Vec::new(),
         };
+        // ポートフォワーディング: yyeditor の設定と ~/.ssh/config の両方（同じものは 1 つに）
+        let (own_forwards, mut errors) = crate::forward::parse_all(&own.forward);
+        errors.extend(sc.forward_errors.iter().cloned());
+        for f in own_forwards.into_iter().chain(sc.forwards.iter().cloned()) {
+            if !spec.forwards.contains(&f) {
+                spec.forwards.push(f);
+            }
+        }
+        spec.forward_errors = errors;
 
         // yyeditor の設定（proxy_jump・proxy のどちらか）があれば ~/.ssh/config の
         // ProxyJump・ProxyCommand は使わない
@@ -275,6 +299,9 @@ impl Resolver {
                 hop.proxy = None;
                 hop.route_error = None;
             }
+            // 踏み台ではポートフォワーディングをしない
+            hop.forwards.clear();
+            hop.forward_errors.clear();
             spec.jumps.push(hop);
         }
     }
@@ -327,6 +354,9 @@ pub struct SshConfigEntry {
     pub identity_files: Vec<String>,
     /// `ProxyJump`・`ProxyCommand` のうち先に現れたもの（`none` なら直接接続）
     pub route: Option<SshRoute>,
+    /// `LocalForward`・`RemoteForward`・`DynamicForward`（すべて。`ClearAllForwardings yes` で消す）
+    pub forwards: Vec<crate::Forward>,
+    pub forward_errors: Vec<String>,
 }
 
 /// `~/.ssh/config` の踏み台・プロキシの指定。
@@ -345,6 +375,7 @@ pub fn parse_for_host(text: &str, host: &str) -> SshConfigEntry {
     let mut route_seen = false;
     // 最初の Host 行より前は全ホストに当てはまる
     let mut active = true;
+    let mut clear_forwards = false;
     for line in text.lines() {
         let Some((key, value)) = split_line(line) else {
             continue;
@@ -366,6 +397,15 @@ pub fn parse_for_host(text: &str, host: &str) -> SshConfigEntry {
                 }
             }
             "identityfile" => out.identity_files.push(unquote(value.trim())),
+            k @ ("localforward" | "remoteforward" | "dynamicforward") => {
+                match crate::Forward::parse_config(k, &value) {
+                    Ok(f) => out.forwards.push(f),
+                    Err(e) => out.forward_errors.push(format!("~/.ssh/config: {e}")),
+                }
+            }
+            "clearallforwardings" if first_word(&value).eq_ignore_ascii_case("yes") => {
+                clear_forwards = true;
+            }
             "proxyjump" if !route_seen => {
                 route_seen = true;
                 let v = first_word(&value);
@@ -377,6 +417,10 @@ pub fn parse_for_host(text: &str, host: &str) -> SshConfigEntry {
             }
             _ => {}
         }
+    }
+    if clear_forwards {
+        out.forwards.clear();
+        out.forward_errors.clear();
     }
     out
 }
@@ -510,6 +554,52 @@ Host *
             parse_for_host(CONFIG, "foo").user.as_deref(),
             Some("fallback")
         );
+    }
+
+    #[test]
+    fn collects_port_forwardings() {
+        let config = "\
+Host db
+    LocalForward 5432 localhost:5432
+    DynamicForward 1080
+    RemoteForward 9000 localhost:3000
+    LocalForward nonsense
+Host quiet
+    LocalForward 8080 localhost:80
+    ClearAllForwardings yes
+Host jump
+    LocalForward 7000 localhost:7000
+";
+        let mut r = Resolver {
+            ssh_config: config.into(),
+            local_user: "me".into(),
+            ..Resolver::default()
+        };
+        r.hosts.push((
+            "db".into(),
+            HostOverride {
+                forward: vec!["L 8080:localhost:80".into(), "D 1080".into(), "Q 1".into()],
+                proxy_jump: Some("jump".into()),
+                ..HostOverride::default()
+            },
+        ));
+        let s = r.resolve(&Target::parse("db").unwrap());
+        let shown: Vec<String> = s.forwards.iter().map(ToString::to_string).collect();
+        // yyeditor の設定が先、同じものは 1 つ
+        assert_eq!(
+            shown,
+            [
+                "-L 8080:localhost:80",
+                "-D 1080",
+                "-L 5432:localhost:5432",
+                "-R 9000:localhost:3000"
+            ]
+        );
+        assert_eq!(s.forward_errors.len(), 2, "{:?}", s.forward_errors);
+        // 踏み台ではしない
+        assert!(s.jumps[0].forwards.is_empty());
+        let s = r.resolve(&Target::parse("quiet").unwrap());
+        assert!(s.forwards.is_empty());
     }
 
     #[test]

@@ -60,7 +60,12 @@ const SPLITTER: i32 = 5;
 
 /// ツリーの 1 項目。
 struct Node {
+    /// 束ねたフォルダ（`a/b/c`）では、いちばん奥のフォルダ（操作の対象）
     path: PathBuf,
+    /// 束ねたフォルダの先頭（`a`。束ねていなければ `path` と同じ）
+    head: PathBuf,
+    /// 表示している名前
+    label: String,
     is_dir: bool,
     /// 中身を読んだ（フォルダ）
     loaded: bool,
@@ -200,10 +205,28 @@ pub(crate) fn create_pane(frame: HWND, instance: HINSTANCE) -> Result<WorkspaceP
     })
 }
 
-/// フォルダをターミナルで開く。`custom` は設定のコマンド（空なら Windows Terminal、
-/// なければコマンド プロンプト）。
+/// 実行ファイルと同じフォルダの yyterm（12 章。なければ `None`）。
+pub(crate) fn yyterm_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.parent()?.join("yyterm.exe");
+    exe.is_file().then_some(exe)
+}
+
+/// フォルダをターミナルで開く。`custom` は設定のコマンド（空なら yyterm、なければ Windows Terminal、
+/// なければコマンド プロンプト）。リモートのフォルダ（`ssh://…`）は yyterm だけで開ける。
 pub(crate) fn open_terminal(dir: &Path, custom: &[String]) -> std::result::Result<(), String> {
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    if remote_uri(dir).is_some() || custom.is_empty() {
+        if let Some(t) = yyterm_exe() {
+            return Command::new(&t)
+                .arg(dir)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("{}: {e}", t.display()));
+        }
+        if remote_uri(dir).is_some() {
+            return Err("リモートのフォルダは yyterm（yyterm.exe）で開きます。".into());
+        }
+    }
     if let Some((cmd, args)) = custom.split_first() {
         let d = dir.to_string_lossy();
         return Command::new(cmd)
@@ -362,7 +385,8 @@ impl App {
     }
 
     /// 項目を `parent` の下に加える。
-    fn insert_node(&mut self, parent: HTREEITEM, node: Node, label: &str) -> HTREEITEM {
+    fn insert_node(&mut self, parent: HTREEITEM, mut node: Node, label: &str) -> HTREEITEM {
+        node.label = label.to_owned();
         let (image, selected) = self.icon_for(&node.path, node.is_dir);
         let children = i32::from(node.is_dir);
         let index = self.ws.nodes.len();
@@ -427,6 +451,8 @@ impl App {
             self.insert_node(
                 TVI_ROOT,
                 Node {
+                    head: f.clone(),
+                    label: String::new(),
                     path: f,
                     is_dir: true,
                     loaded: false,
@@ -501,9 +527,16 @@ impl App {
         &mut self,
         item: HTREEITEM,
         dir: &Path,
-        entries: Vec<workspace::Entry>,
+        mut entries: Vec<workspace::Entry>,
         skipped: usize,
     ) {
+        // 中身がフォルダ 1 つだけのフォルダは束ねる（VS Code と同じ。手元のフォルダは先に中を調べる。
+        // リモートのフォルダは開いたときに束ねる）
+        let heads = if remote_uri(dir).is_none() {
+            workspace::compact_local(&mut entries)
+        } else {
+            entries.iter().map(|e| e.path.clone()).collect()
+        };
         if entries.is_empty() {
             // 中身がなければ展開のボタンを消す
             let tv = TVITEMEXW {
@@ -525,11 +558,13 @@ impl App {
         unsafe {
             SendMessageW(self.ws.tree, WM_SETREDRAW, Some(WPARAM(0)), None);
         }
-        for e in entries {
+        for (e, head) in entries.into_iter().zip(heads) {
             self.insert_node(
                 item,
                 Node {
                     path: e.path,
+                    head,
+                    label: String::new(),
                     is_dir: e.is_dir,
                     loaded: false,
                     root: false,
@@ -681,6 +716,25 @@ impl App {
             .map(|s| s.to_string_lossy().into_owned())
     }
 
+    /// 項目の表示を変える。
+    fn set_item_label(&self, item: HTREEITEM, label: &str) {
+        let mut text: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+        let tv = TVITEMEXW {
+            mask: TVIF_TEXT | TVIF_HANDLE,
+            hItem: item,
+            pszText: windows::core::PWSTR(text.as_mut_ptr()),
+            ..Default::default()
+        };
+        unsafe {
+            SendMessageW(
+                self.ws.tree,
+                TVM_SETITEMW,
+                None,
+                Some(LPARAM(&tv as *const _ as isize)),
+            );
+        }
+    }
+
     /// 項目のパスとフォルダか。
     fn item_info(&self, item: HTREEITEM) -> Option<(PathBuf, bool)> {
         let i = self.node_of(item)?;
@@ -698,14 +752,48 @@ pub(crate) fn load_remote(hwnd: HWND, generation: usize, index: usize) {
         if n.loaded || !n.alive {
             return None;
         }
-        Some((n.remote()?, n.item, n.path.clone()))
+        Some((n.remote()?, n.item, n.path.clone(), n.root))
     })
     .flatten();
-    let Some((uri, item, dir)) = target else {
+    let Some((mut uri, item, mut dir, root)) = target else {
         return;
     };
     // 読んでいる間はアプリの状態を借りない（接続中の問い合わせのダイアログが出るため）
-    let listed = crate::remote::list_dir(&uri);
+    let mut listed = crate::remote::list_dir(&uri);
+    // 中身がフォルダ 1 つだけなら束ねて（`a/b`）、その中を読む（起点のフォルダは束ねない）
+    let mut depth = 0;
+    while !root && depth < workspace::COMPACT_DEPTH {
+        let only = match &listed {
+            Ok((entries, 0)) => match entries.as_slice() {
+                [e] if e.is_dir => e.clone(),
+                _ => break,
+            },
+            _ => break,
+        };
+        let Some(next) = remote_uri(&only.path) else {
+            break;
+        };
+        let merged = with_app(|a| {
+            if a.ws.generation != generation {
+                return false;
+            }
+            let Some(n) = a.ws.nodes.get_mut(index) else {
+                return false;
+            };
+            n.path = only.path.clone();
+            n.label = format!("{}/{}", n.label, only.name);
+            let label = n.label.clone();
+            a.set_item_label(item, &label);
+            true
+        });
+        if merged != Some(true) {
+            return;
+        }
+        uri = next;
+        dir = only.path;
+        listed = crate::remote::list_dir(&uri);
+        depth += 1;
+    }
     let expand = with_app(|a| {
         // 待っている間にツリーが作り直されていれば捨てる
         if a.ws.generation != generation || a.ws.nodes.get(index).is_none_or(|n| n.loaded) {
@@ -810,9 +898,22 @@ pub(crate) fn on_tree_notify(hwnd: HWND, hdr: &NMHDR, lparam: LPARAM) -> Option<
         TVN_BEGINLABELEDITW => {
             // 起点のフォルダの名前は変えない（ワークスペースから外して加え直す）
             let info = unsafe { &*(lparam.0 as *const NMTVDISPINFOW) };
-            let root = with_app(|a| a.ws.nodes.get(info.item.lParam.0 as usize).map(|n| n.root))
-                .flatten()
-                .unwrap_or(true);
+            let node = with_app(|a| {
+                a.ws.nodes
+                    .get(info.item.lParam.0 as usize)
+                    .map(|n| (n.root, workspace::name_of(&n.path), n.label.contains('/')))
+            })
+            .flatten();
+            let root = node.as_ref().is_none_or(|n| n.0);
+            // 束ねたフォルダ（`a/b/c`）は、いちばん奥のフォルダの名前を変える
+            if let Some((false, name, true)) = node {
+                unsafe {
+                    let edit = HWND(SendMessageW(tree, TVM_GETEDITCONTROL, None, None).0 as *mut _);
+                    if !edit.is_invalid() {
+                        let _ = SetWindowTextW(edit, &windows::core::HSTRING::from(name));
+                    }
+                }
+            }
             Some(LRESULT(isize::from(root)))
         }
         TVN_ENDLABELEDITW => {
@@ -954,6 +1055,10 @@ fn context_menu(hwnd: HWND, tree: HWND) {
                         add(CM_GREP, "フォルダ内を検索 (Grep)(&F)...");
                     }
                     sep();
+                } else if yyterm_exe().is_some() {
+                    // リモートのフォルダは yyterm の SSH で開く
+                    add(CM_TERMINAL, "ターミナルで開く(&T)");
+                    sep();
                 }
                 add(CM_COPY_PATH, "パスをコピー(&C)");
                 add(CM_COPY_RELATIVE, "相対パスをコピー(&R)");
@@ -1025,7 +1130,7 @@ fn run_context_command(hwnd: HWND, cmd: u32, item: HTREEITEM, node: Option<(Path
     let dir = if is_dir {
         path.clone()
     } else {
-        path.parent().map(|p| p.to_owned()).unwrap_or_default()
+        workspace::parent(&path).unwrap_or_default()
     };
     let result = match cmd {
         CM_OPEN => {
@@ -1116,8 +1221,8 @@ pub(crate) fn cmd_add_remote_folder(hwnd: HWND) {
             .node_of(a.selected_item())
             .and_then(|i| a.ws.nodes[i].remote());
         (
-            a.remote.available(),
-            selected.or_else(|| a.remote.last.clone()),
+            crate::remote::available(),
+            selected.or_else(crate::remote::last),
         )
     }) else {
         return;
@@ -1141,14 +1246,18 @@ pub(crate) fn cmd_add_remote_folder(hwnd: HWND) {
     {
         let dir = PathBuf::from(p.uri.to_string());
         with_app(|a| {
-            a.remote.last = Some(p.uri.clone());
+            crate::remote::set_last(p.uri.clone());
             a.add_workspace_folder(&dir);
         });
     }
 }
 
 /// ワークスペースのファイルを選ぶ（`save` なら保存先）。
-fn pick_workspace_file(owner: HWND, save: bool, current: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn pick_workspace_file(
+    owner: HWND,
+    save: bool,
+    current: Option<&Path>,
+) -> Option<PathBuf> {
     use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
     unsafe {
         let filters = [COMDLG_FILTERSPEC {
@@ -1792,13 +1901,31 @@ fn shell_op(
 impl App {
     /// `dir` を表示しているフォルダの項目を読み直す。
     fn refresh_folder(&mut self, dir: &Path) {
-        let items: Vec<HTREEITEM> = self
-            .ws
-            .nodes
-            .iter()
-            .filter(|n| n.alive && n.is_dir && yy_config::recent::same_path(&n.path, dir))
-            .map(|n| n.item)
-            .collect();
+        let same = yy_config::recent::same_path;
+        let mut items: Vec<HTREEITEM> = Vec::new();
+        for n in self.ws.nodes.iter().filter(|n| n.alive && n.is_dir) {
+            if same(&n.path, dir) {
+                items.push(n.item);
+            } else if !n.root
+                && workspace::is_within(&n.path, dir)
+                && workspace::is_within(dir, &n.head)
+            {
+                // 束ねたフォルダ（`a/b/c`）の途中が変わった: 束ね方が変わるので、親のフォルダから読み直す
+                let parent = HTREEITEM(unsafe {
+                    SendMessageW(
+                        self.ws.tree,
+                        TVM_GETNEXTITEM,
+                        Some(WPARAM(TVGN_PARENT as usize)),
+                        Some(LPARAM(n.item.0)),
+                    )
+                    .0
+                });
+                if parent.0 != 0 {
+                    items.push(parent);
+                }
+            }
+        }
+        items.dedup();
         for item in items {
             self.refresh_item(item);
         }
