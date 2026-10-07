@@ -103,9 +103,16 @@ impl Budget {
     }
 
     pub fn sub(&self, part: Part, bytes: u64) {
-        let _ = self.used[part as usize].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |u| {
-            Some(u.saturating_sub(bytes))
-        });
+        let used = &self.used[part as usize];
+        let mut cur = used.load(Ordering::Relaxed);
+        while let Err(now) = used.compare_exchange_weak(
+            cur,
+            cur.saturating_sub(bytes),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            cur = now;
+        }
     }
 
     /// `bytes` を足しても部品の予算に収まるか。
