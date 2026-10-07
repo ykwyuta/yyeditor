@@ -738,8 +738,31 @@ pub fn sort(
         .collect();
     let mut group: Option<(Vec<u128>, u32)> = None;
     let flush = |order: &mut Vec<u32>, (kv, width): (Vec<u128>, u32)| {
-        if width <= 64 {
-            sort_pass(order, |r| kv[r as usize] as u64);
+        if width > 64 && width <= 67 {
+            // 1 列のキー（種類 3 ビット＋値 64 ビット）: 種類ごとに分けてから、値（64 ビット）で並べる
+            let pw = width - 3;
+            let mask = if pw == 64 { u64::MAX } else { (1u64 << pw) - 1 };
+            let payload: Vec<u64> = kv.par_iter().map(|&k| k as u64 & mask).collect();
+            let class: Vec<u8> = kv.par_iter().map(|&k| (k >> pw) as u8).collect();
+            drop(kv);
+            let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); 8];
+            for &r in order.iter() {
+                buckets[class[r as usize] as usize].push(r);
+            }
+            drop(class);
+            let mut out = Vec::with_capacity(order.len());
+            for mut b in buckets {
+                if b.len() > 1 {
+                    sort_pass(&mut b, |r| payload[r as usize]);
+                }
+                out.append(&mut b);
+            }
+            *order = out;
+        } else if width <= 64 {
+            // 64 ビットに入るなら詰め直して、キーと組の大きさを半分にする（5000 万行で 1 GB ほど減る）
+            let narrow: Vec<u64> = kv.par_iter().map(|&k| k as u64).collect();
+            drop(kv);
+            sort_pass(order, |r| narrow[r as usize]);
         } else {
             sort_pass(order, |r| kv[r as usize]);
         }
