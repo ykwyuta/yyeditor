@@ -3476,6 +3476,7 @@ dependencies = [
  "yy-3270-macro",
  "yy-3270-tls",
  "yy-buffer",
+ "yy-cobol",
  "yy-config",
  "yy-core",
  "yy-delimited",

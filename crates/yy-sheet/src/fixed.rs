@@ -215,6 +215,53 @@ pub fn preview(bytes: &[u8], spec: &FixedSpec, n: usize) -> Vec<Vec<String>> {
     rows
 }
 
+/// レイアウトの説明（ダイアログに出す）: レコード長・注意・項目の一覧。`sample` があれば（ファイルの
+/// 先頭のバイト列・ファイルの大きさ）レコードの数と 1 件目の値も。行は CR LF で区切る。
+pub fn describe(spec: &FixedSpec, sample: Option<(&[u8], u64)>) -> String {
+    let l = &spec.layout;
+    let mut out = format!(
+        "レコード {}: {} バイト・項目 {} 個（文字コード {}・区切り {}）\r\n",
+        if l.record.is_empty() { "-" } else { &l.record },
+        l.record_len,
+        l.fields.len(),
+        spec.codec.charset.name(),
+        spec.separator.label()
+    );
+    let first = sample.and_then(|(bytes, len)| {
+        let (n, rest) = record_count(len, l.record_len, spec.separator);
+        out.push_str(&format!("ファイル: {n} レコード"));
+        if rest > 0 {
+            out.push_str(&format!(
+                "（末尾の {rest} バイトはレコードになりません。レコード長・区切りを確かめてください）"
+            ));
+        }
+        out.push_str("\r\n");
+        preview(bytes, spec, 1).into_iter().next()
+    });
+    for w in &l.warnings {
+        out.push_str(&format!("注意: {w}\r\n"));
+    }
+    out.push_str("\r\n位置\t長さ\t名前\t型");
+    if first.is_some() {
+        out.push_str("\t1 件目");
+    }
+    out.push_str("\r\n");
+    for (i, f) in l.fields.iter().enumerate() {
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}",
+            f.offset + 1,
+            f.len,
+            f.name,
+            f.describe
+        ));
+        if let Some(v) = first.as_ref().and_then(|r| r.get(i)) {
+            out.push_str(&format!("\t{v}"));
+        }
+        out.push_str("\r\n");
+    }
+    out
+}
+
 fn cancelled() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "中止しました")
 }
@@ -676,6 +723,10 @@ mod tests {
         let (_, rep) = import(&ctx, &p2, &ms, &|_, _| true).unwrap();
         assert_eq!((rep.records, rep.remainder), (3, 3));
         assert_eq!(preview(&m, &ms, 2)[1][1], "漢字テ");
+        let d = describe(&ms, Some((&tail, tail.len() as u64)));
+        assert!(d.contains("43 バイト・項目 7 個"), "{d}");
+        assert!(d.contains("ファイル: 3 レコード（末尾の 3 バイト"), "{d}");
+        assert!(d.contains("16\t8\tKANA\tN(4)\tカナ"), "{d}");
     }
 
     #[test]

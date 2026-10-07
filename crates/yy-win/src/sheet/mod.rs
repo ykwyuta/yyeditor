@@ -12,6 +12,7 @@ mod bulkui;
 mod entry;
 mod fillhandle;
 mod filter;
+mod fixedui;
 mod format;
 mod paint;
 mod view;
@@ -63,6 +64,9 @@ const ID_SAVE: u16 = 3;
 const ID_SAVE_AS: u16 = 4;
 const ID_EXPORT_CSV: u16 = 5;
 const ID_EXIT: u16 = 6;
+const ID_OPEN_FIXED: u16 = 7;
+const ID_EXPORT_FIXED: u16 = 8;
+const ID_FIXED_LAYOUT: u16 = 26;
 const ID_UNDO: u16 = 10;
 const ID_REDO: u16 = 11;
 const ID_CUT: u16 = 12;
@@ -131,6 +135,8 @@ enum Origin {
     New,
     Yys,
     Csv(CsvOptions),
+    /// 固定長ファイル（設定はシートが持つ）
+    Fixed,
 }
 
 /// セルの編集。
@@ -193,6 +199,8 @@ struct App {
     home: Option<entry::Home>,
     /// 直前のフィル（オートフィル オプションのボタン）
     last_fill: Option<fillhandle::LastFill>,
+    /// 最後に使った固定長ファイルの設定（ダイアログの初期値）
+    fixed_last: Option<yy_sheet::fixed::FixedSpec>,
 }
 
 thread_local! {
@@ -282,10 +290,12 @@ fn create_menu() -> Result<HMENU> {
         let file = CreatePopupMenu()?;
         add(file, ID_NEW, "新規(&N)\tCtrl+N");
         add(file, ID_OPEN, "開く(&O)...\tCtrl+O");
+        add(file, ID_OPEN_FIXED, "固定長ファイルを開く(&F)...");
         sep(file);
         add(file, ID_SAVE, "上書き保存(&S)\tCtrl+S");
         add(file, ID_SAVE_AS, "名前を付けて保存(&A)...\tCtrl+Shift+S");
         add(file, ID_EXPORT_CSV, "CSV に書き出し(&E)...");
+        add(file, ID_EXPORT_FIXED, "固定長ファイルに書き出し(&L)...");
         sep(file);
         add(file, ID_EXIT, "終了(&X)");
         let edit = CreatePopupMenu()?;
@@ -365,6 +375,7 @@ fn create_menu() -> Result<HMENU> {
         add(data, ID_CLEAR_VIEW, "絞り込み・並べ替えを解除(&X)");
         sep(data);
         add(data, ID_DEDUP, "重複の削除(&U)...");
+        add(data, ID_FIXED_LAYOUT, "固定長のレイアウト(&Y)...");
         add(data, ID_TO_NUMBER, "列を数値に変換(&V)");
         add(data, ID_TO_TEXT, "列を文字列に変換(&T)");
         let help = CreatePopupMenu()?;
@@ -562,6 +573,7 @@ fn create() -> Result<HWND> {
             marks: Vec::new(),
             home: None,
             last_fill: None,
+            fixed_last: None,
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         with(|a| {
@@ -1664,6 +1676,10 @@ fn show_open(owner: HWND) -> Option<PathBuf> {
                 pszSpec: w!("*.yys;*.csv;*.tsv;*.txt"),
             },
             COMDLG_FILTERSPEC {
+                pszName: w!("固定長ファイル (*.dat;*.bin)"),
+                pszSpec: w!("*.dat;*.bin"),
+            },
+            COMDLG_FILTERSPEC {
                 pszName: w!("すべてのファイル (*.*)"),
                 pszSpec: w!("*.*"),
             },
@@ -1698,6 +1714,16 @@ fn show_save(owner: HWND, current: Option<&Path>, csv_only: bool) -> Option<Path
         dialog.Show(Some(owner)).ok()?;
         file_dialog_result(dialog.GetResult().ok()?)
     }
+}
+
+/// 先頭が `.yys` の印か（拡張子が違っても `.yys` なら開く）。
+fn looks_like_yys(p: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 8];
+    std::fs::File::open(p)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok()
+        && &head == yys::MAGIC
 }
 
 fn is_csv_path(p: &Path) -> bool {
@@ -1826,6 +1852,15 @@ fn open_path(path: &Path) {
         }
         return;
     }
+    // .yys・CSV でなければ固定長ファイルとして開く（レイアウトを尋ねる）
+    let is_yys = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("yys"));
+    if !is_yys && !looks_like_yys(path) {
+        fixedui::open_fixed_path(frame, ctx, path);
+        return;
+    }
     let p = path.to_owned();
     let ctx2 = ctx.clone();
     let r = crate::remote::wait(&set_status, move |_| yys::open(ctx2, &p));
@@ -1853,6 +1888,29 @@ fn save(ask: bool) -> bool {
     };
     let target = match (&path, ask, &origin) {
         (Some(p), false, Origin::Yys) => p.clone(),
+        (Some(p), false, Origin::Fixed) => {
+            let r = unsafe {
+                MessageBoxW(
+                    Some(frame),
+                    &HSTRING::from(format!(
+                        "{} は固定長ファイルです。固定長のまま保存しますか？\n\n\
+                         はい: 固定長で上書きする（文字コードを選べます。色・罫線・式・複数のシートは保存されません）\n\
+                         いいえ: yysheet の形式（.yys）で保存する（レイアウトも保存します）",
+                        p.display()
+                    )),
+                    w!("yysheet"),
+                    MB_YESNOCANCEL | MB_ICONQUESTION,
+                )
+            };
+            match r {
+                IDYES => return fixedui::export_fixed(Some(p.clone())),
+                IDNO => match show_save(frame, Some(p), false) {
+                    Some(t) => t,
+                    None => return false,
+                },
+                _ => return false,
+            }
+        }
         (Some(p), false, Origin::Csv(_)) => {
             let r = unsafe {
                 MessageBoxW(
@@ -2075,6 +2133,11 @@ fn command(id: u16) {
         ID_EXPORT_CSV => {
             export_csv(None);
         }
+        ID_OPEN_FIXED => fixedui::open_fixed(),
+        ID_EXPORT_FIXED => {
+            fixedui::export_fixed(None);
+        }
+        ID_FIXED_LAYOUT => fixedui::layout_dialog(),
         ID_EXIT => {
             if let Some(f) = with(|a| a.frame) {
                 unsafe {

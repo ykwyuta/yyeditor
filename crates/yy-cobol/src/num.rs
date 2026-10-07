@@ -57,6 +57,14 @@ impl Decimal {
         if !x.is_finite() || scale > 38 {
             return None;
         }
+        // 速い道: 小数部の桁数を掛けた値が整数のごく近く（四捨五入の境目から遠い）なら、その整数
+        if (0..=15).contains(&scale) {
+            let y = x * 10f64.powi(scale);
+            let r = y.round();
+            if r.abs() < 9.0e15 && (y - r).abs() < 1e-6 {
+                return Some(Decimal::new(r as i128, scale));
+            }
+        }
         Decimal::parse(&format!("{x}"))?.rescale(scale)
     }
 

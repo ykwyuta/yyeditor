@@ -195,6 +195,23 @@ fn to_fullwidth(c: char) -> char {
     }
 }
 
+/// EBCDIC の CCSID ごとの ASCII の文字の 1 バイトの符号（0 は 1 バイトでない・表にない）。
+fn ascii_table(c: Ccsid) -> &'static [u8; 128] {
+    use std::sync::OnceLock;
+    static TABLES: [OnceLock<[u8; 128]>; Ccsid::ALL.len()] =
+        [const { OnceLock::new() }; Ccsid::ALL.len()];
+    let i = Ccsid::ALL.iter().position(|x| *x == c).unwrap_or(0);
+    TABLES[i].get_or_init(|| {
+        let mut t = [0u8; 128];
+        for (b, slot) in t.iter_mut().enumerate() {
+            if let Some(EbcdicCode::Single(x)) = c.encode_char(b as u8 as char) {
+                *slot = x;
+            }
+        }
+        t
+    })
+}
+
 /// Shift_JIS の先頭バイトか。
 fn sjis_lead(b: u8) -> bool {
     matches!(b, 0x81..=0x9F | 0xE0..=0xFC)
@@ -295,13 +312,30 @@ impl Codec {
                     i += n;
                 }
             }
+            Charset::Ebcdic(c)
+                if !dbcs_only && s.is_ascii() && {
+                    let t = ascii_table(c);
+                    s.bytes().all(|b| t[b as usize] != 0)
+                } =>
+            {
+                // 速い道: ASCII だけの文字列
+                let t = ascii_table(c);
+                for b in s.bytes() {
+                    if bytes.len() == len {
+                        truncated = true;
+                        break;
+                    }
+                    bytes.push(t[b as usize]);
+                }
+            }
             Charset::Ebcdic(c) => {
                 let shift = c.shift_bytes();
                 let mut in_dbcs = false;
                 for ch in s.chars() {
                     // 元のバイト（エスケープ文字）・1 バイト・2 バイト
-                    let unit: (Option<u8>, Vec<u8>) = if let Some(b) = unescape_char(ch) {
-                        (None, vec![b])
+                    // （種類, バイト, バイト数）。種類は None が元のバイト、0 が 1 バイト、1 が 2 バイト
+                    let unit: (Option<u8>, [u8; 2], usize) = if let Some(b) = unescape_char(ch) {
+                        (None, [b, 0], 1)
                     } else {
                         let code = c.encode_char(ch).or_else(|| {
                             issues.unencodable += 1;
@@ -324,9 +358,9 @@ impl Codec {
                             (x, _) => x,
                         };
                         match code {
-                            Some(EbcdicCode::Single(b)) => (Some(0), vec![b]),
-                            Some(EbcdicCode::Double(d)) => (Some(1), d.to_be_bytes().to_vec()),
-                            None => (Some(0), vec![0x6F]),
+                            Some(EbcdicCode::Single(b)) => (Some(0), [b, 0], 1),
+                            Some(EbcdicCode::Double(d)) => (Some(1), d.to_be_bytes(), 2),
+                            None => (Some(0), [0x6F, 0], 1),
                         }
                     };
                     // 切り替え（SO / SI）が要るか
@@ -338,14 +372,14 @@ impl Codec {
                         _ => (None, in_dbcs),
                     };
                     let close = (post_dbcs && !dbcs_only) as usize;
-                    if bytes.len() + pre.is_some() as usize + unit.1.len() + close > len {
+                    if bytes.len() + pre.is_some() as usize + unit.2 + close > len {
                         truncated = true;
                         break;
                     }
                     if let Some(p) = pre {
                         bytes.push(p);
                     }
-                    bytes.extend_from_slice(&unit.1);
+                    bytes.extend_from_slice(&unit.1[..unit.2]);
                     in_dbcs = post_dbcs;
                 }
                 if in_dbcs && let Some((_, si)) = shift {
@@ -357,18 +391,20 @@ impl Codec {
             issues.truncated += 1;
         }
         // 埋める
-        let pad: Vec<u8> = if dbcs_only {
-            let sp = self.charset.dbcs_space();
-            (0..len - bytes.len()).map(|i| sp[i % 2]).collect()
+        let pad = len - bytes.len();
+        let (text_at, pad_at) = if justified {
+            (pad, 0)
         } else {
-            vec![self.charset.space(); len - bytes.len()]
+            (0, bytes.len())
         };
-        if justified {
-            out[..pad.len()].copy_from_slice(&pad);
-            out[pad.len()..].copy_from_slice(&bytes);
-        } else {
-            out[..bytes.len()].copy_from_slice(&bytes);
-            out[bytes.len()..].copy_from_slice(&pad);
+        out[text_at..text_at + bytes.len()].copy_from_slice(&bytes);
+        let sp = self.charset.dbcs_space();
+        for (i, o) in out[pad_at..pad_at + pad].iter_mut().enumerate() {
+            *o = if dbcs_only {
+                sp[i % 2]
+            } else {
+                self.charset.space()
+            };
         }
     }
 
@@ -756,8 +792,9 @@ impl Codec {
         out: &mut [u8],
     ) {
         let ebcdic = self.charset.is_ebcdic();
-        let s = format!("{abs:0w$}", w = digits as usize);
-        let ds: Vec<u8> = s.bytes().map(|c| c - b'0').collect();
+        let mut buf = [0u8; 40];
+        let ds = &mut buf[..digits as usize];
+        digits_into(abs, ds);
         let digit = |d: u8| if ebcdic { 0xF0 | d } else { b'0' + d };
         let (plus, minus) = self.charset.plus_minus();
         let body: &mut [u8] = match (signed, sign) {
@@ -789,6 +826,14 @@ impl Codec {
                 (false, true) => 0x70 + d,
             };
         }
+    }
+}
+
+/// 絶対値の下から `n` 桁（上は 0 で埋める。`out` の長さが `n`）。
+fn digits_into(mut v: u128, out: &mut [u8]) {
+    for d in out.iter_mut().rev() {
+        *d = (v % 10) as u8;
+        v /= 10;
     }
 }
 
@@ -836,8 +881,9 @@ fn decode_packed(b: &[u8]) -> Option<i128> {
 
 fn encode_packed(abs: u128, neg: bool, signed: bool, out: &mut [u8]) {
     let nibbles = out.len() * 2 - 1;
-    let s = format!("{abs:0w$}", w = nibbles);
-    let ds: Vec<u8> = s.bytes().map(|c| c - b'0').collect();
+    let mut buf = [0u8; 80];
+    let ds = &mut buf[..nibbles.min(80)];
+    digits_into(abs, ds);
     let sign = match (signed, neg) {
         (false, _) => 0xF,
         (true, false) => 0xC,
