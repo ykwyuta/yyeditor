@@ -12,6 +12,7 @@ mod adjust;
 mod criteria;
 mod eval;
 mod func;
+mod index;
 mod parse;
 mod print;
 #[cfg(test)]
@@ -19,6 +20,7 @@ mod tests;
 
 pub use adjust::{Edit, adjust};
 pub use eval::{Context, eval};
+pub use index::{Cache, ExactIndex};
 pub use parse::{Area, AreaKind, BinOp, Expr, Func, ParseError, Ref, parse};
 pub use print::formula_text;
 
@@ -171,6 +173,17 @@ pub trait Grid {
             let v = self.get(sheet, r, col);
             f(r, v.cell());
         }
+    }
+
+    /// 1 列の `rows` の完全一致の索引（列が変わるまで覚えておける側が作る。既定は作らない）。
+    fn exact_index(&self, _sheet: usize, _col: u32, _rows: Range<u64>) -> Option<Arc<ExactIndex>> {
+        None
+    }
+
+    /// 範囲の値が、1 回の再計算の間に変わらないか（式・式の結果を含まない）。`true` なら同じ範囲の
+    /// `SUMIFS` をまとめて計算する。
+    fn stable(&self, _sheet: usize, _area: &Area) -> bool {
+        false
     }
 }
 

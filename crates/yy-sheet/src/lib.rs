@@ -40,6 +40,8 @@ pub struct Context {
     pub cache: ChunkCache,
     work_dir: PathBuf,
     work: Mutex<Option<Arc<Store>>>,
+    /// `XLOOKUP` の完全一致の索引（列のデータ・行の範囲ごと。新しいものが後ろ）
+    pub(crate) lookups: Mutex<Vec<formula::LookupEntry>>,
 }
 
 impl Context {
@@ -50,6 +52,7 @@ impl Context {
             cache: ChunkCache::default(),
             work_dir,
             work: Mutex::new(None),
+            lookups: Mutex::new(Vec::new()),
         })
     }
 

@@ -10,12 +10,14 @@ type MemSheet = (String, BTreeMap<(u64, u32), Val>);
 /// メモリ上の格子。
 struct Mem {
     sheets: Vec<MemSheet>,
+    cache: Cache,
 }
 
 impl Mem {
     fn new() -> Mem {
         Mem {
             sheets: vec![("Sheet1".into(), BTreeMap::new())],
+            cache: Cache::default(),
         }
     }
 
@@ -35,6 +37,7 @@ impl Mem {
                 grid: self,
                 sheet: 0,
                 sys: DateSystem::D1900,
+                cache: Some(&self.cache),
             },
         )
     }
@@ -298,4 +301,95 @@ fn wildcards() {
     assert!(wildcard_match("*~**", "a*b"));
     assert!(!wildcard_match("*~**", "ab"));
     assert!(wildcard_match("A*C", "abbbc"));
+}
+
+/// 索引・まとめた計算を使う格子（中身は `Mem` と同じ）。
+struct Fast<'a>(&'a Mem);
+
+impl Grid for Fast<'_> {
+    fn sheet(&self, name: &str) -> Option<usize> {
+        self.0.sheet(name)
+    }
+    fn get(&self, sheet: usize, row: u64, col: u32) -> Val {
+        self.0.get(sheet, row, col)
+    }
+    fn used(&self, sheet: usize) -> (u64, u32) {
+        self.0.used(sheet)
+    }
+    fn exact_index(
+        &self,
+        sheet: usize,
+        col: u32,
+        rows: std::ops::Range<u64>,
+    ) -> Option<Arc<ExactIndex>> {
+        Some(Arc::new(ExactIndex::build(self, sheet, col, rows)))
+    }
+    fn stable(&self, _: usize, _: &Area) -> bool {
+        true
+    }
+}
+
+#[test]
+fn indexes_and_batches_match_plain_evaluation() {
+    let mut g = Mem::new();
+    let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = move |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    let cities = ["東京", "大阪", "TOKYO", "tokyo", "名古屋", "", "100"];
+    for r in 1..=400 {
+        let c = cities[next(cities.len() as u64) as usize];
+        if !c.is_empty() {
+            g.set(0, &format!("A{r}"), t(c));
+        }
+        g.set(0, &format!("B{r}"), n(next(5) as f64));
+        if next(10) == 0 {
+            g.set(0, &format!("C{r}"), t("x"));
+        } else {
+            g.set(0, &format!("C{r}"), n(next(1000) as f64));
+        }
+        g.set(0, &format!("D{r}"), n(r as f64 * 3.0));
+    }
+    let fast = Fast(&g);
+    let cache = Cache::default();
+    let mut formulas = Vec::new();
+    for c in ["東京", "tokyo", "大阪", "名古屋", "", "100", "札幌"] {
+        for b in 0..5 {
+            formulas.push(format!("=SUMIFS(C:C,A:A,\"{c}\",B:B,{b})"));
+            formulas.push(format!("=COUNTIFS(A1:A400,\"{c}\",B1:B400,\"{b}\")"));
+        }
+        formulas.push(format!("=XLOOKUP(\"{c}\",A:A,D:D,\"なし\")"));
+        formulas.push(format!("=XLOOKUP(\"{c}\",A:A,D:D,,0,-1)"));
+    }
+    for k in [3.0, 30.0, 1200.0, 1201.0] {
+        formulas.push(format!("=XLOOKUP({k},D:D,B:B)"));
+    }
+    for f in &formulas {
+        let e = parse(f).unwrap();
+        let plain = eval(
+            &e,
+            &Context {
+                grid: &g,
+                sheet: 0,
+                sys: DateSystem::D1900,
+                cache: None,
+            },
+        );
+        // まとめた計算は 2 回目から使われるので 2 回ずつ
+        for _ in 0..2 {
+            let quick = eval(
+                &e,
+                &Context {
+                    grid: &fast,
+                    sheet: 0,
+                    sys: DateSystem::D1900,
+                    cache: Some(&cache),
+                },
+            );
+            assert_eq!(quick, plain, "{f}");
+        }
+    }
 }

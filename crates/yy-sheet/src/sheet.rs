@@ -260,6 +260,7 @@ impl Sheet {
             .map_err(|e| e.to_string())?;
         let key = (self.source_row(row), col);
         Arc::make_mut(&mut self.formulas.cells).insert(key, f);
+        self.formulas.touch(key.0, col, key.0, col);
         Ok(())
     }
 
@@ -308,12 +309,11 @@ impl Sheet {
     }
 
     pub fn set(&mut self, ctx: &Context, row: u64, col: u32, v: Value) -> io::Result<()> {
+        let src = self.source_row(row);
         if !self.formulas.cells.is_empty() {
-            let key = (self.source_row(row), col);
-            if self.formulas.cells.contains_key(&key) {
-                Arc::make_mut(&mut self.formulas.cells).remove(&key);
-            }
+            self.formulas.remove(src, col);
         }
+        self.formulas.touch(src, col, src, col);
         match self.place(row, col) {
             Place::Header(c) => {
                 let cols = Arc::make_mut(&mut self.table.columns);
@@ -533,6 +533,10 @@ pub struct Document {
     pub(crate) last_dir: u64,
     /// 保存してから変えた
     pub dirty: bool,
+    /// 編集のあとの再計算を呼ぶ側に任せる（UI がバックグラウンドで行う）
+    pub defer_recalc: bool,
+    /// 任された再計算がまだ（[`Document::take_recalc`]）
+    pub recalc_pending: bool,
 }
 
 impl Document {
@@ -546,6 +550,8 @@ impl Document {
             file: None,
             last_dir: 0,
             dirty: false,
+            defer_recalc: false,
+            recalc_pending: false,
         }
     }
 
@@ -566,7 +572,11 @@ impl Document {
             self.book = before;
             return Err(e);
         }
-        crate::formula::recalc(&mut self.book, &self.ctx);
+        if self.defer_recalc {
+            self.recalc_pending |= self.book.sheets.iter().any(|s| !s.formulas.is_empty());
+        } else {
+            crate::formula::recalc(&mut self.book, &self.ctx);
+        }
         self.undo.push(before);
         if self.undo.len() > UNDO_DEPTH {
             self.undo.remove(0);
@@ -574,6 +584,16 @@ impl Document {
         self.redo.clear();
         self.dirty = true;
         Ok(())
+    }
+
+    /// 任された再計算を引き取る（計算するブックの写し。計算したら [`Document::put_recalc`]）。
+    pub fn take_recalc(&mut self) -> Option<Workbook> {
+        std::mem::take(&mut self.recalc_pending).then(|| self.book.clone())
+    }
+
+    /// 計算したブックを戻す。
+    pub fn put_recalc(&mut self, book: Workbook) {
+        self.book = book;
     }
 
     pub fn can_undo(&self) -> bool {

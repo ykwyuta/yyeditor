@@ -63,6 +63,13 @@ impl Column {
         self.ends = Arc::new(ends);
     }
 
+    /// 同じデータ（区間の並びと差分を共有している）か。索引を使い回すときに比べる。
+    pub fn same_data(&self, o: &Column) -> bool {
+        Arc::ptr_eq(&self.pieces, &o.pieces)
+            && Arc::ptr_eq(&self.delta, &o.delta)
+            && self.name == o.name
+    }
+
     pub fn rows(&self) -> u64 {
         self.ends.last().copied().unwrap_or(0)
     }

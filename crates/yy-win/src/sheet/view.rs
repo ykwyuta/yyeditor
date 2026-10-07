@@ -399,6 +399,7 @@ pub(super) fn commit_sort() {
         let _ = a.doc.edit(|b, _| {
             let s = &mut b.sheets[sheet];
             s.table = new_table;
+            s.formulas.touch_all();
             s.view = new_view;
             Ok(())
         });

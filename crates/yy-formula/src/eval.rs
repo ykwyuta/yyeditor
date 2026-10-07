@@ -21,6 +21,8 @@ pub struct Context<'a> {
     /// 式のあるシート
     pub sheet: usize,
     pub sys: DateSystem,
+    /// 1 回の再計算の間の覚え書き（同じ範囲の `SUMIFS` をまとめる。なければまとめない）
+    pub cache: Option<&'a crate::Cache>,
 }
 
 /// 引数（参照は値にせずに渡す。`SUMIFS` などは列を直接読む）。

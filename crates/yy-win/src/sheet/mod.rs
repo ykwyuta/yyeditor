@@ -102,6 +102,9 @@ const SS_CENTERIMAGE: u32 = 0x200;
 const MK_SHIFT: usize = 0x4;
 const MK_CONTROL: usize = 0x8;
 
+/// 式の再計算をバックグラウンドで始める（編集のあとにフレームへ送る）
+const WM_APP_RECALC: u32 = WM_APP + 40;
+
 const IDC_FORMULA: u16 = 100;
 const IDC_TABS: u16 = 101;
 
@@ -474,7 +477,11 @@ fn create() -> Result<HWND> {
             status,
             ui_font,
             config,
-            doc: Document::new(ctx.clone()),
+            doc: {
+                let mut d = Document::new(ctx.clone());
+                d.defer_recalc = true;
+                d
+            },
             ctx,
             origin: Origin::New,
             sheet: 0,
@@ -1131,6 +1138,11 @@ impl App {
     }
 
     fn after_edit(&mut self) {
+        if self.doc.recalc_pending {
+            unsafe {
+                let _ = PostMessageW(Some(self.frame), WM_APP_RECALC, WPARAM(0), LPARAM(0));
+            }
+        }
         self.update_title();
         self.update_scrollbars();
         self.sync_formula();
@@ -1301,6 +1313,7 @@ impl App {
 
     fn set_document(&mut self, doc: Document, origin: Origin) {
         self.doc = doc;
+        self.doc.defer_recalc = true;
         self.origin = origin;
         self.sheet = 0;
         self.top = 0;
@@ -1815,6 +1828,31 @@ fn export_csv(target: Option<PathBuf>) -> bool {
     }
 }
 
+/// 任された式の再計算を、バックグラウンドのスレッドで行う（その間の入力は捨てる）。
+fn recalc_in_background() {
+    let Some((book, ctx)) = with(|a| a.doc.take_recalc().map(|b| (b, a.ctx.clone()))).flatten()
+    else {
+        return;
+    };
+    let mut book = book;
+    let started = std::time::Instant::now();
+    let book = crate::remote::wait(&set_status, move |w| {
+        w.report("再計算中…".into());
+        yy_sheet::formula::recalc(&mut book, &ctx);
+        book
+    });
+    with(|a| {
+        a.doc.put_recalc(book);
+        a.update_scrollbars();
+        a.sync_formula();
+        a.invalidate();
+    });
+    let secs = started.elapsed().as_secs_f64();
+    if secs >= 0.5 {
+        set_status(&format!("再計算しました（{secs:.1} 秒）"));
+    }
+}
+
 fn show_memory() {
     let Some((frame, text)) = with(|a| {
         let b = &a.ctx.budget;
@@ -2189,6 +2227,10 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             LRESULT(0)
         }
         crate::remote::WM_APP_REMOTE_WAKE => LRESULT(0),
+        WM_APP_RECALC => {
+            recalc_in_background();
+            LRESULT(0)
+        }
         _ => default_proc(hwnd, msg, wparam, lparam),
     }
 }

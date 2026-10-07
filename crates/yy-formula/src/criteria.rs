@@ -91,6 +91,22 @@ impl Criterion {
         mk(op, Target::Text(rest.to_owned()), wildcard)
     }
 
+    /// 等しいの条件（ワイルドカードなし）なら、集計の表を引く値。
+    pub(crate) fn eq_key(&self) -> Option<crate::index::Key> {
+        use crate::index::Key;
+        if self.op != Op::Eq || self.wildcard {
+            return None;
+        }
+        Some(match &self.target {
+            Target::Num(n) => Key::num(*n),
+            Target::Text(t) => Key::Text(t.to_lowercase().into()),
+            Target::Bool(b) => Key::Bool(*b),
+            Target::Err(e) => Key::Err(e.code()),
+            Target::Empty(false) => Key::Empty,
+            Target::Empty(true) => return None,
+        })
+    }
+
     /// セルが条件に合うか。
     pub(crate) fn test(&self, c: Cell<'_>) -> bool {
         let ord_ok = |o: Ordering| match self.op {

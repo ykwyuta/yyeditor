@@ -244,6 +244,9 @@ fn ifs(args: &[Expr], cx: &Context<'_>, sum: bool) -> Val {
     };
     // 条件が配列なら要素ごとの結果（スピル）
     let one = |crits: &[Cell<'_>]| -> Val {
+        if let Some(v) = batched(cx, sum_range, crit_ranges, crits) {
+            return v;
+        }
         let n = (shape.0 * shape.1) as usize;
         let mut mask = vec![u64::MAX; n.div_ceil(64)];
         for (r, c) in crit_ranges.iter().zip(crits) {
@@ -315,6 +318,46 @@ fn ifs(args: &[Expr], cx: &Context<'_>, sum: bool) -> Val {
             Val::Array(Arc::new(Array::new(rows, cols, data)))
         }
     }
+}
+
+/// 同じ範囲の `SUMIFS`・`COUNTIFS` をまとめて計算する（すべて 1 列の範囲・式を含まない・条件が
+/// すべて「等しい」のとき。2 回目からは集計の表を引くだけ）。まとめられなければ `None`。
+fn batched(
+    cx: &Context<'_>,
+    sum_range: Option<&Range>,
+    crit_ranges: &[Range],
+    crits: &[Cell<'_>],
+) -> Option<Val> {
+    let cache = cx.cache?;
+    let single = |r: &Range| match r {
+        Range::Area(s, a) if a.cols() == 1 && cx.grid.stable(*s, a) => Some((*s, *a)),
+        _ => None,
+    };
+    let crit_areas: Vec<(usize, Area)> = crit_ranges.iter().map(single).collect::<Option<_>>()?;
+    let sum_area = match sum_range {
+        Some(r) => Some(single(r)?),
+        None => None,
+    };
+    let keys: Vec<crate::index::Key> = crits
+        .iter()
+        .map(|c| Criterion::new(*c, cx.sys).eq_key())
+        .collect::<Option<_>>()?;
+    let gk = crate::index::GroupKey {
+        sum: sum_area.map(|(s, a)| crate::index::area_key(s, &a)),
+        crit: crit_areas
+            .iter()
+            .map(|(s, a)| crate::index::area_key(*s, a))
+            .collect(),
+    };
+    let table = cache.group(gk, || {
+        crate::index::GroupTable::build(cx.grid, cx.sys, &crit_areas, sum_area)
+    })?;
+    let (total, count, err) = table.get(&keys);
+    Some(match (sum_area, err) {
+        (None, _) => Val::Num(count as f64),
+        (Some(_), Some(e)) => Val::Err(e),
+        (Some(_), None) => Val::Num(total),
+    })
 }
 
 // ---- XLOOKUP ----------------------------------------------------------------------
@@ -437,7 +480,16 @@ fn linear_search(
     mode: i32,
     last: bool,
 ) -> Option<usize> {
-    let wildcard = mode == 2;
+    let wildcard = mode == 2 && matches!(key, Cell::Text(k) if k.contains(['*', '?', '~']));
+    // 完全一致は索引で引く（あれば）
+    if !wildcard
+        && (mode == 0 || mode == 2)
+        && let Range::Area(sheet, a) = look
+        && a.cols() == 1
+        && let Some(ix) = cx.grid.exact_index(*sheet, a.c0, a.r0..a.r1 + 1)
+    {
+        return ix.find(key, last);
+    }
     let mut hit: Option<usize> = None;
     // 近似一致の候補（位置・値）
     let mut best: Option<(usize, Val)> = None;

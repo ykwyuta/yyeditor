@@ -203,5 +203,49 @@ fn main() {
                 t.elapsed().as_secs_f64()
             );
         }
+        // 集計表: 条件だけが違う SUMIFS を 1000 個まとめて入れる（貼り付けと同じ 1 回の編集）
+        for (label, make) in [
+            (
+                "SUMIFS 1000 個",
+                (|k: usize| {
+                    let city = ["東京", "大阪", "名古屋", "福岡", "札幌"][k % 5];
+                    format!("=SUMIFS(B:B,C:C,\"{city}\",D:D,\"ID{}\")", k * 37 % 100_000)
+                }) as fn(usize) -> String,
+            ),
+            (
+                "XLOOKUP 1000 個",
+                (|k: usize| format!("=XLOOKUP(\"ID{}\",D:D,A:A,\"なし\")", k * 91 % 100_000))
+                    as fn(usize) -> String,
+            ),
+        ] {
+            let col = last + 1 + (label.len() % 2) as u32;
+            let t = Instant::now();
+            d3.edit(|b, ctx| {
+                for k in 0..1000 {
+                    b.sheets[0]
+                        .set_formula(ctx, k as u64, col, &make(k))
+                        .map_err(std::io::Error::other)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            println!(
+                "{label}（1 回の編集で入れて計算）{:.2} 秒 → 1 つ目 {:?}",
+                t.elapsed().as_secs_f64(),
+                d3.book.sheets[0].get(&ctx, 0, col).unwrap()
+            );
+        }
+        // 元のデータの 1 セルを直す: 関わる式だけ（ここではすべて）を計算し直す
+        let t = Instant::now();
+        d3.edit(|b, ctx| b.sheets[0].set(ctx, 5, 1, 1.0.into()))
+            .unwrap();
+        println!(
+            "データの 1 セルを直して再計算 {:.2} 秒",
+            t.elapsed().as_secs_f64()
+        );
+        let t = Instant::now();
+        d3.edit(|b, ctx| b.sheets[0].set(ctx, 3, last + 9, 1.0.into()))
+            .unwrap();
+        println!("関係のないセルを直す {:.4} 秒", t.elapsed().as_secs_f64());
     }
 }
