@@ -336,3 +336,21 @@ fn fixed_length_text_does_not_rely_on_crlf() {
     assert_eq!(r.fixed_text(), None);
     assert!(r.command().contains("CRLF"));
 }
+
+#[test]
+fn gives_up_when_the_host_never_starts() {
+    let mut dft = Dft::default();
+    dft.start(Local::Sink(Box::new(Shared::default())));
+    assert!(!dft.check_start(std::time::Duration::from_secs(30)));
+    assert!(dft.active());
+    assert!(dft.check_start(std::time::Duration::ZERO));
+    assert!(!dft.active());
+    assert!(
+        matches!(&dft.take_events()[..], [FtEvent::Done { ok: false, message }] if message.contains("始めませんでした"))
+    );
+    // 始まった転送はやめない
+    dft.start(Local::Sink(Box::new(Shared::default())));
+    dft.handle(&open(b"FT:DATA")).unwrap();
+    assert!(!dft.check_start(std::time::Duration::ZERO));
+    assert!(dft.active());
+}

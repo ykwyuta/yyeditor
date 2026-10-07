@@ -2914,6 +2914,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-3270-mock"
+version = "0.1.0"
+dependencies = [
+ "yy-3270",
+ "yy-3270-macro",
+ "yy-encoding",
+]
+
+[[package]]
 name = "yy-agent"
 version = "0.1.0"
 dependencies = [

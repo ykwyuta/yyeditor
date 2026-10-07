@@ -117,15 +117,18 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # ファイル転送のテスト（13 章 9）は本物の sftp-server・scp を使う
-      - name: OpenSSH (sftp-server, scp)
+      # ファイル転送のテスト（13 章 9）は本物の sftp-server・scp を使う。3270 の模擬ホストは x3270 で確かめる
+      - name: OpenSSH (sftp-server, scp), x3270 (s3270, pr3287)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server
+          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server s3270 pr3287
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      # 模擬ホストが、広く使われている 3270 のエミュレーター（x3270）に対して正しく振る舞うか（14 章 16）
+      - name: 3270 mock host vs x3270
+        run: crates/yy-3270-mock/check-with-x3270.sh
       - name: type-check Windows UI
         run: |
           rustup target add x86_64-pc-windows-msvc

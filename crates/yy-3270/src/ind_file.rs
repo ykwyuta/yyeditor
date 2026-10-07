@@ -212,6 +212,8 @@ struct Job {
     cancel: bool,
     /// 書き込み・読み込みの失敗（次の要求で失敗を返す）
     error: Option<String>,
+    /// コマンドを送った時刻
+    since: std::time::Instant,
 }
 
 /// DFT の状態。
@@ -237,9 +239,26 @@ impl Dft {
             eof: false,
             cancel: false,
             error: None,
+            since: std::time::Instant::now(),
         });
         self.message.clear();
         self.message_phase = false;
+    }
+
+    /// ホストが `timeout` を過ぎても転送を始めなければやめる（IND$FILE がない・コマンドの誤りなど）。
+    /// やめたら `true`。
+    pub fn check_start(&mut self, timeout: std::time::Duration) -> bool {
+        let stalled = self
+            .job
+            .as_ref()
+            .is_some_and(|j| !j.started && j.since.elapsed() >= timeout);
+        if stalled {
+            self.abandon(&format!(
+                "ホストが {} 秒たっても転送を始めませんでした（IND$FILE がない・コマンドの誤りなど。画面のメッセージを確かめてください）",
+                timeout.as_secs()
+            ));
+        }
+        stalled
     }
 
     /// 転送中（ホストの応答を待っている）。

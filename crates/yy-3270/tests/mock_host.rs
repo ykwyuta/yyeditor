@@ -350,7 +350,10 @@ fn ind_file_get_with_a_mock_tso_host() {
             .is_err()
     );
     let cmd = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-    let want = e("IND$FILE GET 'USER.DATA' CRLF");
+    // IND$FILE の $ は 0x5B（CCSID 930 では ¥）
+    let mut want = e("IND");
+    want.push(0x5B);
+    want.extend(e("FILE GET 'USER.DATA' CRLF"));
     assert!(cmd.windows(want.len()).any(|x| x == want), "{cmd:02X?}");
     pump(&mut session, &mut events, &|_, ev| {
         // 結果のメッセージで終わる。ホストの最後の Close にも答えるまで受け取り続ける

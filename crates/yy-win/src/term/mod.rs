@@ -64,7 +64,7 @@ const WM_APP_TERM_FOCUS_CHANGED: u32 = WM_APP + 63;
 const WM_APP_TERM_LAYOUT: u32 = WM_APP + 64;
 /// 端末と一緒に開くプリンターのタブを開く（`pending_printers`）
 const WM_APP_TERM_PRINTER: u32 = WM_APP + 65;
-/// プリンターのジョブの区切り（PRINT-EOJ のないホスト）を見るタイマー
+/// プリンターのジョブの区切り（PRINT-EOJ のないホスト）と、IND$FILE の転送が始まるかを見るタイマー
 const TIMER_PRINTER: usize = 0x3287;
 /// マクロのスレッドからの頼みごとがある
 const WM_APP_TERM_MACRO: u32 = WM_APP + 66;
@@ -1619,7 +1619,21 @@ impl TermApp {
     }
 
     /// PRINT-EOJ のないホスト: 一定時間データが来なければジョブを終える（タイマーから）。
+    /// ホストが IND$FILE の転送を始めないまま 30 秒たったら、その転送をやめる。
     fn tn_print_tick(&mut self) {
+        for i in 0..self.tabs.len() {
+            let Some(tn) = self.tabs[i].tn.as_mut() else {
+                continue;
+            };
+            if tn.session.transferring() {
+                let events = tn
+                    .session
+                    .check_transfer_start(yy_3270_macro::tcp::START_TIMEOUT);
+                if !events.is_empty() {
+                    self.tn_events(i, events);
+                }
+            }
+        }
         let timeout = std::time::Duration::from_secs(self.config.tn3270.printer.eoj_timeout.max(1));
         for i in 0..self.tabs.len() {
             let Some(tn) = self.tabs[i].tn.as_mut() else {
@@ -2036,6 +2050,10 @@ impl TermApp {
         t.term = term;
         self.ft_last = Some(choice);
         self.ft_note(&format!("{label}: 開始 {command}"));
+        // ホストが転送を始めるかを見る
+        unsafe {
+            SetTimer(Some(self.frame), TIMER_PRINTER, 1000, None);
+        }
         self.invalidate();
         Ok(())
     }

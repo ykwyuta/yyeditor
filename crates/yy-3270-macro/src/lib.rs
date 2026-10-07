@@ -32,6 +32,7 @@ use yy_3270::ind_file::{Direction, HostKind, Mode as FtMode, Recfm, Request};
 use yy_encoding::Ccsid;
 
 pub mod record;
+pub mod tcp;
 pub use record::Recorder;
 
 /// 待つ操作の既定の時間の上限（秒）
@@ -115,7 +116,8 @@ impl Snapshot {
             cells,
             cursor: (cur / cols + 1, cur % cols + 1),
             locked: session.oia().lock != yy_3270::Lock::None,
-            connected: connected && session.mode() != yy_3270::Mode::Negotiating,
+            // 交渉中も接続している（キーボードはロックされているので、待つ操作は待ち続ける）
+            connected,
             fields,
             ccsid: session.ccsid(),
         }

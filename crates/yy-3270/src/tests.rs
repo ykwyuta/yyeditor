@@ -139,9 +139,18 @@ fn reports_rejected_devices_and_falls_back() {
     s.receive(&iac(DO, OPT_TN3270E));
     let o = s.receive(&sb(&[OPT_TN3270E, E_DEVICE_TYPE, E_REJECT, E_REASON, 3]));
     assert!(matches!(&o.events[0], Event::DeviceRejected(r) if r.contains("INV-NAME")));
-    // サーバーが TN3270E をやめれば TN3270 で続ける
-    let o = s.receive(&iac(DONT, OPT_TN3270E));
+    // 断られたら TN3270E をやめる（x3270 と同じ）。サーバーの DONT には答え直さない
     assert_eq!(o.send, iac(WONT, OPT_TN3270E));
+    assert!(s.receive(&iac(DONT, OPT_TN3270E)).send.is_empty());
+    // 再び申し出られても TN3270 で続ける
+    assert_eq!(
+        s.receive(&iac(DO, OPT_TN3270E)).send,
+        iac(WONT, OPT_TN3270E)
+    );
+    // TN3270 では LU 名を端末の種類に付ける（RFC 1646）
+    s.receive(&iac(DO, OPT_TTYPE));
+    let o = s.receive(&sb(&[OPT_TTYPE, TTYPE_SEND]));
+    assert_eq!(o.send, sb(b"\x18\x00IBM-3278-2-E@NOSUCH"));
     let mut neg = iac(DO, OPT_EOR);
     neg.extend(iac(WILL, OPT_EOR));
     neg.extend(iac(DO, OPT_BINARY));

@@ -27,9 +27,10 @@ fn cgcsgid(ccsid: Ccsid) -> (u32, Option<u32>) {
         Ccsid::Ibm1047 => (0x02B9_0417, None),
         Ccsid::Ibm290 => (0x0494_0122, None),
         Ccsid::Ibm1027 => (0x0494_0403, None),
-        // 2 バイト部は CPGID 300（JIS X 0208 相当＋IBM 拡張）
-        Ccsid::Ibm930 | Ccsid::Ibm1390 => (0x0494_0122, Some(0x0370_012C)),
-        Ccsid::Ibm939 | Ccsid::Ibm1399 => (0x0494_0403, Some(0x0370_012C)),
+        // 2 バイト部は GCSGID 370・CPGID 300（JIS X 0208 相当＋IBM 拡張）。値は 10 進
+        // （x3270 の申告と同じ: 1172/290、1172/1027、370/300）
+        Ccsid::Ibm930 | Ccsid::Ibm1390 => (0x0494_0122, Some(0x0172_012C)),
+        Ccsid::Ibm939 | Ccsid::Ibm1399 => (0x0494_0403, Some(0x0172_012C)),
     }
 }
 

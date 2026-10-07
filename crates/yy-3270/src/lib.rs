@@ -158,6 +158,8 @@ pub struct Session {
     do_eor: bool,
     will_ttype: bool,
     tn3270e: bool,
+    /// TN3270E のデバイスを断られた（再び申し出られても TN3270 で続ける）
+    e_refused: bool,
     functions: Vec<u8>,
     mode: Mode,
     device: Option<String>,
@@ -186,6 +188,7 @@ impl Session {
             do_eor: false,
             will_ttype: false,
             tn3270e: false,
+            e_refused: false,
             functions: Vec::new(),
             mode: Mode::Negotiating,
             device: None,
@@ -397,7 +400,7 @@ impl Session {
         out.events
             .push(Event::Negotiation(format!("受信: {what} {name}")));
         match (cmd, opt) {
-            (DO, OPT_TN3270E) if self.cfg.tn3270e => {
+            (DO, OPT_TN3270E) if self.cfg.tn3270e && !self.e_refused => {
                 if !self.tn3270e {
                     self.tn3270e = true;
                     Self::send_cmd(out, WILL, OPT_TN3270E);
@@ -462,7 +465,11 @@ impl Session {
     fn subnegotiation(&mut self, sb: &[u8], out: &mut Output) {
         match sb {
             [OPT_TTYPE, TTYPE_SEND, ..] => {
-                let tt = self.cfg.terminal_type();
+                // TN3270 では LU 名を端末の種類に付ける（`IBM-3278-2-E@LU名`。RFC 1646）
+                let tt = match self.cfg.lu.as_deref().filter(|l| !l.is_empty()) {
+                    Some(lu) => format!("{}@{lu}", self.cfg.terminal_type()),
+                    None => self.cfg.terminal_type(),
+                };
                 out.events
                     .push(Event::Negotiation(format!("端末の種類: {tt}")));
                 let mut body = vec![OPT_TTYPE, TTYPE_IS];
@@ -519,6 +526,13 @@ impl Session {
                     .and_then(|i| rest.get(i + 1))
                     .map_or("（理由なし）", |&c| reason_text(c));
                 out.events.push(Event::DeviceRejected(reason.to_owned()));
+                // TN3270E をやめて TN3270 で続ける（x3270 と同じ）。LU 名は端末の種類に付ける（RFC 1646）
+                self.tn3270e = false;
+                self.e_refused = true;
+                Self::send_cmd(out, WONT, OPT_TN3270E);
+                out.events.push(Event::Negotiation(
+                    "TN3270E のデバイスを断られたので、TN3270 で続けます".into(),
+                ));
             }
             [OPT_TN3270E, E_FUNCTIONS, E_IS, list @ ..] => {
                 self.functions = list.to_vec();
@@ -720,7 +734,14 @@ impl Session {
             return Err("カーソルが入力できない位置にあります".into());
         }
         self.emu.key(Key::EraseEof);
+        // TSO のコマンドの名前はバイトで決まる（IND$FILE の $ は 0x5B）。CCSID 930 などでは 0x5B は
+        // ¥ なので、その文字を入れる
+        let dollar = match self.emu.ccsid.encode_char('$') {
+            Some(yy_encoding::EbcdicCode::Single(0x5B)) => '$',
+            _ => self.emu.ccsid.decode_single(0x5B).unwrap_or('$'),
+        };
         for c in req.command().chars() {
+            let c = if c == '$' { dollar } else { c };
             self.emu.key(Key::Char(c));
             if let Lock::Operator(e) = self.emu.lock {
                 self.emu.key(Key::Reset);
@@ -747,6 +768,17 @@ impl Session {
     /// 接続が切れたときなど、転送をやめる。
     pub fn abandon_transfer(&mut self, why: &str) -> Vec<Event> {
         self.emu.ft.abandon(why);
+        self.emu
+            .ft
+            .take_events()
+            .into_iter()
+            .map(Event::Transfer)
+            .collect()
+    }
+
+    /// ホストが転送を始めないまま `timeout` が過ぎたら転送をやめる（その出来事を返す）。
+    pub fn check_transfer_start(&mut self, timeout: std::time::Duration) -> Vec<Event> {
+        self.emu.ft.check_start(timeout);
         self.emu
             .ft
             .take_events()
