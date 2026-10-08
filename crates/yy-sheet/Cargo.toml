@@ -19,6 +19,7 @@ memchr.workspace = true
 rayon.workspace = true
 serde = { workspace = true, features = ["rc"] }
 postcard.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

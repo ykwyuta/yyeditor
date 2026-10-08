@@ -3428,6 +3428,7 @@ dependencies = [
  "regex-syntax",
  "serde",
  "tempfile",
+ "toml",
  "yy-cobol",
  "yy-delimited",
  "yy-encoding",

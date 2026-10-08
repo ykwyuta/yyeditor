@@ -78,6 +78,9 @@ pub struct SheetConfig {
     pub font_size: f32,
     /// 既定の列幅（半角の文字数）
     pub column_width: f32,
+    /// レイアウトカタログのルート（固定長ファイルのレイアウトの定義ファイルを置くフォルダ。空なら
+    /// `%APPDATA%\yyeditor\layouts`。15 章 6.6）
+    pub layout_catalog: String,
 }
 
 impl Default for SheetConfig {
@@ -88,6 +91,7 @@ impl Default for SheetConfig {
             font_family: String::new(),
             font_size: 11.0,
             column_width: 8.43,
+            layout_catalog: String::new(),
         }
     }
 }

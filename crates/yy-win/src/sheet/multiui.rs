@@ -36,6 +36,8 @@ const M_SEP: u16 = 17;
 const M_LE: u16 = 18;
 const M_SUMMARY: u16 = 19;
 const M_LEN: u16 = 20;
+const M_CATLOAD: u16 = 21;
+const M_CATSAVE: u16 = 22;
 
 struct MultiState {
     layouts: Vec<(String, String)>,
@@ -65,6 +67,21 @@ type Initial = (
 );
 
 fn initial() -> Initial {
+    // データ > レイアウトカタログから当てる
+    if let Some(def) = super::catalogui::take_preset() {
+        let last = with(|a| a.fixed_last.clone()).flatten();
+        return (
+            def.layouts.clone(),
+            def.data_len.map(|n| n.to_string()).unwrap_or_default(),
+            def.charset
+                .or(last.as_ref().map(|s| s.codec.charset))
+                .unwrap_or(Charset::Ms932),
+            def.separator.or(last.as_ref().map(|s| s.separator)),
+            def.little_endian
+                .or(last.as_ref().map(|s| s.codec.little_endian))
+                .unwrap_or(false),
+        );
+    }
     // レイアウトはシートごと: 今のシートになければ、文字コード・区切りだけ最後に使ったものから
     let (spec, last) =
         with(|a| (a.sheet().fixed.as_deref().cloned(), a.fixed_last.clone())).unwrap_or_default();
@@ -294,6 +311,24 @@ fn multi_dialog(owner: HWND, open: Option<(Vec<u8>, u64)>, title: &str) -> Optio
         CLASS_EDIT,
         "",
     );
+    button(
+        &mut t,
+        7,
+        321 + y,
+        104,
+        M_CATLOAD,
+        "カタログから読み込む(&G)...",
+        false,
+    );
+    button(
+        &mut t,
+        115,
+        321 + y,
+        90,
+        M_CATSAVE,
+        "カタログに保存(&V)...",
+        false,
+    );
     button(&mut t, 346, 321 + y, 50, IDOK_, "OK", true);
     button(&mut t, 403, 321 + y, 50, IDCANCEL_, "キャンセル", false);
     let mut st = MultiState {
@@ -454,6 +489,83 @@ extern "system" fn multi_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                             let _ =
                                 SetDlgItemTextW(hwnd, M_TEXT as i32, &HSTRING::from(crlf(&text)));
                             update_summary(hwnd, st);
+                        }
+                        1
+                    }
+                    M_CATLOAD => {
+                        read_controls(hwnd, st);
+                        if let Some((name, def)) = super::catalogui::pick(hwnd) {
+                            let offset = st.open.is_some() as usize;
+                            st.loading = true;
+                            super::catalogui::set_codec_controls(
+                                hwnd,
+                                &def,
+                                (M_CHARSET, M_SEP, M_LE),
+                                offset,
+                            );
+                            if def.is_multi() {
+                                // マルチレイアウトの定義: レイアウトとデータ長を入れ替える
+                                st.layouts = def.layouts.clone();
+                                if let Some(n) = def.data_len {
+                                    let _ = SetDlgItemTextW(
+                                        hwnd,
+                                        M_LEN as i32,
+                                        &HSTRING::from(n.to_string()),
+                                    );
+                                }
+                                st.cur = 0;
+                            } else {
+                                // 単一のレイアウト: レイアウトの 1 つとして足す（今のが空なら置き換える）
+                                let base = match def.layouts.first() {
+                                    Some((n, _)) if !n.trim().is_empty() => n.trim().to_string(),
+                                    _ => name
+                                        .rsplit('/')
+                                        .next()
+                                        .unwrap_or(&name)
+                                        .split('.')
+                                        .next()
+                                        .unwrap_or("LAYOUT")
+                                        .to_uppercase(),
+                                };
+                                let mut n = base.clone();
+                                let mut k = 2;
+                                while st.layouts.iter().any(|l| l.0.eq_ignore_ascii_case(&n)) {
+                                    n = format!("{base}{k}");
+                                    k += 1;
+                                }
+                                let entry = (n, def.copybook().to_string());
+                                if st.layouts.len() == 1 && st.layouts[0].1.trim().is_empty() {
+                                    st.layouts[0] = entry;
+                                    st.cur = 0;
+                                } else {
+                                    st.layouts.push(entry);
+                                    st.cur = st.layouts.len() - 1;
+                                }
+                            }
+                            st.loading = false;
+                            refresh_list(hwnd, st);
+                            load_current(hwnd, st);
+                        }
+                        1
+                    }
+                    M_CATSAVE => {
+                        read_controls(hwnd, st);
+                        match spec_of(st) {
+                            Ok(spec) => {
+                                let def = yy_sheet::catalog::LayoutDef::from_spec(&spec, "");
+                                if let Some(name) = super::catalogui::save(hwnd, def) {
+                                    set_status(&format!(
+                                        "レイアウトをカタログの {name} に保存しました"
+                                    ));
+                                }
+                            }
+                            Err(e) => message(
+                                hwnd,
+                                &format!(
+                                    "設定を読めないので保存できません。
+{e}"
+                                ),
+                            ),
                         }
                         1
                     }

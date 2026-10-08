@@ -403,6 +403,33 @@ mod tests {
         assert!(n >= 30, "{n}");
     }
 
+    /// yysheet のヘルプのレイアウトカタログの定義ファイルの例が、そのまま読める。
+    #[test]
+    fn sheet_help_catalog_example_parses() {
+        let start = section_line_in(SHEET_MD, "catalog").unwrap();
+        let lines: Vec<&str> = SHEET_MD.lines().skip(start).collect();
+        let open = lines.iter().position(|l| l.trim() == "```toml").unwrap();
+        let close = open
+            + 1
+            + lines[open + 1..]
+                .iter()
+                .position(|l| l.trim() == "```")
+                .unwrap();
+        let text: String = lines[open + 1..close]
+            .iter()
+            .map(|l| format!("{}\n", l.strip_prefix("  ").unwrap_or(l)))
+            .collect();
+        let def = yy_sheet::catalog::parse_def(&text).unwrap();
+        let spec = def
+            .to_spec(
+                yy_cobol::Codec::new(yy_cobol::Charset::Ms932),
+                yy_sheet::fixed::RecordSep::Crlf,
+            )
+            .unwrap();
+        assert_eq!(spec.layout.record_len, 11);
+        assert!(spec.codec.charset.is_ebcdic());
+    }
+
     /// yysheet のメニューのショートカットと関数が、yysheet のヘルプの表にある。
     #[test]
     fn sheet_help_lists_shortcuts_and_functions() {

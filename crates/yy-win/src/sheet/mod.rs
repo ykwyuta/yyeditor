@@ -9,6 +9,7 @@
 //! 状態を借りたままにしない。
 
 mod bulkui;
+mod catalogui;
 mod entry;
 mod fillhandle;
 mod filter;
@@ -119,6 +120,9 @@ const ID_HELP_FUNCS: u16 = 44;
 const ID_CRASH_LOGS: u16 = 45;
 const ID_ADD_FIXED: u16 = 46;
 const ID_ADD_MULTI: u16 = 47;
+const ID_CATALOG_APPLY: u16 = 48;
+const ID_CATALOG_SAVE: u16 = 49;
+const ID_CATALOG_FOLDER: u16 = 29;
 
 /// STATIC の文字を上下の中央に置く
 const SS_CENTERIMAGE: u32 = 0x200;
@@ -419,6 +423,21 @@ fn create_menu() -> Result<HMENU> {
         add(data, ID_FIXED_LAYOUT, "固定長のレイアウト(&Y)...");
         add(data, ID_MULTI_LAYOUT, "マルチレイアウトの設定(&M)...");
         add(data, ID_ROW_LAYOUT, "行のレイアウトを指定(&W)...");
+        add(
+            data,
+            ID_CATALOG_APPLY,
+            "レイアウトカタログから当てる(&G)...",
+        );
+        add(
+            data,
+            ID_CATALOG_SAVE,
+            "シートのレイアウトをカタログに保存(&V)...",
+        );
+        add(
+            data,
+            ID_CATALOG_FOLDER,
+            "レイアウトカタログのフォルダを開く",
+        );
         add(data, ID_TO_NUMBER, "列を数値に変換(&V)");
         add(data, ID_TO_TEXT, "列を文字列に変換(&T)");
         let help = CreatePopupMenu()?;
@@ -576,6 +595,7 @@ fn create() -> Result<HWND> {
             PathBuf::from(config.sheet.work_dir.trim())
         };
         let ctx = SheetCtx::new(limit, work_dir);
+        catalogui::set_root(&config);
         let painter = GridPainter::new(&config.sheet.font_family, config.sheet.font_size, dpi)?;
         crate::remote::install(
             crate::remote::RemoteState::new(None, config.remote.clone()),
@@ -2473,6 +2493,9 @@ fn command(id: u16) {
         ID_OPEN_MULTI => multiui::open_multi(false),
         ID_MULTI_LAYOUT => multiui::multi_layout_dialog(),
         ID_ROW_LAYOUT => multiui::row_layout_dialog(),
+        ID_CATALOG_APPLY => catalogui::apply_from_catalog(),
+        ID_CATALOG_SAVE => catalogui::save_sheet_layout(),
+        ID_CATALOG_FOLDER => catalogui::open_root_folder(),
         ID_EXIT => {
             if let Some(f) = with(|a| a.frame) {
                 unsafe {

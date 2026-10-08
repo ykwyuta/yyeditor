@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 pub mod autofill;
 pub mod budget;
 pub mod bulk;
+pub mod catalog;
 pub mod chunk;
 pub mod column;
 pub mod csv;
