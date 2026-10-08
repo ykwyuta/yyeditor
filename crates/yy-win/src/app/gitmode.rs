@@ -23,6 +23,9 @@ const GIT_CLASS: windows::core::PCWSTR = w!("YYEditorGit");
 const WM_APP_GIT_FOUND: u32 = WM_APP + 1;
 /// git の操作が終わった（`LPARAM` は `Box<Done>`）
 const WM_APP_GIT_DONE: u32 = WM_APP + 2;
+/// 接続先へ接続してから続ける（`LPARAM` は `Box<Connect>`）。接続の問い合わせ（パスワードなど）を
+/// 出すので、状態を借りていないところで行う
+const WM_APP_GIT_CONNECT: u32 = WM_APP + 3;
 
 const G_COMBO: u16 = 10;
 const G_BRANCH: u16 = 11;
@@ -69,6 +72,71 @@ enum Item {
     Note,
 }
 
+/// 作業スレッドで動かす git の操作。
+type GitOp = Box<dyn FnOnce(&Git) -> std::result::Result<String, GitError> + Send>;
+
+/// 接続を待っている操作。
+struct Pending {
+    label: String,
+    clear_message: bool,
+    op: GitOp,
+}
+
+/// 接続してからすること。
+enum Then {
+    /// リポジトリを探す
+    Discover,
+    /// 待っている操作（[`ScmPane::pending`]）を動かす
+    Pending,
+}
+
+/// 接続の頼み。
+struct Connect {
+    targets: Vec<yy_remote::uri::Target>,
+    then: Then,
+}
+
+/// `ssh://…` のリポジトリなら、その場所。
+fn remote_of(root: &Path) -> Option<yy_remote::RemoteUri> {
+    yy_remote::RemoteUri::parse(&root.to_string_lossy())
+}
+
+/// リポジトリの git（接続先なら接続済みの接続を使う。なければ `None`）。
+fn git_live(root: &Path) -> Option<Git> {
+    match remote_of(root) {
+        None => Some(Git::new(root)),
+        Some(u) => crate::remote::live_transport(&u.target()).map(|t| Git::remote(t, &u.path)),
+    }
+}
+
+/// リポジトリの git（接続先に接続していなければ接続する。状態を借りていないところで呼ぶ）。
+fn git_connect(frame: HWND, root: &Path) -> Option<Git> {
+    match remote_of(root) {
+        None => Some(Git::new(root)),
+        Some(u) => match crate::remote::transport(&u.target(), &crate::remote::show_status) {
+            Ok(t) => Some(Git::remote(t, &u.path)),
+            Err(e) => {
+                error_box(frame, &e);
+                None
+            }
+        },
+    }
+}
+
+/// リポジトリの中のファイルの場所（手元のパスか `ssh://…`）。
+fn file_location(root: &Path, rel: &str) -> PathBuf {
+    match remote_of(root) {
+        None => root.join(rel),
+        Some(u) => PathBuf::from(
+            yy_remote::RemoteUri {
+                path: yy_proto::join_path(&u.path, rel.as_bytes()),
+                ..u
+            }
+            .to_string(),
+        ),
+    }
+}
+
 /// 作業スレッドの結果。
 pub(crate) struct Done {
     root: PathBuf,
@@ -102,6 +170,8 @@ pub(crate) struct ScmPane {
     discovered: bool,
     /// git の出力の記録
     log: String,
+    /// 接続を待っている操作
+    pending: Option<Pending>,
 }
 
 fn last_repo_file() -> Option<PathBuf> {
@@ -241,6 +311,7 @@ pub(crate) fn create_scm(frame: HWND, instance: HINSTANCE) -> Result<ScmPane> {
             busy: None,
             discovered: false,
             log: String::new(),
+            pending: None,
         };
         pane.update_branch_button();
         Ok(pane)
@@ -567,10 +638,84 @@ impl App {
     fn git_discover(&mut self) {
         self.scm.discovered = false;
         self.scm.render();
+        // リモートのフォルダの接続先に、まだ接続していなければ接続してから探す
+        let missing = self.git_remote_targets(true);
+        if !missing.is_empty() {
+            self.git_request_connect(missing, Then::Discover);
+            return;
+        }
+        self.git_discover_now();
+    }
+
+    /// ワークスペースのリモートのフォルダの接続先（`missing` なら、接続していないものだけ）。
+    fn git_remote_targets(&self, missing: bool) -> Vec<yy_remote::uri::Target> {
+        let mut v: Vec<yy_remote::uri::Target> = Vec::new();
+        for f in &self.ws.workspace.folders {
+            if let Some(u) = remote_of(f) {
+                let t = u.target();
+                if v.iter().any(|x| x.same(&t)) {
+                    continue;
+                }
+                if missing && crate::remote::live_transport(&t).is_some() {
+                    continue;
+                }
+                v.push(t);
+            }
+        }
+        v
+    }
+
+    /// 接続してから続けるよう頼む（状態を借りていないところで接続する）。
+    fn git_request_connect(&mut self, targets: Vec<yy_remote::uri::Target>, then: Then) {
+        let boxed = Box::into_raw(Box::new(Connect { targets, then }));
+        unsafe {
+            if PostMessageW(
+                Some(self.scm.hwnd),
+                WM_APP_GIT_CONNECT,
+                WPARAM(0),
+                LPARAM(boxed as isize),
+            )
+            .is_err()
+            {
+                drop(Box::from_raw(boxed));
+            }
+        }
+    }
+
+    /// 手元のフォルダと、接続しているリモートのフォルダの下を探す（作業スレッド）。
+    fn git_discover_now(&mut self) {
+        self.scm.discovered = false;
+        self.scm.render();
         let roots = self.ws.workspace.folders.clone();
+        // 接続先ごとのリモートのフォルダ（接続できなかったものは飛ばす）
+        let mut remote: Vec<(Arc<dyn yy_remote::Transport>, Vec<yy_remote::RemoteUri>)> =
+            Vec::new();
+        let mut skipped = Vec::new();
+        for t in self.git_remote_targets(false) {
+            let uris: Vec<yy_remote::RemoteUri> = roots
+                .iter()
+                .filter_map(|f| remote_of(f))
+                .filter(|u| u.target().same(&t))
+                .collect();
+            match crate::remote::live_transport(&t) {
+                Some(tr) => remote.push((tr, uris)),
+                None => skipped.push(t.to_string()),
+            }
+        }
+        if !skipped.is_empty() {
+            self.scm.add_log(&format!(
+                "[リポジトリを探す] 接続していないので探しませんでした: {}",
+                skipped.join("、")
+            ));
+        }
         let hwnd = self.scm.hwnd.0 as isize;
         std::thread::spawn(move || {
-            let found = yy_git::discover(&roots, yy_git::Limits::default());
+            let limits = yy_git::Limits::default();
+            let mut found = yy_git::discover(&roots, limits);
+            for (t, uris) in &remote {
+                found.extend(yy_git::discover_remote(t, uris, limits));
+            }
+            found.sort_by_key(|f| f.label.to_lowercase());
             let boxed = Box::into_raw(Box::new(found));
             unsafe {
                 if PostMessageW(
@@ -629,10 +774,22 @@ impl App {
         self.git_refresh();
     }
 
-    /// 状態を読み直す（操作の途中なら何もしない。終わったときに読み直す）。
+    /// 状態を読み直す（操作の途中なら何もしない。終わったときに読み直す）。接続先のリポジトリで接続が
+    /// 切れていれば接続し直す。
     pub(crate) fn git_refresh(&mut self) {
         if self.scm.busy.is_none() && self.scm.current.is_some() {
             self.git_run("", false, |_| Ok(String::new()));
+        }
+    }
+
+    /// 自動の読み直し（保存・ウィンドウに戻ったとき）。接続先のリポジトリで接続が切れていれば、
+    /// 接続し直さない（パスワードを何度も尋ねない）。
+    fn git_refresh_quiet(&mut self) {
+        let Some(root) = self.scm.current.clone() else {
+            return;
+        };
+        if git_live(&root).is_some() {
+            self.git_refresh();
         }
     }
 
@@ -664,10 +821,22 @@ impl App {
             self.status_msg = format!("Git: {label}を実行しています…");
             self.update_status();
         }
+        let Some(git) = git_live(&root) else {
+            // 接続先に接続してから動かす
+            self.scm.busy = None;
+            self.scm.pending = Some(Pending {
+                label: label.to_string(),
+                clear_message,
+                op: Box::new(op),
+            });
+            if let Some(u) = remote_of(&root) {
+                self.git_request_connect(vec![u.target()], Then::Pending);
+            }
+            return;
+        };
         let hwnd = self.scm.hwnd.0 as isize;
         let label = label.to_string();
         std::thread::spawn(move || {
-            let git = Git::new(&root);
             let result = op(&git);
             let status = git.status();
             let done = Box::into_raw(Box::new(Done {
@@ -690,6 +859,24 @@ impl App {
                 }
             }
         });
+    }
+
+    /// 接続し終えた（できなかったものもある）。
+    fn git_connected(&mut self, then: Then) {
+        match then {
+            Then::Discover => self.git_discover_now(),
+            Then::Pending => {
+                let Some(p) = self.scm.pending.take() else {
+                    return;
+                };
+                let live = self.scm.current.as_deref().and_then(git_live).is_some();
+                if live {
+                    self.git_run(&p.label, p.clear_message, p.op);
+                } else {
+                    self.scm.render();
+                }
+            }
+        }
     }
 
     /// 操作が終わった。知らせる誤りを返す（メッセージボックスは借りずに出す）。
@@ -738,7 +925,7 @@ impl App {
     /// 保存のあと・ウィンドウに戻ったときに読み直す（表示していれば）。
     pub(crate) fn git_poke(&mut self) {
         if self.git_visible() {
-            self.git_refresh();
+            self.git_refresh_quiet();
         }
     }
 
@@ -803,10 +990,12 @@ type Sides = (String, Option<Vec<u8>>, String, Option<Vec<u8>>);
 
 /// ファイルの差分を比較のウィンドウで出す。
 fn show_diff(frame: HWND, root: &Path, group: Group, c: &yy_git::Change) {
-    let git = Git::new(root);
+    let Some(git) = git_connect(frame, root) else {
+        return;
+    };
     let path = c.path.as_str();
     let orig = c.orig.as_deref().unwrap_or(path);
-    let read_work = || std::fs::read(root.join(path)).ok();
+    let read_work = || git.read_worktree(path).ok().flatten();
     let result: std::result::Result<Sides, GitError> = (|| {
         Ok(match group {
             Group::Staged => (
@@ -953,7 +1142,9 @@ fn branch_menu(frame: HWND, anchor: HWND) {
     let Some(root) = with_app(|a| a.scm.current.clone()).flatten() else {
         return;
     };
-    let git = Git::new(&root);
+    let Some(git) = git_connect(frame, &root) else {
+        return;
+    };
     let branches = match git.branches() {
         Ok(b) => b,
         Err(e) => {
@@ -1185,7 +1376,7 @@ fn run_menu(frame: HWND, cmd: u32, target: Option<Item>) {
             };
             match cmd {
                 M_DIFF => show_diff(frame, &root, group, &c),
-                M_OPEN => open_path(frame, root.join(&c.path), None, false),
+                M_OPEN => open_path(frame, file_location(&root, &c.path), None, false),
                 M_STAGE => {
                     let p = vec![c.path.clone()];
                     with_app(|a| {
@@ -1208,8 +1399,16 @@ fn run_menu(frame: HWND, cmd: u32, target: Option<Item>) {
                 }
                 M_DISCARD => discard(frame, vec![c]),
                 M_COPY_PATH => {
-                    let path = root.join(&c.path);
-                    crate::clipboard::set_text(frame, &path.to_string_lossy(), false);
+                    // 接続先のものは接続先のパス（/home/…）
+                    let text = match remote_of(&root) {
+                        Some(u) => String::from_utf8_lossy(&yy_proto::join_path(
+                            &u.path,
+                            c.path.as_bytes(),
+                        ))
+                        .into_owned(),
+                        None => root.join(&c.path).to_string_lossy().into_owned(),
+                    };
+                    crate::clipboard::set_text(frame, &text, false);
                 }
                 _ => {}
             }
@@ -1401,6 +1600,19 @@ extern "system" fn git_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         WM_APP_GIT_FOUND => {
             let found = unsafe { Box::from_raw(lparam.0 as *mut Vec<Found>) };
             with_app(|a| a.git_found(*found));
+            LRESULT(0)
+        }
+        WM_APP_GIT_CONNECT => {
+            let req = unsafe { Box::from_raw(lparam.0 as *mut Connect) };
+            for t in &req.targets {
+                if crate::remote::live_transport(t).is_some() {
+                    continue;
+                }
+                if let Err(e) = crate::remote::transport(t, &crate::remote::show_status) {
+                    error_box(frame(), &e);
+                }
+            }
+            with_app(|a| a.git_connected(req.then));
             LRESULT(0)
         }
         WM_APP_GIT_DONE => {

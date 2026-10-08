@@ -1,4 +1,5 @@
 use super::*;
+use std::process::Command;
 
 #[test]
 fn parses_porcelain_v2() {
@@ -299,8 +300,93 @@ fn reports_git_errors() {
     assert!(e.command.starts_with("git commit"), "{e}");
     assert!(!e.message.is_empty());
     // git が見つからない
-    let mut missing = Git::new(tmp.path());
-    missing.program = PathBuf::from("/nonexistent/git-not-here");
+    let missing = Git::with_runner(Arc::new(LocalRunner::with_program(
+        tmp.path(),
+        Path::new("/nonexistent/git-not-here"),
+    )));
     let e = missing.status().unwrap_err();
     assert!(e.message.contains("git が見つかりません"), "{e}");
+}
+
+#[test]
+fn quotes_for_the_remote_shell() {
+    assert_eq!(shell_quote(b"plain"), b"'plain'");
+    assert_eq!(shell_quote(b"it's"), b"'it'\"'\"'s'");
+    assert_eq!(shell_quote(b"a b;$(x)`y`"), b"'a b;$(x)`y`'");
+}
+
+/// SSH の接続先の代わりに、手元のシェル（`sh -c`）で同じ操作をする。
+#[cfg(unix)]
+#[test]
+fn works_on_a_remote_repository() {
+    use std::os::unix::ffi::OsStrExt;
+    if !git_available() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    // 空白・引用符・日本語を含む名前（シェルの引用を確かめる）
+    let ws = tmp.path().join("ws dir");
+    let repo = ws.join("it's 日本語");
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    std::fs::create_dir_all(ws.join("node_modules/x")).unwrap();
+    init(&repo);
+    init(&ws.join("node_modules/x"));
+    std::fs::create_dir_all(ws.join("linked")).unwrap();
+    std::fs::write(ws.join("linked/.git"), "gitdir: x\n").unwrap();
+    let t: Arc<dyn yy_remote::Transport> = Arc::new(yy_remote::local::LocalTransport::new());
+    let folder = yy_remote::RemoteUri {
+        user: Some("me".into()),
+        host: "build".into(),
+        port: None,
+        path: ws.as_os_str().as_bytes().to_vec(),
+    };
+    let found = discover_remote(&t, std::slice::from_ref(&folder), Limits::default());
+    let labels: Vec<(&str, bool)> = found.iter().map(|f| (f.label.as_str(), f.linked)).collect();
+    assert_eq!(
+        labels,
+        [
+            ("ws dir/it's 日本語 [me@build]", false),
+            ("ws dir/linked [me@build]", true),
+        ]
+    );
+    let root = found[0].root.to_string_lossy().into_owned();
+    assert!(root.starts_with("ssh://me@build/"), "{root}");
+    let uri = yy_remote::RemoteUri::parse(&root).unwrap();
+    assert_eq!(uri.path, repo.as_os_str().as_bytes());
+    // フォルダを含む上のリポジトリ
+    let inner = yy_remote::RemoteUri {
+        path: repo.join("sub").as_os_str().as_bytes().to_vec(),
+        ..folder.clone()
+    };
+    let up = discover_remote(&t, &[inner], Limits::default());
+    assert_eq!(up.len(), 1, "{up:?}");
+    assert!(up[0].label.contains("sub を含む"), "{}", up[0].label);
+    // 操作
+    let g = Git::remote(t.clone(), &uri.path);
+    std::fs::write(repo.join("a b.txt"), "one\n").unwrap();
+    std::fs::write(repo.join("sub/'q'.txt"), "q\n").unwrap();
+    let st = g.status().unwrap();
+    assert_eq!(st.in_group(Group::Unstaged).len(), 2);
+    g.stage_all().unwrap();
+    let summary = g.commit("リモートのコミット\n", false).unwrap();
+    assert!(summary.ends_with("リモートのコミット"), "{summary}");
+    std::fs::write(repo.join("a b.txt"), "two\n").unwrap();
+    assert_eq!(g.read_worktree("a b.txt").unwrap().unwrap(), b"two\n");
+    assert_eq!(g.read_worktree("sub/'q'.txt").unwrap().unwrap(), b"q\n");
+    assert_eq!(g.read_worktree("nothing").unwrap(), None);
+    assert_eq!(g.show("HEAD", "a b.txt").unwrap().unwrap(), b"one\n");
+    g.stage(&["a b.txt".into()]).unwrap();
+    assert_eq!(g.status().unwrap().in_group(Group::Staged).len(), 1);
+    g.unstage(&["a b.txt".into()]).unwrap();
+    g.discard(&["a b.txt".into()], &[]).unwrap();
+    assert!(g.status().unwrap().changes.is_empty());
+    g.create_branch("feature/リモート").unwrap();
+    assert_eq!(
+        g.status().unwrap().branch.as_deref(),
+        Some("feature/リモート")
+    );
+    // 接続先に git がない
+    let missing = Git::remote(t.clone(), b"/nonexistent-dir");
+    let e = missing.status().unwrap_err();
+    assert!(!e.message.is_empty());
 }

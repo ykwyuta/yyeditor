@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+yy-remote.workspace = true
+yy-proto.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

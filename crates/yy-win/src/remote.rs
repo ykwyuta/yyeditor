@@ -868,6 +868,21 @@ pub(crate) fn start_forwards(
     out
 }
 
+/// `target` への接続済みの SSH の接続（接続しない。なければ `None`）。
+pub(crate) fn live_transport(target: &Target) -> Option<Arc<dyn Transport>> {
+    with_state(|r| {
+        if let Some(s) = r.live_session(target) {
+            return Some(s.transport());
+        }
+        r.transports.retain(|(_, t)| !t.is_closed());
+        r.transports
+            .iter()
+            .find(|(t, _)| t.same(target))
+            .map(|(_, t)| t.clone())
+    })
+    .flatten()
+}
+
 /// `target` への SSH の接続（ターミナル用。エージェントは使わない）。接続済みのセッションが
 /// あればその接続を使い、なければ接続する（接続中は `show` に表示）。
 pub(crate) fn transport(

@@ -9,11 +9,12 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fmt;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::sync::Arc;
 
+mod runner;
 mod status;
+pub use runner::{LocalRunner, RemoteRunner, Runner, discover_remote, shell_quote};
 pub use status::{Change, Group, Status, parse_status};
 
 // ---- リポジトリを探す ---------------------------------------------------------------------------
@@ -204,112 +205,63 @@ pub struct Branch {
     pub upstream: String,
 }
 
-/// 1 つのリポジトリの git コマンド。
-#[derive(Clone, Debug)]
+/// 1 つのリポジトリの git コマンド（手元か、SSH の接続先。[`Runner`]）。
+#[derive(Clone)]
 pub struct Git {
-    /// 作業ツリーの起点
-    pub root: PathBuf,
-    program: PathBuf,
+    runner: Arc<dyn Runner>,
+}
+
+impl fmt::Debug for Git {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Git({})", self.runner.location())
+    }
 }
 
 impl Git {
+    /// 手元のリポジトリ（作業ツリーの起点 `root`）。
     pub fn new(root: &Path) -> Git {
         Git {
-            root: root.to_path_buf(),
-            program: std::env::var_os("YYEDITOR_GIT")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("git")),
+            runner: Arc::new(LocalRunner::new(root)),
         }
     }
 
-    fn command<I, S>(&self, args: I) -> (Command, String)
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let args: Vec<std::ffi::OsString> = args.into_iter().map(|a| a.as_ref().into()).collect();
-        let shown = format!(
-            "git {}",
-            args.iter()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let mut c = Command::new(&self.program);
-        c.arg("-C")
-            .arg(&self.root)
-            .args(["-c", "core.quotepath=off", "-c", "color.ui=false"])
-            .args(&args)
-            // パスワードを端末で尋ねない（固まらない）。資格情報マネージャーの画面は出てよい
-            .env("GIT_TERMINAL_PROMPT", "0")
-            // エディタを開かない（コミットのメッセージは渡す）
-            .env("GIT_EDITOR", "true")
-            .env("GIT_MERGE_AUTOEDIT", "no")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            // コンソールの窓を出さない
-            c.creation_flags(0x0800_0000);
+    /// SSH の接続先のリポジトリ（作業ツリーの起点は接続先の絶対パス `root`）。接続先の git を動かす。
+    pub fn remote(transport: Arc<dyn yy_remote::Transport>, root: &[u8]) -> Git {
+        Git {
+            runner: Arc::new(RemoteRunner::new(transport, root)),
         }
-        (c, shown)
+    }
+
+    pub fn with_runner(runner: Arc<dyn Runner>) -> Git {
+        Git { runner }
+    }
+
+    /// 場所の説明（手元のフォルダ・`ssh://…`）。
+    pub fn location(&self) -> String {
+        self.runner.location()
     }
 
     /// git コマンドを動かす（`input` は標準入力に渡す）。0 以外で終われば [`GitError`]。
     pub fn run_with<I, S>(&self, args: I, input: Option<&[u8]>) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
+        S: AsRef<str>,
     {
-        let (mut c, shown) = self.command(args);
-        if input.is_some() {
-            c.stdin(Stdio::piped());
-        }
-        let mut child = c.spawn().map_err(|e| GitError {
-            command: shown.clone(),
-            message: if e.kind() == std::io::ErrorKind::NotFound {
-                "git が見つかりません。Git for Windows をインストールし、PATH に git.exe のフォルダを入れてください".into()
-            } else {
-                format!("git を起動できません: {e}")
-            },
-        })?;
-        if let Some(input) = input
-            && let Some(mut stdin) = child.stdin.take()
-        {
-            let _ = stdin.write_all(input);
-        }
-        let out = child.wait_with_output().map_err(|e| GitError {
-            command: shown.clone(),
-            message: e.to_string(),
-        })?;
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        if !out.status.success() {
-            let mut message = stderr.trim().to_string();
-            if message.is_empty() {
-                message = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            }
-            if message.is_empty() {
-                message = format!("終了コード {}", out.status.code().unwrap_or(-1));
-            }
-            return Err(GitError {
-                command: shown,
-                message,
-            });
-        }
-        Ok(Output {
-            stdout: out.stdout,
-            stderr,
-        })
+        let args: Vec<String> = args.into_iter().map(|a| a.as_ref().to_string()).collect();
+        self.runner.git(&args, input)
     }
 
     pub fn run<I, S>(&self, args: I) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
+        S: AsRef<str>,
     {
         self.run_with(args, None)
+    }
+
+    /// 作業ツリーのファイル（起点からの相対パス）の中身。なければ `Ok(None)`。
+    pub fn read_worktree(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        self.runner.read(path)
     }
 
     /// 状態（ブランチ・上流との差・変更の一覧）。
