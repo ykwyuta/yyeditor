@@ -54,6 +54,7 @@ const CM_DELETE: u32 = 14;
 const CM_CUT: u32 = 15;
 const CM_PASTE: u32 = 16;
 const CM_COPY: u32 = 17;
+const CM_DOWNLOAD: u32 = 18;
 
 /// サイドバーとツリーの境界の幅（96 DPI でのピクセル）
 const SPLITTER: i32 = 5;
@@ -287,12 +288,23 @@ impl App {
         unsafe {
             if sw == 0 {
                 let _ = ShowWindow(self.ws.tree, SW_HIDE);
+                let _ = ShowWindow(self.scm.hwnd, SW_HIDE);
                 self.ws.splitter = RECT::default();
                 return 0;
             }
             let sw = sw.min((width - split - 100).max(60));
-            let _ = MoveWindow(self.ws.tree, 0, 0, sw, height, true);
-            let _ = ShowWindow(self.ws.tree, SW_SHOWNA);
+            // エクスプローラーかソース管理のどちらか
+            let (show, hide) = if self.scm.side == Side::Git {
+                (self.scm.hwnd, self.ws.tree)
+            } else {
+                (self.ws.tree, self.scm.hwnd)
+            };
+            let _ = ShowWindow(hide, SW_HIDE);
+            let _ = MoveWindow(show, 0, 0, sw, height, true);
+            if show == self.scm.hwnd {
+                self.scm.layout(sw, height);
+            }
+            let _ = ShowWindow(show, SW_SHOWNA);
             self.ws.splitter = RECT {
                 left: sw,
                 top: 0,
@@ -318,6 +330,20 @@ impl App {
 
     /// サイドバーの表示を切り替える。
     pub(crate) fn toggle_sidebar(&mut self) {
+        // ソース管理を出していれば、エクスプローラーに切り替える
+        if self.ws.visible && self.scm.side == Side::Git {
+            self.scm.side = Side::Explorer;
+            if self.ws.nodes.is_empty() {
+                self.rebuild_tree();
+            }
+            self.layout_children();
+            self.update_workspace_menu();
+            unsafe {
+                let _ = SetFocus(Some(self.ws.tree));
+            }
+            return;
+        }
+        self.scm.side = Side::Explorer;
         self.ws.visible = !self.ws.visible;
         if self.ws.visible && self.ws.nodes.is_empty() {
             self.rebuild_tree();
@@ -336,12 +362,17 @@ impl App {
     pub(crate) fn update_workspace_menu(&self) {
         unsafe {
             let menu = GetMenu(self.frame);
-            let flag = if self.ws.visible {
-                MF_CHECKED
-            } else {
-                MF_UNCHECKED
-            };
-            CheckMenuItem(menu, ID_WS_SIDEBAR as u32, (MF_BYCOMMAND | flag).0);
+            let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
+            CheckMenuItem(
+                menu,
+                ID_WS_SIDEBAR as u32,
+                (MF_BYCOMMAND | check(self.ws.visible && self.scm.side == Side::Explorer)).0,
+            );
+            CheckMenuItem(
+                menu,
+                ID_GIT_VIEW as u32,
+                (MF_BYCOMMAND | check(self.git_visible())).0,
+            );
         }
     }
 
@@ -467,6 +498,8 @@ impl App {
             SendMessageW(self.ws.tree, WM_SETREDRAW, Some(WPARAM(1)), None);
             let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(self.ws.tree), None, true);
         }
+        // フォルダが変わったかもしれないので、ソース管理のリポジトリも探し直す
+        self.git_workspace_changed();
     }
 
     /// 項目の番号（lParam）。
@@ -1055,9 +1088,12 @@ fn context_menu(hwnd: HWND, tree: HWND) {
                         add(CM_GREP, "フォルダ内を検索 (Grep)(&F)...");
                     }
                     sep();
-                } else if yyterm_exe().is_some() {
-                    // リモートのフォルダは yyterm の SSH で開く
-                    add(CM_TERMINAL, "ターミナルで開く(&T)");
+                } else {
+                    add(CM_DOWNLOAD, "ダウンロード フォルダにコピー(&L)");
+                    if yyterm_exe().is_some() {
+                        // リモートのフォルダは yyterm の SSH で開く
+                        add(CM_TERMINAL, "ターミナルで開く(&T)");
+                    }
                     sep();
                 }
                 add(CM_COPY_PATH, "パスをコピー(&C)");
@@ -1116,6 +1152,7 @@ fn run_context_command(hwnd: HWND, cmd: u32, item: HTREEITEM, node: Option<(Path
         CM_CUT => return set_clip(path, true),
         CM_COPY => return set_clip(path, false),
         CM_PASTE => return paste_into(hwnd, path, is_dir),
+        CM_DOWNLOAD => return post_op(hwnd, WsOp::Download(path)),
         CM_RENAME => {
             if let Some(tree) = with_app(|a| a.ws.tree) {
                 unsafe {
@@ -1335,6 +1372,9 @@ pub(crate) fn on_workspace_command(hwnd: HWND, id: u16) -> bool {
         ID_WS_SIDEBAR => {
             with_app(|a| a.toggle_sidebar());
         }
+        ID_GIT_VIEW => {
+            with_app(|a| a.toggle_git_view());
+        }
         ID_WS_ADD_FOLDER => cmd_add_folder(hwnd),
         ID_WS_ADD_REMOTE => cmd_add_remote_folder(hwnd),
         ID_WS_NEW => {
@@ -1383,6 +1423,7 @@ pub(crate) fn create_workspace_menu() -> Result<HMENU> {
             ID_WS_SIDEBAR,
             w!("サイドバー（エクスプローラー）(&E)\tCtrl+Shift+E"),
         )?;
+        item(ID_GIT_VIEW, w!("ソース管理（Git）(&G)\tCtrl+Shift+G"))?;
         AppendMenuW(m, MF_SEPARATOR, 0, None)?;
         item(
             ID_WS_ADD_FOLDER,
@@ -1432,6 +1473,8 @@ pub(crate) enum WsOp {
         from: PathBuf,
         to_dir: PathBuf,
     },
+    /// リモートの `ssh://…` をダウンロード フォルダにコピーする
+    Download(PathBuf),
 }
 
 /// 操作を後で行うよう頼む。
@@ -1454,6 +1497,17 @@ pub(crate) fn on_op(hwnd: HWND, lparam: LPARAM) {
         WsOp::Delete { path, is_dir } => delete_item(hwnd, &path, is_dir),
         WsOp::Move { from, to_dir } => move_item(&from, &to_dir),
         WsOp::Copy { from, to_dir } => copy_item(hwnd, &from, &to_dir),
+        WsOp::Download(path) => match remote_uri(&path) {
+            Some(u) => crate::download::download(hwnd, &u).map(|msg| {
+                if let Some(m) = msg {
+                    with_app(|a| {
+                        a.status_msg = m;
+                        a.update_status();
+                    });
+                }
+            }),
+            None => Ok(()),
+        },
     };
     if let Err(e) = r {
         error_box(hwnd, &e);

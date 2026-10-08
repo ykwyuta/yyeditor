@@ -12,6 +12,7 @@
 //! 書き込み用のスレッドが送る（UI スレッドを止めない）。
 
 mod ftdlg;
+mod links;
 mod macros;
 mod paint;
 mod printer;
@@ -96,6 +97,8 @@ const ID_MACRO_FOLDER: u16 = 3063;
 const ID_COPY: u16 = 3010;
 const ID_PASTE: u16 = 3011;
 const ID_CLEAR: u16 = 3012;
+const ID_SELECT_ALL: u16 = 3013;
+const ID_COPY_SCREEN: u16 = 3014;
 const ID_SIDEBAR: u16 = 3020;
 const ID_ZOOM_IN: u16 = 3021;
 const ID_ZOOM_OUT: u16 = 3022;
@@ -122,6 +125,7 @@ const CM_REFRESH: u32 = 4;
 const CM_REMOVE: u32 = 5;
 const CM_ADD: u32 = 6;
 const CM_ADD_REMOTE: u32 = 7;
+const CM_DOWNLOAD: u32 = 8;
 
 /// サイドバーの幅（96 DPI でのピクセル）
 const SIDEBAR_WIDTH: i32 = 240;
@@ -203,6 +207,10 @@ struct Tab {
     size: (u16, u16),
     /// 3270 のタブ（`term` は 3270 の画面を写したもの）
     tn: Option<Box<tn3270::Tn3270>>,
+    /// マウスの下のリンク（Ctrl+クリックで開く）
+    hover: Option<(yy_term::LinkTarget, Vec<(Pos, Pos)>)>,
+    /// 接続先のホーム（リンク・作業フォルダの `~` を展開する。分かったら覚える）
+    home: Option<Vec<u8>>,
 }
 
 impl Tab {
@@ -615,6 +623,9 @@ fn create_menu() -> Result<HMENU> {
         item(edit, ID_COPY, w!("コピー(&C)\tCtrl+Shift+C"))?;
         item(edit, ID_PASTE, w!("貼り付け(&P)\tCtrl+Shift+V"))?;
         sep(edit)?;
+        item(edit, ID_SELECT_ALL, w!("すべて選択(&A)\tCtrl+Shift+A"))?;
+        item(edit, ID_COPY_SCREEN, w!("表示している画面をコピー(&S)"))?;
+        sep(edit)?;
         item(edit, ID_CLEAR, w!("スクロールバックを消去(&L)"))?;
         let view = CreatePopupMenu()?;
         item(view, ID_SIDEBAR, w!("ワークスペース(&W)\tCtrl+Shift+E"))?;
@@ -726,6 +737,9 @@ fn shortcut(msg: &MSG) -> bool {
     let m = mods();
     let frame = with(|a| a.frame).unwrap_or_default();
     let cmd = match (m.ctrl, m.shift, vk) {
+        // 選択しているときの Ctrl+C はコピー（していなければ、そのままシェルへ送る〔中断〕）
+        (true, false, VK_C) if !m.alt && with(|a| a.has_selection()).unwrap_or(false) => ID_COPY,
+        (true, true, VK_A) => ID_SELECT_ALL,
         (true, true, VK_T) => ID_NEW_TAB,
         (true, true, VK_W) => ID_CLOSE_TAB,
         (true, true, VK_C) => ID_COPY,
@@ -956,6 +970,8 @@ impl TermApp {
             selecting: false,
             mouse_button: None,
             mouse_cell: (usize::MAX, usize::MAX),
+            hover: None,
+            home: None,
             input: in_tx,
             resize: Arc::from(resize),
             kill: Arc::from(kill),
@@ -1259,6 +1275,7 @@ impl TermApp {
             term: &t.term,
             back: t.back,
             selection: t.selection,
+            link: t.hover.as_ref().map_or(&[][..], |h| h.1.as_slice()),
             focused,
         });
         let _ = self
@@ -1287,6 +1304,8 @@ impl TermApp {
                     }
                     let t = &mut self.tabs[i];
                     t.term.feed(&data);
+                    // 文字が変わるのでリンクの下線は消す（マウスを動かせばまた出る）
+                    t.hover = None;
                     let resp = t.term.take_responses();
                     t.send(resp);
                     // さかのぼって表示しているときは、同じ行を表示し続ける
@@ -2217,13 +2236,167 @@ impl TermApp {
         self.send_input(bytes);
     }
 
+    /// 選択しているか。
+    fn has_selection(&self) -> bool {
+        self.tab().is_some_and(|t| t.selection.is_some())
+    }
+
+    /// 選択をコピーする。選択していなければ `false`。クリップボードに書けなければ（ほかのアプリが
+    /// 使っている）ステータスバーで知らせ、選択は残す（もう一度コピーできる）。
     fn copy(&mut self) -> bool {
         let Some(t) = self.tab() else { return false };
         let Some((a, b)) = t.selection else {
             return false;
         };
-        let text = t.term.text(a, b).replace('\n', "\r\n");
-        crate::clipboard::set_text(self.frame, &text, false)
+        let text = t.term.text(a, b);
+        self.put_clipboard(&text);
+        true
+    }
+
+    /// 文字列をクリップボードに書く（改行は CR LF）。書けたら `true`。結果をステータスバーに出す。
+    fn put_clipboard(&mut self, text: &str) -> bool {
+        let text = text.replace('\n', "\r\n");
+        let ok = crate::clipboard::set_text(self.frame, &text, false);
+        self.status_text = if ok {
+            let lines = text.lines().count().max(1);
+            format!(
+                "コピーしました（{} 文字・{lines} 行）",
+                text.chars().count()
+            )
+        } else {
+            "クリップボードに書けませんでした（ほかのアプリが使用中）。もう一度コピーしてください（選択は残しています）"
+                .into()
+        };
+        self.update_status();
+        ok
+    }
+
+    /// 選択をコピーし、書けたら選択を解く（メニュー・ショートカット・右クリック）。
+    fn copy_command(&mut self) {
+        if !self.has_selection() {
+            self.status_text = if self.reports_mouse_mode() {
+                "選択していません。このプログラムはマウスを使っているので、Shift を押しながらドラッグして選択します（表示している画面をコピー・すべて選択もできます）"
+            } else {
+                "選択していません。ドラッグして選択するか、すべて選択（Ctrl+Shift+A）・表示している画面をコピーを使ってください"
+            }
+            .into();
+            self.update_status();
+            return;
+        }
+        let Some(t) = self.tab() else { return };
+        let Some((a, b)) = t.selection else { return };
+        let text = t.term.text(a, b);
+        if self.put_clipboard(&text) {
+            if let Some(t) = self.tab_mut() {
+                t.selection = None;
+            }
+            self.invalidate();
+        }
+    }
+
+    /// すべて（スクロールバックと画面）を選択する。
+    fn select_all(&mut self) {
+        let Some(t) = self.tab_mut() else { return };
+        let first = t.term.first_line();
+        let last = t.term.end_line().saturating_sub(1);
+        t.selection = Some((
+            Pos {
+                line: first,
+                col: 0,
+            },
+            Pos {
+                line: last,
+                col: t.term.cols(),
+            },
+        ));
+        t.selecting = false;
+        self.status_text = "すべて選択しました（Ctrl+Shift+C か右クリックでコピー）".into();
+        self.update_status();
+        self.invalidate();
+    }
+
+    /// 表示している画面（スクロールバックをさかのぼっていればその位置）の文字をコピーする。
+    fn copy_screen(&mut self) {
+        let Some(t) = self.tab() else { return };
+        let back = t.back.min(t.term.history_len()) as u64;
+        let top = t.term.screen_line(0) - back;
+        let rows = t.term.rows() as u64;
+        let text = t.term.text(
+            Pos { line: top, col: 0 },
+            Pos {
+                line: top + rows - 1,
+                col: t.term.cols(),
+            },
+        );
+        self.put_clipboard(&text);
+    }
+
+    /// 画面の位置 `(x, y)` のリンク（3270 のタブにはない）。
+    fn link_at_point(&self, x: i32, y: i32) -> Option<(yy_term::LinkTarget, Vec<(Pos, Pos)>)> {
+        let t = self.tab()?;
+        if t.tn.is_some() {
+            return None;
+        }
+        let p = self.pos_at(x, y, false)?;
+        t.term.link_at(p)
+    }
+
+    /// リンクを開く・作業フォルダを開くのに要ること（`line` の上のプロンプトを読む。なければカーソルの行）。
+    fn link_context(&self, line: Option<u64>) -> Option<links::LinkContext> {
+        let t = self.tab()?;
+        let line = line.unwrap_or_else(|| t.term.screen_line(t.term.cursor().0));
+        Some(links::LinkContext {
+            place: t.place.clone(),
+            cwd: t.term.cwd().map(str::to_string),
+            prompt: t.term.prompt_cwd_above(line, 500),
+            home: t.home.clone(),
+        })
+    }
+
+    /// マウスの下のリンクに下線を引く（変わったときだけ描き直す）。
+    fn update_hover(&mut self, x: i32, y: i32) {
+        let link = self.link_at_point(x, y);
+        let Some(t) = self.tab_mut() else { return };
+        let same = match (&t.hover, &link) {
+            (Some(a), Some(b)) => a.1 == b.1,
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        const HINT: &str = "Ctrl+クリックで開く: ";
+        match &link {
+            Some((target, _)) => {
+                let what = match target {
+                    yy_term::LinkTarget::Url(_) => "ブラウザ",
+                    yy_term::LinkTarget::Path { .. } => "エディタ",
+                };
+                self.status_text = format!("{HINT}{}（{what}）", links::text_of(target));
+            }
+            None if self.status_text.starts_with(HINT) => self.status_text.clear(),
+            None => {}
+        }
+        if let Some(t) = self.tab_mut() {
+            t.hover = link;
+        }
+        self.update_status();
+        self.invalidate();
+    }
+
+    /// 開いた結果を出し、分かった接続先のホームを覚える。
+    fn after_open(&mut self, place: &Place, opened: links::Opened) {
+        if let (Some(home), Place::Remote { target, .. }) = (opened.home, place) {
+            for t in &mut self.tabs {
+                if matches!(&t.place, Place::Remote { target: x, .. } if x.same(target)) {
+                    t.home = Some(home.clone());
+                }
+            }
+        }
+        if !opened.message.is_empty() {
+            self.status_text = opened.message;
+            self.update_status();
+        }
     }
 
     fn paste(&mut self) {
@@ -2299,6 +2472,12 @@ impl TermApp {
             line: t.term.screen_line(0) - back + row,
             col,
         })
+    }
+
+    /// プログラムがマウスの操作の報告を求めているか（Shift に関係なく）。
+    fn reports_mouse_mode(&self) -> bool {
+        self.tab()
+            .is_some_and(|t| t.term.modes().mouse != MouseMode::Off && t.exited.is_none())
     }
 
     /// マウスの操作を報告するか（プログラムが要求していて、Shift を押していない）。
@@ -2517,14 +2696,13 @@ fn command(hwnd: HWND, id: u16) {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         },
         ID_COPY => {
-            with(|a| {
-                if a.copy() {
-                    if let Some(t) = a.tab_mut() {
-                        t.selection = None;
-                    }
-                    a.invalidate();
-                }
-            });
+            with(|a| a.copy_command());
+        }
+        ID_SELECT_ALL => {
+            with(|a| a.select_all());
+        }
+        ID_COPY_SCREEN => {
+            with(|a| a.copy_screen());
         }
         ID_PASTE => {
             with(|a| a.paste());
@@ -2656,14 +2834,18 @@ Ctrl+Shift+O\tSSH で接続
 Ctrl+Shift+W\tタブを閉じる
 Ctrl+Tab / Ctrl+Shift+Tab\tタブの切り替え
 Ctrl+Shift+C / Ctrl+Insert\tコピー
+Ctrl+C\t選択していればコピー（していなければシェルへ送る〔中断〕）
+Ctrl+Shift+A\tすべて選択（スクロールバックも）
 Ctrl+Shift+V / Shift+Insert\t貼り付け
-右クリック\t選択していればコピー、していなければ貼り付け
+右クリック\tメニュー（コピー・貼り付け・リンクを開く・カレントディレクトリを yysftp で開く）
+Ctrl+クリック\tURL をブラウザで、ファイルのパスをエディタで開く
 ダブルクリック\t単語を選択
 Shift+PageUp / PageDown\tスクロールバックを表示
 Ctrl+Shift+E\tワークスペース（サイドバー）
 Ctrl++ / Ctrl+- / Ctrl+0\t文字の大きさ
 
-プログラムがマウスを使っているとき（vim・tmux など）は、Shift を押しながら選択します。";
+プログラムがマウスを使っているとき（vim・tmux など）は、Shift を押しながら選択します。
+選択できないときも、編集 > 表示している画面をコピー で画面の文字をすべてコピーできます。";
 
 /// 「SSH で接続」。
 fn cmd_ssh(hwnd: HWND) {
@@ -3144,6 +3326,151 @@ fn cmd_add_remote_folder(hwnd: HWND) {
     layout();
 }
 
+/// リンクを開く（状態を借りずに。接続先で確かめる間も画面は止めない）。
+fn open_link(hwnd: HWND, target: &yy_term::LinkTarget, ctx: &links::LinkContext) {
+    let opened = links::open(hwnd, target, ctx);
+    let place = ctx.place.clone();
+    with(|a| a.after_open(&place, opened));
+}
+
+// 右クリックのメニュー
+const RM_OPEN_LINK: u32 = 1;
+const RM_COPY_LINK: u32 = 2;
+const RM_COPY: u32 = 3;
+const RM_PASTE: u32 = 4;
+const RM_SELECT_ALL: u32 = 5;
+const RM_COPY_SCREEN: u32 = 6;
+const RM_SFTP_HERE: u32 = 7;
+const RM_EXPLORER_HERE: u32 = 8;
+
+/// 端末の右クリックのメニュー。
+fn view_menu(hwnd: HWND, x: i32, y: i32) {
+    let Some((link, selected, ctx, tn)) = with(|a| {
+        let link = a.link_at_point(x, y);
+        let line = link.as_ref().map(|l| l.1[0].0.line);
+        (
+            link,
+            a.has_selection(),
+            a.link_context(line),
+            a.tab().is_some_and(|t| t.tn.is_some()),
+        )
+    }) else {
+        return;
+    };
+    let cmd = unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let add = |id: u32, text: &str, on: bool| {
+            let flags = if on { MF_STRING } else { MF_STRING | MF_GRAYED };
+            let _ = AppendMenuW(
+                menu,
+                flags,
+                id as usize,
+                &windows::core::HSTRING::from(text),
+            );
+        };
+        let sep = || {
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        };
+        if let Some((target, _)) = &link {
+            let shown: String = links::text_of(target).chars().take(60).collect();
+            match target {
+                yy_term::LinkTarget::Url(_) => {
+                    add(RM_OPEN_LINK, &format!("ブラウザで開く(&O): {shown}"), true);
+                    add(RM_COPY_LINK, "リンクのアドレスをコピー(&L)", true);
+                }
+                yy_term::LinkTarget::Path { .. } => {
+                    add(RM_OPEN_LINK, &format!("エディタで開く(&O): {shown}"), true);
+                    add(RM_COPY_LINK, "パスをコピー(&L)", true);
+                }
+            }
+            sep();
+        }
+        add(RM_COPY, "コピー(&C)\tCtrl+Shift+C", selected);
+        add(RM_PASTE, "貼り付け(&P)\tCtrl+Shift+V", true);
+        sep();
+        add(RM_SELECT_ALL, "すべて選択(&A)\tCtrl+Shift+A", true);
+        add(RM_COPY_SCREEN, "表示している画面をコピー(&S)", true);
+        match ctx.as_ref().map(|c| &c.place) {
+            Some(Place::Remote { target, .. }) if !tn => {
+                sep();
+                let dir = ctx
+                    .as_ref()
+                    .map(links::remote_cwd_label)
+                    .unwrap_or_default();
+                add(
+                    RM_SFTP_HERE,
+                    &format!("カレントディレクトリを yysftp で開く(&F): {target}:{dir}"),
+                    true,
+                );
+            }
+            Some(Place::Local(_)) if !tn => {
+                sep();
+                add(
+                    RM_EXPLORER_HERE,
+                    "カレントディレクトリをエクスプローラーで開く(&E)",
+                    true,
+                );
+            }
+            _ => {}
+        }
+        let mut pt = POINT { x, y };
+        let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut pt);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            None,
+            hwnd,
+            None,
+        );
+        let _ = DestroyMenu(menu);
+        cmd.0 as u32
+    };
+    match cmd {
+        RM_OPEN_LINK => {
+            if let (Some((target, _)), Some(ctx)) = (&link, &ctx) {
+                open_link(hwnd, target, ctx);
+            }
+        }
+        RM_COPY_LINK => {
+            if let Some((target, _)) = &link {
+                let frame = with(|a| a.frame).unwrap_or(hwnd);
+                crate::clipboard::set_text(frame, &links::text_of(target), false);
+            }
+        }
+        RM_COPY => {
+            with(|a| a.copy_command());
+        }
+        RM_PASTE => {
+            with(|a| a.paste());
+        }
+        RM_SELECT_ALL => {
+            with(|a| a.select_all());
+        }
+        RM_COPY_SCREEN => {
+            with(|a| a.copy_screen());
+        }
+        RM_SFTP_HERE => {
+            if let Some(ctx) = &ctx {
+                let opened = links::sftp_here(hwnd, ctx);
+                let place = ctx.place.clone();
+                with(|a| a.after_open(&place, opened));
+            }
+        }
+        RM_EXPLORER_HERE => {
+            if let Some(ctx) = &ctx {
+                let message = links::explorer_here(hwnd, ctx);
+                with(|a| {
+                    a.status_text = message;
+                    a.update_status();
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
 /// ファイルをエディタ（yyeditor）で開く。
 fn open_in_editor(hwnd: HWND, path: &Path) {
     let exe = std::env::current_exe()
@@ -3286,6 +3613,11 @@ fn context_menu(hwnd: HWND) {
             } else {
                 let _ = item(CM_OPEN_EDITOR, w!("エディタで開く(&E)"));
             }
+            if let Some((_, path, _, _)) = &node
+                && sidebar::remote_uri(path).is_some()
+            {
+                let _ = item(CM_DOWNLOAD, w!("ダウンロード フォルダにコピー(&L)"));
+            }
             let _ = item(CM_COPY_PATH, w!("パスをコピー(&C)"));
             if *root {
                 let _ = item(CM_REMOVE, w!("ワークスペースから外す(&D)"));
@@ -3310,6 +3642,15 @@ fn context_menu(hwnd: HWND) {
             (CM_ADD_REMOTE, _) => cmd_add_remote_folder(hwnd),
             (CM_OPEN_HERE, Some((_, path, _, _))) => activate_node(hwnd, path, true),
             (CM_OPEN_EDITOR, Some((_, path, _, _))) => open_in_editor(hwnd, &path),
+            (CM_DOWNLOAD, Some((_, path, _, _))) => {
+                if let Some(u) = sidebar::remote_uri(&path) {
+                    match crate::download::download(hwnd, &u) {
+                        Ok(Some(m)) => set_status(&m),
+                        Ok(None) => {}
+                        Err(e) => error_box(hwnd, &e),
+                    }
+                }
+            }
             (CM_COPY_PATH, Some((_, path, _, _))) => {
                 let _ = crate::clipboard::set_text(hwnd, &path.to_string_lossy(), false);
             }
@@ -3390,6 +3731,15 @@ fn point(lparam: LPARAM) -> (i32, i32) {
 
 extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        // リンクの上で Ctrl を押していれば指の形
+        WM_SETCURSOR
+            if loword(lparam.0 as usize) == HTCLIENT
+                && key_down(VK_CONTROL)
+                && with(|a| a.tab().is_some_and(|t| t.hover.is_some())).unwrap_or(false) =>
+        unsafe {
+            let _ = SetCursor(LoadCursorW(None, IDC_HAND).ok());
+            LRESULT(1)
+        },
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             unsafe {
@@ -3556,15 +3906,35 @@ extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
             unsafe {
                 let _ = SetFocus(Some(hwnd));
-                SetCapture(hwnd);
             }
             let (x, y) = point(lparam);
+            // Ctrl+クリック: リンク（URL・ファイルのパス）を開く
+            if msg == WM_LBUTTONDOWN && key_down(VK_CONTROL) {
+                let link = with(|a| {
+                    if a.reports_mouse() {
+                        return None;
+                    }
+                    let (target, ranges) = a.link_at_point(x, y)?;
+                    let ctx = a.link_context(Some(ranges[0].0.line))?;
+                    Some((target, ctx))
+                })
+                .flatten();
+                if let Some((target, ctx)) = link {
+                    open_link(hwnd, &target, &ctx);
+                    return LRESULT(0);
+                }
+            }
+            unsafe {
+                SetCapture(hwnd);
+            }
             with(|a| {
                 if a.reports_mouse() {
                     a.report_mouse(MouseEvent::Press(Button::Left), x, y);
                     if let Some(t) = a.tab_mut() {
                         t.mouse_button = Some(Button::Left);
                     }
+                    a.status_text = "このプログラムはマウスを使っています。文字を選択するには Shift を押しながらドラッグします".into();
+                    a.update_status();
                     return;
                 }
                 if msg == WM_LBUTTONDBLCLK {
@@ -3602,6 +3972,7 @@ extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                 }
                 let selecting = a.tab().is_some_and(|t| t.selecting);
                 if !selecting {
+                    a.update_hover(x, y);
                     return;
                 }
                 // 画面の外まで引っ張ったらスクロールする
@@ -3667,17 +4038,23 @@ extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
             } else {
                 Button::Middle
             };
+            // 右クリックのメニュー（プログラムがマウスを使っていれば、Shift を押しながら）
+            if button == Button::Right
+                && with(|a| !a.reports_mouse() && a.config.terminal.right_click_menu)
+                    .unwrap_or(false)
+            {
+                view_menu(hwnd, x, y);
+                return LRESULT(0);
+            }
             with(|a| {
                 if a.reports_mouse() {
                     a.report_mouse(MouseEvent::Press(button), x, y);
                     return;
                 }
-                // 選択していればコピー、していなければ貼り付け（コンソールと同じ）
-                if button == Button::Right && a.copy() {
-                    if let Some(t) = a.tab_mut() {
-                        t.selection = None;
-                    }
-                    a.invalidate();
+                // 選択していればコピー、していなければ貼り付け（コンソールと同じ）。コピーに失敗しても
+                // 貼り付けはしない（選択は残す）
+                if button == Button::Right && a.has_selection() {
+                    a.copy_command();
                 } else {
                     a.paste();
                 }

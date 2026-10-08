@@ -17,14 +17,17 @@ use std::sync::Arc;
 
 use yy_proto::FileKind;
 
-use crate::{Session, UploadOutcome};
+use crate::sftp::{Attrs, Sftp};
+use crate::{RemoteFs, Session, SftpFs, UploadOutcome};
 
 /// コピー元・コピー先の場所。
 #[derive(Clone)]
 pub enum Loc {
     Local(PathBuf),
-    /// 接続先のセッションと、その中の絶対パス
+    /// 接続先のセッション（エージェント）と、その中の絶対パス
     Remote(Arc<Session>, Vec<u8>),
+    /// 接続先の SFTP（エージェントを置かない）と、その中の絶対パス
+    Sftp(Arc<SftpFs>, Vec<u8>),
 }
 
 /// コピーした量。
@@ -52,18 +55,32 @@ enum Name {
 }
 
 impl Loc {
+    /// 接続先なら、そのファイル操作とパス。
+    fn remote_fs(&self) -> Option<(&dyn RemoteFs, &[u8])> {
+        match self {
+            Loc::Local(_) => None,
+            Loc::Remote(s, p) => Some((s.as_ref() as &dyn RemoteFs, p.as_slice())),
+            Loc::Sftp(s, p) => Some((s.as_ref() as &dyn RemoteFs, p.as_slice())),
+        }
+    }
+
     fn join(&self, name: &Name) -> Loc {
         match self {
             Loc::Local(p) => Loc::Local(p.join(match name {
                 Name::Os(n) => n.clone(),
                 Name::Bytes(b) => OsString::from(String::from_utf8_lossy(b).into_owned()),
             })),
-            Loc::Remote(s, p) => {
+            Loc::Remote(_, p) | Loc::Sftp(_, p) => {
                 let n = match name {
                     Name::Os(n) => n.to_string_lossy().into_owned().into_bytes(),
                     Name::Bytes(b) => b.clone(),
                 };
-                Loc::Remote(s.clone(), yy_proto::join_path(p, &n))
+                let path = yy_proto::join_path(p, &n);
+                match self {
+                    Loc::Remote(s, _) => Loc::Remote(s.clone(), path),
+                    Loc::Sftp(s, _) => Loc::Sftp(s.clone(), path),
+                    Loc::Local(_) => unreachable!(),
+                }
             }
         }
     }
@@ -85,17 +102,21 @@ impl Loc {
                     Kind::Skip
                 })
             }
-            Loc::Remote(s, p) => {
-                let i = s.stat(p)?;
+            _ => {
+                let (fs, p) = self.remote_fs().expect("remote");
+                let i = fs.stat(p)?;
                 Ok(remote_kind(i.kind, i.link))
             }
         }
     }
 
     fn exists(&self) -> io::Result<bool> {
-        let r = match self {
-            Loc::Local(p) => fs::symlink_metadata(p).map(|_| ()),
-            Loc::Remote(s, p) => s.stat(p).map(|_| ()),
+        let r = match self.remote_fs() {
+            None => match self {
+                Loc::Local(p) => fs::symlink_metadata(p).map(|_| ()),
+                _ => unreachable!(),
+            },
+            Some((fs, p)) => fs.stat(p).map(|_| ()),
         };
         match r {
             Ok(()) => Ok(true),
@@ -115,24 +136,30 @@ impl Loc {
                 }
                 Ok(out)
             }
-            Loc::Remote(s, p) => Ok(s
-                .read_dir(p)?
-                .into_iter()
-                .map(|e| {
-                    let kind = e
-                        .info
-                        .as_ref()
-                        .map_or(Kind::Skip, |i| remote_kind(i.kind, i.link));
-                    (Name::Bytes(e.name), kind)
-                })
-                .collect()),
+            _ => {
+                let (fs, p) = self.remote_fs().expect("remote");
+                Ok(fs
+                    .read_dir(p)?
+                    .into_iter()
+                    .map(|e| {
+                        let kind = e
+                            .info
+                            .as_ref()
+                            .map_or(Kind::Skip, |i| remote_kind(i.kind, i.link));
+                        (Name::Bytes(e.name), kind)
+                    })
+                    .collect())
+            }
         }
     }
 
     fn make_dir(&self) -> io::Result<()> {
         match self {
             Loc::Local(p) => fs::create_dir(p),
-            Loc::Remote(s, p) => s.make_dir(p),
+            _ => {
+                let (fs, p) = self.remote_fs().expect("remote");
+                fs.make_dir(p)
+            }
         }
     }
 
@@ -145,7 +172,10 @@ impl Loc {
                     fs::remove_file(p)
                 }
             }
-            Loc::Remote(s, p) => s.remove(p, true),
+            _ => {
+                let (fs, p) = self.remote_fs().expect("remote");
+                fs.remove(p, true)
+            }
         }
     }
 }
@@ -217,9 +247,12 @@ fn measure_node(loc: &Loc, kind: Kind, t: &mut Ticker) -> io::Result<()> {
         Kind::Skip => t.stats.skipped += 1,
         Kind::File => {
             t.stats.files += 1;
-            t.stats.bytes += match loc {
-                Loc::Local(p) => fs::metadata(p)?.len(),
-                Loc::Remote(s, p) => s.stat(p)?.len(),
+            t.stats.bytes += match loc.remote_fs() {
+                Some((fs, p)) => fs.stat(p)?.len(),
+                None => match loc {
+                    Loc::Local(p) => fs::metadata(p)?.len(),
+                    _ => unreachable!(),
+                },
             };
         }
         Kind::Dir => {
@@ -237,6 +270,7 @@ pub fn crosses_network(from: &Loc, to: &Loc) -> bool {
     match (from, to) {
         (Loc::Local(_), Loc::Local(_)) => false,
         (Loc::Remote(a, _), Loc::Remote(b, _)) => !Arc::ptr_eq(a, b),
+        (Loc::Sftp(a, _), Loc::Sftp(b, _)) => !Arc::ptr_eq(a, b),
         _ => true,
     }
 }
@@ -339,20 +373,20 @@ fn copy_file(from: &Loc, to: &Loc, t: &mut Ticker) -> io::Result<()> {
             }
             Ok(())
         }
-        (Loc::Local(f), Loc::Remote(s, d)) => {
+        (Loc::Local(f), _) => {
             let mut src = Counting {
                 inner: File::open(f)?,
                 ticker: t,
             };
-            upload(s, &mut src, d)
+            write_remote(to, &mut src)
         }
-        (Loc::Remote(s, f), Loc::Local(d)) => {
+        (_, Loc::Local(d)) => {
             let mut dst = BufWriter::with_capacity(1 << 20, create_new(d)?);
-            download(s, f, &mut dst, t)?;
+            read_remote(from, &mut dst, t)?;
             dst.into_inner().map_err(|e| e.into_error())?.sync_all()
         }
-        (Loc::Remote(a, f), Loc::Remote(b, d)) => {
-            // 別の接続先の間は、手元の一時ファイルを経由する
+        _ => {
+            // 接続先の間（別の接続先・エージェントと SFTP）は、手元の一時ファイルを経由する
             let tmp = std::env::temp_dir().join(format!(
                 "yyeditor-copy-{}-{}.tmp",
                 std::process::id(),
@@ -360,15 +394,124 @@ fn copy_file(from: &Loc, to: &Loc, t: &mut Ticker) -> io::Result<()> {
             ));
             let r = (|| {
                 let mut w = BufWriter::with_capacity(1 << 20, File::create(&tmp)?);
-                download(a, f, &mut w, t)?;
+                read_remote(from, &mut w, t)?;
                 w.flush()?;
                 drop(w);
-                upload(b, &mut File::open(&tmp)?, d)
+                write_remote(to, &mut File::open(&tmp)?)
             })();
             let _ = fs::remove_file(&tmp);
             r
         }
     }
+}
+
+/// 接続先のファイルを読んで `out` に書く。
+fn read_remote(from: &Loc, out: &mut dyn Write, t: &mut Ticker) -> io::Result<()> {
+    match from {
+        Loc::Remote(s, f) => download(s, f, out, t),
+        Loc::Sftp(s, f) => sftp_download(s.sftp(), f, out, t),
+        Loc::Local(_) => unreachable!(),
+    }
+}
+
+/// `src` を接続先のファイル（新しく作る）に書く。
+fn write_remote(to: &Loc, src: &mut dyn Read) -> io::Result<()> {
+    match to {
+        Loc::Remote(s, d) => upload(s, src, d),
+        Loc::Sftp(s, d) => sftp_upload(s.sftp(), src, d),
+        Loc::Local(_) => unreachable!(),
+    }
+}
+
+/// 1 回に読み書きする大きさと、返事を待たずに送る数（SFTP）。
+const SFTP_CHUNK: u32 = 32 * 1024;
+const SFTP_INFLIGHT: usize = 16;
+
+/// SFTP でファイルを読む（読み出しを先に何個も送って、往復の待ちを減らす）。
+fn sftp_download(s: &Sftp, path: &[u8], out: &mut dyn Write, t: &mut Ticker) -> io::Result<()> {
+    use crate::sftp::open;
+    let h = s.open(path, open::READ, &Attrs::default())?;
+    let r = (|| {
+        let mut queue = std::collections::VecDeque::new();
+        let mut next = 0u64;
+        loop {
+            while queue.len() < SFTP_INFLIGHT {
+                queue.push_back((next, s.send_read(&h, next, SFTP_CHUNK)?));
+                next += u64::from(SFTP_CHUNK);
+            }
+            let Some((offset, reply)) = queue.pop_front() else {
+                return Ok(());
+            };
+            let data = reply.wait()?;
+            if data.is_empty() {
+                // ファイルの終わり（残りの返事は読み捨てる）
+                for (_, r) in queue.drain(..) {
+                    let _ = r.wait();
+                }
+                return Ok(());
+            }
+            out.write_all(&data)?;
+            t.add_bytes(data.len() as u64)?;
+            if (data.len() as u32) < SFTP_CHUNK {
+                // 短い読み出し: 続きをその位置から読み直す
+                let rest = offset + data.len() as u64;
+                for (_, r) in queue.drain(..) {
+                    let _ = r.wait();
+                }
+                next = rest;
+            }
+        }
+    })();
+    let _ = s.close(&h);
+    r
+}
+
+/// SFTP でファイルを書く（新しく作る。あればエラー）。
+fn sftp_upload(s: &Sftp, src: &mut dyn Read, path: &[u8]) -> io::Result<()> {
+    use crate::sftp::open;
+    let h = s.open(
+        path,
+        open::WRITE | open::CREATE | open::EXCLUSIVE,
+        &Attrs::default(),
+    )?;
+    let r = (|| {
+        let mut queue = std::collections::VecDeque::new();
+        let mut offset = 0u64;
+        let mut buf = vec![0u8; SFTP_CHUNK as usize];
+        loop {
+            let n = read_full(src, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            queue.push_back(s.send_write(&h, offset, &buf[..n])?);
+            offset += n as u64;
+            if queue.len() >= SFTP_INFLIGHT
+                && let Some(w) = queue.pop_front()
+            {
+                w.wait()?;
+            }
+        }
+        for w in queue {
+            w.wait()?;
+        }
+        Ok(())
+    })();
+    let _ = s.close(&h);
+    r
+}
+
+/// `buf` が埋まるか終わりまで読む。
+fn read_full(src: &mut dyn Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        match src.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(n)
 }
 
 fn upload(s: &Arc<Session>, src: &mut dyn Read, path: &[u8]) -> io::Result<()> {
@@ -396,4 +539,94 @@ fn download(s: &Session, path: &[u8], out: &mut dyn Write, t: &mut Ticker) -> io
         return Err(cancelled());
     }
     r.map(|_| ())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::local::{LocalTransport, sftp_server};
+    use std::os::unix::ffi::OsStrExt;
+
+    fn tree(root: &std::path::Path) -> Vec<u8> {
+        fs::create_dir_all(root.join("sub/深い")).unwrap();
+        // 読み出しを何個も先に送る大きさ（32 KiB × 16 を超える）と、端の大きさ
+        let big: Vec<u8> = (0..1_234_567u32).map(|i| (i * 7 % 251) as u8).collect();
+        fs::write(root.join("big.bin"), &big).unwrap();
+        fs::write(root.join("sub/empty"), b"").unwrap();
+        fs::write(root.join("sub/深い/メモ.txt"), "こんにちは\n").unwrap();
+        fs::write(root.join("exact.bin"), vec![1u8; SFTP_CHUNK as usize]).unwrap();
+        std::os::unix::fs::symlink(root.join("sub"), root.join("link-to-dir")).unwrap();
+        big
+    }
+
+    #[test]
+    fn copies_over_sftp_both_ways() {
+        if sftp_server().is_none() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("remote-src");
+        let big = tree(&src);
+        let t = LocalTransport::new();
+        let sftp = Arc::new(SftpFs::connect(&t).unwrap());
+        let remote =
+            |p: &std::path::Path| Loc::Sftp(sftp.clone(), p.as_os_str().as_bytes().to_vec());
+        // 量（フォルダを指すリンクは数えない）
+        let st = measure(&remote(&src), &mut |_| true).unwrap();
+        assert_eq!(st.files, 4);
+        assert_eq!(st.skipped, 1);
+        assert_eq!(
+            st.bytes,
+            big.len() as u64 + "こんにちは\n".len() as u64 + u64::from(SFTP_CHUNK)
+        );
+        // 接続先 → 手元（ダウンロード）
+        let dst = tmp.path().join("Downloads").join("remote-src");
+        fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        let st = copy(&remote(&src), &Loc::Local(dst.clone()), &mut |_| true).unwrap();
+        assert_eq!((st.files, st.skipped), (4, 1));
+        assert_eq!(fs::read(dst.join("big.bin")).unwrap(), big);
+        assert_eq!(fs::read(dst.join("sub/empty")).unwrap(), b"");
+        assert_eq!(
+            fs::read_to_string(dst.join("sub/深い/メモ.txt")).unwrap(),
+            "こんにちは\n"
+        );
+        assert_eq!(
+            fs::read(dst.join("exact.bin")).unwrap().len(),
+            SFTP_CHUNK as usize
+        );
+        assert!(!dst.join("link-to-dir").exists());
+        // 1 つのファイル
+        let one = tmp.path().join("one.bin");
+        copy(
+            &remote(&src.join("big.bin")),
+            &Loc::Local(one.clone()),
+            &mut |_| true,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&one).unwrap(), big);
+        // 手元 → 接続先（アップロード）
+        let up = tmp.path().join("uploaded");
+        copy(&Loc::Local(dst.clone()), &remote(&up), &mut |_| true).unwrap();
+        assert_eq!(fs::read(up.join("big.bin")).unwrap(), big);
+        assert_eq!(
+            fs::read_to_string(up.join("sub/深い/メモ.txt")).unwrap(),
+            "こんにちは\n"
+        );
+        // あれば上書きしない
+        let e = copy(
+            &remote(&src.join("big.bin")),
+            &Loc::Local(one.clone()),
+            &mut |_| true,
+        )
+        .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        // 中止したら作りかけを消す
+        let stopped = tmp.path().join("stopped");
+        let e = copy(&remote(&src), &Loc::Local(stopped.clone()), &mut |s| {
+            s.bytes < 100_000
+        })
+        .unwrap_err();
+        assert!(is_cancelled(&e), "{e}");
+        assert!(!stopped.exists());
+    }
 }

@@ -298,3 +298,216 @@ fn cancel_in_the_middle_of_a_sequence() {
     assert_eq!(lines(&t), ["ac"]);
     assert_eq!(t.screen_row(0).cells[0].attr.fg, Color::Default);
 }
+
+/// すべて選択（スクロールバックの先頭から画面の最後まで）の文字列。スクロールバックからあふれて捨てた
+/// 行があっても、残っている行をすべて取り出せる。代替画面の間も同じ。
+#[test]
+fn select_all_text_after_history_overflow() {
+    let mut t = Terminal::new(10, 3, 5);
+    for i in 0..20 {
+        t.feed(format!("L{i}\r\n").as_bytes());
+    }
+    let all = |t: &Terminal| {
+        t.text(
+            Pos {
+                line: t.first_line(),
+                col: 0,
+            },
+            Pos {
+                line: t.end_line() - 1,
+                col: t.cols(),
+            },
+        )
+    };
+    let text = all(&t);
+    // スクロールバック 5 行＋画面 3 行（最後は空の行）
+    assert_eq!(text, "L13\nL14\nL15\nL16\nL17\nL18\nL19\n");
+    // 表示している画面だけ
+    let top = t.screen_line(0);
+    let screen = t.text(
+        Pos { line: top, col: 0 },
+        Pos {
+            line: top + t.rows() as u64 - 1,
+            col: t.cols(),
+        },
+    );
+    assert_eq!(screen, "L18\nL19\n");
+    // 全角の文字も 1 文字として
+    t.feed("漢字ABC".as_bytes());
+    assert!(all(&t).ends_with("L19\n漢字ABC"), "{:?}", all(&t));
+    // 代替画面
+    t.feed(b"\x1b[?1049h\x1b[Hvim");
+    assert!(all(&t).contains("L13") && all(&t).contains("vim"));
+}
+
+#[test]
+fn finds_urls_and_paths() {
+    use crate::links::{LinkTarget, find};
+    let got = |t: &str| -> Vec<(String, LinkTarget)> {
+        let chars: Vec<char> = t.chars().collect();
+        find(t)
+            .into_iter()
+            .map(|f| (chars[f.start..f.end].iter().collect(), f.target))
+            .collect()
+    };
+    let url = |u: &str| LinkTarget::Url(u.into());
+    let path = |p: &str, line: Option<u32>, col: Option<u32>| LinkTarget::Path {
+        path: p.into(),
+        line,
+        col,
+    };
+    // 文の終わりの句読点・対のない括弧は含めない
+    assert_eq!(
+        got("see https://example.com/a?b=1&c=2. (https://x.org/wiki/A_(b))、"),
+        [
+            (
+                "https://example.com/a?b=1&c=2".into(),
+                url("https://example.com/a?b=1&c=2")
+            ),
+            (
+                "https://x.org/wiki/A_(b)".into(),
+                url("https://x.org/wiki/A_(b)")
+            ),
+        ]
+    );
+    assert_eq!(
+        got("詳しくは「https://例え.jp/ページ」を"),
+        [(
+            "https://例え.jp/ページ".into(),
+            url("https://例え.jp/ページ")
+        )]
+    );
+    // パスと行・桁
+    assert_eq!(
+        got("error[E0308]: --> src/main.rs:12:5"),
+        [(
+            "src/main.rs:12:5".into(),
+            path("src/main.rs", Some(12), Some(5))
+        )]
+    );
+    assert_eq!(
+        got("C:\\work\\a.cpp(34,7): error C2065"),
+        [(
+            "C:\\work\\a.cpp(34,7)".into(),
+            path("C:\\work\\a.cpp", Some(34), Some(7))
+        )]
+    );
+    assert_eq!(
+        got("vi /etc/hosts and ~/notes.txt or ./run.sh"),
+        [
+            ("/etc/hosts".into(), path("/etc/hosts", None, None)),
+            ("~/notes.txt".into(), path("~/notes.txt", None, None)),
+            ("./run.sh".into(), path("./run.sh", None, None)),
+        ]
+    );
+    assert_eq!(
+        got("'README.md' main.rs:3 --config=/opt/app/conf.toml"),
+        [
+            ("README.md".into(), path("README.md", None, None)),
+            ("main.rs:3".into(), path("main.rs", Some(3), None)),
+            (
+                "/opt/app/conf.toml".into(),
+                path("/opt/app/conf.toml", None, None)
+            ),
+        ]
+    );
+    // パスでないもの
+    assert!(
+        got("2026/10/08 1/2 v1.2 e.g. / // -s /s ok.").is_empty(),
+        "{:?}",
+        got("2026/10/08 1/2 v1.2 e.g. / // -s /s ok.")
+    );
+}
+
+#[test]
+fn reads_the_working_directory() {
+    use crate::links::prompt_cwd;
+    assert_eq!(
+        prompt_cwd("yamada@build01:~/src/app$ ls").as_deref(),
+        Some("~/src/app")
+    );
+    assert_eq!(
+        prompt_cwd("(venv) root@web-1:/var/log# tail x").as_deref(),
+        Some("/var/log")
+    );
+    assert_eq!(prompt_cwd("me@h:/tmp/a b$ ").as_deref(), Some("/tmp/a b"));
+    assert_eq!(
+        prompt_cwd("PS C:\\Users\\me\\src> dir").as_deref(),
+        Some("C:\\Users\\me\\src")
+    );
+    assert_eq!(
+        prompt_cwd("C:\\Windows\\System32>echo").as_deref(),
+        Some("C:\\Windows\\System32")
+    );
+    assert_eq!(prompt_cwd("mail me@example.com: hi"), None);
+    assert_eq!(prompt_cwd("plain output"), None);
+    // OSC 7・OSC 9;9 とプロンプト
+    let mut t = term(40, 5);
+    t.feed(b"\x1b]7;file://host/home/me/my%20dir\x07");
+    assert_eq!(t.cwd(), Some("/home/me/my dir"));
+    t.feed(b"\x1b]7;file://pc/C:/Users/me\x1b\\");
+    assert_eq!(t.cwd(), Some("C:/Users/me"));
+    t.feed(b"\x1b]9;9;\"C:\\work\"\x07");
+    assert_eq!(t.cwd(), Some("C:\\work"));
+    t.feed(b"me@h:~/proj$ make\r\nsrc/a.c:3: error\r\n");
+    let line = t.screen_line(1);
+    assert_eq!(t.prompt_cwd_above(line, 100).as_deref(), Some("~/proj"));
+}
+
+#[test]
+fn finds_links_across_wrapped_lines() {
+    use crate::links::LinkTarget;
+    let mut t = term(10, 4);
+    t.feed(b"go https://ex.com/long/path ok");
+    // 1 行目の 3 桁目から 3 行目まで折り返している
+    let first = t.screen_line(0);
+    let (target, ranges) = t
+        .link_at(Pos {
+            line: first + 1,
+            col: 2,
+        })
+        .unwrap();
+    assert_eq!(target, LinkTarget::Url("https://ex.com/long/path".into()));
+    assert_eq!(
+        ranges,
+        [
+            (
+                Pos {
+                    line: first,
+                    col: 3
+                },
+                Pos {
+                    line: first,
+                    col: 10
+                }
+            ),
+            (
+                Pos {
+                    line: first + 1,
+                    col: 0
+                },
+                Pos {
+                    line: first + 1,
+                    col: 10
+                }
+            ),
+            (
+                Pos {
+                    line: first + 2,
+                    col: 0
+                },
+                Pos {
+                    line: first + 2,
+                    col: 7
+                }
+            ),
+        ]
+    );
+    assert!(
+        t.link_at(Pos {
+            line: first,
+            col: 0
+        })
+        .is_none()
+    );
+}

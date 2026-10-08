@@ -19,6 +19,7 @@ mod crash;
 mod credstore;
 mod diffstream;
 mod diffview;
+mod download;
 mod findbar;
 mod font;
 mod goto;
@@ -88,6 +89,12 @@ pub(crate) fn app_icons(hinstance: windows::Win32::Foundation::HINSTANCE) -> (HI
         };
         (load(SM_CXICON), load(SM_CXSMICON))
     }
+}
+
+/// git の askpass として起動されたなら、資格情報を答えて `true`（`main` はすぐ終わる。17 章）。
+/// ソース管理のプル・プッシュで、入力してもらったパスワードなどを git・ssh に渡すのに使う。
+pub fn git_askpass() -> bool {
+    yy_git::askpass_main()
 }
 
 /// エディタを起動し、ウィンドウが閉じられるまでメッセージループを回す。
@@ -244,7 +251,13 @@ fn run_inner(
             let bar = app::findbar_with_focus();
             // ヘルプのウィンドウでは、エディタのショートカット（Ctrl+C など）を使わない
             let in_help = help::contains(msg.hwnd);
-            let use_accel = !in_help && (bar.is_none() || app::is_global_shortcut(&msg));
+            // ソース管理のコミットのメッセージの欄: Ctrl+Enter でコミット、編集のショートカットは欄に任せる
+            if app::git_pre_translate(&msg) {
+                continue;
+            }
+            let in_git_message = app::git_message_with_focus();
+            let use_accel =
+                !in_help && ((bar.is_none() && !in_git_message) || app::is_global_shortcut(&msg));
             if use_accel && TranslateAcceleratorW(frame, accel, &msg) != 0 {
                 continue;
             }

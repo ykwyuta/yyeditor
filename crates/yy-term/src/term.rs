@@ -164,6 +164,8 @@ pub struct Terminal {
     gl: usize,
     title: String,
     title_changed: bool,
+    /// シェルが知らせた作業フォルダ（OSC 7 の `file://…`・OSC 9;9）
+    cwd: Option<String>,
     bell: bool,
     dirty: bool,
     responses: Vec<u8>,
@@ -208,6 +210,7 @@ impl Terminal {
             gl: 0,
             title: String::new(),
             title_changed: false,
+            cwd: None,
             bell: false,
             dirty: true,
             responses: Vec::new(),
@@ -1307,6 +1310,94 @@ impl Terminal {
                 self.title = title;
                 self.title_changed = true;
             }
+        }
+        // 作業フォルダ: OSC 7（`file://ホスト/パス`）、OSC 9;9（Windows Terminal・ConEmu の形）
+        if code == "7"
+            && let Some(p) = crate::links::file_url_path(rest)
+        {
+            self.cwd = Some(p);
+        }
+        if code == "9"
+            && let Some(p) = rest.strip_prefix("9;")
+        {
+            let p = p.trim_matches('"');
+            if !p.is_empty() {
+                self.cwd = Some(p.to_string());
+            }
+        }
+    }
+
+    // ---- リンク・作業フォルダ ---------------------------------------------------
+
+    /// シェルが知らせた作業フォルダ（OSC 7・OSC 9;9。知らせていなければ `None`）。
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+
+    /// 行 `line` を含む、折り返しでつながった行の文字と、文字ごとの位置（行・始めの桁・終わりの桁）。
+    fn logical_line(&self, line: u64) -> (Vec<char>, Vec<(u64, usize, usize)>) {
+        let mut first = line;
+        while first > self.dropped && self.line(first - 1).is_some_and(|l| l.wrapped) {
+            first -= 1;
+        }
+        let mut chars = Vec::new();
+        let mut map = Vec::new();
+        let mut n = first;
+        while let Some(l) = self.line(n) {
+            for (col, c) in l.cells.iter().enumerate() {
+                if c.is_continuation() {
+                    continue;
+                }
+                let w = usize::from(c.width.max(1));
+                // 結合文字は前の文字と同じ位置
+                for ch in c.text().chars() {
+                    chars.push(ch);
+                    map.push((n, col, col + w));
+                }
+            }
+            if !l.wrapped {
+                break;
+            }
+            n += 1;
+        }
+        (chars, map)
+    }
+
+    /// `pos` にあるリンク（URL・パス）と、その範囲（行ごとの `(始め, 終わり)`。終わりは含まない）。
+    pub fn link_at(&self, pos: Pos) -> Option<(crate::links::LinkTarget, Vec<(Pos, Pos)>)> {
+        let (chars, map) = self.logical_line(pos.line);
+        let i = map
+            .iter()
+            .position(|&(l, a, b)| l == pos.line && pos.col >= a && pos.col < b)?;
+        let text: String = chars.iter().collect();
+        let found = crate::links::find(&text)
+            .into_iter()
+            .find(|f| f.start <= i && i < f.end)?;
+        let mut ranges: Vec<(Pos, Pos)> = Vec::new();
+        for &(l, a, b) in &map[found.start..found.end] {
+            match ranges.last_mut() {
+                Some((s, e)) if s.line == l => e.col = e.col.max(b),
+                _ => ranges.push((Pos { line: l, col: a }, Pos { line: l, col: b })),
+            }
+        }
+        Some((found.target, ranges))
+    }
+
+    /// 行 `line` から上へ（`limit` 行まで）、プロンプトの行を探して作業フォルダを読む
+    /// （[`crate::links::prompt_cwd`]。`~` で始まることがある）。
+    pub fn prompt_cwd_above(&self, line: u64, limit: u64) -> Option<String> {
+        let mut n = line;
+        let stop = line.saturating_sub(limit).max(self.dropped);
+        loop {
+            if let Some(l) = self.line(n)
+                && let Some(p) = crate::links::prompt_cwd(&l.text())
+            {
+                return Some(p);
+            }
+            if n <= stop {
+                return None;
+            }
+            n -= 1;
         }
     }
 

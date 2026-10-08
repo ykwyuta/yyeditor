@@ -38,6 +38,9 @@ pub(crate) struct Painter {
     target: Option<(ID2D1HwndRenderTarget, ID2D1SolidColorBrush)>,
 }
 
+/// リンクの下線の色
+const LINK_COLOR: (u8, u8, u8) = (90, 160, 255);
+
 /// 描く内容。
 pub(crate) struct Scene<'a> {
     pub term: &'a Terminal,
@@ -45,6 +48,8 @@ pub(crate) struct Scene<'a> {
     pub back: usize,
     /// 選択範囲（`start` から `end` の手前まで）
     pub selection: Option<(Pos, Pos)>,
+    /// マウスの下のリンク（行ごとの範囲。下線を引く）
+    pub link: &'a [(Pos, Pos)],
     pub focused: bool,
 }
 
@@ -413,6 +418,18 @@ impl Painter {
                 }
             }
             flush(&mut run, run_start, &run_key);
+            // マウスの下のリンクに下線
+            for (a, b) in s.link.iter().filter(|(a, _)| a.line == line_no) {
+                fill(
+                    rect(
+                        PADDING + a.col as f32 * cw,
+                        y + ch - 2.0,
+                        (b.col.saturating_sub(a.col)) as f32 * cw,
+                        1.5,
+                    ),
+                    LINK_COLOR,
+                );
+            }
         }
 
         // カーソル（さかのぼって表示しているときは、画面に入っていれば描く）

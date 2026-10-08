@@ -5,10 +5,12 @@
 //! `yy-win` が行う。
 
 pub mod keys;
+pub mod links;
 pub mod screen;
 pub mod term;
 
 pub use keys::{Button, Key, Mods, MouseEvent};
+pub use links::LinkTarget;
 pub use screen::{Attr, Cell, Color, Line};
 pub use term::{CursorShape, Modes, MouseMode, Pos, Terminal};
 

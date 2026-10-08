@@ -3345,6 +3345,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-git"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "yy-proto",
+ "yy-remote",
+]
+
+[[package]]
 name = "yy-io"
 version = "0.1.0"
 dependencies = [
@@ -3428,6 +3437,7 @@ dependencies = [
  "regex-syntax",
  "serde",
  "tempfile",
+ "toml",
  "yy-cobol",
  "yy-delimited",
  "yy-encoding",
@@ -3482,6 +3492,7 @@ dependencies = [
  "yy-delimited",
  "yy-encoding",
  "yy-formula",
+ "yy-git",
  "yy-io",
  "yy-jobs",
  "yy-layout",

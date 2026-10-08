@@ -13,14 +13,20 @@ struct Opened;
 
 impl Opened {
     fn open(owner: HWND) -> Option<Opened> {
-        // 他のアプリが一時的に開いていることがあるため数回試す
-        for _ in 0..5 {
+        // 他のアプリ（クリップボードの履歴・リモート デスクトップ・Office など）が開いていることが
+        // あるため、間を少しずつ延ばしながら 0.5 秒ほど試す
+        let mut wait = 5;
+        let start = std::time::Instant::now();
+        loop {
             if unsafe { OpenClipboard(Some(owner)) }.is_ok() {
                 return Some(Opened);
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            if start.elapsed() > std::time::Duration::from_millis(500) {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(wait));
+            wait = (wait * 2).min(50);
         }
-        None
     }
 }
 
@@ -56,9 +62,20 @@ pub(crate) fn get_text(owner: HWND) -> Option<(String, bool)> {
     }
 }
 
-/// クリップボードに文字列を設定する。`column` なら矩形選択のデータとして印を付ける。
+/// クリップボードに文字列を設定する。`column` なら矩形選択のデータとして印を付ける。ほかのアプリが
+/// 使っていて失敗したら、少し待って何度か試す。
 pub(crate) fn set_text(owner: HWND, text: &str, column: bool) -> bool {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    for i in 0..3 {
+        if set_wide(owner, &wide, column) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50 * (i + 1)));
+    }
+    false
+}
+
+fn set_wide(owner: HWND, wide: &[u16], column: bool) -> bool {
     unsafe {
         let Some(_open) = Opened::open(owner) else {
             return false;

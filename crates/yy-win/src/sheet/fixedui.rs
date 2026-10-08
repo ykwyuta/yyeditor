@@ -30,6 +30,8 @@ const L_CHARSET: u16 = 12;
 const L_SEP: u16 = 13;
 const L_LE: u16 = 14;
 const L_SUMMARY: u16 = 15;
+const L_CATLOAD: u16 = 16;
+const L_CATSAVE: u16 = 17;
 
 /// ダイアログの使い道。
 enum Purpose {
@@ -58,6 +60,20 @@ pub(super) fn remember(spec: &FixedSpec) {
 /// 初期値。レイアウトはシートごとなので、コピーブックは今のシートのものだけ（なければ空）。文字コード・
 /// 区切り・2 進数の並びは、シートになければ最後に使ったもの。
 fn initial() -> (String, Charset, Option<RecordSep>, bool) {
+    // データ > レイアウトカタログから当てる
+    if let Some(def) = super::catalogui::take_preset() {
+        let last = with(|a| a.fixed_last.clone()).flatten();
+        return (
+            def.copybook().to_string(),
+            def.charset
+                .or(last.as_ref().map(|s| s.codec.charset))
+                .unwrap_or(Charset::Ms932),
+            def.separator.or(last.as_ref().map(|s| s.separator)),
+            def.little_endian
+                .or(last.as_ref().map(|s| s.codec.little_endian))
+                .unwrap_or(false),
+        );
+    }
     with(|a| match a.sheet().fixed.as_deref() {
         Some(s) => (
             s.copybook.to_string(),
@@ -201,6 +217,24 @@ fn layout_dialog_with(owner: HWND, purpose: Purpose, title: &str) -> Option<Fixe
         CLASS_EDIT,
         "",
     );
+    button(
+        &mut t,
+        7,
+        311,
+        104,
+        L_CATLOAD,
+        "カタログから読み込む(&G)...",
+        false,
+    );
+    button(
+        &mut t,
+        115,
+        311,
+        90,
+        L_CATSAVE,
+        "カタログに保存(&V)...",
+        false,
+    );
     button(&mut t, 316, 311, 50, IDOK_, "OK", true);
     button(&mut t, 373, 311, 50, IDCANCEL_, "キャンセル", false);
     let mut st = LayoutState {
@@ -340,6 +374,55 @@ extern "system" fn layout_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             let _ =
                                 SetDlgItemTextW(hwnd, L_TEXT as i32, &HSTRING::from(crlf(&text)));
                             update_summary(hwnd, st);
+                        }
+                        1
+                    }
+                    L_CATLOAD => {
+                        if let Some((name, def)) = super::catalogui::pick(hwnd) {
+                            if def.is_multi() {
+                                message(
+                                    hwnd,
+                                    &format!(
+                                        "{name} はマルチレイアウトの定義です。
+                                         データ > マルチレイアウトの設定（または固定長ファイルを開く〔マルチレイアウト〕）で読み込んでください。"
+                                    ),
+                                );
+                                return 1;
+                            }
+                            let offset = matches!(st.purpose, Purpose::Open { .. }) as usize;
+                            super::catalogui::set_codec_controls(
+                                hwnd,
+                                &def,
+                                (L_CHARSET, L_SEP, L_LE),
+                                offset,
+                            );
+                            let _ = SetDlgItemTextW(
+                                hwnd,
+                                L_TEXT as i32,
+                                &HSTRING::from(crlf(def.copybook())),
+                            );
+                            update_summary(hwnd, st);
+                        }
+                        1
+                    }
+                    L_CATSAVE => {
+                        read_controls(hwnd, st);
+                        match spec_of(st) {
+                            Ok(spec) => {
+                                let def = yy_sheet::catalog::LayoutDef::from_spec(&spec, "");
+                                if let Some(name) = super::catalogui::save(hwnd, def) {
+                                    set_status(&format!(
+                                        "レイアウトをカタログの {name} に保存しました"
+                                    ));
+                                }
+                            }
+                            Err(e) => message(
+                                hwnd,
+                                &format!(
+                                    "レイアウトを読めないので保存できません。
+{e}"
+                                ),
+                            ),
                         }
                         1
                     }

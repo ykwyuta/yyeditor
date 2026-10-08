@@ -41,6 +41,7 @@ use yy_layout::{
 
 mod codemode;
 mod csvmode;
+mod gitmode;
 mod hexmode;
 mod previewmode;
 mod syntaxmode;
@@ -56,6 +57,8 @@ use crate::util::{Context, error_box, group_digits, human_size, info_box, wide};
 use crate::{COLHEAD_CLASS, FRAME_CLASS, VIEW_CLASS, clipboard, default_proc, hiword, ime, loword};
 use codemode::*;
 use csvmode::*;
+use gitmode::*;
+pub(crate) use gitmode::{git_message_with_focus, git_pre_translate};
 use hexmode::*;
 use syntaxmode::*;
 use workspacemode::*;
@@ -299,6 +302,8 @@ pub(crate) struct App {
     /// SSH 接続先のファイルの編集（11 章）
     /// ワークスペースとサイドバー（左側）
     ws: WorkspacePane,
+    /// ソース管理（Git）のビュー
+    scm: ScmPane,
 }
 
 /// 非表示タブの文書と表示位置。検索条件と表示設定はウィンドウ全体で共有する。
@@ -441,6 +446,7 @@ pub(crate) fn create_accelerators() -> Result<HACCEL> {
         (ctrl_shift, b'K' as u16, ID_CODE_MODE),
         (ctrl_shift, b'R' as u16, ID_RECORD_MODE),
         (ctrl_shift, b'E' as u16, ID_WS_SIDEBAR),
+        (ctrl_shift, b'G' as u16, ID_GIT_VIEW),
         (ctrl, VK_OEM_2.0, ID_TOGGLE_COMMENT),
         (ctrl, VK_DIVIDE.0, ID_TOGGLE_COMMENT),
         (ctrl, VK_OEM_6.0, ID_GOTO_BRACKET),
@@ -785,6 +791,7 @@ impl App {
                 },
             );
             let ws = create_pane(frame, hinstance)?;
+            let scm = create_scm(frame, hinstance)?;
             let app = App {
                 frame,
                 view,
@@ -852,6 +859,7 @@ impl App {
                 ui_font: crate::util::ui_font(dpi),
                 preview: Default::default(),
                 ws,
+                scm,
             };
             APP.with(|cell| *cell.borrow_mut() = Some(app));
             with_app(|a| {
@@ -983,7 +991,10 @@ impl App {
     /// タブ・ステータスバーに画面の部品のフォントを設定する（設定しないとタブは
     /// 古いシステムフォントになり、メニューなどと見た目がそろわない）。
     fn apply_ui_font(&self) {
-        for w in [self.tabbar, self.status, self.ws.tree] {
+        for w in [self.tabbar, self.status, self.ws.tree]
+            .into_iter()
+            .chain(self.scm.controls())
+        {
             unsafe {
                 SendMessageW(
                     w,
@@ -2964,6 +2975,8 @@ impl App {
             return;
         };
         if done.result.is_ok() {
+            // ソース管理を出していれば、変更の一覧を読み直す
+            self.git_poke();
             let n = self.notifier();
             self.doc.maintain_indexing(&self.pool, n);
             self.renderer.clear_cache();
@@ -5190,6 +5203,13 @@ pub(crate) extern "system" fn frame_proc(
         WM_APP_RELAYOUT => {
             with_app(|a| a.layout_children());
             LRESULT(0)
+        }
+        WM_ACTIVATE => {
+            // ほかのアプリ（コマンド プロンプトの git など）から戻ったら、ソース管理を読み直す
+            if loword(wparam.0) != WA_INACTIVE {
+                with_app(|a| a.git_poke());
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_SETFOCUS => {
             if let Some(view) = with_app(|a| a.view) {

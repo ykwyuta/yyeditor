@@ -723,6 +723,11 @@ pub(crate) fn fs(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<dyn RemoteF
     if use_agent() {
         return session(target, show).map(|s| s as Arc<dyn RemoteFs>);
     }
+    sftp_fs(target, show).map(|f| f as Arc<dyn RemoteFs>)
+}
+
+/// `target` の SFTP（接続先に何も置かない。接続・SFTP の開始は必要なときだけ）。
+pub(crate) fn sftp_fs(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<SftpFs>, String> {
     let cached = with_state(|r| {
         r.sftps.retain(|(_, f)| !f.is_closed());
         r.sftps
@@ -866,6 +871,26 @@ pub(crate) fn start_forwards(
         }
     });
     out
+}
+
+/// パスワードを保存する設定か（`[remote] remember_passwords`）。
+pub(crate) fn remember_passwords() -> bool {
+    with_state(|r| r.config.remember_passwords).unwrap_or(true)
+}
+
+/// `target` への接続済みの SSH の接続（接続しない。なければ `None`）。
+pub(crate) fn live_transport(target: &Target) -> Option<Arc<dyn Transport>> {
+    with_state(|r| {
+        if let Some(s) = r.live_session(target) {
+            return Some(s.transport());
+        }
+        r.transports.retain(|(_, t)| !t.is_closed());
+        r.transports
+            .iter()
+            .find(|(t, _)| t.same(target))
+            .map(|(_, t)| t.clone())
+    })
+    .flatten()
 }
 
 /// `target` への SSH の接続（ターミナル用。エージェントは使わない）。接続済みのセッションが
