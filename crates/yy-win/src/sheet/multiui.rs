@@ -65,14 +65,20 @@ type Initial = (
 );
 
 fn initial() -> Initial {
-    let spec = with(|a| {
-        a.sheet()
-            .fixed
-            .as_deref()
-            .cloned()
-            .or_else(|| a.fixed_last.clone())
-    })
-    .flatten();
+    // レイアウトはシートごと: 今のシートになければ、文字コード・区切りだけ最後に使ったものから
+    let (spec, last) =
+        with(|a| (a.sheet().fixed.as_deref().cloned(), a.fixed_last.clone())).unwrap_or_default();
+    if spec.is_none()
+        && let Some(s) = last
+    {
+        return (
+            vec![("LAYOUT1".into(), String::new())],
+            String::new(),
+            s.codec.charset,
+            Some(s.separator),
+            s.codec.little_endian,
+        );
+    }
     match spec {
         Some(s) if s.is_multi() => (
             s.multi
@@ -537,9 +543,9 @@ pub(super) fn multi_layout_dialog() {
     }
 }
 
-/// ファイル > 固定長ファイルを開く（マルチレイアウト）。
-pub(super) fn open_multi() {
-    if !confirm_discard() {
+/// ファイル > 固定長ファイルを開く（マルチレイアウト。`add` なら、今の文書にシートとして追加）。
+pub(super) fn open_multi(add: bool) {
+    if !add && !confirm_discard() {
         return;
     }
     let Some((frame, ctx)) = with(|a| (a.frame, a.ctx.clone())) else {
@@ -554,10 +560,10 @@ pub(super) fn open_multi() {
     ) else {
         return;
     };
-    open_multi_path(frame, ctx, &path);
+    open_multi_path(frame, ctx, &path, add);
 }
 
-fn open_multi_path(frame: HWND, ctx: Arc<SheetCtx>, path: &Path) {
+fn open_multi_path(frame: HWND, ctx: Arc<SheetCtx>, path: &Path, add: bool) {
     let read = (|| -> std::io::Result<(Vec<u8>, u64)> {
         use std::io::Read;
         let f = std::fs::File::open(path)?;
@@ -604,15 +610,7 @@ fn open_multi_path(frame: HWND, ctx: Arc<SheetCtx>, path: &Path) {
     });
     match r {
         Ok((sheet, rep)) => {
-            let mut doc = Document::with_book(
-                ctx,
-                Workbook {
-                    sheets: vec![sheet],
-                    date_system: DateSystem::D1900,
-                },
-            );
-            doc.path = Some(path.to_owned());
-            with(|a| a.set_document(doc, Origin::Fixed));
+            with(|a| a.place_fixed_sheet(sheet, path, add));
             set_status(&format!(
                 "{} レコードを取り込みました（{}・区切り {}）。どの行もレイアウト未確定です。A 列にレイアウトの名前を入れるか、データ > 行のレイアウトを指定 で選んでください",
                 crate::util::group_digits(rep.records),

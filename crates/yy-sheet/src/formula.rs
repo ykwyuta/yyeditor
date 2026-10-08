@@ -49,8 +49,8 @@ pub struct Formulas {
     pub spills: Arc<BTreeMap<(u64, u32), (u64, u32)>>,
     /// 式のセル → あふれようとして止められた大きさ（`#SPILL!`。止めた値が消えたら計算し直す）
     pub blocked: Arc<BTreeMap<(u64, u32), (u64, u32)>>,
-    /// `CBL.MOVE` の式のセル → 値を置いた受け取り範囲
-    pub moves: Arc<BTreeMap<(u64, u32), yy_formula::Area>>,
+    /// `CBL.MOVE` の式のセル → 値を置いた受け取り範囲（シートの番号・範囲。ほかのシートのこともある）
+    pub moves: Arc<BTreeMap<(u64, u32), (usize, yy_formula::Area)>>,
     /// 共有式（列の多数の行に入れた、行ごとに相対的に同じ式）
     pub shared: Arc<Vec<Shared>>,
     /// 前回の計算から変わったセル（計算し直す式を決める。保存しない）
@@ -165,15 +165,7 @@ impl Formulas {
         Arc::make_mut(&mut self.spills).remove(&(row, col));
         Arc::make_mut(&mut self.blocked).remove(&(row, col));
         self.touch(row, col, row + h - 1, col + w - 1);
-        if let Some(a) = Arc::make_mut(&mut self.moves).remove(&(row, col)) {
-            let results = Arc::make_mut(&mut self.results);
-            for c in a.c0..=a.c1 {
-                for r in a.r0..=a.r1 {
-                    results.remove(&(c, r));
-                }
-            }
-            self.touch(a.r0, a.c0, a.r1, a.c1);
-        }
+        // CBL.MOVE の置いた値は、次の計算の初めに消す（ほかのシートのこともあるので [`recalc`] で）
     }
 
     pub fn result(&self, row: u64, col: u32) -> Option<&Value> {
@@ -619,8 +611,8 @@ fn refs(e: &Expr, sheet: usize, book: &Workbook, out: &mut Vec<(usize, yy_formul
     }
 }
 
-/// 式が `=CBL.MOVE(送り出し, 受け取り)` なら、受け取り範囲（同じシートのもの）。
-fn move_target(e: &Expr, sheet: usize, book: &Workbook) -> Option<yy_formula::Area> {
+/// 式が `=CBL.MOVE(送り出し, 受け取り)` なら、受け取り範囲（シートの番号・範囲。ほかのシートでもよい）。
+fn move_target(e: &Expr, sheet: usize, book: &Workbook) -> Option<(usize, yy_formula::Area)> {
     let Expr::Call(yy_formula::Func::CblMove, args) = e else {
         return None;
     };
@@ -633,10 +625,14 @@ fn move_target(e: &Expr, sheet: usize, book: &Workbook) -> Option<yy_formula::Ar
     ) {
         return None;
     }
-    match &r.sheet {
-        Some(n) if !yy_formula::eq_text(&book.sheets[sheet].name, n) => None,
-        _ => Some(r.area),
-    }
+    let s = match &r.sheet {
+        None => sheet,
+        Some(n) => book
+            .sheets
+            .iter()
+            .position(|x| yy_formula::eq_text(&x.name, n))?,
+    };
+    Some((s, r.area))
 }
 
 /// 式が `CBL.MOVE` を含むか。
@@ -668,8 +664,8 @@ struct Node {
     expr: Arc<Expr>,
     /// 共有式なら番号（シートの `formulas.shared` の中の）と行数
     shared: Option<(usize, u64)>,
-    /// `=CBL.MOVE(…)` の式なら受け取り範囲（同じシート。値は式のセルでなくここに置く）
-    target: Option<yy_formula::Area>,
+    /// `=CBL.MOVE(…)` の式なら受け取り範囲（シートの番号・範囲。値は式のセルでなくここに置く）
+    target: Option<(usize, yy_formula::Area)>,
 }
 
 impl Node {
@@ -687,6 +683,28 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
             s.formulas.touched = Touched::default();
         }
     };
+    // 消えた CBL.MOVE の式が置いた値を消す（受け取り範囲を参照する式は計算し直す）
+    for si in 0..book.sheets.len() {
+        let f = &book.sheets[si].formulas;
+        let gone: Vec<((u64, u32), (usize, yy_formula::Area))> = f
+            .moves
+            .iter()
+            .filter(|(k, _)| !f.cells.contains_key(k))
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        for (k, (ts, a)) in gone {
+            Arc::make_mut(&mut book.sheets[si].formulas.moves).remove(&k);
+            if let Some(t) = book.sheets.get_mut(ts) {
+                let res = Arc::make_mut(&mut t.formulas.results);
+                for c in a.c0..=a.c1 {
+                    for r in a.r0..=a.r1 {
+                        res.remove(&(c, r));
+                    }
+                }
+                t.formulas.touch(a.r0, a.c0, a.r1, a.c1);
+            }
+        }
+    }
     if book.sheets.iter().all(|s| s.formulas.is_empty()) {
         clear_touched(book);
         return;
@@ -752,7 +770,10 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                 }
             }
             for &j in &movers {
-                if list[j].sheet == s && list[j].target.is_some_and(|t| t.intersects(&a)) {
+                if list[j]
+                    .target
+                    .is_some_and(|(ts, t)| ts == s && t.intersects(&a))
+                {
                     deps[i].push(j);
                 }
             }
@@ -799,7 +820,7 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
             dirty[i] = touched(node.sheet, &own)
                 || ref_lists[i].iter().any(|(s, a)| touched(*s, a))
                 // 受け取り範囲に値・式を入れた・消した
-                || node.target.is_some_and(|t| touched(node.sheet, &t))
+                || node.target.is_some_and(|(ts, t)| touched(ts, &t))
                 // まだ結果のない式（新しく入れた式）
                 || fresh;
         }
@@ -839,7 +860,7 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
     let mut results: Vec<BTreeMap<(u32, u64), Value>> = Vec::with_capacity(book.sheets.len());
     let mut spills: Vec<BTreeMap<(u64, u32), (u64, u32)>> = Vec::new();
     let mut blocked: Vec<BTreeMap<(u64, u32), (u64, u32)>> = Vec::new();
-    let mut moves: Vec<BTreeMap<(u64, u32), yy_formula::Area>> = Vec::new();
+    let mut moves: Vec<BTreeMap<(u64, u32), (usize, yy_formula::Area)>> = Vec::new();
     let mut shared_res: Vec<Vec<Option<crate::Column>>> = Vec::new();
     for s in &book.sheets {
         if full {
@@ -879,10 +900,10 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                     results[si].remove(&(cc, rr));
                 }
             }
-            if let Some(a) = moves[si].remove(&(r, c)) {
+            if let Some((ts, a)) = moves[si].remove(&(r, c)) {
                 for cc in a.c0..=a.c1 {
                     for rr in a.r0..=a.r1 {
-                        results[si].remove(&(cc, rr));
+                        results[ts].remove(&(cc, rr));
                     }
                 }
             }
@@ -971,8 +992,20 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                 memo: Default::default(),
             };
             if node.target.is_none() && contains_move(&node.expr) {
-                // CBL.MOVE は式の全体でだけ使える（ほかの式の中では受け取り範囲に置けない）
-                results[si].insert((c, r), Value::Error(CellError::Value));
+                // CBL.MOVE は式の全体でだけ使える（ほかの式の中では受け取り範囲に置けない）。
+                // 受け取り範囲がないシートなら #REF!
+                let no_sheet = matches!(
+                    &*node.expr,
+                    Expr::Call(yy_formula::Func::CblMove, args)
+                        if matches!(args.get(1), Some(Expr::Ref(x)) if x.sheet.is_some()
+                            && matches!(x.area.kind, yy_formula::AreaKind::Cell | yy_formula::AreaKind::Range))
+                );
+                let e = if no_sheet {
+                    CellError::Ref
+                } else {
+                    CellError::Value
+                };
+                results[si].insert((c, r), Value::Error(e));
                 continue;
             }
             yy_formula::eval(
@@ -986,7 +1019,7 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                 },
             )
         };
-        if let Some(t) = node.target {
+        if let Some((ts, t)) = node.target {
             let Val::Array(a) = v else {
                 results[si].insert((c, r), from_val(&v));
                 continue;
@@ -1000,13 +1033,13 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                 shared: &shared_res,
                 memo: Default::default(),
             };
-            let blocked_at = t.contains(r, c)
+            let blocked_at = (ts == si && t.contains(r, c))
                 || (t.r0..=t.r1).any(|rr| {
                     (t.c0..=t.c1).any(|cc| {
-                        index[si].contains_key(&(cc, rr))
-                            || results[si].contains_key(&(cc, rr))
-                            || book.sheets[si].formulas.shared_at(rr, cc).is_some()
-                            || !grid.base(si, rr, cc).is_empty()
+                        index[ts].contains_key(&(cc, rr))
+                            || results[ts].contains_key(&(cc, rr))
+                            || book.sheets[ts].formulas.shared_at(rr, cc).is_some()
+                            || !grid.base(ts, rr, cc).is_empty()
                     })
                 });
             if blocked_at {
@@ -1016,15 +1049,20 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
             for dr in 0..a.rows {
                 for dc in 0..a.cols {
                     let (rr, cc) = (t.r0 + dr as u64, t.c0 + dc as u32);
-                    results[si].insert((cc, rr), from_val(&fit(si, rr, cc, a.get(dr, dc).clone())));
+                    results[ts].insert((cc, rr), from_val(&fit(ts, rr, cc, a.get(dr, dc).clone())));
                 }
             }
-            moves[si].insert((r, c), t);
+            moves[si].insert((r, c), (ts, t));
             // 式のセル: 送れなかった値があれば（最初の）エラー、なければ置いた先
             let summary = match a.data.iter().find(|x| matches!(x, Val::Err(_))) {
                 Some(e) => from_val(e),
                 None => Value::text(&format!(
-                    "CBL.MOVE → {}（{} 行）",
+                    "CBL.MOVE → {}{}（{} 行）",
+                    if ts == si {
+                        String::new()
+                    } else {
+                        yy_formula::sheet_prefix(&book.sheets[ts].name)
+                    },
                     yy_formula::area_text(&t),
                     t.rows()
                 )),

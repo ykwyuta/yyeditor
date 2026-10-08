@@ -1962,6 +1962,84 @@ mod tests {
         assert_eq!(&rec(11)[0..5], b"ABC  ");
     }
 
+    #[test]
+    fn cobol_move_across_sheets() {
+        use crate::{CellError, Document};
+        let ctx = Context::for_tests();
+        // シートごとのレイアウト: 入力（Sheet1）と出力（OUT。別のコピーブック・文字コード）
+        let input = super::tests::spec(Charset::Ms932, RecordSep::Crlf);
+        let output = FixedSpec::new(
+            "01 R.\n 05 KEY PIC X(8).\n 05 AMT PIC S9(5) COMP-3.\n",
+            Codec::new(Charset::Ebcdic(Ccsid::Ibm930)),
+            RecordSep::None,
+        )
+        .unwrap();
+        let mut d = Document::new(ctx.clone());
+        d.edit(|b, ctx| {
+            let name = b.sheets[0].name.clone();
+            assert_eq!(&*name, "Sheet1");
+            apply_layout(ctx, &mut b.sheets[0], &input)?;
+            let mut out = Sheet::new("OUT");
+            apply_layout(ctx, &mut out, &output)?;
+            b.sheets.push(out);
+            let sh = &mut b.sheets[0];
+            for (r, (id, amt)) in [(1, 1234.5), (2, -0.5), (3, 99999.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let r = r as u64 + 1;
+                sh.set(ctx, r, 0, Value::Number(id as f64))?;
+                sh.set(ctx, r, 3, Value::Number(amt))?;
+            }
+            // 入力のシートの範囲の外の列から、出力のシートへ
+            sh.set_formula(ctx, 1, 10, "=CBL.MOVE(A2:A4,OUT!A2:A4)")
+                .unwrap();
+            // 出力のシートの範囲の外の列で、入力のシートから
+            let out = &mut b.sheets[1];
+            out.set_formula(ctx, 1, 5, "=CBL.MOVE(Sheet1!D2:D4,B2:B4)")
+                .unwrap();
+            out.set_formula(ctx, 5, 5, "=CBL.MOVE(Sheet1!A2,NOSUCH!A2)")
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let get =
+            |d: &Document, s: usize, r: u64, c: u32| d.book.sheets[s].get(&ctx, r, c).unwrap();
+        // 受け取りのシートの型で送る
+        assert_eq!(get(&d, 1, 1, 0), Value::text("00001   "));
+        assert_eq!(get(&d, 1, 3, 0), Value::text("00003   "));
+        assert_eq!(
+            get(&d, 0, 1, 10),
+            Value::text("CBL.MOVE → 'OUT'!A2:A4（3 行）")
+        );
+        assert_eq!(get(&d, 1, 1, 1), Value::Number(1234.0));
+        assert_eq!(get(&d, 1, 2, 1), Value::Number(0.0));
+        assert_eq!(get(&d, 1, 3, 1), Value::Number(99999.0));
+        assert_eq!(get(&d, 1, 1, 5), Value::text("CBL.MOVE → B2:B4（3 行）"));
+        assert_eq!(get(&d, 1, 5, 5), Value::Error(CellError::Ref));
+        // 送り出しを変えると、ほかのシートに置いた値も変わる
+        d.edit(|b, ctx| b.sheets[0].set(ctx, 1, 0, Value::Number(42.0)))
+            .unwrap();
+        assert_eq!(get(&d, 1, 1, 0), Value::text("00042   "));
+        // 書き出すと出力のシートのレイアウト・文字コード（EBCDIC・区切りなし）
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.dat");
+        let rep = export(&ctx, &d.book.sheets[1], &path, &output, None, &|_, _| true).unwrap();
+        assert_eq!(rep.records, 3);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), 3 * 11);
+        assert_eq!(
+            &bytes[0..8],
+            &[0xF0, 0xF0, 0xF0, 0xF4, 0xF2, 0x40, 0x40, 0x40]
+        );
+        assert_eq!(&bytes[8..11], &[0x01, 0x23, 0x4C]);
+        // 式を消すと、ほかのシートに置いた値も消える
+        d.edit(|b, ctx| b.sheets[0].set(ctx, 1, 10, Value::Empty))
+            .unwrap();
+        assert_eq!(get(&d, 1, 1, 0), Value::Empty);
+        assert_eq!(get(&d, 1, 1, 1), Value::Number(1234.0));
+    }
+
     const HDR: &str = "01 H.\n 05 TYP PIC X.\n 05 DT PIC 9(8).\n 05 FILLER PIC X(11).\n";
     const DTL: &str = "01 D.\n 05 TYP PIC X.\n 05 AMT PIC S9(7)V99 COMP-3.\n 05 NAME PIC X(14).\n";
     const TXT: &str = "01 T.\n 05 ALLTEXT PIC X(20).\n";

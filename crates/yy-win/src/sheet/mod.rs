@@ -117,6 +117,8 @@ const ID_HELP: u16 = 42;
 const ID_HELP_COBOL: u16 = 43;
 const ID_HELP_FUNCS: u16 = 44;
 const ID_CRASH_LOGS: u16 = 45;
+const ID_ADD_FIXED: u16 = 46;
+const ID_ADD_MULTI: u16 = 47;
 
 /// STATIC の文字を上下の中央に置く
 const SS_CENTERIMAGE: u32 = 0x200;
@@ -207,8 +209,10 @@ struct App {
     home: Option<entry::Home>,
     /// 直前のフィル（オートフィル オプションのボタン）
     last_fill: Option<fillhandle::LastFill>,
-    /// 最後に使った固定長ファイルの設定（ダイアログの初期値）
+    /// 最後に使った固定長ファイルの設定（ダイアログの文字コード・区切りの初期値）
     fixed_last: Option<yy_sheet::fixed::FixedSpec>,
+    /// シート → 取り込んだ固定長ファイル（固定長のまま上書きする先。レイアウトはシートごと）
+    fixed_paths: std::collections::HashMap<usize, PathBuf>,
 }
 
 thread_local! {
@@ -317,6 +321,16 @@ fn create_menu() -> Result<HMENU> {
             file,
             ID_OPEN_MULTI,
             "固定長ファイルを開く（マルチレイアウト）(&U)...",
+        );
+        add(
+            file,
+            ID_ADD_FIXED,
+            "固定長ファイルをシートとして追加(&I)...",
+        );
+        add(
+            file,
+            ID_ADD_MULTI,
+            "固定長ファイルをシートとして追加（マルチレイアウト）(&M)...",
         );
         sep(file);
         add(file, ID_SAVE, "上書き保存(&S)\tCtrl+S");
@@ -608,6 +622,7 @@ fn create() -> Result<HWND> {
             home: None,
             last_fill: None,
             fixed_last: None,
+            fixed_paths: Default::default(),
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         with(|a| {
@@ -1746,6 +1761,45 @@ impl App {
         self.invalidate();
     }
 
+    /// 取り込んだ固定長ファイルのシートを置く。`add` なら今の文書に新しいシート（名前はファイル名から）として
+    /// 足し、そうでなければ文書を置き換える。レイアウトはシートが持つので、シートごとに違ってよい。
+    fn place_fixed_sheet(&mut self, mut sheet: yy_sheet::Sheet, path: &Path, add: bool) {
+        if !add {
+            let mut doc = Document::with_book(
+                self.ctx.clone(),
+                Workbook {
+                    sheets: vec![sheet],
+                    date_system: DateSystem::D1900,
+                },
+            );
+            doc.path = Some(path.to_owned());
+            self.set_document(doc, Origin::Fixed);
+            return;
+        }
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "固定長".into());
+        let sheets = &self.doc.book.sheets;
+        let taken = |n: &str| sheets.iter().any(|x| yy_formula::eq_text(&x.name, n));
+        let name = std::iter::once(stem.clone())
+            .chain((2..).map(|i| format!("{stem} ({i})")))
+            .find(|n| !taken(n))
+            .unwrap_or(stem);
+        sheet.name = Arc::from(name.as_str());
+        let _ = self.doc.edit(|b, _| {
+            b.sheets.push(sheet);
+            Ok(())
+        });
+        let last = self.doc.book.sheets.len() - 1;
+        self.fixed_paths.insert(last, path.to_owned());
+        self.refresh_tabs();
+        self.switch_sheet(last);
+        self.refresh_tabs();
+        self.update_title();
+    }
+
     fn switch_sheet(&mut self, i: usize) {
         if i >= self.doc.book.sheets.len() {
             return;
@@ -1763,6 +1817,10 @@ impl App {
     }
 
     fn set_document(&mut self, doc: Document, origin: Origin) {
+        self.fixed_paths.clear();
+        if let (Origin::Fixed, Some(p)) = (&origin, &doc.path) {
+            self.fixed_paths.insert(0, p.clone());
+        }
         self.doc = doc;
         self.doc.defer_recalc = true;
         self.origin = origin;
@@ -2111,7 +2169,7 @@ fn open_path(path: &Path) {
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("yys"));
     if !is_yys && !looks_like_yys(path) {
-        fixedui::open_fixed_path(frame, ctx, path);
+        fixedui::open_fixed_path(frame, ctx, path, false);
         return;
     }
     let p = path.to_owned();
@@ -2142,13 +2200,32 @@ fn save(ask: bool) -> bool {
     let target = match (&path, ask, &origin) {
         (Some(p), false, Origin::Yys) => p.clone(),
         (Some(p), false, Origin::Fixed) => {
+            // 固定長のまま保存するのは今のシート（取り込んだファイルへ。レイアウトはシートごと）
+            let Some((name, src, many)) = with(|a| {
+                (
+                    a.sheet().name.to_string(),
+                    a.fixed_paths.get(&a.sheet).cloned(),
+                    a.doc.book.sheets.len() > 1,
+                )
+            }) else {
+                return false;
+            };
+            let what = match &src {
+                Some(s) => format!("{} で上書きする", s.display()),
+                None => "書き出す（保存先を尋ねます）".to_string(),
+            };
+            let others = if many {
+                "ほかのシートは、そのシートを選んで同じ操作をしてください。"
+            } else {
+                ""
+            };
             let r = unsafe {
                 MessageBoxW(
                     Some(frame),
                     &HSTRING::from(format!(
-                        "{} は固定長ファイルです。固定長のまま保存しますか？\n\n\
-                         はい: 固定長で上書きする（文字コードを選べます。色・罫線・式・複数のシートは保存されません）\n\
-                         いいえ: yysheet の形式（.yys）で保存する（レイアウトも保存します）",
+                        "{} は固定長ファイルです。シート「{name}」を固定長のまま保存しますか？\n\n\
+                         はい: このシートを固定長で{what}（文字コードを選べます。色・罫線・式は保存されません。{others}）\n\
+                         いいえ: yysheet の形式（.yys）で保存する（すべてのシートとシートごとのレイアウトを保存します）",
                         p.display()
                     )),
                     w!("yysheet"),
@@ -2156,7 +2233,7 @@ fn save(ask: bool) -> bool {
                 )
             };
             match r {
-                IDYES => return fixedui::export_fixed(Some(p.clone())),
+                IDYES => return fixedui::export_fixed(src),
                 IDNO => match show_save(frame, Some(p), false) {
                     Some(t) => t,
                     None => return false,
@@ -2386,12 +2463,14 @@ fn command(id: u16) {
         ID_EXPORT_CSV => {
             export_csv(None);
         }
-        ID_OPEN_FIXED => fixedui::open_fixed(),
+        ID_OPEN_FIXED => fixedui::open_fixed(false),
+        ID_ADD_FIXED => fixedui::open_fixed(true),
+        ID_ADD_MULTI => multiui::open_multi(true),
         ID_EXPORT_FIXED => {
             fixedui::export_fixed(None);
         }
         ID_FIXED_LAYOUT => fixedui::layout_dialog(),
-        ID_OPEN_MULTI => multiui::open_multi(),
+        ID_OPEN_MULTI => multiui::open_multi(false),
         ID_MULTI_LAYOUT => multiui::multi_layout_dialog(),
         ID_ROW_LAYOUT => multiui::row_layout_dialog(),
         ID_EXIT => {

@@ -55,22 +55,25 @@ pub(super) fn remember(spec: &FixedSpec) {
     with(|a| a.fixed_last = Some(spec.clone()));
 }
 
+/// 初期値。レイアウトはシートごとなので、コピーブックは今のシートのものだけ（なければ空）。文字コード・
+/// 区切り・2 進数の並びは、シートになければ最後に使ったもの。
 fn initial() -> (String, Charset, Option<RecordSep>, bool) {
-    with(|a| {
-        a.sheet()
-            .fixed
-            .as_deref()
-            .cloned()
-            .or_else(|| a.fixed_last.clone())
-    })
-    .flatten()
-    .map(|s| {
-        (
+    with(|a| match a.sheet().fixed.as_deref() {
+        Some(s) => (
             s.copybook.to_string(),
             s.codec.charset,
             Some(s.separator),
             s.codec.little_endian,
-        )
+        ),
+        None => match &a.fixed_last {
+            Some(s) => (
+                String::new(),
+                s.codec.charset,
+                Some(s.separator),
+                s.codec.little_endian,
+            ),
+            None => (String::new(), Charset::Ms932, None, false),
+        },
     })
     .unwrap_or_else(|| (String::new(), Charset::Ms932, None, false))
 }
@@ -438,9 +441,9 @@ fn pick_save(owner: HWND, current: Option<&Path>) -> Option<PathBuf> {
     }
 }
 
-/// ファイル > 固定長ファイルを開く。
-pub(super) fn open_fixed() {
-    if !confirm_discard() {
+/// ファイル > 固定長ファイルを開く（`add` なら、今の文書にシートとして追加）。
+pub(super) fn open_fixed(add: bool) {
+    if !add && !confirm_discard() {
         return;
     }
     let Some((frame, ctx)) = with(|a| (a.frame, a.ctx.clone())) else {
@@ -455,11 +458,11 @@ pub(super) fn open_fixed() {
     ) else {
         return;
     };
-    open_fixed_path(frame, ctx, &path);
+    open_fixed_path(frame, ctx, &path, add);
 }
 
-/// 固定長ファイルを開く（レイアウトを尋ねる）。
-pub(super) fn open_fixed_path(frame: HWND, ctx: Arc<SheetCtx>, path: &Path) {
+/// 固定長ファイルを開く（レイアウトを尋ねる）。`add` なら今の文書にシートとして追加する。
+pub(super) fn open_fixed_path(frame: HWND, ctx: Arc<SheetCtx>, path: &Path, add: bool) {
     // 見本（先頭 1 MB）
     let read = (|| -> std::io::Result<(Vec<u8>, u64)> {
         use std::io::Read;
@@ -507,15 +510,7 @@ pub(super) fn open_fixed_path(frame: HWND, ctx: Arc<SheetCtx>, path: &Path) {
     });
     match r {
         Ok((sheet, rep)) => {
-            let mut doc = Document::with_book(
-                ctx,
-                Workbook {
-                    sheets: vec![sheet],
-                    date_system: DateSystem::D1900,
-                },
-            );
-            doc.path = Some(path.to_owned());
-            with(|a| a.set_document(doc, Origin::Fixed));
+            with(|a| a.place_fixed_sheet(sheet, path, add));
             let mut msg = format!(
                 "{} レコード × {} 項目を取り込みました（{}・区切り {}）",
                 crate::util::group_digits(rep.records),
@@ -723,11 +718,16 @@ pub(super) fn export_fixed(target: Option<PathBuf>) -> bool {
     let target = match target {
         Some(t) => t,
         None => {
-            let cur = if matches!(origin, Origin::Fixed) {
-                path.clone()
-            } else {
-                None
-            };
+            // 既定はこのシートを取り込んだファイル
+            let cur = with(|a| a.fixed_paths.get(&sheet_ix).cloned())
+                .flatten()
+                .or_else(|| {
+                    if matches!(origin, Origin::Fixed) && sheet_ix == 0 {
+                        path.clone()
+                    } else {
+                        None
+                    }
+                });
             match pick_save(frame, cur.as_deref()) {
                 Some(t) => t,
                 None => return false,
@@ -815,7 +815,10 @@ pub(super) fn export_fixed(target: Option<PathBuf>) -> bool {
                 if let Some(s) = a.doc.book.sheets.get_mut(sheet_ix) {
                     s.fixed = Some(Arc::new(spec.clone()));
                 }
-                if matches!(a.origin, Origin::Fixed | Origin::New)
+                a.fixed_paths.insert(sheet_ix, target.clone());
+                // 1 枚だけの文書なら、書いたファイルが文書の保存先（複数のシートは .yys でまとめて保存）
+                if a.doc.book.sheets.len() == 1
+                    && matches!(a.origin, Origin::Fixed | Origin::New)
                     && (a.doc.path.is_none() || a.doc.path.as_deref() == Some(target.as_path()))
                 {
                     a.doc.path = Some(target.clone());
