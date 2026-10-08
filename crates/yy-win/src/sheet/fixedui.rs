@@ -891,6 +891,11 @@ pub(super) fn export_fixed(target: Option<PathBuf>) -> bool {
                 msg.push_str("（書き換えた値があります）");
                 info_box(frame, &lines.join("\n"));
             }
+            // 接続先から取り寄せたファイルなら送り返す（送れなければ写しに書いたまま未保存）
+            let sent = super::remotefile::push(frame, &target);
+            if let Some(u) = super::remotefile::uri_of(&target).filter(|_| sent) {
+                msg.push_str(&format!("（{u}）"));
+            }
             set_status(&msg);
             remember(&spec);
             with(|a| {
@@ -906,11 +911,11 @@ pub(super) fn export_fixed(target: Option<PathBuf>) -> bool {
                 {
                     a.doc.path = Some(target.clone());
                     a.origin = Origin::Fixed;
-                    a.doc.dirty = false;
+                    a.doc.dirty = !sent;
                 }
                 a.update_title();
             });
-            true
+            sent
         }
         Err(e) => {
             set_status("");

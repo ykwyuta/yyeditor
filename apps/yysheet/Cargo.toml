@@ -12,8 +12,14 @@ build = "../yyeditor/build.rs"
 name = "yysheet"
 path = "src/main.rs"
 
+[features]
+default = ["ssh"]
+# 接続先（SSH）のファイル・フォルダを開く組み込みの SSH クライアント（OpenSSH を使わない）
+ssh = ["dep:yy-ssh"]
+
 [target.'cfg(windows)'.dependencies]
 yy-win.workspace = true
+yy-ssh = { workspace = true, optional = true }
 
 [lints]
 workspace = true

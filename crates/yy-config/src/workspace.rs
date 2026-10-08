@@ -27,6 +27,10 @@ pub const LAST_FILE: &str = "last-workspace.txt";
 pub const TERMINAL_UNTITLED_FILE: &str = "terminal-untitled.yyworkspace";
 /// ターミナル（yyterm）が最後に使ったワークスペースを記録するファイル名。
 pub const TERMINAL_LAST_FILE: &str = "terminal-last-workspace.txt";
+/// スプレッドシート（yysheet）の、名前を付けていないワークスペースのファイル名。
+pub const SHEET_UNTITLED_FILE: &str = "sheet-untitled.yyworkspace";
+/// スプレッドシート（yysheet）が最後に使ったワークスペースを記録するファイル名。
+pub const SHEET_LAST_FILE: &str = "sheet-last-workspace.txt";
 /// 一覧に表示しないフォルダ・ファイル。
 pub const EXCLUDED: &[&str] = &[".git", ".svn", ".hg"];
 /// 1 つのフォルダに表示する項目の上限。

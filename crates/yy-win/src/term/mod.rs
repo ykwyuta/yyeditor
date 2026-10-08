@@ -17,7 +17,6 @@ mod macros;
 mod paint;
 mod printer;
 mod pty;
-mod sidebar;
 mod tn3270;
 
 use std::cell::RefCell;
@@ -46,8 +45,8 @@ use yy_term::{Button, Key, Mods, MouseEvent, MouseMode, Pos, Terminal};
 
 use self::paint::{Painter, Scene};
 use self::pty::Backend;
-use self::sidebar::{ID_TREE, Sidebar};
 use crate::util::{Context, error_box, info_box};
+use crate::wsbar::{self as sidebar, ID_TREE, Sidebar};
 use crate::{hiword, loword};
 
 const FRAME_CLASS: PCWSTR = w!("YYTermFrame");
@@ -482,7 +481,7 @@ fn create(
             None,
         )
         .context("CreateWindowExW(status)")?;
-        let sidebar = Sidebar::create(frame, instance)?;
+        let sidebar = Sidebar::create(frame, instance, sidebar::TERMINAL)?;
         let keypad = tn3270::Keypad::create(
             frame,
             instance,
@@ -2758,10 +2757,7 @@ fn command(hwnd: HWND, id: u16) {
         }
         ID_WS_NEW => {
             with(|a| {
-                a.sidebar.switch_to(
-                    workspace::config_file(workspace::TERMINAL_UNTITLED_FILE),
-                    Workspace::default(),
-                );
+                a.sidebar.switch_to_untitled();
                 a.save_workspace();
             });
         }
@@ -2772,8 +2768,7 @@ fn command(hwnd: HWND, id: u16) {
                         with(|a| {
                             a.sidebar.switch_to(Some(file.clone()), ws);
                             a.sidebar.visible = true;
-                            let _ =
-                                workspace::set_last_used_in(workspace::TERMINAL_LAST_FILE, &file);
+                            a.sidebar.remember(&file);
                             a.update_title();
                         });
                         layout();
@@ -3571,35 +3566,10 @@ fn on_tree_notify(hwnd: HWND, hdr: &NMHDR, lparam: LPARAM) -> LRESULT {
 }
 
 fn context_menu(hwnd: HWND) {
-    let Some(tree) = with(|a| a.sidebar.tree) else {
+    // 右クリックした項目を選ぶ
+    let Some(pt) = with(|a| a.sidebar.select_at_cursor()) else {
         return;
     };
-    let mut pt = POINT::default();
-    unsafe {
-        let _ = GetCursorPos(&mut pt);
-        // 右クリックした項目を選ぶ
-        let mut client = pt;
-        let _ = ScreenToClient(tree, &mut client);
-        let mut hit = TVHITTESTINFO {
-            pt: client,
-            ..Default::default()
-        };
-        let item = SendMessageW(
-            tree,
-            TVM_HITTEST,
-            None,
-            Some(LPARAM(&mut hit as *mut _ as isize)),
-        )
-        .0;
-        if item != 0 {
-            SendMessageW(
-                tree,
-                TVM_SELECTITEM,
-                Some(WPARAM(TVGN_CARET as usize)),
-                Some(LPARAM(item)),
-            );
-        }
-    }
     let node = with(|a| a.sidebar.selected_node()).flatten();
     let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
         return;
@@ -3670,36 +3640,9 @@ fn context_menu(hwnd: HWND) {
 
 /// リモートのフォルダの中身を読んでサイドバーに並べる（接続中はアプリの状態を借りない）。
 fn load_remote_dir(hwnd: HWND, generation: usize, index: usize) {
-    let Some(uri) = with(|a| a.sidebar.pending_remote(generation, index)).flatten() else {
-        return;
-    };
-    let mut listed = crate::remote::list_dir(&uri);
-    // 中身がフォルダ 1 つだけなら束ねて（`a/b`。VS Code と同じ）、その中を読む
-    for _ in 0..workspace::COMPACT_DEPTH {
-        let only = match &listed {
-            Ok((entries, 0)) => match entries.as_slice() {
-                [e] if e.is_dir => e.clone(),
-                _ => break,
-            },
-            _ => break,
-        };
-        let Some(next) = with(|a| a.sidebar.merge_single(generation, index, &only)).flatten()
-        else {
-            break;
-        };
-        listed = crate::remote::list_dir(&next);
-    }
-    match listed {
-        Ok((entries, _)) => {
-            with(|a| {
-                if a.sidebar.pending_remote(generation, index).is_some() {
-                    a.sidebar.add_children(index, entries);
-                    a.sidebar.expand(index);
-                }
-            });
-        }
-        Err(e) => error_box(hwnd, &format!("フォルダを開けません。\n{e}")),
-    }
+    sidebar::load_remote_dir(hwnd, generation, index, &|f| {
+        with(|a| f(&mut a.sidebar));
+    });
 }
 
 // ---- 端末の画面 -------------------------------------------------------------------------
