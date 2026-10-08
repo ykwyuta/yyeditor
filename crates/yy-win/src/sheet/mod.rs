@@ -116,6 +116,7 @@ const ID_ABOUT: u16 = 41;
 const ID_HELP: u16 = 42;
 const ID_HELP_COBOL: u16 = 43;
 const ID_HELP_FUNCS: u16 = 44;
+const ID_CRASH_LOGS: u16 = 45;
 
 /// STATIC の文字を上下の中央に置く
 const SS_CENTERIMAGE: u32 = 0x200;
@@ -223,6 +224,11 @@ thread_local! {
     static STATUS: std::cell::Cell<HWND> = const { std::cell::Cell::new(HWND(std::ptr::null_mut())) };
 }
 
+thread_local! {
+    /// 前回が異常終了だったときの知らせ（起動したらステータスバーに出す）
+    static PREVIOUS_CRASH: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 fn set_status(text: &str) {
     let h = STATUS.with(|s| s.get());
     if !h.is_invalid() {
@@ -241,7 +247,10 @@ fn set_status(text: &str) {
 /// yysheet を起動する。
 pub fn run_sheet(initial: Option<PathBuf>) -> Result<()> {
     crate::util::set_app_name("yysheet");
+    let previous_crash = crate::crash::install("yysheet");
+    PREVIOUS_CRASH.with(|p| *p.borrow_mut() = previous_crash);
     let r = run_inner(initial);
+    crate::crash::clean_exit();
     if let Err(e) = &r {
         error_box(
             HWND::default(),
@@ -267,6 +276,9 @@ fn run_inner(initial: Option<PathBuf>) -> Result<()> {
         crate::help::use_sheet_help(m.into());
     }
     let frame = create()?;
+    if let Some(msg) = PREVIOUS_CRASH.with(|p| p.borrow_mut().take()) {
+        set_status(&msg);
+    }
     if let Some(p) = initial {
         open_path(&p);
     }
@@ -401,6 +413,7 @@ fn create_menu() -> Result<HMENU> {
         add(help, ID_HELP_COBOL, "COBOL の型の一覧(&C)");
         sep(help);
         add(help, ID_MEMORY, "メモリの使用状況(&M)");
+        add(help, ID_CRASH_LOGS, "異常終了の記録のフォルダを開く(&L)");
         add(help, ID_ABOUT, "yysheet について(&A)");
         for (m, t) in [
             (file, "ファイル(&F)"),
@@ -812,11 +825,12 @@ impl App {
         // マルチレイアウト: レイアウト未確定の行（背景を赤く、レイアウトの列にエラーを出す）
         let multi_lc = yy_sheet::fixed::layout_column(self.sheet());
         let head = self.sheet().table.header as u64;
-        let last_row = multi_lc.map_or(0, |_| self.sheet().extent().0);
+        // 固定長の範囲の外の列だけに何かある行は、レコードでない
+        let last_row = multi_lc.map_or(0, |_| self.sheet().record_rows());
         let mut cells = Vec::with_capacity(self.rows.len());
         for &(row, _) in &self.rows {
             let undetermined = match multi_lc {
-                Some(_) if row >= head && row < last_row => {
+                Some(_) if row >= head && self.sheet().source_row(row) < last_row => {
                     match yy_sheet::fixed::row_layout(
                         &self.ctx,
                         self.sheet(),
@@ -2529,6 +2543,7 @@ fn command(id: u16) {
             }
         }
         ID_MEMORY => show_memory(),
+        ID_CRASH_LOGS => crate::crash::open_log_dir(),
         ID_ABOUT => {
             if let Some(f) = with(|a| a.frame) {
                 info_box(

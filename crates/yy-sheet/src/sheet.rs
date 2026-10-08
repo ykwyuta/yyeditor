@@ -242,6 +242,30 @@ impl Sheet {
         (rows, cols)
     }
 
+    /// 絞り込み・並べ替えをしないときの、表の列（固定長ではレコードの列）に何かある行数。表の右の列
+    /// （固定長の範囲の外。`CBL.MOVE` の式などを書く）だけに値・式がある行は数えない。
+    pub fn record_rows(&self) -> u64 {
+        let cols = self.table.cols();
+        let mut rows = self.table.grid_rows();
+        let keys = self
+            .cells
+            .keys()
+            .copied()
+            .chain(self.formulas.cells.keys().copied())
+            .chain(self.formulas.results.keys().map(|&(c, r)| (r, c)));
+        for (r, c) in keys {
+            if c < cols {
+                rows = rows.max(r + 1);
+            }
+        }
+        for sh in self.formulas.shared.iter() {
+            if sh.col < cols {
+                rows = rows.max(sh.r1 + 1);
+            }
+        }
+        rows
+    }
+
     /// 格子のセルの式（共有式なら、その行の式）。
     pub fn formula_at(&self, row: u64, col: u32) -> Option<Formula> {
         if self.formulas.cells.is_empty() && self.formulas.shared.is_empty() {
@@ -293,7 +317,8 @@ impl Sheet {
                             .is_none_or(|n| yy_formula::eq_text(n, &name))
                             && yy_formula::spread(a, count).intersects(&own)
                     });
-                    if count >= SHARED_MIN && !self_ref {
+                    // CBL.MOVE は受け取り範囲に値を置くので、共有式にしない（行ごとの式に）
+                    if count >= SHARED_MIN && !self_ref && !crate::formula::contains_move(&f.expr) {
                         self.clear_range(ctx, top + 1, bottom, col)
                             .map_err(|e| e.to_string())?;
                         self.formulas.add_shared(crate::shared::Shared {

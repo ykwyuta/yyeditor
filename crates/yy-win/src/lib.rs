@@ -15,6 +15,7 @@
 
 mod app;
 mod clipboard;
+mod crash;
 mod credstore;
 mod diffstream;
 mod diffview;
@@ -99,7 +100,9 @@ pub fn run(
     initial_line: Option<u64>,
     ssh: Option<yy_remote::ConnectorFactory>,
 ) -> Result<()> {
+    crash::install("yyeditor");
     let r = run_inner(initial_file, initial_line, ssh);
+    crash::clean_exit();
     if let Err(e) = &r {
         util::error_box(
             HWND::default(),

@@ -763,8 +763,7 @@ fn export_multi_to(
     let total = match order {
         Some(o) => o.len() as u64,
         None => sheet
-            .source_extent()
-            .0
+            .record_rows()
             .saturating_sub(head)
             .max(sheet.table.rows),
     };
@@ -938,24 +937,18 @@ fn val_input(v: &yy_formula::Val) -> Input<'_> {
 /// `CBL.MOVE(送り出し範囲, 受け取り範囲)` の値（受け取り範囲の大きさの配列）。
 ///
 /// - 受け取り範囲は COBOL の型のある列の、見出し行でない行だけ（そうでなければ `#VALUE!`）。式は受け取り
-///   範囲の左上のセルに置く（`at` が分かればそうでなければ `#REF!`）。
+///   範囲の外（固定長の範囲の外の列など）に置き、値は受け取り範囲に置く（[`crate::formula::recalc`]）。
 /// - 列の数が同じなら列ごとに基本項目の MOVE、違えば行ごとに集団の MOVE（[`yy_cobol::Codec::move_group`]）。
 ///   送り出しの列の型（なければ値のまま）と、受け取りの列の型で送る。文字コードは受け取り側。
 /// - 送れない組み合わせ（小数部のある数値 → 英数字など）・エラー値は `#VALUE!`。
 pub(crate) fn cobol_move(
     ctx: &Context,
     book: &crate::Workbook,
-    at: Option<(usize, u64, u32)>,
     (ss, sa): (usize, yy_formula::Area),
     (ds, da): (usize, yy_formula::Area),
     get: &dyn Fn(usize, u64, u32) -> yy_formula::Val,
 ) -> yy_formula::Val {
     use yy_formula::{Array, Error, Val};
-    if let Some((si, r, c)) = at
-        && (ds != si || da.r0 != r || da.c0 != c)
-    {
-        return Val::Err(Error::Ref);
-    }
     let dst_sheet = &book.sheets[ds];
     let Some(spec) = dst_sheet.fixed.as_deref() else {
         return Val::Err(Error::Value);
@@ -1426,7 +1419,7 @@ fn export_to(
     let head = t.header as u64;
     let total = match order {
         Some(o) => o.len() as u64,
-        None if grid => sheet.source_extent().0.saturating_sub(head).max(t.rows),
+        None if grid => sheet.record_rows().saturating_sub(head).max(t.rows),
         None => t.rows,
     };
     const BLOCK: u64 = 16_384;
@@ -1893,47 +1886,75 @@ mod tests {
                 sh.set(ctx, r, 1, Value::text(name))?;
                 sh.set(ctx, r, 3, Value::Number(amt))?;
             }
+            // 式は固定長の範囲の外の列（K・L）に書き、値は受け取り範囲に置く
             let f = |sh: &mut Sheet, r: u64, c: u32, t: &str| sh.set_formula(ctx, r, c, t).unwrap();
-            f(sh, 5, 4, "=CBL.MOVE(D2:D4,E6:E8)");
-            f(sh, 5, 1, "=CBL.MOVE(A2:A4,B6:B8)");
-            f(sh, 9, 1, "=CBL.MOVE(A2:B2,B10)");
-            f(sh, 11, 0, "=CBL.MOVE(B2,A12:B12)");
-            f(sh, 13, 0, "=CBL.MOVE(A2:A4,A14:A15)");
-            f(sh, 13, 9, "=CBL.MOVE(A2,J14)");
-            f(sh, 15, 0, "=CBL.MOVE(A2,B16)");
-            f(sh, 17, 1, "=CBL.MOVE(D2,B18)");
-            f(sh, 19, 3, "=CBL.MOVE(A2:A3,D20:D21)");
-            f(sh, 21, 0, "=CBL.MOVE(B2:B3,A22:A23)");
+            f(sh, 5, 10, "=CBL.MOVE(D2:D4,E6:E8)");
+            f(sh, 5, 11, "=CBL.MOVE(A2:A4,B6:B8)");
+            f(sh, 9, 10, "=CBL.MOVE(A2:B2,B10)");
+            f(sh, 11, 10, "=CBL.MOVE(B2,A12:B12)");
+            f(sh, 13, 10, "=CBL.MOVE(A2:A4,A14:A15)");
+            f(sh, 13, 11, "=CBL.MOVE(A2,J14)");
+            f(sh, 15, 0, "=CBL.MOVE(A2,A16)");
+            sh.set(ctx, 16, 1, Value::text("Z"))?;
+            f(sh, 16, 10, "=CBL.MOVE(A2,B17)");
+            f(sh, 17, 10, "=CBL.MOVE(D2,B18)");
+            f(sh, 18, 10, "=IFERROR(CBL.MOVE(A2,B19),0)");
+            f(sh, 19, 10, "=CBL.MOVE(A2:A3,D20:D21)");
+            f(sh, 21, 10, "=CBL.MOVE(B2:B3,A22:A23)");
+            f(sh, 23, 10, "=E6+1");
             Ok(())
         })
         .unwrap();
-        let get = |r: u64, c: u32| d.book.sheets[0].get(&ctx, r, c).unwrap();
-        // 数値 → 数値: 小数部は切り捨て
-        assert_eq!(get(5, 4), Value::Number(1234.0));
-        assert_eq!(get(6, 4), Value::Number(0.0));
-        assert_eq!(get(7, 4), Value::Number(0.0));
+        let get = |d: &Document, r: u64, c: u32| d.book.sheets[0].get(&ctx, r, c).unwrap();
+        // 数値 → 数値: 小数部は切り捨て。式のセルには置いた先
+        assert_eq!(get(&d, 5, 4), Value::Number(1234.0));
+        assert_eq!(get(&d, 6, 4), Value::Number(0.0));
+        assert_eq!(get(&d, 7, 4), Value::Number(0.0));
+        assert_eq!(get(&d, 5, 10), Value::text("CBL.MOVE → E6:E8（3 行）"));
+        // 置いた値を参照する式
+        assert_eq!(get(&d, 23, 10), Value::Number(1235.0));
         // 9(5) → X(10): 桁数の数字
-        assert_eq!(get(5, 1), Value::text("00001     "));
-        assert_eq!(get(6, 1), Value::text("00002     "));
+        assert_eq!(get(&d, 5, 1), Value::text("00001     "));
+        assert_eq!(get(&d, 6, 1), Value::text("00002     "));
         // 集団の MOVE: 2 列 → 1 列、1 列 → 2 列
-        assert_eq!(get(9, 1), Value::text("00001ABC  "));
-        assert_eq!(get(11, 0), Value::text("X'4142432020'"));
-        assert_eq!(get(11, 1), Value::Empty);
-        // 行数が違う・型のない列・左上でない・送れない組み合わせ
-        assert_eq!(get(13, 0), Value::Error(CellError::Value));
-        assert_eq!(get(13, 9), Value::Error(CellError::Value));
-        assert_eq!(get(15, 0), Value::Error(CellError::Ref));
-        assert_eq!(get(17, 1), Value::Error(CellError::Value));
+        assert_eq!(get(&d, 9, 1), Value::text("00001ABC  "));
+        assert_eq!(get(&d, 11, 0), Value::text("X'4142432020'"));
+        assert_eq!(get(&d, 11, 1), Value::Empty);
+        // 行数が違う・型のない列・送れない組み合わせ・ほかの式の中
+        assert_eq!(get(&d, 13, 10), Value::Error(CellError::Value));
+        assert_eq!(get(&d, 13, 11), Value::Error(CellError::Value));
+        assert_eq!(get(&d, 17, 10), Value::Error(CellError::Value));
+        assert_eq!(get(&d, 18, 10), Value::Error(CellError::Value));
+        assert_eq!(get(&d, 18, 1), Value::Empty);
+        // 式のセルが受け取り範囲の中・受け取り範囲に値がある → #SPILL!（値を消せば置く）
+        assert_eq!(get(&d, 15, 0), Value::Error(CellError::Spill));
+        assert_eq!(get(&d, 16, 10), Value::Error(CellError::Spill));
+        assert_eq!(get(&d, 16, 1), Value::text("Z"));
         // 9(5) → S9(7)V99 COMP-3、X(10) "ABC" → 9(5) は送れない
-        assert_eq!(get(19, 3), Value::Number(1.0));
-        assert_eq!(get(20, 3), Value::Number(2.0));
-        assert_eq!(get(21, 0), Value::Error(CellError::Value));
+        assert_eq!(get(&d, 19, 3), Value::Number(1.0));
+        assert_eq!(get(&d, 20, 3), Value::Number(2.0));
+        assert_eq!(get(&d, 21, 0), Value::Error(CellError::Value));
+        // 送り出しを変えると置いた値と、それを参照する式も変わる
+        d.edit(|b, ctx| b.sheets[0].set(ctx, 1, 3, Value::Number(77.0)))
+            .unwrap();
+        assert_eq!(get(&d, 5, 4), Value::Number(77.0));
+        assert_eq!(get(&d, 23, 10), Value::Number(78.0));
+        d.edit(|b, ctx| b.sheets[0].set(ctx, 16, 1, Value::Empty))
+            .unwrap();
+        assert_eq!(get(&d, 16, 1), Value::text("00001     "));
+        // 式を消すと置いた値も消える
+        d.edit(|b, ctx| b.sheets[0].set(ctx, 16, 10, Value::Empty))
+            .unwrap();
+        assert_eq!(get(&d, 16, 1), Value::Empty);
         // 書き出すと受け取りの型のバイト
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mv.dat");
-        export(&ctx, &d.book.sheets[0], &path, &s, None, &|_, _| true).unwrap();
+        let rep = export(&ctx, &d.book.sheets[0], &path, &s, None, &|_, _| true).unwrap();
+        // 範囲の外の列だけに式がある行（24 行目）はレコードにしない（A23 まで）
+        assert_eq!(rep.records, 22);
         let bytes = std::fs::read(&path).unwrap();
         let stride = s.layout.record_len + 2;
+        assert_eq!(bytes.len(), 22 * stride);
         let rec = |grid_row: usize| {
             &bytes[(grid_row - 1) * stride..(grid_row - 1) * stride + s.layout.record_len]
         };
@@ -2081,6 +2102,12 @@ mod tests {
             let rep = export(&ctx, sh, &out, &spec, None, &|_, _| true).unwrap();
             assert_eq!((rep.records, rep.undetermined), (3, 0));
             assert_eq!(std::fs::read(&out).unwrap(), bytes, "{cs:?}");
+            // 範囲の外の列だけに式がある行はレコードでない（未確定に数えない）
+            let mut sh2 = sh.clone();
+            sh2.set_formula(&ctx, 10, 20, "=1+1").unwrap();
+            let rep = export(&ctx, &sh2, &out, &spec, None, &|_, _| true).unwrap();
+            assert_eq!((rep.records, rep.undetermined), (3, 0));
+            assert_eq!(sh2.record_rows(), 4);
             // 決まった行も、読めないレイアウトには変えられない
             assert_eq!(names(&d, 2), ["DTL", "TXT"]);
             let mut sh = d.book.sheets[0].clone();

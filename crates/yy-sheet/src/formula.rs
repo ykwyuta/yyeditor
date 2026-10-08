@@ -49,6 +49,8 @@ pub struct Formulas {
     pub spills: Arc<BTreeMap<(u64, u32), (u64, u32)>>,
     /// 式のセル → あふれようとして止められた大きさ（`#SPILL!`。止めた値が消えたら計算し直す）
     pub blocked: Arc<BTreeMap<(u64, u32), (u64, u32)>>,
+    /// `CBL.MOVE` の式のセル → 値を置いた受け取り範囲
+    pub moves: Arc<BTreeMap<(u64, u32), yy_formula::Area>>,
     /// 共有式（列の多数の行に入れた、行ごとに相対的に同じ式）
     pub shared: Arc<Vec<Shared>>,
     /// 前回の計算から変わったセル（計算し直す式を決める。保存しない）
@@ -163,6 +165,15 @@ impl Formulas {
         Arc::make_mut(&mut self.spills).remove(&(row, col));
         Arc::make_mut(&mut self.blocked).remove(&(row, col));
         self.touch(row, col, row + h - 1, col + w - 1);
+        if let Some(a) = Arc::make_mut(&mut self.moves).remove(&(row, col)) {
+            let results = Arc::make_mut(&mut self.results);
+            for c in a.c0..=a.c1 {
+                for r in a.r0..=a.r1 {
+                    results.remove(&(c, r));
+                }
+            }
+            self.touch(a.r0, a.c0, a.r1, a.c1);
+        }
     }
 
     pub fn result(&self, row: u64, col: u32) -> Option<&Value> {
@@ -295,8 +306,6 @@ struct BookGrid<'a> {
     shared: &'a [Vec<Option<crate::Column>>],
     /// 覚え書き（1 つの式・共有式を計算する間だけ）: シートの使っている範囲・最後に使った索引
     memo: std::cell::RefCell<GridMemo>,
-    /// 計算している式のセル（シート・行・列。共有式は `None`）
-    at: Option<(usize, u64, u32)>,
 }
 
 /// 索引の範囲（シート・列・行）。
@@ -458,9 +467,7 @@ impl BookGrid<'_> {
 
 impl Grid for BookGrid<'_> {
     fn cobol_move(&self, src: (usize, yy_formula::Area), dst: (usize, yy_formula::Area)) -> Val {
-        crate::fixed::cobol_move(self.ctx, self.book, self.at, src, dst, &|s, r, c| {
-            self.get(s, r, c)
-        })
+        crate::fixed::cobol_move(self.ctx, self.book, src, dst, &|s, r, c| self.get(s, r, c))
     }
 
     fn stable(&self, sheet: usize, a: &yy_formula::Area) -> bool {
@@ -601,7 +608,7 @@ fn refs(e: &Expr, sheet: usize, book: &Workbook, out: &mut Vec<(usize, yy_formul
             refs(l, sheet, book, out);
             refs(r, sheet, book, out);
         }
-        // CBL.MOVE の受け取り範囲は形と型を見るだけ（値は読まない。式のセル自身を含む）
+        // CBL.MOVE の受け取り範囲は形と型を見るだけ（値は読まない。値はそこに置く）
         Expr::Call(yy_formula::Func::CblMove, args) => {
             if let Some(a) = args.first() {
                 refs(a, sheet, book, out)
@@ -609,6 +616,37 @@ fn refs(e: &Expr, sheet: usize, book: &Workbook, out: &mut Vec<(usize, yy_formul
         }
         Expr::Call(_, args) => args.iter().for_each(|a| refs(a, sheet, book, out)),
         _ => {}
+    }
+}
+
+/// 式が `=CBL.MOVE(送り出し, 受け取り)` なら、受け取り範囲（同じシートのもの）。
+fn move_target(e: &Expr, sheet: usize, book: &Workbook) -> Option<yy_formula::Area> {
+    let Expr::Call(yy_formula::Func::CblMove, args) = e else {
+        return None;
+    };
+    let Some(Expr::Ref(r)) = args.get(1) else {
+        return None;
+    };
+    if !matches!(
+        r.area.kind,
+        yy_formula::AreaKind::Cell | yy_formula::AreaKind::Range
+    ) {
+        return None;
+    }
+    match &r.sheet {
+        Some(n) if !yy_formula::eq_text(&book.sheets[sheet].name, n) => None,
+        _ => Some(r.area),
+    }
+}
+
+/// 式が `CBL.MOVE` を含むか。
+pub(crate) fn contains_move(e: &Expr) -> bool {
+    match e {
+        Expr::Neg(x) | Expr::Plus(x) | Expr::Percent(x) | Expr::Paren(x) => contains_move(x),
+        Expr::Bin(_, l, r) => contains_move(l) || contains_move(r),
+        Expr::Call(yy_formula::Func::CblMove, _) => true,
+        Expr::Call(_, args) => args.iter().any(contains_move),
+        _ => false,
     }
 }
 
@@ -630,6 +668,8 @@ struct Node {
     expr: Arc<Expr>,
     /// 共有式なら番号（シートの `formulas.shared` の中の）と行数
     shared: Option<(usize, u64)>,
+    /// `=CBL.MOVE(…)` の式なら受け取り範囲（同じシート。値は式のセルでなくここに置く）
+    target: Option<yy_formula::Area>,
 }
 
 impl Node {
@@ -664,6 +704,7 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                 col: c,
                 expr: f.expr.clone(),
                 shared: None,
+                target: move_target(&f.expr, si, book),
             });
         }
         for (k, sh) in s.formulas.shared.iter().enumerate() {
@@ -674,11 +715,13 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                 col: sh.col,
                 expr: sh.formula.expr.clone(),
                 shared: Some((k, sh.rows())),
+                target: None,
             });
         }
     }
-    // 依存（参照する範囲にある式・共有式・前回スピルした範囲が重なる式）
+    // 依存（参照する範囲にある式・共有式・前回スピルした範囲が重なる式・受け取り範囲が重なる CBL.MOVE）
     let n = list.len();
+    let movers: Vec<usize> = (0..n).filter(|&i| list[i].target.is_some()).collect();
     let mut deps: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut ref_lists: Vec<Vec<(usize, yy_formula::Area)>> = Vec::with_capacity(n);
     for (i, node) in list.iter().enumerate() {
@@ -705,6 +748,11 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                 if a.intersects(&rect(r, c, size))
                     && let Some(&j) = index[s].get(&(c, r))
                 {
+                    deps[i].push(j);
+                }
+            }
+            for &j in &movers {
+                if list[j].sheet == s && list[j].target.is_some_and(|t| t.intersects(&a)) {
                     deps[i].push(j);
                 }
             }
@@ -750,6 +798,8 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
             };
             dirty[i] = touched(node.sheet, &own)
                 || ref_lists[i].iter().any(|(s, a)| touched(*s, a))
+                // 受け取り範囲に値・式を入れた・消した
+                || node.target.is_some_and(|t| touched(node.sheet, &t))
                 // まだ結果のない式（新しく入れた式）
                 || fresh;
         }
@@ -789,17 +839,20 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
     let mut results: Vec<BTreeMap<(u32, u64), Value>> = Vec::with_capacity(book.sheets.len());
     let mut spills: Vec<BTreeMap<(u64, u32), (u64, u32)>> = Vec::new();
     let mut blocked: Vec<BTreeMap<(u64, u32), (u64, u32)>> = Vec::new();
+    let mut moves: Vec<BTreeMap<(u64, u32), yy_formula::Area>> = Vec::new();
     let mut shared_res: Vec<Vec<Option<crate::Column>>> = Vec::new();
     for s in &book.sheets {
         if full {
             results.push(BTreeMap::new());
             spills.push(BTreeMap::new());
             blocked.push(BTreeMap::new());
+            moves.push(BTreeMap::new());
             shared_res.push(vec![None; s.formulas.shared.len()]);
         } else {
             results.push((*s.formulas.results).clone());
             spills.push((*s.formulas.spills).clone());
             blocked.push((*s.formulas.blocked).clone());
+            moves.push((*s.formulas.moves).clone());
             shared_res.push(
                 s.formulas
                     .shared
@@ -824,6 +877,13 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
             for cc in c..c + w {
                 for rr in r..r + h {
                     results[si].remove(&(cc, rr));
+                }
+            }
+            if let Some(a) = moves[si].remove(&(r, c)) {
+                for cc in a.c0..=a.c1 {
+                    for rr in a.r0..=a.r1 {
+                        results[si].remove(&(cc, rr));
+                    }
                 }
             }
         }
@@ -867,6 +927,15 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
         let node = &list[i];
         let (si, r, c) = (node.sheet, node.row, node.col);
         if let Some((k, rows)) = node.shared {
+            if contains_move(&node.expr) {
+                shared_res[si][k] = results_column(ctx, |push| {
+                    for _ in 0..rows {
+                        push(Val::Err(yy_formula::Error::Value));
+                    }
+                })
+                .ok();
+                continue;
+            }
             let col = {
                 let grid = BookGrid {
                     book,
@@ -875,7 +944,6 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                     formulas: &index,
                     shared: &shared_res,
                     memo: Default::default(),
-                    at: None,
                 };
                 let cx = yy_formula::Context {
                     grid: &grid,
@@ -901,8 +969,12 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                 formulas: &index,
                 shared: &shared_res,
                 memo: Default::default(),
-                at: Some((si, r, c)),
             };
+            if node.target.is_none() && contains_move(&node.expr) {
+                // CBL.MOVE は式の全体でだけ使える（ほかの式の中では受け取り範囲に置けない）
+                results[si].insert((c, r), Value::Error(CellError::Value));
+                continue;
+            }
             yy_formula::eval(
                 &node.expr,
                 &yy_formula::Context {
@@ -914,6 +986,52 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                 },
             )
         };
+        if let Some(t) = node.target {
+            let Val::Array(a) = v else {
+                results[si].insert((c, r), from_val(&v));
+                continue;
+            };
+            // 受け取り範囲に値・式・共有式・ほかの結果があるか、式のセルが中にあれば #SPILL!
+            let grid = BookGrid {
+                book,
+                ctx,
+                results: &results,
+                formulas: &index,
+                shared: &shared_res,
+                memo: Default::default(),
+            };
+            let blocked_at = t.contains(r, c)
+                || (t.r0..=t.r1).any(|rr| {
+                    (t.c0..=t.c1).any(|cc| {
+                        index[si].contains_key(&(cc, rr))
+                            || results[si].contains_key(&(cc, rr))
+                            || book.sheets[si].formulas.shared_at(rr, cc).is_some()
+                            || !grid.base(si, rr, cc).is_empty()
+                    })
+                });
+            if blocked_at {
+                results[si].insert((c, r), Value::Error(CellError::Spill));
+                continue;
+            }
+            for dr in 0..a.rows {
+                for dc in 0..a.cols {
+                    let (rr, cc) = (t.r0 + dr as u64, t.c0 + dc as u32);
+                    results[si].insert((cc, rr), from_val(&fit(si, rr, cc, a.get(dr, dc).clone())));
+                }
+            }
+            moves[si].insert((r, c), t);
+            // 式のセル: 送れなかった値があれば（最初の）エラー、なければ置いた先
+            let summary = match a.data.iter().find(|x| matches!(x, Val::Err(_))) {
+                Some(e) => from_val(e),
+                None => Value::text(&format!(
+                    "CBL.MOVE → {}（{} 行）",
+                    yy_formula::area_text(&t),
+                    t.rows()
+                )),
+            };
+            results[si].insert((c, r), summary);
+            continue;
+        }
         match v {
             Val::Array(a) if a.rows * a.cols > 1 => {
                 // あふれる先に値・式・共有式・ほかのスピルがあれば #SPILL!
@@ -924,7 +1042,6 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                     formulas: &index,
                     shared: &shared_res,
                     memo: Default::default(),
-                    at: Some((si, r, c)),
                 };
                 let is_blocked = (0..a.rows).any(|dr| {
                     (0..a.cols).any(|dc| {
@@ -964,6 +1081,7 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
         s.formulas.results = Arc::new(std::mem::take(&mut results[si]));
         s.formulas.spills = Arc::new(std::mem::take(&mut spills[si]));
         s.formulas.blocked = Arc::new(std::mem::take(&mut blocked[si]));
+        s.formulas.moves = Arc::new(std::mem::take(&mut moves[si]));
         if !s.formulas.shared.is_empty() {
             let res = std::mem::take(&mut shared_res[si]);
             for (sh, r) in Arc::make_mut(&mut s.formulas.shared).iter_mut().zip(res) {
