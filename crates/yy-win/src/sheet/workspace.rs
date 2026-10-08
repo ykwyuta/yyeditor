@@ -43,6 +43,7 @@ const CM_REFRESH: u32 = 7;
 const CM_REMOVE: u32 = 8;
 const CM_ADD: u32 = 9;
 const CM_ADD_REMOTE: u32 = 10;
+const CM_OPEN_DELIMITED: u32 = 11;
 
 /// メニュー バーの「ワークスペース」と、表示メニューの切り替え。
 pub(super) fn add_menus(bar: HMENU, view: HMENU) -> Result<()> {
@@ -319,6 +320,7 @@ fn context_menu(hwnd: HWND) {
                 item(CM_REFRESH, "最新の情報に更新(&R)");
             } else {
                 item(CM_OPEN, "開く(&O)");
+                item(CM_OPEN_DELIMITED, "区切りを指定して開く(&T)...");
                 item(
                     CM_OPEN_MULTI,
                     "固定長ファイル（マルチレイアウト）として開く(&U)",
@@ -359,6 +361,7 @@ fn context_menu(hwnd: HWND) {
         match cmd.0 as u32 {
             CM_OPEN => open(How::Open),
             CM_OPEN_MULTI => open(How::OpenMulti),
+            CM_OPEN_DELIMITED => open(How::OpenDelimited),
             CM_ADD_FIXED => open(How::AddFixed),
             CM_ADD_MULTI => open(How::AddMulti),
             CM_ADD => add_folder(hwnd),

@@ -36,6 +36,8 @@ pub(super) enum How {
     Open,
     /// 固定長ファイル（マルチレイアウト）として開く
     OpenMulti,
+    /// 区切り文字形式として、区切りを指定して開く
+    OpenDelimited,
     /// 固定長ファイルを今の文書にシートとして追加する
     AddFixed,
     /// 固定長ファイル（マルチレイアウト）を今の文書にシートとして追加する
@@ -55,7 +57,7 @@ pub(super) fn remote_uri(path: &Path) -> Option<RemoteUri> {
 /// 手元のファイルか接続先のファイル（`ssh://…`）を開く。`confirm` なら、今の文書を置き換える前に
 /// 変更を保存するかを尋ねる。
 pub(super) fn open_item(path: &Path, how: How, confirm: bool) {
-    let replaces = matches!(how, How::Open | How::OpenMulti);
+    let replaces = matches!(how, How::Open | How::OpenMulti | How::OpenDelimited);
     if confirm && replaces && !confirm_discard() {
         return;
     }
@@ -79,6 +81,7 @@ pub(super) fn open_item(path: &Path, how: How, confirm: bool) {
     match how {
         How::Open => open_path(&local),
         How::OpenMulti => multiui::open_multi_path(frame, ctx, &local, false),
+        How::OpenDelimited => super::delimui::open_delimited(&local),
         How::AddFixed => fixedui::open_fixed_path(frame, ctx, &local, true),
         How::AddMulti => multiui::open_multi_path(frame, ctx, &local, true),
     }

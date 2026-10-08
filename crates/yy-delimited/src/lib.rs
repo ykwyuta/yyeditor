@@ -14,12 +14,14 @@
 
 mod index;
 mod reader;
+mod sep;
 mod sniff;
 
 use std::ops::Range;
 
 pub use index::{BLOCK, Point, RecordIndex, common_prefix};
 pub use reader::{Record, RecordReader, quote_field, unquote, write_record};
+pub use sep::{describe_bytes, parse_bytes};
 pub use sniff::sniff;
 
 /// 区切り文字と引用符。
@@ -62,6 +64,21 @@ impl Dialect {
         })
     }
 
+    /// [`Dialect::new`] と同じだが、区切り文字に CR・LF も使える（レコードの終わりを改行以外にする
+    /// 読み書き用。[`Scanner`] などの改行を前提にした部品には使わないこと）。
+    pub fn with_any_delimiter(delim: &[u8], quote: Option<u8>) -> Option<Dialect> {
+        if delim.is_empty() || delim.len() > 4 || delim.iter().any(|&b| Some(b) == quote) {
+            return None;
+        }
+        let mut d = [0u8; 4];
+        d[..delim.len()].copy_from_slice(delim);
+        Some(Dialect {
+            delim: d,
+            delim_len: delim.len() as u8,
+            quote,
+        })
+    }
+
     pub fn csv() -> Dialect {
         Dialect::new(b",", Some(b'"')).unwrap()
     }
@@ -82,7 +99,7 @@ impl Dialect {
             b";" => "セミコロン".into(),
             b"|" => "パイプ".into(),
             b" " => "空白".into(),
-            d => String::from_utf8_lossy(d).into_owned(),
+            d => describe_bytes(d),
         }
     }
 

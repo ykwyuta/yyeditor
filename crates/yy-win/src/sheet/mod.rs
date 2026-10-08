@@ -10,6 +10,7 @@
 
 mod bulkui;
 mod catalogui;
+mod delimui;
 mod entry;
 mod fillhandle;
 mod filter;
@@ -343,6 +344,11 @@ fn create_menu() -> Result<HMENU> {
             workspace::ID_OPEN_REMOTE,
             "リモートのファイルを開く(&R)...",
         );
+        add(
+            file,
+            delimui::ID_OPEN_DELIMITED,
+            "区切りを指定して開く(&T)...",
+        );
         add(file, ID_OPEN_FIXED, "固定長ファイルを開く(&F)...");
         add(
             file,
@@ -362,7 +368,12 @@ fn create_menu() -> Result<HMENU> {
         sep(file);
         add(file, ID_SAVE, "上書き保存(&S)\tCtrl+S");
         add(file, ID_SAVE_AS, "名前を付けて保存(&A)...\tCtrl+Shift+S");
-        add(file, ID_EXPORT_CSV, "CSV に書き出し(&E)...");
+        add(file, ID_EXPORT_CSV, "CSV・TSV に書き出し(&E)...");
+        add(
+            file,
+            delimui::ID_EXPORT_DELIMITED,
+            "区切りを指定して書き出し(&D)...",
+        );
         add(file, ID_EXPORT_FIXED, "固定長ファイルに書き出し(&L)...");
         sep(file);
         add(file, ID_EXIT, "終了(&X)");
@@ -2075,7 +2086,7 @@ fn show_open(owner: HWND) -> Option<PathBuf> {
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         let filters = [
             COMDLG_FILTERSPEC {
-                pszName: w!("yysheet・CSV (*.yys;*.csv;*.tsv;*.txt)"),
+                pszName: w!("yysheet・CSV・TSV (*.yys;*.csv;*.tsv;*.txt)"),
                 pszSpec: w!("*.yys;*.csv;*.tsv;*.txt"),
             },
             COMDLG_FILTERSPEC {
@@ -2103,10 +2114,22 @@ fn show_save(owner: HWND, current: Option<&Path>, csv_only: bool) -> Option<Path
             pszSpec: w!("*.yys"),
         };
         let csv = COMDLG_FILTERSPEC {
-            pszName: w!("CSV（UTF-8・カンマ区切り）(*.csv)"),
+            pszName: w!("CSV（カンマ区切り）(*.csv)"),
             pszSpec: w!("*.csv"),
         };
-        let filters: Vec<COMDLG_FILTERSPEC> = if csv_only { vec![csv] } else { vec![yys, csv] };
+        let tsv = COMDLG_FILTERSPEC {
+            pszName: w!("TSV（タブ区切り）(*.tsv)"),
+            pszSpec: w!("*.tsv"),
+        };
+        let any = COMDLG_FILTERSPEC {
+            pszName: w!("すべてのファイル (*.*)"),
+            pszSpec: w!("*.*"),
+        };
+        let filters: Vec<COMDLG_FILTERSPEC> = if csv_only {
+            vec![csv, tsv, any]
+        } else {
+            vec![yys, csv, tsv]
+        };
         let _ = dialog.SetFileTypes(&filters);
         let _ = dialog.SetDefaultExtension(if csv_only { w!("csv") } else { w!("yys") });
         let stem = current
@@ -2211,52 +2234,7 @@ fn open_path(path: &Path) {
                 return;
             }
         };
-        let opts = pv.options.clone();
-        let p = path.to_owned();
-        let label = format!("{} を取り込んでいます…（Esc で中止）", path.display());
-        set_status(&label);
-        let ctx2 = ctx.clone();
-        let o2 = opts.clone();
-        let r = crate::remote::wait(&set_status, move |w| {
-            yy_sheet::csv::import(&ctx2, &p, &o2, &|done, total| {
-                w.report(format!(
-                    "取り込み中… {}%（Esc で中止）",
-                    done * 100 / total.max(1)
-                ));
-                !w.cancelled()
-            })
-        });
-        match r {
-            Ok(sheet) => {
-                let mut doc = Document::with_book(
-                    ctx,
-                    Workbook {
-                        sheets: vec![sheet],
-                        date_system: DateSystem::D1900,
-                    },
-                );
-                doc.path = Some(path.to_owned());
-                let rows = doc.book.sheets[0].table.rows;
-                let cols = doc.book.sheets[0].table.cols();
-                with(|a| a.set_document(doc, Origin::Csv(opts.clone())));
-                set_status(&format!(
-                    "{} 行 × {} 列を取り込みました（{}・{}）",
-                    crate::util::group_digits(rows),
-                    cols,
-                    opts.encoding.label(),
-                    opts.dialect.name()
-                ));
-            }
-            Err(e) => {
-                set_status("");
-                if e.kind() != std::io::ErrorKind::Interrupted {
-                    error_box(
-                        frame,
-                        &format!("{} を取り込めませんでした。\n{e}", path.display()),
-                    );
-                }
-            }
-        }
+        import_csv(path, pv.options);
         return;
     }
     // .yys・CSV でなければ固定長ファイルとして開く（レイアウトを尋ねる）
@@ -2281,6 +2259,62 @@ fn open_path(path: &Path) {
             frame,
             &format!("{} を開けませんでした。\n{e}", path.display()),
         ),
+    }
+}
+
+/// 区切り文字形式（CSV・TSV など）のファイルを、設定 `opts` で取り込んで文書にする。
+fn import_csv(path: &Path, opts: CsvOptions) {
+    let Some((frame, ctx)) = with(|a| (a.frame, a.ctx.clone())) else {
+        return;
+    };
+    let p = path.to_owned();
+    let label = format!("{} を取り込んでいます…（Esc で中止）", path.display());
+    set_status(&label);
+    let ctx2 = ctx.clone();
+    let o2 = opts.clone();
+    let r = crate::remote::wait(&set_status, move |w| {
+        yy_sheet::csv::import(&ctx2, &p, &o2, &|done, total| {
+            w.report(format!(
+                "取り込み中… {}%（Esc で中止）",
+                done * 100 / total.max(1)
+            ));
+            !w.cancelled()
+        })
+    });
+    match r {
+        Ok(sheet) => {
+            let mut doc = Document::with_book(
+                ctx,
+                Workbook {
+                    sheets: vec![sheet],
+                    date_system: DateSystem::D1900,
+                },
+            );
+            doc.path = Some(path.to_owned());
+            let rows = doc.book.sheets[0].table.rows;
+            let cols = doc.book.sheets[0].table.cols();
+            with(|a| a.set_document(doc, Origin::Csv(opts.clone())));
+            let end = match &opts.record_end {
+                yy_sheet::csv::RecordEnd::Newline => String::new(),
+                e => format!("・レコードの終わり {}", e.label()),
+            };
+            set_status(&format!(
+                "{} 行 × {} 列を取り込みました（{}・区切り {}{end}）",
+                crate::util::group_digits(rows),
+                cols,
+                opts.encoding.label(),
+                opts.dialect.name()
+            ));
+        }
+        Err(e) => {
+            set_status("");
+            if e.kind() != std::io::ErrorKind::Interrupted {
+                error_box(
+                    frame,
+                    &format!("{} を取り込めませんでした。\n{e}", path.display()),
+                );
+            }
+        }
     }
 }
 
@@ -2420,8 +2454,38 @@ fn save(ask: bool) -> bool {
     }
 }
 
-/// CSV に書き出す（`target` がなければ尋ねる）。
+/// CSV に書き出す（`target` がなければ尋ねる）。区切り文字などは、開いたときのもの（別の名前の
+/// `.csv`・`.tsv` なら拡張子のもの）。
 fn export_csv(target: Option<PathBuf>) -> bool {
+    export_csv_with(target, None)
+}
+
+/// 書き出しの既定の設定（[`export_csv`]）。
+fn default_export(origin: &Origin, doc_path: Option<&Path>, target: &Path) -> ExportOptions {
+    let mut o = ExportOptions::default();
+    if let Origin::Csv(c) = origin {
+        o.dialect = c.dialect;
+        o.encoding = c.encoding;
+        o.record_end = c.record_end.clone();
+    }
+    if doc_path != Some(target) {
+        let ext = target
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        if let Some(d) = ext
+            .as_deref()
+            .and_then(yy_delimited::Dialect::for_extension)
+        {
+            o.dialect = d;
+            o.record_end = yy_sheet::csv::RecordEnd::Newline;
+        }
+    }
+    o
+}
+
+/// 区切り文字形式で書き出す（`target` がなければ尋ねる。`given` がなければ [`default_export`]）。
+fn export_csv_with(target: Option<PathBuf>, given: Option<ExportOptions>) -> bool {
     let Some((frame, path, ctx, sheet, sys, origin)) = with(|a| {
         a.end_edit(true);
         (
@@ -2463,12 +2527,8 @@ fn export_csv(target: Option<PathBuf>) -> bool {
             _ => return false,
         }
     }
-    let mut opts = ExportOptions::default();
-    if let Origin::Csv(o) = &origin {
-        // 開いたときの区切り文字・文字コードで書く
-        opts.dialect = o.dialect;
-        opts.encoding = o.encoding;
-    }
+    let opts = given.unwrap_or_else(|| default_export(&origin, path.as_deref(), &target));
+    let written = opts.clone();
     let t = target.clone();
     let r = crate::remote::wait(&set_status, move |w| {
         let order = order.as_deref().map(Vec::as_slice);
@@ -2502,9 +2562,13 @@ fn export_csv(target: Option<PathBuf>) -> bool {
             }
             set_status(&msg);
             with(|a| {
-                if matches!(a.origin, Origin::Csv(_))
-                    && a.doc.path.as_deref() == Some(target.as_path())
+                if a.doc.path.as_deref() == Some(target.as_path())
+                    && let Origin::Csv(o) = &mut a.origin
                 {
+                    // 次の上書き保存も、書いた区切り・文字コードで
+                    o.dialect = written.dialect;
+                    o.encoding = written.encoding;
+                    o.record_end = written.record_end.clone();
                     a.doc.dirty = false;
                     a.update_title();
                 }
@@ -2573,7 +2637,7 @@ fn show_memory() {
 }
 
 fn command(id: u16) {
-    if workspace::command(id) {
+    if workspace::command(id) || delimui::command(id) {
         return;
     }
     match id {
