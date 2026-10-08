@@ -22,6 +22,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | R14 | 同じクレートを使った別のアプリとしての SFTP・SCP のファイル転送（巨大ファイル、切断後のレジューム、詳しい記録、エクスプローラー風の UI） | [13-transfer](13-transfer.md) |
 | R15 | ターミナルの 3270 エミュレーター（TN3270・TN3270E、日本語 DBCS、キーパッド、IND$FILE、プリンター 3287、マクロ、SSH 経由・TLS）**（実装済み）** | [14-tn3270](14-tn3270.md) |
 | R16 | 同じクレートを使った別のアプリとしてのスプレッドシート（50 億セル〔1000 列 × 500 万行・100 列 × 5000 万行〕を数秒で並べ替え・絞り込み・集計、メモリ 8 GB まで、独自形式と RFC 4180 の CSV、Excel 互換の一部の関数と表示形式、色・罫線）**（実装中）** | [15-spreadsheet](15-spreadsheet.md) |
+| R17 | 独立した Windows 常駐アプリ yyclip でクリップボード履歴を記録・復元する | [16-clipboard-history](16-clipboard-history.md) |
 
 > 依頼文の「encdic」は、IBM メインフレーム系の **EBCDIC**（日本では EBCDIK / IBM CCSID 930・939・1390・1399、富士通 JEF、日立 KEIS などの EBCDIC 系漢字コード）を指すものと解釈しています。
 
@@ -73,6 +74,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | [10-syntax-highlight.md](10-syntax-highlight.md) | ファイル種類の判定、ハイライト定義の形式、巨大ファイル対応のハイライトエンジン、カラーテーマ |
 | [11-remote-ssh.md](11-remote-ssh.md) | SSH 経由のリモート編集：組み込み SSH、エージェントの配置、疎キャッシュ、接続先でのジョブ実行、保存・再接続、プロトコル |
 | [15-spreadsheet.md](15-spreadsheet.md) | スプレッドシート（yysheet）：列指向の保管、独自形式、CSV の並列の取り込み、数式と関数、表示形式、絞り込み・並べ替え、性能の見積もり |
+| [16-clipboard-history.md](16-clipboard-history.md) | yyclip のクリップボード監視、1 MiB 制限、履歴と定型文のタブ |
 
 ## 4. 性能・品質目標（抜粋）
 

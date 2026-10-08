@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""yyeditor・yyterm・yysftp・yysheet のアイコン（apps/<アプリ>/res/<アプリ>.ico）を作る。
+"""yyeditor・yyterm・yysftp・yysheet・yyclip のアイコンを作る。
 
     python3 tools/gen-icon/gen_icon.py
 
 角丸の四角に白の「YY」を描く。エディタは青地にテキストの行を表す線、ターミナルは黒地に
-プロンプト（`>_`）、ファイル転送は緑地に上下の矢印、スプレッドシートは橙地に表の格子。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
+プロンプト（`>_`）、ファイル転送は緑地に上下の矢印、スプレッドシートは橙地に表の格子、
+クリップボード履歴は紫地にクリップボード。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
 Pillow が必要。
 """
 
@@ -20,6 +21,7 @@ EDITOR = ((0x3B, 0x82, 0xF6), (0x1D, 0x4E, 0xD8))
 TERMINAL = ((0x37, 0x41, 0x51), (0x11, 0x18, 0x27))
 TRANSFER = ((0x10, 0xB9, 0x81), (0x04, 0x78, 0x57))
 SHEET = ((0xF5, 0x9E, 0x0B), (0xB4, 0x53, 0x09))
+CLIP = ((0xA8, 0x55, 0xF7), (0x6B, 0x21, 0xA8))
 PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
@@ -40,7 +42,13 @@ def draw_y(d, x, y, w, h, t, a):
 
 def render(size, kind="editor"):
     terminal = kind == "terminal"
-    top_c, bottom_c = {"editor": EDITOR, "terminal": TERMINAL, "transfer": TRANSFER, "sheet": SHEET}[kind]
+    top_c, bottom_c = {
+        "editor": EDITOR,
+        "terminal": TERMINAL,
+        "transfer": TRANSFER,
+        "sheet": SHEET,
+        "clip": CLIP,
+    }[kind]
     n = size * SCALE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     # 縦のグラデーション
@@ -100,6 +108,26 @@ def render(size, kind="editor"):
         for j in range(3):
             y = top_g + (bottom_g - top_g) * j / 2
             d.rectangle([left, y - lt / 2, right, y + lt / 2], fill=LINE)
+    elif not small and kind == "clip":
+        # クリップ付きの用紙。32px でも輪郭が残るように太めに描く。
+        lt = round(n * 0.05)
+        d.rounded_rectangle(
+            [n * 0.31, n * 0.68, n * 0.69, n * 0.9],
+            radius=n * 0.025,
+            outline=WHITE,
+            width=lt,
+        )
+        d.rounded_rectangle(
+            [n * 0.42, n * 0.63, n * 0.58, n * 0.72],
+            radius=n * 0.025,
+            fill=WHITE,
+        )
+        for yy in (0.77, 0.83):
+            d.rounded_rectangle(
+                [n * 0.39, n * yy, n * 0.61, n * (yy + 0.025)],
+                radius=n * 0.012,
+                fill=LINE,
+            )
     elif not small:
         # テキストの行
         lt = n * 0.055
@@ -148,6 +176,7 @@ def main():
         ("yyterm", "terminal"),
         ("yysftp", "transfer"),
         ("yysheet", "sheet"),
+        ("yyclip", "clip"),
     ]:
         res = root / "apps" / app / "res"
         res.mkdir(parents=True, exist_ok=True)
