@@ -244,7 +244,13 @@ fn run_inner(
             let bar = app::findbar_with_focus();
             // ヘルプのウィンドウでは、エディタのショートカット（Ctrl+C など）を使わない
             let in_help = help::contains(msg.hwnd);
-            let use_accel = !in_help && (bar.is_none() || app::is_global_shortcut(&msg));
+            // ソース管理のコミットのメッセージの欄: Ctrl+Enter でコミット、編集のショートカットは欄に任せる
+            if app::git_pre_translate(&msg) {
+                continue;
+            }
+            let in_git_message = app::git_message_with_focus();
+            let use_accel =
+                !in_help && ((bar.is_none() && !in_git_message) || app::is_global_shortcut(&msg));
             if use_accel && TranslateAcceleratorW(frame, accel, &msg) != 0 {
                 continue;
             }

@@ -25,6 +25,7 @@ yy-3270-macro.workspace = true
 yy-3270-tls.workspace = true
 yy-sheet.workspace = true
 yy-cobol.workspace = true
+yy-git.workspace = true
 yy-formula.workspace = true
 yy-numfmt.workspace = true
 webview2-com.workspace = true

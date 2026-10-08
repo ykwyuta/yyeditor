@@ -24,6 +24,7 @@ members = [
     "crates/yy-formula",
     "crates/yy-sheet",
     "crates/yy-cobol",
+    "crates/yy-git",
     "crates/yy-win",
     "apps/yyeditor",
     "apps/yyterm",
@@ -55,6 +56,7 @@ yy-numfmt = { path = "crates/yy-numfmt" }
 yy-formula = { path = "crates/yy-formula" }
 yy-sheet = { path = "crates/yy-sheet" }
 yy-cobol = { path = "crates/yy-cobol" }
+yy-git = { path = "crates/yy-git" }
 yy-search = { path = "crates/yy-search" }
 yy-delimited = { path = "crates/yy-delimited" }
 yy-core = { path = "crates/yy-core" }

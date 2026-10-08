@@ -1,0 +1,13 @@
+[package]
+name = "yy-git"
+description = "Git integration for yyeditor: finding repositories in the workspace and running the git command (status, stage, commit, branches, pull, push)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
