@@ -76,7 +76,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | [15-spreadsheet.md](15-spreadsheet.md) | スプレッドシート（yysheet）：列指向の保管、独自形式、CSV の並列の取り込み、数式と関数、表示形式、絞り込み・並べ替え、性能の見積もり |
 | [16-clipboard-history.md](16-clipboard-history.md) | yyclip のクリップボード監視、1 MiB 制限、履歴と定型文のタブ |
 | [17-git.md](17-git.md) | ソース管理（Git）：リポジトリの検出と選択、git コマンドの呼び方、ソース管理のビュー |
-| [18-filemanager.md](18-filemanager.md) | ファイル管理（yyfilemanager）：共有フォルダへのレジュームつき同期、似た名前の版の判定、重複の検出、確かめてからの一括削除（提案） |
+| [18-filemanager.md](18-filemanager.md) | ファイル管理（yyfilemanager）：共有フォルダへのレジュームつき同期、ファイルの検索、似た名前の版の判定、重複の検出、確かめてからの一括削除（提案） |
 
 ## 4. 性能・品質目標（抜粋）
 
