@@ -43,6 +43,8 @@ pub struct Config {
     /// ファイル転送（yysftp。13 章）
     pub transfer: TransferConfig,
     pub tn3270: Tn3270Config,
+    /// スプレッドシート（yysheet。15 章）
+    pub sheet: SheetConfig,
 }
 
 impl Default for Config {
@@ -57,6 +59,35 @@ impl Default for Config {
             terminal: TerminalConfig::default(),
             transfer: TransferConfig::default(),
             tn3270: Tn3270Config::default(),
+            sheet: SheetConfig::default(),
+        }
+    }
+}
+
+/// スプレッドシート（yysheet。15 章）の設定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SheetConfig {
+    /// アプリが使うメモリの上限（GB。15 章 3.6）
+    pub memory_limit_gb: f64,
+    /// 作業ファイルのフォルダ（空なら OS の一時フォルダ）
+    pub work_dir: String,
+    /// 格子のフォント（空なら Yu Gothic UI）
+    pub font_family: String,
+    /// 格子の文字の大きさ（ポイント）
+    pub font_size: f32,
+    /// 既定の列幅（半角の文字数）
+    pub column_width: f32,
+}
+
+impl Default for SheetConfig {
+    fn default() -> Self {
+        SheetConfig {
+            memory_limit_gb: 8.0,
+            work_dir: String::new(),
+            font_family: String::new(),
+            font_size: 11.0,
+            column_width: 8.43,
         }
     }
 }

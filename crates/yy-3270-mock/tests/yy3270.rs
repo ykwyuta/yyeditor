@@ -229,6 +229,8 @@ fn associated_printer_receives_scs_and_lu3_jobs() {
             .is_some()
     );
     assert!(has(&m, "(associate)"));
+    // 端末の側でつながっても、模擬ホストがプリンターを登録するまでは PRINT を受け付けない
+    assert!(has(&m, "printer ready"), "{:#?}", m.events());
     let dir = out_dir("print");
     let script = format!(
         r#"{LOGON}

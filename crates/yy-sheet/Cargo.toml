@@ -1,0 +1,27 @@
+[package]
+name = "yy-sheet"
+description = "Spreadsheet core for yysheet: columnar chunks, edits and snapshots, memory budget, the .yys format, parallel CSV import/export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+yy-delimited.workspace = true
+yy-encoding.workspace = true
+yy-cobol.workspace = true
+yy-io.workspace = true
+yy-numfmt.workspace = true
+yy-formula.workspace = true
+regex-automata.workspace = true
+regex-syntax.workspace = true
+memchr.workspace = true
+rayon.workspace = true
+serde = { workspace = true, features = ["rc"] }
+postcard.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

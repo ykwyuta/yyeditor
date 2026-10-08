@@ -124,6 +124,21 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 - TLS（`tn3270s://` の暗黙の TLS と Telnet の STARTTLS。rustls）。検証できない証明書（社内の自己署名など）は SSH のホスト鍵と同じく初めて見たときに確かめて記録し、変わったら接続しません。PEM のクライアント証明書も使えます。
 - 中核は OS に依存しない `yy-3270`・`yy-3270-tls`。テスト用の模擬ホスト `yy-3270-mock`（TN3270E の LU・ASSOCIATE・RESPONSES・PRINT-EOJ、日本語、Query、IND$FILE、SCS/LU3、TLS）を x3270（s3270・pr3287）で確かめたうえで、Linux の CI で yyterm の 3270 の中核を試験しています。
 
+### スプレッドシート（yysheet）
+
+提案書 [15 章](docs/proposal/15-spreadsheet.md) の方式で、50 億セル（1000 列 × 500 万行、100 列 × 5000 万行）のデータを、メモリ 8 GB までで扱う別のアプリ（`yysheet.exe`）を作っています（M1 を実装中）。
+
+- 列指向の保管（6.5 万行ずつの変更しないチャンク。型ごとに詰めた形と統計）、行の挿入・削除はデータをコピーしない区間の付け替え、編集の差分、O(1) のスナップショットと Undo。
+- 独自形式（`.yys`）: 末尾の目次だけを読んで開き、保存は変わったチャンクだけを書き足す（書き足しの途中で落ちても前の状態で開ける）。
+- RFC 4180 の CSV の並列の取り込み（区画ごとに引用符の内外の 2 通りで読んで状態を決める）と書き出し。文字コード・列の型の推定。
+- Excel 互換の表示形式（`yy-numfmt`。区分・条件・色・桁区切り・指数・分数・日付・時刻・経過時間・和暦）。
+- 格子（Direct2D）・セルの編集（IME）・数式バー・シートのタブ・クリップボード・行と列の挿入と削除。
+- 複数段階の絞り込み（値の一覧・文字列・数値・上位・平均・空。列見出しの ▼ から）と、複数のキーの並べ替え（Excel と同じ値の順。安定）。データは動かさず表示する行の並びだけを持ち、条件はファイルに保存します。並べ替えはキーを 128 ビットに詰めて全コアで並べます。
+- セルの書式: 表示形式・塗りつぶし・文字の色・太字・斜体・配置・罫線（6 種類と線の色）。5000 万行でも軽いように、書式は範囲（列全体・行全体を含む）の層として重ねて持ちます。
+- 数式（`yy-formula`）: Excel と同じ文法と型の変換、`SUM`・`COUNT`・`SUMIFS`・`COUNTIFS`・`XLOOKUP`・`PRODUCT`・`ABS`・`CONCAT`・`TEXTJOIN`・`TEXTSPLIT`・四則演算・`&`、スピル（動的配列）、依存の順の再計算、行・列の挿入と削除での参照の付け替え。表の列は列ごとにまとめて読んで計算します。
+- 固定長ファイル（`yy-cobol`）: IBM COBOL のコピーブック互換のレイアウト定義から、項目ごとの列を作って読み書きします（`PIC X`・`N`・`G`・`NATIONAL`・ゾーン 10 進数・`COMP-3`・`COMP`・`COMP-5`・`COMP-1`・`COMP-2`・数字編集、`OCCURS`・`REDEFINES`・`SIGN`・`SYNC`）。文字コードは MS932 と EBCDIC（930・939・1390・1399 など）で、開くとき・レイアウトを当てるとき・書き出すときに選べます（MS932 ⇔ EBCDIC の変換もできます）。読めない数値の項目は `X'…'` で表示して元のバイトのまま書き戻します。500 万レコード（415 MB）の取り込みは約 4 秒。列見出しに項目の型、ステータスバーにレコード長を出し、セルの書式設定で列の COBOL の型を選び直せます（コピーブックを書き直します）。型に合わない入力は受け付けません。値は COBOL と同じく項目の長さまで埋めます。マルチレイアウト（名前を付けた複数のレイアウトを行ごとに指定。未確定の行は赤く表示）にも対応します。yysheet には、COBOL の型と関数の一覧を含む利用ガイド（F1）があります。
+- 中核（`yy-sheet`・`yy-numfmt`・`yy-formula`・`yy-cobol`）は OS に依存せず、Linux の CI でテストします。
+
 ### ファイル転送（yysftp）
 
 提案書 [13 章](docs/proposal/13-transfer.md) の方式で、エディタ・ターミナルと同じクレートを使った別のアプリとして SFTP・SCP のファイル転送（`yysftp.exe`）を作っています。
@@ -286,16 +301,20 @@ crates/
   yy-3270-macro/ 3270 のマクロ（Rhai。待つ・読む・入力・転送・記録）
   yy-3270-tls/ 3270 の TLS（暗黙の TLS・STARTTLS・証明書の TOFU・クライアント証明書。rustls + ring）
   yy-3270-mock/ 3270 の模擬ホスト（試験用。x3270 で確かめる check-with-x3270.sh）
+  yy-sheet/    スプレッドシートの中核（列のチャンク・差分・スナップショット・メモリの予算・.yys・CSV の並列の取り込み）
+  yy-numfmt/   Excel 互換の表示形式（書式記号・標準・日付のシリアル値・入力の解釈）
+  yy-cobol/    COBOL のコピーブックの解析と、固定長レコードの項目の読み書き（ゾーン・パック・2 進数・浮動小数点・編集・DBCS）
   yy-term/     ターミナルの中核（制御シーケンスの解釈、画面、スクロールバック、キーの送り方。OS 非依存）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
 apps/yyterm/   ターミナルの実行ファイル（yy-win の term モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yysftp/   ファイル転送の実行ファイル（yy-win の sftp モジュール。ビルドスクリプトは yyeditor と共通）
+apps/yysheet/  スプレッドシートの実行ファイル（yy-win の sheet モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yy-agent/ SSH 接続先に置くエージェント（Linux 用、musl で静的リンク）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
                     ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
-tools/gen-icon/     アイコン（apps/yyeditor・yyterm・yysftp の res/*.ico）の生成（Python + Pillow）
+tools/gen-icon/     アイコン（apps/yyeditor・yyterm・yysftp・yysheet の res/*.ico）の生成（Python + Pillow）
 tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の取得（npm から）
 ```
 

@@ -23,6 +23,10 @@ yy-term.workspace = true
 yy-3270.workspace = true
 yy-3270-macro.workspace = true
 yy-3270-tls.workspace = true
+yy-sheet.workspace = true
+yy-cobol.workspace = true
+yy-formula.workspace = true
+yy-numfmt.workspace = true
 webview2-com.workspace = true
 crossbeam-channel.workspace = true
 windows-numerics.workspace = true
@@ -47,11 +51,13 @@ features = [
     "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
     "Win32_System_Time",
     "Win32_System_Ole",
     "Win32_System_SystemInformation",
     "Win32_System_LibraryLoader",
     "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
     "Win32_UI_Controls_RichEdit",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_Ime",

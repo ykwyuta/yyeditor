@@ -751,6 +751,8 @@ fn serve(conn: Conn, shared: &Arc<Shared>) -> io::Result<()> {
         let (tx, rx): (Sender<Job>, Receiver<Job>) = channel();
         if let Some(l) = &lu {
             shared.lus.lock().unwrap().printers.insert(l.clone(), tx);
+            // 端末の PRINT はこの後から届く（試験はこれを待ってから印刷する）
+            shared.log(format!("printer ready {l}"));
         }
         printer::run(&mut link, shared, rx)
     } else {

@@ -146,6 +146,82 @@ impl Ccsid {
         })
     }
 
+    /// 固定長レコードの項目のバイト列を文字列にする（改行の扱いはしない。制御文字もそのまま）。
+    /// `dbcs_only` なら SO / SI のない 2 バイト文字だけの項目（COBOL の `PIC G`・`PIC N`）。
+    /// 2 バイト部があれば SO / SI で切り替える（SO / SI は文字にしない）。表にないバイトは
+    /// エスケープ文字（[`crate::escape_char`]）にするので、[`Ccsid::encode_char`] と
+    /// [`crate::unescape_char`] で元のバイトに戻せる。
+    pub fn decode_field(self, bytes: &[u8], dbcs_only: bool) -> String {
+        let t = self.table();
+        let mut s = String::with_capacity(bytes.len());
+        let mut dbcs = dbcs_only && t.mixed;
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if t.mixed && !dbcs_only {
+                if b == t.so && !dbcs {
+                    dbcs = true;
+                    i += 1;
+                    continue;
+                }
+                if b == t.si && dbcs {
+                    dbcs = false;
+                    i += 1;
+                    continue;
+                }
+            }
+            if dbcs {
+                if i + 1 >= bytes.len() {
+                    s.push(crate::escape_char(b));
+                    i += 1;
+                    continue;
+                }
+                let code = u16::from_be_bytes([b, bytes[i + 1]]);
+                match t.db_dec[code as usize] {
+                    0 => {
+                        s.push(crate::escape_char(b));
+                        s.push(crate::escape_char(bytes[i + 1]));
+                    }
+                    v if v & PAIR != 0 => {
+                        let (x, y) = t.pairs[(v & CP_MASK) as usize];
+                        s.extend(char::from_u32(x));
+                        s.extend(char::from_u32(y));
+                    }
+                    v => match char::from_u32(v & CP_MASK) {
+                        Some(c) => s.push(c),
+                        None => {
+                            s.push(crate::escape_char(b));
+                            s.push(crate::escape_char(bytes[i + 1]));
+                        }
+                    },
+                }
+                i += 2;
+                continue;
+            }
+            let v = t.sb_dec[b as usize];
+            match v {
+                NONE => s.push(crate::escape_char(b)),
+                v if v & PAIR != 0 => {
+                    let (x, y) = t.pairs[(v & CP_MASK) as usize];
+                    s.extend(char::from_u32(x));
+                    s.extend(char::from_u32(y));
+                }
+                v => match char::from_u32(v & CP_MASK) {
+                    Some(c) => s.push(c),
+                    None => s.push(crate::escape_char(b)),
+                },
+            }
+            i += 1;
+        }
+        s
+    }
+
+    /// SO・SI のバイト（2 バイト部がある CCSID）。
+    pub fn shift_bytes(self) -> Option<(u8, u8)> {
+        let t = self.table();
+        t.mixed.then_some((t.so, t.si))
+    }
+
     pub(crate) fn table(self) -> &'static Table {
         static TABLES: [OnceLock<Table>; 9] = [const { OnceLock::new() }; 9];
         let i = Ccsid::ALL.iter().position(|c| *c == self).unwrap();

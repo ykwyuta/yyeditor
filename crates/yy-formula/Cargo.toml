@@ -1,0 +1,13 @@
+[package]
+name = "yy-formula"
+description = "Excel-compatible formulas for yysheet (parser, evaluator, XLOOKUP, SUMIFS, COUNTIFS, text functions, spill)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+yy-numfmt.workspace = true
+
+[lints]
+workspace = true

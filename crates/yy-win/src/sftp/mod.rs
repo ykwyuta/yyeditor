@@ -229,7 +229,9 @@ fn set_status(text: &str) {
 /// `initial` はコマンドラインの引数（`ssh://接続先/パス` か `ユーザー@ホスト`）。
 pub fn run_sftp(initial: Option<String>, ssh: Option<yy_remote::ConnectorFactory>) -> Result<()> {
     crate::util::set_app_name("yysftp");
+    crate::crash::install("yysftp");
     let r = run_inner(initial, ssh);
+    crate::crash::clean_exit();
     if let Err(e) = &r {
         error_box(
             HWND::default(),

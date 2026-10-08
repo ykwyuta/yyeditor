@@ -1,0 +1,12 @@
+[package]
+name = "yy-numfmt"
+description = "Excel-compatible number and date formats for yysheet (format codes, General, date serials, input parsing)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

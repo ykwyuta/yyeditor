@@ -307,7 +307,9 @@ pub fn run_terminal(
     ssh: Option<yy_remote::ConnectorFactory>,
 ) -> Result<()> {
     crate::util::set_app_name("yyterm");
+    crate::crash::install("yyterm");
     let r = run_inner(initial, ssh);
+    crate::crash::clean_exit();
     if let Err(e) = &r {
         error_box(
             HWND::default(),

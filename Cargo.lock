@@ -3281,6 +3281,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-cobol"
+version = "0.1.0"
+dependencies = [
+ "yy-encoding",
+]
+
+[[package]]
 name = "yy-config"
 version = "0.1.0"
 dependencies = [
@@ -3331,6 +3338,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-formula"
+version = "0.1.0"
+dependencies = [
+ "yy-numfmt",
+]
+
+[[package]]
 name = "yy-io"
 version = "0.1.0"
 dependencies = [
@@ -3357,6 +3371,10 @@ dependencies = [
  "yy-delimited",
  "yy-encoding",
 ]
+
+[[package]]
+name = "yy-numfmt"
+version = "0.1.0"
 
 [[package]]
 name = "yy-preview"
@@ -3400,6 +3418,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-sheet"
+version = "0.1.0"
+dependencies = [
+ "memchr",
+ "postcard",
+ "rayon",
+ "regex-automata",
+ "regex-syntax",
+ "serde",
+ "tempfile",
+ "yy-cobol",
+ "yy-delimited",
+ "yy-encoding",
+ "yy-formula",
+ "yy-io",
+ "yy-numfmt",
+]
+
+[[package]]
 name = "yy-ssh"
 version = "0.1.0"
 dependencies = [
@@ -3439,16 +3476,20 @@ dependencies = [
  "yy-3270-macro",
  "yy-3270-tls",
  "yy-buffer",
+ "yy-cobol",
  "yy-config",
  "yy-core",
  "yy-delimited",
  "yy-encoding",
+ "yy-formula",
  "yy-io",
  "yy-jobs",
  "yy-layout",
+ "yy-numfmt",
  "yy-preview",
  "yy-proto",
  "yy-remote",
+ "yy-sheet",
  "yy-syntax",
  "yy-term",
 ]
@@ -3466,6 +3507,13 @@ name = "yysftp"
 version = "0.1.0"
 dependencies = [
  "yy-ssh",
+ "yy-win",
+]
+
+[[package]]
+name = "yysheet"
+version = "0.1.0"
+dependencies = [
  "yy-win",
 ]
 

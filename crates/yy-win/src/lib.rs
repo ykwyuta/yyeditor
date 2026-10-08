@@ -15,6 +15,7 @@
 
 mod app;
 mod clipboard;
+mod crash;
 mod credstore;
 mod diffstream;
 mod diffview;
@@ -32,6 +33,7 @@ mod remote;
 mod remotedlg;
 mod render;
 mod sftp;
+mod sheet;
 mod tabclose;
 mod term;
 mod util;
@@ -47,6 +49,8 @@ use crate::util::Context;
 
 /// ファイル転送（yysftp）を起動する
 pub use sftp::run_sftp;
+/// スプレッドシート（yysheet）を起動する
+pub use sheet::run_sheet;
 /// ターミナル（yyterm）を起動する
 pub use term::run_terminal;
 /// SSH の接続の実装を作る関数（`yy-ssh`。実行ファイルが [`run`] に渡す）
@@ -96,7 +100,9 @@ pub fn run(
     initial_line: Option<u64>,
     ssh: Option<yy_remote::ConnectorFactory>,
 ) -> Result<()> {
+    crash::install("yyeditor");
     let r = run_inner(initial_file, initial_line, ssh);
+    crash::clean_exit();
     if let Err(e) = &r {
         util::error_box(
             HWND::default(),
