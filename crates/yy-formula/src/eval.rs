@@ -26,6 +26,8 @@ pub struct Context<'a> {
     pub cache: Option<&'a crate::Cache>,
     /// 相対参照の行をずらす数（共有式の各行。ふつうは 0）
     pub offset: i64,
+    /// 式のあるセルの行（0 始まり。共有式は 1 行目で、各行は `offset` を足す。`ROW()` 用）
+    pub row: u64,
 }
 
 /// 引数（参照は値にせずに渡す。`SUMIFS` などは列を直接読む）。

@@ -39,6 +39,7 @@ impl Mem {
                 sys: DateSystem::D1900,
                 cache: Some(&self.cache),
                 offset: 0,
+                row: 0,
             },
         )
     }
@@ -414,6 +415,7 @@ fn indexes_and_batches_match_plain_evaluation() {
                 sys: DateSystem::D1900,
                 cache: None,
                 offset: 0,
+                row: 0,
             },
         );
         // まとめた計算は 2 回目から使われるので 2 回ずつ
@@ -426,6 +428,7 @@ fn indexes_and_batches_match_plain_evaluation() {
                     sys: DateSystem::D1900,
                     cache: Some(&cache),
                     offset: 0,
+                    row: 0,
                 },
             );
             assert_eq!(quick, plain, "{f}");
@@ -461,6 +464,7 @@ fn shared_rows_match_per_row_evaluation() {
             sys: DateSystem::D1900,
             cache: None,
             offset: 0,
+            row: 0,
         };
         let mut got = Vec::new();
         eval_rows(&e, &cx, 250, &mut |i, v| {
@@ -514,6 +518,7 @@ fn shared_lookup_rows_use_the_index() {
             sys: DateSystem::D1900,
             cache: None,
             offset: 0,
+            row: 0,
         };
         let mut got = Vec::new();
         eval_rows(&e, &cx, 150, &mut |_, v| got.push(v));
@@ -783,4 +788,98 @@ fn cbl_move_arguments() {
             .iter()
             .any(|f| f.name == "CBL.MOVE")
     );
+}
+
+#[test]
+fn and_or_ifs_and_row() {
+    let mut g = Mem::new();
+    g.set(0, "A1", n(1.0));
+    g.set(0, "A2", n(0.0));
+    g.set(0, "A3", t("文字"));
+    g.set(0, "B1", Val::Bool(true));
+    g.set(0, "C1", Val::Err(Error::Div0));
+    g.set(0, "D1", n(85.0));
+    g.set(0, "D2", n(70.0));
+    g.set(0, "D3", n(40.0));
+    // AND・OR
+    assert_eq!(g.eval("=AND(TRUE,1,\"true\")"), Val::Bool(true));
+    assert_eq!(g.eval("=AND(TRUE,0)"), Val::Bool(false));
+    assert_eq!(g.eval("=OR(FALSE,0,A1)"), Val::Bool(true));
+    assert_eq!(g.eval("=OR(A2,FALSE)"), Val::Bool(false));
+    // 範囲の中の文字列・空は無視（A1:A3 は 1・0・文字）
+    assert_eq!(g.eval("=AND(A1:A3)"), Val::Bool(false));
+    assert_eq!(g.eval("=OR(A1:A3,B1)"), Val::Bool(true));
+    assert_eq!(g.eval("=AND(A3)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=OR(E1:E5)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=AND(\"x\")"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=AND(A1,C1)"), Val::Err(Error::Div0));
+    assert_eq!(g.eval("=OR(TRUE,1/0)"), Val::Err(Error::Div0));
+    assert_eq!(g.eval("=AND()"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=AND({1,1,0})"), Val::Bool(false));
+    assert_eq!(g.eval("=OR(D1:D3>80)"), Val::Bool(true));
+    assert_eq!(
+        g.eval("=IF(AND(D1>=60,D2>=60),\"合格\",\"不合格\")"),
+        t("合格")
+    );
+    // IFS
+    let grade = |cell: &str| {
+        g.eval(&format!(
+            "=IFS({cell}>=80,\"A\",{cell}>=60,\"B\",TRUE,\"C\")"
+        ))
+    };
+    assert_eq!(grade("D1"), t("A"));
+    assert_eq!(grade("D2"), t("B"));
+    assert_eq!(grade("D3"), t("C"));
+    assert_eq!(g.eval("=IFS(D3>50,1,D3>45,2)"), Val::Err(Error::NA));
+    assert_eq!(g.eval("=IFS(D1>50,1,D1>45)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=IFS(C1,1,TRUE,2)"), Val::Err(Error::Div0));
+    assert_eq!(g.eval("=IFS(A3,1)"), Val::Err(Error::Value));
+    // 真になった後ろは計算しない（エラーにならない）
+    assert_eq!(g.eval("=IFS(TRUE,1,1/0,2)"), n(1.0));
+    // 配列の条件は要素ごと
+    assert_eq!(
+        g.eval("=IFS(D1:D3>=80,\"A\",D1:D3>=60,\"B\",TRUE,\"C\")"),
+        arr(3, 1, vec![t("A"), t("B"), t("C")])
+    );
+    assert_eq!(
+        g.eval("=IFS({1,0},\"x\",{0,0},\"y\")"),
+        arr(1, 2, vec![t("x"), Val::Err(Error::NA)])
+    );
+    assert_eq!(
+        g.eval("=IFS(FALSE,1,{1,0},\"y\")"),
+        arr(1, 2, vec![t("y"), Val::Err(Error::NA)])
+    );
+    // ROW
+    assert_eq!(g.eval("=ROW(C5)"), n(5.0));
+    assert_eq!(g.eval("=ROW($B$7:D7)"), n(7.0));
+    assert_eq!(
+        g.eval("=ROW(A2:B4)"),
+        arr(3, 1, vec![n(2.0), n(3.0), n(4.0)])
+    );
+    assert_eq!(g.eval("=ROW(A:A)"), arr(3, 1, vec![n(1.0), n(2.0), n(3.0)]));
+    assert_eq!(g.eval("=ROW(Sheet9!A1)"), Val::Err(Error::Ref));
+    assert_eq!(g.eval("=ROW(1)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=ROW(1/0)"), Val::Err(Error::Div0));
+    assert_eq!(g.eval("=ROW(A1,A2)"), Val::Err(Error::Value));
+    // 引数なしは式のあるセルの行（共有式は各行）
+    let e = parse("=ROW()*10+ROW(A2)").unwrap();
+    let cx = Context {
+        grid: &g,
+        sheet: 0,
+        sys: DateSystem::D1900,
+        cache: None,
+        offset: 0,
+        row: 9,
+    };
+    assert_eq!(eval(&e, &cx), n(102.0));
+    assert_eq!(eval(&parse("=ROW()").unwrap(), &cx), n(10.0));
+    let mut got = Vec::new();
+    eval_rows(&e, &cx, 3, &mut |_, v| got.push(v));
+    assert_eq!(got, vec![n(102.0), n(113.0), n(124.0)]);
+    for name in ["AND", "OR", "IFS", "ROW"] {
+        assert_eq!(
+            formula_text(&parse(&format!("={}(1)", name.to_lowercase())).unwrap()),
+            format!("={name}(1)")
+        );
+    }
 }

@@ -122,7 +122,13 @@ pub enum Func {
     /// `ROUND`・`ROUNDUP`・`ROUNDDOWN`
     Round(Rounding),
     If,
+    /// `IFS(条件1, 値1, …)`
+    Ifs,
     Iferror,
+    /// `AND`（`true`）・`OR`
+    AndOr(bool),
+    /// `ROW([参照])`
+    Row,
     Mod,
     Pi,
     /// `TRUE()`（`true`）・`FALSE()`
@@ -172,6 +178,10 @@ impl Func {
             "ROUNDUP" => Func::Round(Rounding::Up),
             "ROUNDDOWN" => Func::Round(Rounding::Down),
             "IF" => Func::If,
+            "IFS" => Func::Ifs,
+            "AND" => Func::AndOr(true),
+            "OR" => Func::AndOr(false),
+            "ROW" => Func::Row,
             "MOD" => Func::Mod,
             "PI" => Func::Pi,
             "TRUE" => Func::Logical(true),
@@ -205,6 +215,10 @@ impl Func {
             Func::Round(Rounding::Up) => "ROUNDUP",
             Func::Round(Rounding::Down) => "ROUNDDOWN",
             Func::If => "IF",
+            Func::Ifs => "IFS",
+            Func::AndOr(true) => "AND",
+            Func::AndOr(false) => "OR",
+            Func::Row => "ROW",
             Func::Mod => "MOD",
             Func::Pi => "PI",
             Func::Logical(true) => "TRUE",

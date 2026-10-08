@@ -26,6 +26,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: None,
     },
     FuncInfo {
+        name: "AND",
+        desc: "すべての論理式が真なら TRUE、1 つでも偽なら FALSE を返します（範囲の中の文字列・空は無視します）。",
+        params: &["論理式1", "[論理式2]"],
+        repeat: Some((1, 1)),
+    },
+    FuncInfo {
         name: "AVERAGE",
         desc: "数値の平均を返します（範囲の中の文字列・真偽値・空は無視します。数値がなければ #DIV/0!）。",
         params: &["数値1", "[数値2]"],
@@ -86,6 +92,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: None,
     },
     FuncInfo {
+        name: "IFS",
+        desc: "最初に真になった条件の値を返します（どれも真でなければ #N/A）。",
+        params: &["条件1", "値1", "[条件2", "値2]"],
+        repeat: Some((2, 2)),
+    },
+    FuncInfo {
         name: "MAX",
         desc: "数値の最大値を返します（範囲の中の文字列・真偽値・空は無視します。数値がなければ 0）。",
         params: &["数値1", "[数値2]"],
@@ -108,6 +120,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         desc: "数値を除数で割った余りを返します（符号は除数と同じ。MOD(-3,2) = 1）。除数が 0 なら #DIV/0!。",
         params: &["数値", "除数"],
         repeat: None,
+    },
+    FuncInfo {
+        name: "OR",
+        desc: "論理式が 1 つでも真なら TRUE、すべて偽なら FALSE を返します（範囲の中の文字列・空は無視します）。",
+        params: &["論理式1", "[論理式2]"],
+        repeat: Some((1, 1)),
     },
     FuncInfo {
         name: "PERCENTILE",
@@ -155,6 +173,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         name: "ROUNDUP",
         desc: "数値を指定の桁で切り上げます（0 から遠い方へ。桁数が負なら整数部で切り上げ）。",
         params: &["数値", "桁数"],
+        repeat: None,
+    },
+    FuncInfo {
+        name: "ROW",
+        desc: "参照の行番号を返します（省略すれば式のあるセルの行。複数の行の範囲なら行番号を縦に並べます）。",
+        params: &["[参照]"],
         repeat: None,
     },
     FuncInfo {
