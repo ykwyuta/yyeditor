@@ -273,6 +273,9 @@ pub struct TerminalConfig {
     pub term: String,
     /// 選択したら自動でコピーする
     pub copy_on_select: bool,
+    /// 右クリックでメニューを出す（コピー・貼り付け・リンクを開く・作業フォルダを yysftp で開く など）。
+    /// `false` なら、選択していればコピー、していなければ貼り付け（コンソールと同じ）
+    pub right_click_menu: bool,
     /// ワークスペースのリモートのフォルダの一覧に、接続先のエージェントを使う（使わなければ SFTP。
     /// 接続先に何も置かない）。シェルにはエージェントを使わない
     pub use_agent: bool,
@@ -288,6 +291,7 @@ impl Default for TerminalConfig {
             ambiguous_wide: false,
             term: "xterm-256color".into(),
             copy_on_select: false,
+            right_click_menu: true,
             use_agent: false,
         }
     }
