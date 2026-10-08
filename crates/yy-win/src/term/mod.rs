@@ -96,6 +96,8 @@ const ID_MACRO_FOLDER: u16 = 3063;
 const ID_COPY: u16 = 3010;
 const ID_PASTE: u16 = 3011;
 const ID_CLEAR: u16 = 3012;
+const ID_SELECT_ALL: u16 = 3013;
+const ID_COPY_SCREEN: u16 = 3014;
 const ID_SIDEBAR: u16 = 3020;
 const ID_ZOOM_IN: u16 = 3021;
 const ID_ZOOM_OUT: u16 = 3022;
@@ -615,6 +617,9 @@ fn create_menu() -> Result<HMENU> {
         item(edit, ID_COPY, w!("コピー(&C)\tCtrl+Shift+C"))?;
         item(edit, ID_PASTE, w!("貼り付け(&P)\tCtrl+Shift+V"))?;
         sep(edit)?;
+        item(edit, ID_SELECT_ALL, w!("すべて選択(&A)\tCtrl+Shift+A"))?;
+        item(edit, ID_COPY_SCREEN, w!("表示している画面をコピー(&S)"))?;
+        sep(edit)?;
         item(edit, ID_CLEAR, w!("スクロールバックを消去(&L)"))?;
         let view = CreatePopupMenu()?;
         item(view, ID_SIDEBAR, w!("ワークスペース(&W)\tCtrl+Shift+E"))?;
@@ -726,6 +731,9 @@ fn shortcut(msg: &MSG) -> bool {
     let m = mods();
     let frame = with(|a| a.frame).unwrap_or_default();
     let cmd = match (m.ctrl, m.shift, vk) {
+        // 選択しているときの Ctrl+C はコピー（していなければ、そのままシェルへ送る〔中断〕）
+        (true, false, VK_C) if !m.alt && with(|a| a.has_selection()).unwrap_or(false) => ID_COPY,
+        (true, true, VK_A) => ID_SELECT_ALL,
         (true, true, VK_T) => ID_NEW_TAB,
         (true, true, VK_W) => ID_CLOSE_TAB,
         (true, true, VK_C) => ID_COPY,
@@ -2217,13 +2225,99 @@ impl TermApp {
         self.send_input(bytes);
     }
 
+    /// 選択しているか。
+    fn has_selection(&self) -> bool {
+        self.tab().is_some_and(|t| t.selection.is_some())
+    }
+
+    /// 選択をコピーする。選択していなければ `false`。クリップボードに書けなければ（ほかのアプリが
+    /// 使っている）ステータスバーで知らせ、選択は残す（もう一度コピーできる）。
     fn copy(&mut self) -> bool {
         let Some(t) = self.tab() else { return false };
         let Some((a, b)) = t.selection else {
             return false;
         };
-        let text = t.term.text(a, b).replace('\n', "\r\n");
-        crate::clipboard::set_text(self.frame, &text, false)
+        let text = t.term.text(a, b);
+        self.put_clipboard(&text);
+        true
+    }
+
+    /// 文字列をクリップボードに書く（改行は CR LF）。書けたら `true`。結果をステータスバーに出す。
+    fn put_clipboard(&mut self, text: &str) -> bool {
+        let text = text.replace('\n', "\r\n");
+        let ok = crate::clipboard::set_text(self.frame, &text, false);
+        self.status_text = if ok {
+            let lines = text.lines().count().max(1);
+            format!(
+                "コピーしました（{} 文字・{lines} 行）",
+                text.chars().count()
+            )
+        } else {
+            "クリップボードに書けませんでした（ほかのアプリが使用中）。もう一度コピーしてください（選択は残しています）"
+                .into()
+        };
+        self.update_status();
+        ok
+    }
+
+    /// 選択をコピーし、書けたら選択を解く（メニュー・ショートカット・右クリック）。
+    fn copy_command(&mut self) {
+        if !self.has_selection() {
+            self.status_text = if self.reports_mouse_mode() {
+                "選択していません。このプログラムはマウスを使っているので、Shift を押しながらドラッグして選択します（表示している画面をコピー・すべて選択もできます）"
+            } else {
+                "選択していません。ドラッグして選択するか、すべて選択（Ctrl+Shift+A）・表示している画面をコピーを使ってください"
+            }
+            .into();
+            self.update_status();
+            return;
+        }
+        let Some(t) = self.tab() else { return };
+        let Some((a, b)) = t.selection else { return };
+        let text = t.term.text(a, b);
+        if self.put_clipboard(&text) {
+            if let Some(t) = self.tab_mut() {
+                t.selection = None;
+            }
+            self.invalidate();
+        }
+    }
+
+    /// すべて（スクロールバックと画面）を選択する。
+    fn select_all(&mut self) {
+        let Some(t) = self.tab_mut() else { return };
+        let first = t.term.first_line();
+        let last = t.term.end_line().saturating_sub(1);
+        t.selection = Some((
+            Pos {
+                line: first,
+                col: 0,
+            },
+            Pos {
+                line: last,
+                col: t.term.cols(),
+            },
+        ));
+        t.selecting = false;
+        self.status_text = "すべて選択しました（Ctrl+Shift+C か右クリックでコピー）".into();
+        self.update_status();
+        self.invalidate();
+    }
+
+    /// 表示している画面（スクロールバックをさかのぼっていればその位置）の文字をコピーする。
+    fn copy_screen(&mut self) {
+        let Some(t) = self.tab() else { return };
+        let back = t.back.min(t.term.history_len()) as u64;
+        let top = t.term.screen_line(0) - back;
+        let rows = t.term.rows() as u64;
+        let text = t.term.text(
+            Pos { line: top, col: 0 },
+            Pos {
+                line: top + rows - 1,
+                col: t.term.cols(),
+            },
+        );
+        self.put_clipboard(&text);
     }
 
     fn paste(&mut self) {
@@ -2299,6 +2393,12 @@ impl TermApp {
             line: t.term.screen_line(0) - back + row,
             col,
         })
+    }
+
+    /// プログラムがマウスの操作の報告を求めているか（Shift に関係なく）。
+    fn reports_mouse_mode(&self) -> bool {
+        self.tab()
+            .is_some_and(|t| t.term.modes().mouse != MouseMode::Off && t.exited.is_none())
     }
 
     /// マウスの操作を報告するか（プログラムが要求していて、Shift を押していない）。
@@ -2517,14 +2617,13 @@ fn command(hwnd: HWND, id: u16) {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         },
         ID_COPY => {
-            with(|a| {
-                if a.copy() {
-                    if let Some(t) = a.tab_mut() {
-                        t.selection = None;
-                    }
-                    a.invalidate();
-                }
-            });
+            with(|a| a.copy_command());
+        }
+        ID_SELECT_ALL => {
+            with(|a| a.select_all());
+        }
+        ID_COPY_SCREEN => {
+            with(|a| a.copy_screen());
         }
         ID_PASTE => {
             with(|a| a.paste());
@@ -2656,6 +2755,8 @@ Ctrl+Shift+O\tSSH で接続
 Ctrl+Shift+W\tタブを閉じる
 Ctrl+Tab / Ctrl+Shift+Tab\tタブの切り替え
 Ctrl+Shift+C / Ctrl+Insert\tコピー
+Ctrl+C\t選択していればコピー（していなければシェルへ送る〔中断〕）
+Ctrl+Shift+A\tすべて選択（スクロールバックも）
 Ctrl+Shift+V / Shift+Insert\t貼り付け
 右クリック\t選択していればコピー、していなければ貼り付け
 ダブルクリック\t単語を選択
@@ -2663,7 +2764,8 @@ Shift+PageUp / PageDown\tスクロールバックを表示
 Ctrl+Shift+E\tワークスペース（サイドバー）
 Ctrl++ / Ctrl+- / Ctrl+0\t文字の大きさ
 
-プログラムがマウスを使っているとき（vim・tmux など）は、Shift を押しながら選択します。";
+プログラムがマウスを使っているとき（vim・tmux など）は、Shift を押しながら選択します。
+選択できないときも、編集 > 表示している画面をコピー で画面の文字をすべてコピーできます。";
 
 /// 「SSH で接続」。
 fn cmd_ssh(hwnd: HWND) {
@@ -3565,6 +3667,8 @@ extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                     if let Some(t) = a.tab_mut() {
                         t.mouse_button = Some(Button::Left);
                     }
+                    a.status_text = "このプログラムはマウスを使っています。文字を選択するには Shift を押しながらドラッグします".into();
+                    a.update_status();
                     return;
                 }
                 if msg == WM_LBUTTONDBLCLK {
@@ -3672,12 +3776,10 @@ extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                     a.report_mouse(MouseEvent::Press(button), x, y);
                     return;
                 }
-                // 選択していればコピー、していなければ貼り付け（コンソールと同じ）
-                if button == Button::Right && a.copy() {
-                    if let Some(t) = a.tab_mut() {
-                        t.selection = None;
-                    }
-                    a.invalidate();
+                // 選択していればコピー、していなければ貼り付け（コンソールと同じ）。コピーに失敗しても
+                // 貼り付けはしない（選択は残す）
+                if button == Button::Right && a.has_selection() {
+                    a.copy_command();
                 } else {
                     a.paste();
                 }

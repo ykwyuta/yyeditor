@@ -298,3 +298,44 @@ fn cancel_in_the_middle_of_a_sequence() {
     assert_eq!(lines(&t), ["ac"]);
     assert_eq!(t.screen_row(0).cells[0].attr.fg, Color::Default);
 }
+
+/// すべて選択（スクロールバックの先頭から画面の最後まで）の文字列。スクロールバックからあふれて捨てた
+/// 行があっても、残っている行をすべて取り出せる。代替画面の間も同じ。
+#[test]
+fn select_all_text_after_history_overflow() {
+    let mut t = Terminal::new(10, 3, 5);
+    for i in 0..20 {
+        t.feed(format!("L{i}\r\n").as_bytes());
+    }
+    let all = |t: &Terminal| {
+        t.text(
+            Pos {
+                line: t.first_line(),
+                col: 0,
+            },
+            Pos {
+                line: t.end_line() - 1,
+                col: t.cols(),
+            },
+        )
+    };
+    let text = all(&t);
+    // スクロールバック 5 行＋画面 3 行（最後は空の行）
+    assert_eq!(text, "L13\nL14\nL15\nL16\nL17\nL18\nL19\n");
+    // 表示している画面だけ
+    let top = t.screen_line(0);
+    let screen = t.text(
+        Pos { line: top, col: 0 },
+        Pos {
+            line: top + t.rows() as u64 - 1,
+            col: t.cols(),
+        },
+    );
+    assert_eq!(screen, "L18\nL19\n");
+    // 全角の文字も 1 文字として
+    t.feed("漢字ABC".as_bytes());
+    assert!(all(&t).ends_with("L19\n漢字ABC"), "{:?}", all(&t));
+    // 代替画面
+    t.feed(b"\x1b[?1049h\x1b[Hvim");
+    assert!(all(&t).contains("L13") && all(&t).contains("vim"));
+}
