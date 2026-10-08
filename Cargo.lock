@@ -3506,6 +3506,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "yyclip"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "yyeditor"
 version = "0.1.0"
 dependencies = [

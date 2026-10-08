@@ -91,7 +91,7 @@ pub(crate) fn app_icons(hinstance: windows::Win32::Foundation::HINSTANCE) -> (HI
     }
 }
 
-/// git の askpass として起動されたなら、資格情報を答えて `true`（`main` はすぐ終わる。16 章）。
+/// git の askpass として起動されたなら、資格情報を答えて `true`（`main` はすぐ終わる。17 章）。
 /// ソース管理のプル・プッシュで、入力してもらったパスワードなどを git・ssh に渡すのに使う。
 pub fn git_askpass() -> bool {
     yy_git::askpass_main()

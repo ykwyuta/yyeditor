@@ -1,4 +1,4 @@
-# 16. ソース管理（Git）
+# 17. ソース管理（Git）
 
 yyeditor に、VS Code のソース管理と同じ形の Git の連携を足す。コアは `yy-git`（OS に依存しない。Linux の CI で
 実際の git を使って試験する）、画面は `yy-win` の `app/gitmode.rs`。
