@@ -390,3 +390,127 @@ fn works_on_a_remote_repository() {
     let e = missing.status().unwrap_err();
     assert!(!e.message.is_empty());
 }
+
+#[test]
+fn reads_auth_failures_and_remote_urls() {
+    use crate::auth::*;
+    assert_eq!(
+        auth_failure(
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+        ),
+        Some(AuthKind::Password)
+    );
+    assert_eq!(
+        auth_failure(
+            "remote: Invalid username or password.\nfatal: Authentication failed for 'https://x/'"
+        ),
+        Some(AuthKind::Password)
+    );
+    assert_eq!(
+        auth_failure(
+            "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."
+        ),
+        Some(AuthKind::Ssh)
+    );
+    assert_eq!(auth_failure("fatal: not a git repository"), None);
+    let r = remote_info("https://alice@github.com/owner/repo.git");
+    assert_eq!(
+        (r.key.as_str(), r.label.as_str(), r.user.as_str(), r.kind),
+        (
+            "git/https://github.com",
+            "https://github.com",
+            "alice",
+            AuthKind::Password
+        )
+    );
+    let r = remote_info("https://bob:secret@git.example.com:8443/x");
+    assert_eq!(
+        (r.key.as_str(), r.user.as_str()),
+        ("git/https://git.example.com:8443", "bob")
+    );
+    let r = remote_info("git@github.com:owner/repo.git");
+    assert_eq!(
+        (r.key.as_str(), r.label.as_str(), r.kind),
+        ("git/ssh/git@github.com", "git@github.com", AuthKind::Ssh)
+    );
+    let r = remote_info("ssh://git@host:2222/srv/repo.git");
+    assert_eq!(r.key, "git/ssh/git@host:2222");
+    assert_eq!(askpass_answer("Username for 'https://x': ", "u", "p"), "u");
+    assert_eq!(
+        askpass_answer("Password for 'https://u@x': ", "u", "p"),
+        "p"
+    );
+    assert_eq!(
+        askpass_answer("Enter passphrase for key '/k': ", "u", "p"),
+        "p"
+    );
+    let c = Credentials {
+        user: "u".into(),
+        secret: "very secret".into(),
+    };
+    assert!(!format!("{c:?}").contains("secret"));
+}
+
+/// 資格情報を askpass で渡す（git credential fill は、資格情報ヘルパーがなければ askpass に尋ねる）。
+#[cfg(unix)]
+#[test]
+fn passes_credentials_through_askpass() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    if !git_available() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("r");
+    std::fs::create_dir_all(&repo).unwrap();
+    init(&repo);
+    let input = b"protocol=https\nhost=example.com\n\n";
+    let cred = Credentials {
+        user: "alice".into(),
+        secret: "p@ss w'rd $HOME".into(),
+    };
+    // 資格情報がなければ尋ねずに失敗し、認証の失敗と分かる
+    let plain = Git::new(&repo);
+    let e = plain
+        .run_with(
+            ["-c", "credential.helper=", "credential", "fill"],
+            Some(input),
+        )
+        .unwrap_err();
+    assert_eq!(auth_failure(&e.message), Some(AuthKind::Password), "{e}");
+    // 手元: askpass のプログラム
+    let script = tmp.path().join("askpass.sh");
+    std::fs::write(&script, crate::auth::ASKPASS_SCRIPT).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let local = Git::with_runner(Arc::new(LocalRunner::new(&repo).with_askpass(&script)));
+    let out = local
+        .run_auth_with(&["credential", "fill"], input, &cred)
+        .unwrap()
+        .text();
+    assert!(out.contains("username=alice\n"), "{out}");
+    assert!(out.contains("password=p@ss w'rd $HOME\n"), "{out}");
+    // 接続先: sh -c の中で一時的な askpass を作り、資格情報は標準入力で渡す
+    let t: Arc<dyn yy_remote::Transport> = Arc::new(yy_remote::local::LocalTransport::new());
+    let remote = Git::remote(t, repo.as_os_str().as_bytes());
+    let out = remote
+        .run_auth_with(&["credential", "fill"], input, &cred)
+        .unwrap()
+        .text();
+    assert!(out.contains("username=alice\n"), "{out}");
+    assert!(out.contains("password=p@ss w'rd $HOME\n"), "{out}");
+    // 一時的な askpass は消える
+    let askpass = remote
+        .run_auth(
+            [
+                "-c",
+                "alias.askpath=!printf '%s' \"$GIT_ASKPASS\"",
+                "askpath",
+            ],
+            Some(&cred),
+        )
+        .unwrap()
+        .text();
+    let askpass = askpass.trim();
+    assert!(askpass.ends_with("/askpass"), "{askpass}");
+    assert!(!Path::new(askpass).exists());
+}

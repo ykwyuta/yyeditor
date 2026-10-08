@@ -8,12 +8,16 @@ use std::sync::Arc;
 
 use yy_remote::{RemoteUri, Transport};
 
+use crate::auth::{ASKPASS_ENV, ASKPASS_SCRIPT, Credentials, SECRET_ENV, USER_ENV, auth_args};
 use crate::{Found, GitError, Limits, Output, Result};
 
 /// 1 つのリポジトリで git を動かすもの。
 pub trait Runner: Send + Sync {
     /// 作業ツリーの起点で `git <args>` を動かす（`input` は標準入力）。0 以外で終われば [`GitError`]。
     fn git(&self, args: &[String], input: Option<&[u8]>) -> Result<Output>;
+    /// 資格情報を渡して git を動かす（askpass で答える。設定済みの資格情報ヘルパーは外す。[`crate::auth`]）。
+    fn git_auth(&self, args: &[String], input: Option<&[u8]>, cred: &Credentials)
+    -> Result<Output>;
     /// 作業ツリーのファイル（起点からの相対パス）。なければ `Ok(None)`。
     fn read(&self, rel: &str) -> Result<Option<Vec<u8>>>;
     /// 場所の説明（手元のフォルダ・`ssh://…`）。
@@ -47,6 +51,8 @@ fn failure(stderr: &str, stdout: &[u8], code: Option<i64>) -> String {
 pub struct LocalRunner {
     root: PathBuf,
     program: PathBuf,
+    /// 資格情報を答える askpass（既定は自分の実行ファイル。[`crate::askpass_main`]）
+    askpass: Option<PathBuf>,
 }
 
 impl LocalRunner {
@@ -64,18 +70,46 @@ impl LocalRunner {
         LocalRunner {
             root: root.to_path_buf(),
             program: program.to_path_buf(),
+            askpass: std::env::current_exe().ok(),
         }
     }
-}
 
-impl Runner for LocalRunner {
-    fn git(&self, args: &[String], input: Option<&[u8]>) -> Result<Output> {
+    /// askpass のプログラムを変える（試験用）。
+    pub fn with_askpass(mut self, askpass: &Path) -> LocalRunner {
+        self.askpass = Some(askpass.to_path_buf());
+        self
+    }
+
+    fn run(
+        &self,
+        args: &[String],
+        input: Option<&[u8]>,
+        cred: Option<&Credentials>,
+    ) -> Result<Output> {
         let shown = shown(args);
         let mut c = Command::new(&self.program);
         c.arg("-C")
             .arg(&self.root)
-            .args(["-c", "core.quotepath=off", "-c", "color.ui=false"])
-            .args(args)
+            .args(["-c", "core.quotepath=off", "-c", "color.ui=false"]);
+        if let Some(cred) = cred {
+            let Some(askpass) = &self.askpass else {
+                return Err(GitError {
+                    command: shown,
+                    message: "資格情報を渡すプログラム（askpass）がありません".into(),
+                });
+            };
+            c.args(auth_args())
+                .env("GIT_ASKPASS", askpass)
+                .env("SSH_ASKPASS", askpass)
+                .env("SSH_ASKPASS_REQUIRE", "force")
+                .env(ASKPASS_ENV, "1")
+                .env(USER_ENV, &cred.user)
+                .env(SECRET_ENV, &cred.secret);
+            if std::env::var_os("DISPLAY").is_none() {
+                c.env("DISPLAY", ":0");
+            }
+        }
+        c.args(args)
             // パスワードを端末で尋ねない（固まらない）。資格情報マネージャーの画面は出てよい
             .env("GIT_TERMINAL_PROMPT", "0")
             // エディタを開かない（コミットのメッセージは渡す）
@@ -122,6 +156,21 @@ impl Runner for LocalRunner {
             stdout: out.stdout,
             stderr,
         })
+    }
+}
+
+impl Runner for LocalRunner {
+    fn git(&self, args: &[String], input: Option<&[u8]>) -> Result<Output> {
+        self.run(args, input, None)
+    }
+
+    fn git_auth(
+        &self,
+        args: &[String],
+        input: Option<&[u8]>,
+        cred: &Credentials,
+    ) -> Result<Output> {
+        self.run(args, input, Some(cred))
     }
 
     fn read(&self, rel: &str) -> Result<Option<Vec<u8>>> {
@@ -193,14 +242,41 @@ fn remote_git_command(root: &[u8], args: &[String]) -> Vec<u8> {
     cmd
 }
 
-impl Runner for RemoteRunner {
-    fn git(&self, args: &[String], input: Option<&[u8]>) -> Result<Output> {
-        let shown = shown(args);
-        let out = self.exec(
-            &remote_git_command(&self.root, args),
-            input.unwrap_or(b""),
-            &shown,
-        )?;
+/// 接続先で、資格情報を askpass で渡して git を動かすコマンド（`sh -c '…'`）。標準入力の 1 行目が
+/// ユーザー名、2 行目がパスワードなどで、残りを git に渡す。askpass のスクリプトは一時フォルダに作って
+/// 終わったら消す。
+fn remote_auth_command(root: &[u8], args: &[String]) -> Vec<u8> {
+    let mut git: Vec<u8> =
+        b"GIT_ASKPASS=\"$d/askpass\" SSH_ASKPASS=\"$d/askpass\" SSH_ASKPASS_REQUIRE=force \
+DISPLAY=\"${DISPLAY:-:0}\" GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true GIT_MERGE_AUTOEDIT=no git -C "
+            .to_vec();
+    git.extend(shell_quote(root));
+    git.extend_from_slice(b" -c core.quotepath=off -c color.ui=false -c credential.helper=");
+    for a in args {
+        git.push(b' ');
+        git.extend(shell_quote(a.as_bytes()));
+    }
+    let mut script: Vec<u8> = b"d=$(mktemp -d 2>/dev/null || mktemp -d -t yygit) || exit 125\n\
+trap 'rm -rf \"$d\"' EXIT\n\
+umask 077\n\
+printf '%s' "
+        .to_vec();
+    script.extend(shell_quote(ASKPASS_SCRIPT.as_bytes()));
+    script.extend_from_slice(
+        b" > \"$d/askpass\" && chmod 700 \"$d/askpass\" || exit 125\n\
+IFS= read -r YYGIT_USER\n\
+IFS= read -r YYGIT_SECRET\n\
+export YYGIT_USER YYGIT_SECRET\n",
+    );
+    script.extend(git);
+    script.push(b'\n');
+    let mut cmd = b"sh -c ".to_vec();
+    cmd.extend(shell_quote(&script));
+    cmd
+}
+
+impl RemoteRunner {
+    fn finish(&self, shown: String, out: yy_remote::Output) -> Result<Output> {
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         if !out.success() {
             let message = if out.status == Some(127) {
@@ -220,6 +296,33 @@ impl Runner for RemoteRunner {
             stdout: out.stdout,
             stderr,
         })
+    }
+}
+
+impl Runner for RemoteRunner {
+    fn git_auth(
+        &self,
+        args: &[String],
+        input: Option<&[u8]>,
+        cred: &Credentials,
+    ) -> Result<Output> {
+        let shown = shown(args);
+        // 改行は渡せない（1 行ずつ読む）
+        let line = |s: &str| s.replace(['\r', '\n'], "");
+        let mut stdin = format!("{}\n{}\n", line(&cred.user), line(&cred.secret)).into_bytes();
+        stdin.extend_from_slice(input.unwrap_or(b""));
+        let out = self.exec(&remote_auth_command(&self.root, args), &stdin, &shown)?;
+        self.finish(shown, out)
+    }
+
+    fn git(&self, args: &[String], input: Option<&[u8]>) -> Result<Output> {
+        let shown = shown(args);
+        let out = self.exec(
+            &remote_git_command(&self.root, args),
+            input.unwrap_or(b""),
+            &shown,
+        )?;
+        self.finish(shown, out)
     }
 
     fn read(&self, rel: &str) -> Result<Option<Vec<u8>>> {

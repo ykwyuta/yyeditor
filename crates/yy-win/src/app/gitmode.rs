@@ -72,8 +72,82 @@ enum Item {
     Note,
 }
 
-/// 作業スレッドで動かす git の操作。
-type GitOp = Box<dyn FnOnce(&Git) -> std::result::Result<String, GitError> + Send>;
+/// 作業スレッドで動かす git の操作（結果と、プル・プッシュなどならその資格情報の扱い）。
+type GitOp =
+    Box<dyn FnOnce(&Git) -> (std::result::Result<String, GitError>, Option<NetDone>) + Send>;
+
+/// リモートとやり取りする操作（資格情報が要ることがある）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Net {
+    Pull,
+    Push,
+    Sync,
+    Fetch,
+}
+
+impl Net {
+    fn label(self) -> &'static str {
+        match self {
+            Net::Pull => "プル",
+            Net::Push => "プッシュ",
+            Net::Sync => "同期",
+            Net::Fetch => "フェッチ",
+        }
+    }
+
+    fn run(
+        self,
+        g: &Git,
+        cred: Option<&yy_git::Credentials>,
+    ) -> std::result::Result<String, GitError> {
+        match self {
+            Net::Pull => g.pull_with(cred).map(|o| summary(&o)),
+            Net::Fetch => g.fetch_with(cred).map(|o| summary(&o)),
+            Net::Push => {
+                let st = g.status()?;
+                g.push_with(&st, cred).map(|o| summary(&o))
+            }
+            Net::Sync => {
+                let pulled = g.pull_with(cred)?;
+                let st = g.status()?;
+                let pushed = g.push_with(&st, cred)?;
+                Ok(format!("{}{}", summary(&pulled), summary(&pushed)))
+            }
+        }
+    }
+}
+
+/// リモートとやり取りした操作の、資格情報の扱い。
+struct NetDone {
+    net: Net,
+    /// リモートの URL から分かること（リモートがなければ `None`）
+    info: Option<yy_git::RemoteInfo>,
+    /// 保存した資格情報を使った
+    used_saved: bool,
+    /// 入力してもらった資格情報と「保存する」
+    tried: Option<(yy_git::Credentials, bool)>,
+}
+
+/// 資格情報を尋ねる頼み（[`App::git_done`] から）。
+struct AuthAsk {
+    net: Net,
+    info: yy_git::RemoteInfo,
+    /// 前に入力した（または保存していた）ユーザー名
+    user: String,
+    /// 問いの前に添えること（受け付けられなかった、など）
+    note: Option<String>,
+}
+
+/// 操作が終わったあとに、状態を借りずにすること。
+enum After {
+    Error(String),
+    Ask(AuthAsk),
+}
+
+/// 資格情報の保存先（設定で保存しないなら `None`）。
+fn credential_store() -> Option<crate::credstore::WindowsCredentials> {
+    crate::remote::remember_passwords().then_some(crate::credstore::WindowsCredentials)
+}
 
 /// 接続を待っている操作。
 struct Pending {
@@ -146,6 +220,8 @@ pub(crate) struct Done {
     status: std::result::Result<Status, GitError>,
     /// 成功したらメッセージの欄を空にする（コミット）
     clear_message: bool,
+    /// プル・プッシュなどの資格情報の扱い
+    net: Option<NetDone>,
 }
 
 /// ソース管理のビュー。
@@ -800,6 +876,50 @@ impl App {
         clear_message: bool,
         op: impl FnOnce(&Git) -> std::result::Result<String, GitError> + Send + 'static,
     ) {
+        self.git_spawn(label, clear_message, Box::new(move |g| (op(g), None)));
+    }
+
+    /// リモートとやり取りする操作。資格情報は、`cred`（入力してもらったもの）、なければ保存したもの
+    /// （リモートの URL ごと）を渡す。認証に失敗したら [`App::git_done`] が尋ねてやり直す。
+    fn git_net(&mut self, net: Net, cred: Option<(yy_git::Credentials, bool)>) {
+        let remember = crate::remote::remember_passwords();
+        self.git_spawn(
+            net.label(),
+            false,
+            Box::new(move |g| {
+                let info = g.default_remote_url().map(|u| yy_git::remote_info(&u));
+                let (use_cred, used_saved) = match &cred {
+                    Some((c, _)) => (Some(c.clone()), false),
+                    None => {
+                        use yy_remote::PasswordStore;
+                        let saved = info
+                            .as_ref()
+                            .filter(|_| remember)
+                            .and_then(|i| crate::credstore::WindowsCredentials.load(&i.key))
+                            .map(|s| yy_git::Credentials {
+                                user: s.user,
+                                secret: s.password,
+                            });
+                        let used = saved.is_some();
+                        (saved, used)
+                    }
+                };
+                let result = net.run(g, use_cred.as_ref());
+                (
+                    result,
+                    Some(NetDone {
+                        net,
+                        info,
+                        used_saved,
+                        tried: cred,
+                    }),
+                )
+            }),
+        );
+    }
+
+    /// git の操作を作業スレッドで動かし、終わったら状態を読み直す。
+    fn git_spawn(&mut self, label: &str, clear_message: bool, op: GitOp) {
         let Some(root) = self.scm.current.clone() else {
             return;
         };
@@ -827,7 +947,7 @@ impl App {
             self.scm.pending = Some(Pending {
                 label: label.to_string(),
                 clear_message,
-                op: Box::new(op),
+                op,
             });
             if let Some(u) = remote_of(&root) {
                 self.git_request_connect(vec![u.target()], Then::Pending);
@@ -837,7 +957,7 @@ impl App {
         let hwnd = self.scm.hwnd.0 as isize;
         let label = label.to_string();
         std::thread::spawn(move || {
-            let result = op(&git);
+            let (result, net) = op(&git);
             let status = git.status();
             let done = Box::into_raw(Box::new(Done {
                 root,
@@ -845,6 +965,7 @@ impl App {
                 result,
                 status,
                 clear_message,
+                net,
             }));
             unsafe {
                 if PostMessageW(
@@ -871,7 +992,7 @@ impl App {
                 };
                 let live = self.scm.current.as_deref().and_then(git_live).is_some();
                 if live {
-                    self.git_run(&p.label, p.clear_message, p.op);
+                    self.git_spawn(&p.label, p.clear_message, p.op);
                 } else {
                     self.scm.render();
                 }
@@ -880,14 +1001,38 @@ impl App {
     }
 
     /// 操作が終わった。知らせる誤りを返す（メッセージボックスは借りずに出す）。
-    fn git_done(&mut self, done: Done) -> Option<String> {
+    fn git_done(&mut self, done: Done) -> Option<After> {
         if self.scm.current.as_ref() != Some(&done.root) {
             return None;
         }
         self.scm.busy = None;
         let mut error = None;
+        let mut ask = None;
         match &done.result {
             Ok(text) => {
+                // 入力してもらった資格情報で通ったら、選んでいれば保存する
+                if let Some(NetDone {
+                    info: Some(info),
+                    tried: Some((cred, true)),
+                    ..
+                }) = &done.net
+                    && let Some(store) = credential_store()
+                {
+                    use yy_remote::PasswordStore;
+                    let saved = yy_remote::SavedPassword {
+                        user: cred.user.clone(),
+                        password: cred.secret.clone(),
+                    };
+                    match store.save(&info.key, &saved) {
+                        Ok(()) => self.scm.add_log(&format!(
+                            "[資格情報] {} の資格情報を Windows の資格情報マネージャーに保存しました（yyeditor/{}）",
+                            info.label, info.key
+                        )),
+                        Err(e) => self
+                            .scm
+                            .add_log(&format!("[資格情報] 保存できませんでした: {e}")),
+                    }
+                }
                 if !done.label.is_empty() {
                     self.scm.add_log(&format!("[{}] {}", done.label, text));
                     self.status_msg = if text.trim().is_empty() {
@@ -903,9 +1048,49 @@ impl App {
             }
             Err(e) => {
                 self.scm.add_log(&format!("[{}] 失敗\n{e}", done.label));
-                self.status_msg = format!("Git: {}に失敗しました", done.label);
-                self.update_status();
-                error = Some(format!("{}に失敗しました。\n\n{e}", done.label));
+                // 資格情報がない・違う: 尋ねてやり直す（保存していたものが通らなければ消す）
+                if let Some(NetDone {
+                    net,
+                    info: Some(info),
+                    used_saved,
+                    tried,
+                }) = &done.net
+                    && yy_git::auth_failure(&e.message).is_some()
+                {
+                    let mut user = info.user.clone();
+                    let note = if *used_saved {
+                        if let Some(store) = credential_store() {
+                            use yy_remote::PasswordStore;
+                            if let Some(s) = store.load(&info.key) {
+                                user = s.user;
+                            }
+                            store.delete(&info.key);
+                        }
+                        Some(
+                            "保存していた資格情報が受け付けられませんでした（保存を消しました）。"
+                                .to_string(),
+                        )
+                    } else if let Some((c, _)) = tried {
+                        user = c.user.clone();
+                        Some(
+                            "資格情報が受け付けられませんでした。もう一度入力してください。".into(),
+                        )
+                    } else {
+                        None
+                    };
+                    self.status_msg = format!("Git: {}に資格情報が要ります", done.label);
+                    self.update_status();
+                    ask = Some(AuthAsk {
+                        net: *net,
+                        info: info.clone(),
+                        user,
+                        note,
+                    });
+                } else {
+                    self.status_msg = format!("Git: {}に失敗しました", done.label);
+                    self.update_status();
+                    error = Some(format!("{}に失敗しました。\n\n{e}", done.label));
+                }
             }
         }
         match done.status {
@@ -919,7 +1104,11 @@ impl App {
             }
         }
         self.scm.render();
-        error
+        match (ask, error) {
+            (Some(a), _) => Some(After::Ask(a)),
+            (None, Some(e)) => Some(After::Error(e)),
+            (None, None) => None,
+        }
     }
 
     /// 保存のあと・ウィンドウに戻ったときに読み直す（表示していれば）。
@@ -1037,6 +1226,57 @@ fn show_diff(frame: HWND, root: &Path, group: Group, c: &yy_git::Change) {
             }
         }
         Err(e) => error_box(frame, &format!("差分を作れません。\n\n{e}")),
+    }
+}
+
+/// git のリモートの資格情報を尋ねる（ユーザー名と、パスワード・トークン・パスフレーズ。「保存する」）。
+fn ask_credentials(frame: HWND, ask: &AuthAsk) -> Option<(yy_git::Credentials, bool)> {
+    let title = "Git の資格情報";
+    let note = ask
+        .note
+        .as_ref()
+        .map(|n| format!("{n}\n"))
+        .unwrap_or_default();
+    let save_label = credential_store()
+        .is_some()
+        .then_some("保存する（Windows の資格情報マネージャー。次からは尋ねません）");
+    let secret = |prompt: &str| match save_label {
+        Some(check) => crate::goto::prompt_secret_with_check(frame, title, prompt, check),
+        None => crate::goto::prompt_secret(frame, title, prompt).map(|s| (s, false)),
+    };
+    match ask.info.kind {
+        yy_git::AuthKind::Password => {
+            let user = crate::goto::prompt_text(
+                frame,
+                title,
+                &format!(
+                    "{note}{} の{}のユーザー名:",
+                    ask.info.label,
+                    ask.net.label()
+                ),
+                &ask.user,
+            )?;
+            let user = user.trim().to_string();
+            let (secret, save) = secret(&format!(
+                "{} の {user} のパスワード（またはアクセス トークン）:",
+                ask.info.label
+            ))?;
+            Some((yy_git::Credentials { user, secret }, save))
+        }
+        yy_git::AuthKind::Ssh => {
+            let (secret, save) = secret(&format!(
+                "{note}{}（SSH）に{}するための、秘密鍵のパスフレーズか SSH のパスワード:",
+                ask.info.label,
+                ask.net.label()
+            ))?;
+            Some((
+                yy_git::Credentials {
+                    user: ask.user.clone(),
+                    secret,
+                },
+                save,
+            ))
+        }
     }
 }
 
@@ -1297,28 +1537,16 @@ fn more_menu(frame: HWND, anchor: HWND) {
 fn run_menu(frame: HWND, cmd: u32, target: Option<Item>) {
     match cmd {
         M_PULL => {
-            with_app(|a| a.git_run("プル", false, |g| g.pull().map(|o| summary(&o))));
+            with_app(|a| a.git_net(Net::Pull, None));
         }
         M_PUSH => {
-            with_app(|a| {
-                a.git_run("プッシュ", false, |g| {
-                    let st = g.status()?;
-                    g.push(&st).map(|o| summary(&o))
-                })
-            });
+            with_app(|a| a.git_net(Net::Push, None));
         }
         M_SYNC => {
-            with_app(|a| {
-                a.git_run("同期", false, |g| {
-                    let pulled = g.pull()?;
-                    let st = g.status()?;
-                    let pushed = g.push(&st)?;
-                    Ok(format!("{}{}", summary(&pulled), summary(&pushed)))
-                })
-            });
+            with_app(|a| a.git_net(Net::Sync, None));
         }
         M_FETCH => {
-            with_app(|a| a.git_run("フェッチ", false, |g| g.fetch().map(|o| summary(&o))));
+            with_app(|a| a.git_net(Net::Fetch, None));
         }
         M_STAGE_ALL => {
             with_app(|a| {
@@ -1617,8 +1845,14 @@ extern "system" fn git_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         }
         WM_APP_GIT_DONE => {
             let done = unsafe { Box::from_raw(lparam.0 as *mut Done) };
-            if let Some(Some(e)) = with_app(|a| a.git_done(*done)) {
-                error_box(frame(), &e);
+            match with_app(|a| a.git_done(*done)).flatten() {
+                Some(After::Error(e)) => error_box(frame(), &e),
+                Some(After::Ask(ask)) => {
+                    if let Some(cred) = ask_credentials(frame(), &ask) {
+                        with_app(|a| a.git_net(ask.net, Some(cred)));
+                    }
+                }
+                None => {}
             }
             LRESULT(0)
         }

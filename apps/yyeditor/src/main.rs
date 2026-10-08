@@ -3,6 +3,10 @@
 
 #[cfg(windows)]
 fn main() {
+    // ソース管理（git）の資格情報を答える askpass として起動された
+    if yy_win::git_askpass() {
+        return;
+    }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     // 描画確認用: yyeditor --render-bmp <入力> <出力.bmp>
     if args.first().is_some_and(|a| a == "--render-bmp") && args.len() == 3 {

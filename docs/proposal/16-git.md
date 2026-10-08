@@ -79,6 +79,29 @@ yyeditor に、VS Code のソース管理と同じ形の Git の連携を足す�
 - 試験は `yy_remote::local::LocalTransport`（SSH の代わりに `sh -c`）で、空白・`'`・日本語を含むパスの
   リポジトリを探し、ステージ・コミット・差分の読み出し・ブランチの作成までを行う（Linux の CI）。
 
-## 6. これから
+## 6. 資格情報
+
+- プル・プッシュ・同期・フェッチは、まず資格情報を渡さずに（`GIT_TERMINAL_PROMPT=0`。設定済みの資格情報
+  ヘルパー・SSH の鍵・ssh-agent はそのまま使う）、ただしリモートの URL（`git ls-remote --get-url`）のホストの
+  資格情報を保存していればそれを渡して動かす。
+- 失敗の出力が資格情報のためのもの（`could not read Username`・`terminal prompts disabled`・
+  `Authentication failed`・`401`・`403`・`Permission denied (publickey` など。`yy_git::auth_failure`）なら、
+  失敗にせずに尋ねる: HTTPS はユーザー名とパスワード（トークン）、SSH は鍵のパスフレーズか SSH のパスワード。
+  「保存する」を選べる（`[remote] remember_passwords`）。入力した資格情報でやり直し、通ったら Windows の資格情報
+  マネージャーに `yyeditor/git/https://ホスト[:ポート]`・`yyeditor/git/ssh/ユーザー@ホスト` で保存する。
+  保存していたものが通らなければ消して尋ね直す。入力したものが通らなければ、もう一度尋ねる（取り消すまで）。
+- 渡し方は askpass。git は HTTPS のユーザー名・パスワードを `GIT_ASKPASS` に、ssh は鍵のパスフレーズ・
+  パスワードを `SSH_ASKPASS`（`SSH_ASKPASS_REQUIRE=force`）に尋ねるので、問いが `Username…` ならユーザー名、
+  それ以外はパスワードなどを答える。答えは環境変数 `YYGIT_USER`・`YYGIT_SECRET`（その git の起動にだけ渡す）
+  から読む。やり直すときは `-c credential.helper=` で資格情報ヘルパーを外す（受け付けられない資格情報を出し
+  続けるヘルパーがあっても askpass に尋ねさせる）。
+  - 手元: askpass は yyeditor.exe 自身（`YYGIT_ASKPASS=1` で起動されたら、`main` の初めに答えて終わる）。
+  - 接続先: `sh -c '…'` の中で `mktemp -d` の一時フォルダに askpass のスクリプト（0700）を作り、資格情報は
+    コマンドの文字列ではなく SSH の標準入力の初めの 2 行で渡して（`ps` に出ない）、`trap` で終わったら消す。
+- 試験は `git credential fill`（資格情報ヘルパーがなければ askpass に尋ねる）で、手元・接続先（`sh -c`）とも、
+  空白・`'`・`$` を含むパスワードがそのまま渡ることと、一時的な askpass が消えることを確かめる。資格情報が
+  なければ尋ねずに失敗し、その出力が資格情報のためのものと分かることも確かめる。
+
+## 7. これから
 
 - 行ごとのステージ（hunk）、ブレーム、履歴（ログ）の表示、スタッシュ、エディタの行番号の横の変更の印。

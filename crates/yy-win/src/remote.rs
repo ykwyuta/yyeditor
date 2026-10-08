@@ -868,6 +868,11 @@ pub(crate) fn start_forwards(
     out
 }
 
+/// パスワードを保存する設定か（`[remote] remember_passwords`）。
+pub(crate) fn remember_passwords() -> bool {
+    with_state(|r| r.config.remember_passwords).unwrap_or(true)
+}
+
 /// `target` への接続済みの SSH の接続（接続しない。なければ `None`）。
 pub(crate) fn live_transport(target: &Target) -> Option<Arc<dyn Transport>> {
     with_state(|r| {

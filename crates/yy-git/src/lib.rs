@@ -12,8 +12,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod auth;
 mod runner;
 mod status;
+pub use auth::{AuthKind, Credentials, RemoteInfo, askpass_main, auth_failure, remote_info};
 pub use runner::{LocalRunner, RemoteRunner, Runner, discover_remote, shell_quote};
 pub use status::{Change, Group, Status, parse_status};
 
@@ -259,6 +261,34 @@ impl Git {
         self.run_with(args, None)
     }
 
+    /// 資格情報（あれば）を渡して git を動かす（[`auth`]）。
+    pub fn run_auth<I, S>(&self, args: I, cred: Option<&Credentials>) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let args: Vec<String> = args.into_iter().map(|a| a.as_ref().to_string()).collect();
+        match cred {
+            Some(c) => self.runner.git_auth(&args, None, c),
+            None => self.runner.git(&args, None),
+        }
+    }
+
+    /// 資格情報を渡して、標準入力も渡す（試験用: `git credential fill`）。
+    pub fn run_auth_with(&self, args: &[&str], input: &[u8], cred: &Credentials) -> Result<Output> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        self.runner.git_auth(&args, Some(input), cred)
+    }
+
+    /// プル・プッシュ・フェッチの相手の URL（今のブランチのリモート、なければ `origin`）。リモートが
+    /// なければ `None`。
+    pub fn default_remote_url(&self) -> Option<String> {
+        let o = self.run(["ls-remote", "--get-url"]).ok()?;
+        let url = o.text().trim().to_string();
+        // リモートがなければ、名前（origin）がそのまま返る
+        (url.contains("://") || url.contains(':') || url.contains('/')).then_some(url)
+    }
+
     /// 作業ツリーのファイル（起点からの相対パス）の中身。なければ `Ok(None)`。
     pub fn read_worktree(&self, path: &str) -> Result<Option<Vec<u8>>> {
         self.runner.read(path)
@@ -465,18 +495,33 @@ impl Git {
 
     /// フェッチ（消えたリモートのブランチは消す）。
     pub fn fetch(&self) -> Result<Output> {
-        self.run(["fetch", "--prune"])
+        self.fetch_with(None)
+    }
+
+    /// 資格情報（あれば）を渡してフェッチ。
+    pub fn fetch_with(&self, cred: Option<&Credentials>) -> Result<Output> {
+        self.run_auth(["fetch", "--prune"], cred)
     }
 
     /// プル。
     pub fn pull(&self) -> Result<Output> {
-        self.run(["pull"])
+        self.pull_with(None)
+    }
+
+    /// 資格情報（あれば）を渡してプル。
+    pub fn pull_with(&self, cred: Option<&Credentials>) -> Result<Output> {
+        self.run_auth(["pull"], cred)
     }
 
     /// プッシュ。上流がなければ最初のリモート（`origin`）の同じ名前のブランチへ、上流として設定する。
     pub fn push(&self, status: &Status) -> Result<Output> {
+        self.push_with(status, None)
+    }
+
+    /// 資格情報（あれば）を渡してプッシュ。
+    pub fn push_with(&self, status: &Status, cred: Option<&Credentials>) -> Result<Output> {
         if status.upstream.is_some() {
-            return self.run(["push"]);
+            return self.run_auth(["push"], cred);
         }
         let Some(branch) = &status.branch else {
             return Err(GitError {
@@ -491,7 +536,7 @@ impl Git {
                 message: "リモートがありません（git remote add で追加してください）".into(),
             });
         };
-        self.run(["push", "-u", &remote, branch])
+        self.run_auth(["push", "-u", &remote, branch], cred)
     }
 }
 
