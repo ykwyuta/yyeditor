@@ -125,6 +125,7 @@ const CM_REFRESH: u32 = 4;
 const CM_REMOVE: u32 = 5;
 const CM_ADD: u32 = 6;
 const CM_ADD_REMOTE: u32 = 7;
+const CM_DOWNLOAD: u32 = 8;
 
 /// サイドバーの幅（96 DPI でのピクセル）
 const SIDEBAR_WIDTH: i32 = 240;
@@ -3612,6 +3613,11 @@ fn context_menu(hwnd: HWND) {
             } else {
                 let _ = item(CM_OPEN_EDITOR, w!("エディタで開く(&E)"));
             }
+            if let Some((_, path, _, _)) = &node
+                && sidebar::remote_uri(path).is_some()
+            {
+                let _ = item(CM_DOWNLOAD, w!("ダウンロード フォルダにコピー(&L)"));
+            }
             let _ = item(CM_COPY_PATH, w!("パスをコピー(&C)"));
             if *root {
                 let _ = item(CM_REMOVE, w!("ワークスペースから外す(&D)"));
@@ -3636,6 +3642,15 @@ fn context_menu(hwnd: HWND) {
             (CM_ADD_REMOTE, _) => cmd_add_remote_folder(hwnd),
             (CM_OPEN_HERE, Some((_, path, _, _))) => activate_node(hwnd, path, true),
             (CM_OPEN_EDITOR, Some((_, path, _, _))) => open_in_editor(hwnd, &path),
+            (CM_DOWNLOAD, Some((_, path, _, _))) => {
+                if let Some(u) = sidebar::remote_uri(&path) {
+                    match crate::download::download(hwnd, &u) {
+                        Ok(Some(m)) => set_status(&m),
+                        Ok(None) => {}
+                        Err(e) => error_box(hwnd, &e),
+                    }
+                }
+            }
             (CM_COPY_PATH, Some((_, path, _, _))) => {
                 let _ = crate::clipboard::set_text(hwnd, &path.to_string_lossy(), false);
             }

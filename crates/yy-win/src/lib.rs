@@ -19,6 +19,7 @@ mod crash;
 mod credstore;
 mod diffstream;
 mod diffview;
+mod download;
 mod findbar;
 mod font;
 mod goto;

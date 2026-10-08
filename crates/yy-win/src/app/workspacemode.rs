@@ -54,6 +54,7 @@ const CM_DELETE: u32 = 14;
 const CM_CUT: u32 = 15;
 const CM_PASTE: u32 = 16;
 const CM_COPY: u32 = 17;
+const CM_DOWNLOAD: u32 = 18;
 
 /// サイドバーとツリーの境界の幅（96 DPI でのピクセル）
 const SPLITTER: i32 = 5;
@@ -1087,9 +1088,12 @@ fn context_menu(hwnd: HWND, tree: HWND) {
                         add(CM_GREP, "フォルダ内を検索 (Grep)(&F)...");
                     }
                     sep();
-                } else if yyterm_exe().is_some() {
-                    // リモートのフォルダは yyterm の SSH で開く
-                    add(CM_TERMINAL, "ターミナルで開く(&T)");
+                } else {
+                    add(CM_DOWNLOAD, "ダウンロード フォルダにコピー(&L)");
+                    if yyterm_exe().is_some() {
+                        // リモートのフォルダは yyterm の SSH で開く
+                        add(CM_TERMINAL, "ターミナルで開く(&T)");
+                    }
                     sep();
                 }
                 add(CM_COPY_PATH, "パスをコピー(&C)");
@@ -1148,6 +1152,7 @@ fn run_context_command(hwnd: HWND, cmd: u32, item: HTREEITEM, node: Option<(Path
         CM_CUT => return set_clip(path, true),
         CM_COPY => return set_clip(path, false),
         CM_PASTE => return paste_into(hwnd, path, is_dir),
+        CM_DOWNLOAD => return post_op(hwnd, WsOp::Download(path)),
         CM_RENAME => {
             if let Some(tree) = with_app(|a| a.ws.tree) {
                 unsafe {
@@ -1468,6 +1473,8 @@ pub(crate) enum WsOp {
         from: PathBuf,
         to_dir: PathBuf,
     },
+    /// リモートの `ssh://…` をダウンロード フォルダにコピーする
+    Download(PathBuf),
 }
 
 /// 操作を後で行うよう頼む。
@@ -1490,6 +1497,17 @@ pub(crate) fn on_op(hwnd: HWND, lparam: LPARAM) {
         WsOp::Delete { path, is_dir } => delete_item(hwnd, &path, is_dir),
         WsOp::Move { from, to_dir } => move_item(&from, &to_dir),
         WsOp::Copy { from, to_dir } => copy_item(hwnd, &from, &to_dir),
+        WsOp::Download(path) => match remote_uri(&path) {
+            Some(u) => crate::download::download(hwnd, &u).map(|msg| {
+                if let Some(m) = msg {
+                    with_app(|a| {
+                        a.status_msg = m;
+                        a.update_status();
+                    });
+                }
+            }),
+            None => Ok(()),
+        },
     };
     if let Err(e) = r {
         error_box(hwnd, &e);

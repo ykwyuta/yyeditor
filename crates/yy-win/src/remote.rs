@@ -723,6 +723,11 @@ pub(crate) fn fs(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<dyn RemoteF
     if use_agent() {
         return session(target, show).map(|s| s as Arc<dyn RemoteFs>);
     }
+    sftp_fs(target, show).map(|f| f as Arc<dyn RemoteFs>)
+}
+
+/// `target` の SFTP（接続先に何も置かない。接続・SFTP の開始は必要なときだけ）。
+pub(crate) fn sftp_fs(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<SftpFs>, String> {
     let cached = with_state(|r| {
         r.sftps.retain(|(_, f)| !f.is_closed());
         r.sftps
