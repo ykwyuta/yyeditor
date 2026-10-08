@@ -60,6 +60,9 @@ fn init(dir: &Path) -> Git {
     g.run(["config", "user.name", "Test"]).unwrap();
     g.run(["config", "user.email", "test@example.com"]).unwrap();
     g.run(["config", "commit.gpgsign", "false"]).unwrap();
+    // Git for Windows の既定（core.autocrlf=true）では、戻したファイルの改行が CRLF になる。
+    // 試験は改行をそのまま比べるので、変換しない
+    g.run(["config", "core.autocrlf", "false"]).unwrap();
     g
 }
 
