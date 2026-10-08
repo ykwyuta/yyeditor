@@ -541,6 +541,94 @@ fn download(s: &Session, path: &[u8], out: &mut dyn Write, t: &mut Ticker) -> io
     r.map(|_| ())
 }
 
+/// 場所のファイルの情報（なければ `None`）。手元のファイルは `None`（接続先のファイルの変更を
+/// 見分けるためのもの）。
+pub fn info(loc: &Loc) -> io::Result<Option<yy_proto::FileInfo>> {
+    match loc.remote_fs() {
+        Some((fs, p)) => fs.try_stat(p),
+        None => Ok(None),
+    }
+}
+
+/// 手元のファイル `local` の内容で、ファイル `to` を置き換える（なければ作る）。上書きしない
+/// [`copy`] と違い、保存のためのもの。
+///
+/// 同じフォルダに一時の名前で書いてから名前を変えるので、途中で切れても元のファイルは残る
+/// （エージェントは接続先で同じことをする）。元のファイルの権限は引き継ぐ。
+pub fn replace(
+    local: &std::path::Path,
+    to: &Loc,
+    step: &mut dyn FnMut(&CopyStats) -> bool,
+) -> io::Result<()> {
+    let mut ticker = Ticker {
+        stats: CopyStats::default(),
+        step,
+    };
+    let mut src = Counting {
+        inner: File::open(local)?,
+        ticker: &mut ticker,
+    };
+    match to {
+        Loc::Local(d) => {
+            let name = d.file_name().unwrap_or_default().to_string_lossy();
+            let tmp = d.with_file_name(format!(".{name}.yy-{}.tmp", std::process::id()));
+            let r = (|| {
+                let mut w = BufWriter::with_capacity(1 << 20, create_new(&tmp)?);
+                io::copy(&mut src, &mut w)?;
+                w.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+                if let Ok(m) = fs::metadata(d) {
+                    let _ = fs::set_permissions(&tmp, m.permissions());
+                }
+                fs::rename(&tmp, d)
+            })();
+            if r.is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+            r
+        }
+        Loc::Remote(s, d) => match s.upload(&mut src, d, None, &mut |_| true)? {
+            UploadOutcome::Saved(_) => Ok(()),
+            // 既にある（置き換える）
+            UploadOutcome::Conflict { pending, .. } => pending.force().map(|_| ()),
+        },
+        Loc::Sftp(s, d) => {
+            let sftp = s.sftp();
+            let tmp = sibling_temp(d);
+            let r = (|| {
+                // 前に残った一時ファイルがあれば消す
+                if sftp.try_stat(&tmp)?.is_some() {
+                    sftp.remove(&tmp)?;
+                }
+                sftp_upload(sftp, &mut src, &tmp)?;
+                if let Some(perm) = sftp.try_stat(d)?.and_then(|a| a.permissions) {
+                    let _ = sftp.setstat(
+                        &tmp,
+                        &Attrs {
+                            permissions: Some(perm & 0o7777),
+                            ..Attrs::default()
+                        },
+                    );
+                }
+                sftp.rename(&tmp, d, true)
+            })();
+            if r.is_err() {
+                let _ = sftp.remove(&tmp);
+            }
+            r
+        }
+    }
+}
+
+/// `path` と同じフォルダの一時の名前（`.名前.yy-プロセス番号.tmp`）。
+fn sibling_temp(path: &[u8]) -> Vec<u8> {
+    let cut = path.iter().rposition(|&b| b == b'/').map_or(0, |i| i + 1);
+    let mut out = path[..cut].to_vec();
+    out.push(b'.');
+    out.extend_from_slice(&path[cut..]);
+    out.extend_from_slice(format!(".yy-{}.tmp", std::process::id()).as_bytes());
+    out
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -628,5 +716,73 @@ mod tests {
         .unwrap_err();
         assert!(is_cancelled(&e), "{e}");
         assert!(!stopped.exists());
+    }
+
+    #[test]
+    fn replaces_files_keeping_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("new.csv");
+        let big: Vec<u8> = (0..700_000u32).map(|i| (i % 253) as u8).collect();
+        fs::write(&src, &big).unwrap();
+        // 手元
+        let local = tmp.path().join("local.csv");
+        fs::write(&local, b"old").unwrap();
+        fs::set_permissions(&local, fs::Permissions::from_mode(0o640)).unwrap();
+        replace(&src, &Loc::Local(local.clone()), &mut |_| true).unwrap();
+        assert_eq!(fs::read(&local).unwrap(), big);
+        assert_eq!(
+            fs::metadata(&local).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        // 一時ファイルは残らない
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
+        if sftp_server().is_none() {
+            return;
+        }
+        let t = LocalTransport::new();
+        let sftp = Arc::new(SftpFs::connect(&t).unwrap());
+        let remote =
+            |p: &std::path::Path| Loc::Sftp(sftp.clone(), p.as_os_str().as_bytes().to_vec());
+        // 既にあるファイルを置き換える（権限はそのまま）
+        let dir = tmp.path().join("remote");
+        fs::create_dir(&dir).unwrap();
+        let there = dir.join("データ.csv");
+        fs::write(&there, b"old contents").unwrap();
+        fs::set_permissions(&there, fs::Permissions::from_mode(0o600)).unwrap();
+        let before = info(&remote(&there)).unwrap().unwrap();
+        replace(&src, &remote(&there), &mut |_| true).unwrap();
+        assert_eq!(fs::read(&there).unwrap(), big);
+        assert_eq!(
+            fs::metadata(&there).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let after = info(&remote(&there)).unwrap().unwrap();
+        assert_ne!(before.id, after.id);
+        assert_eq!(after.len(), big.len() as u64);
+        // ないファイルは作る
+        let fresh = dir.join("new.csv");
+        assert!(info(&remote(&fresh)).unwrap().is_none());
+        replace(&src, &remote(&fresh), &mut |_| true).unwrap();
+        assert_eq!(fs::read(&fresh).unwrap(), big);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        // 中止したら元のファイルが残る
+        fs::write(&there, b"keep").unwrap();
+        let e = replace(&src, &remote(&there), &mut |s| s.bytes < 100_000).unwrap_err();
+        assert!(is_cancelled(&e), "{e}");
+        assert_eq!(fs::read(&there).unwrap(), b"keep");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn temp_names_sit_next_to_the_file() {
+        assert_eq!(
+            String::from_utf8(sibling_temp(b"/home/u/a.csv")).unwrap(),
+            format!("/home/u/.a.csv.yy-{}.tmp", std::process::id())
+        );
+        assert_eq!(
+            String::from_utf8(sibling_temp(b"a.csv")).unwrap(),
+            format!(".a.csv.yy-{}.tmp", std::process::id())
+        );
     }
 }

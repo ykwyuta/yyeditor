@@ -675,7 +675,7 @@ pub(super) fn open_multi(add: bool) {
     open_multi_path(frame, ctx, &path, add);
 }
 
-fn open_multi_path(frame: HWND, ctx: Arc<SheetCtx>, path: &Path, add: bool) {
+pub(super) fn open_multi_path(frame: HWND, ctx: Arc<SheetCtx>, path: &Path, add: bool) {
     let read = (|| -> std::io::Result<(Vec<u8>, u64)> {
         use std::io::Read;
         let f = std::fs::File::open(path)?;

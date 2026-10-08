@@ -38,6 +38,7 @@ mod sheet;
 mod tabclose;
 mod term;
 mod util;
+mod wsbar;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};

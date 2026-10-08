@@ -1,12 +1,12 @@
-//! ターミナルのワークスペース（左のサイドバー）。
+//! ワークスペースのサイドバー（ターミナル・スプレッドシートの左のツリー）。
 //!
 //! エディタと同じ `*.yyworkspace`（[`yy_config::workspace`]）を使い、手元のフォルダと
-//! SSH 接続先のフォルダ（`ssh://…`）を並べる。フォルダをダブルクリックするとそこで
-//! ターミナルを開き、ファイルはエディタ（yyeditor）で開く。
+//! SSH 接続先のフォルダ（`ssh://…`）を並べる。項目を開いたときの動きは使うアプリが決める
+//! （ターミナルはフォルダでターミナルを開き、ファイルはエディタで。スプレッドシートはファイルを開く）。
 
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Shell::{
@@ -22,6 +22,27 @@ use crate::util::Context;
 
 /// サイドバーのツリー ビューの ID
 pub(crate) const ID_TREE: u16 = 2100;
+
+/// アプリごとのワークスペースのファイル（設定フォルダの中の名前）。
+#[derive(Clone, Copy)]
+pub(crate) struct Files {
+    /// 最後に使ったワークスペースの記録
+    pub last: &'static str,
+    /// 名前を付けていないワークスペース
+    pub untitled: &'static str,
+}
+
+/// ターミナル（yyterm）のワークスペース。
+pub(crate) const TERMINAL: Files = Files {
+    last: workspace::TERMINAL_LAST_FILE,
+    untitled: workspace::TERMINAL_UNTITLED_FILE,
+};
+
+/// スプレッドシート（yysheet）のワークスペース。
+pub(crate) const SHEET: Files = Files {
+    last: workspace::SHEET_LAST_FILE,
+    untitled: workspace::SHEET_UNTITLED_FILE,
+};
 
 /// ツリーの 1 項目。
 pub(crate) struct Node {
@@ -50,8 +71,9 @@ pub(crate) struct Sidebar {
     pub tree: HWND,
     pub visible: bool,
     pub workspace: Workspace,
-    /// ワークスペースのファイル（名前を付けていなければ `terminal-untitled.yyworkspace`）
+    /// ワークスペースのファイル（名前を付けていなければ [`Files::untitled`]）
     pub file: Option<PathBuf>,
+    files: Files,
     nodes: Vec<Node>,
     /// ツリーを作り直した回数（読み込みの待ち合わせに使う）
     pub generation: usize,
@@ -83,7 +105,7 @@ fn system_icon(
 }
 
 impl Sidebar {
-    pub(crate) fn create(frame: HWND, instance: HINSTANCE) -> Result<Sidebar> {
+    pub(crate) fn create(frame: HWND, instance: HINSTANCE, files: Files) -> Result<Sidebar> {
         let tree = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -135,11 +157,11 @@ impl Sidebar {
             system_icon("folder", FILE_ATTRIBUTE_DIRECTORY, true),
             system_icon("file", FILE_ATTRIBUTE_NORMAL, false),
         );
-        // ターミナルが最後に使ったワークスペース、なければエディタのもの
-        let file = workspace::last_used_in(workspace::TERMINAL_LAST_FILE)
+        // そのアプリが最後に使ったワークスペース、なければエディタのもの
+        let file = workspace::last_used_in(files.last)
             .or_else(workspace::last_used)
             .filter(|f| f.is_file())
-            .or_else(|| workspace::config_file(workspace::TERMINAL_UNTITLED_FILE));
+            .or_else(|| workspace::config_file(files.untitled));
         let ws = file
             .as_deref()
             .and_then(|f| Workspace::load(f).ok())
@@ -149,6 +171,7 @@ impl Sidebar {
             visible: !ws.folders.is_empty(),
             workspace: ws,
             file,
+            files,
             nodes: Vec::new(),
             generation: 0,
             icons,
@@ -386,11 +409,11 @@ impl Sidebar {
         n.remote()
     }
 
-    /// ワークスペースを保存し、ターミナルが最後に使ったものとして記録する。
+    /// ワークスペースを保存し、このアプリが最後に使ったものとして記録する。
     pub(crate) fn save(&mut self) -> std::result::Result<(), String> {
         let file = match &self.file {
             Some(f) => f.clone(),
-            None => match workspace::config_file(workspace::TERMINAL_UNTITLED_FILE) {
+            None => match workspace::config_file(self.files.untitled) {
                 Some(f) => f,
                 None => return Ok(()),
             },
@@ -399,7 +422,7 @@ impl Sidebar {
         self.workspace
             .save(&file)
             .map_err(|e| format!("ワークスペースを保存できません: {e}"))?;
-        let _ = workspace::set_last_used_in(workspace::TERMINAL_LAST_FILE, &file);
+        let _ = workspace::set_last_used_in(self.files.last, &file);
         Ok(())
     }
 
@@ -426,12 +449,101 @@ impl Sidebar {
         self.rebuild();
     }
 
+    /// 新しい（名前を付けていない）ワークスペースにする。
+    pub(crate) fn switch_to_untitled(&mut self) {
+        self.switch_to(
+            workspace::config_file(self.files.untitled),
+            Workspace::default(),
+        );
+    }
+
+    /// 開いたワークスペースのファイルを、このアプリが最後に使ったものとして記録する。
+    pub(crate) fn remember(&self, file: &Path) {
+        let _ = workspace::set_last_used_in(self.files.last, file);
+    }
+
+    /// マウスの下の項目を選び、その位置（スクリーン座標。右クリックのメニュー用）を返す。
+    pub(crate) fn select_at_cursor(&self) -> POINT {
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+            let mut client = pt;
+            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(self.tree, &mut client);
+            let mut hit = TVHITTESTINFO {
+                pt: client,
+                ..Default::default()
+            };
+            let item = SendMessageW(
+                self.tree,
+                TVM_HITTEST,
+                None,
+                Some(LPARAM(&mut hit as *mut _ as isize)),
+            )
+            .0;
+            if item != 0 {
+                SendMessageW(
+                    self.tree,
+                    TVM_SELECTITEM,
+                    Some(WPARAM(TVGN_CARET as usize)),
+                    Some(LPARAM(item)),
+                );
+            }
+        }
+        pt
+    }
+
     /// ワークスペースの名前（ウィンドウのタイトル用。名前を付けていなければ `None`）。
     pub(crate) fn title(&self) -> Option<String> {
         let f = self.file.as_ref()?;
-        if workspace::config_file(workspace::TERMINAL_UNTITLED_FILE).as_ref() == Some(f) {
+        if workspace::config_file(self.files.untitled).as_ref() == Some(f) {
             return None;
         }
         f.file_stem().map(|s| s.to_string_lossy().into_owned())
+    }
+}
+
+/// アプリの状態を借りてサイドバーを渡す関数（借りられなければ何もしない）。
+pub(crate) type WithBar<'a> = &'a dyn Fn(&mut dyn FnMut(&mut Sidebar));
+
+/// リモートのフォルダの中身を読んでサイドバーに並べる（[`Sidebar::expanding`] が後回しにしたもの）。
+/// `bar` はアプリの状態を借りてサイドバーを渡す（借りられなければ何もしない）。接続して読む間は
+/// 状態を借りない。
+pub(crate) fn load_remote_dir(owner: HWND, generation: usize, index: usize, bar: WithBar) {
+    let with_bar = |f: &mut dyn FnMut(&mut Sidebar) -> Option<RemoteUri>| {
+        let mut out = None;
+        bar(&mut |s| out = f(s));
+        out
+    };
+    let Some(uri) = with_bar(&mut |s| s.pending_remote(generation, index)) else {
+        return;
+    };
+    let mut listed = crate::remote::list_dir(&uri);
+    // 中身がフォルダ 1 つだけなら束ねて（`a/b`。VS Code と同じ）、その中を読む
+    for _ in 0..workspace::COMPACT_DEPTH {
+        let only = match &listed {
+            Ok((entries, 0)) => match entries.as_slice() {
+                [e] if e.is_dir => e.clone(),
+                _ => break,
+            },
+            _ => break,
+        };
+        let Some(next) = with_bar(&mut |s| s.merge_single(generation, index, &only)) else {
+            break;
+        };
+        listed = crate::remote::list_dir(&next);
+    }
+    match listed {
+        Ok((entries, _)) => {
+            let mut entries = Some(entries);
+            bar(&mut |s| {
+                if s.pending_remote(generation, index).is_some()
+                    && let Some(e) = entries.take()
+                {
+                    s.add_children(index, e);
+                    s.expand(index);
+                }
+            });
+        }
+        Err(e) => crate::util::error_box(owner, &format!("フォルダを開けません。\n{e}")),
     }
 }

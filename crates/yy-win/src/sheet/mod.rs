@@ -10,6 +10,7 @@
 
 mod bulkui;
 mod catalogui;
+mod delimui;
 mod entry;
 mod fillhandle;
 mod filter;
@@ -17,7 +18,9 @@ mod fixedui;
 mod format;
 mod multiui;
 mod paint;
+mod remotefile;
 mod view;
+mod workspace;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -134,6 +137,8 @@ const MK_CONTROL: usize = 0x8;
 const WM_APP_RECALC: u32 = WM_APP + 40;
 /// 式の入力の補助（候補・参照の枠）を出し直す
 const WM_APP_ENTRY: u32 = WM_APP + 41;
+/// 使わなくなった、接続先から取り寄せたファイルの写しを消す
+const WM_APP_FORGET: u32 = WM_APP + 43;
 
 const IDC_FORMULA: u16 = 100;
 const IDC_TABS: u16 = 101;
@@ -217,6 +222,10 @@ struct App {
     fixed_last: Option<yy_sheet::fixed::FixedSpec>,
     /// シート → 取り込んだ固定長ファイル（固定長のまま上書きする先。レイアウトはシートごと）
     fixed_paths: std::collections::HashMap<usize, PathBuf>,
+    /// ワークスペース（左のサイドバー）
+    sidebar: crate::wsbar::Sidebar,
+    /// 接続先から取り寄せたファイル（手元の写し → 接続先）
+    remote_files: std::collections::HashMap<PathBuf, remotefile::Link>,
 }
 
 thread_local! {
@@ -252,12 +261,13 @@ fn set_status(text: &str) {
     }
 }
 
-/// yysheet を起動する。
-pub fn run_sheet(initial: Option<PathBuf>) -> Result<()> {
+/// yysheet を起動する。`initial` は開くファイル（`ssh://…` なら接続先のファイル）。`ssh` は接続先の
+/// ファイル・フォルダに使う SSH の実装（なければリモートの機能は使えない）。
+pub fn run_sheet(initial: Option<PathBuf>, ssh: Option<yy_remote::ConnectorFactory>) -> Result<()> {
     crate::util::set_app_name("yysheet");
     let previous_crash = crate::crash::install("yysheet");
     PREVIOUS_CRASH.with(|p| *p.borrow_mut() = previous_crash);
-    let r = run_inner(initial);
+    let r = run_inner(initial, ssh);
     crate::crash::clean_exit();
     if let Err(e) = &r {
         error_box(
@@ -268,7 +278,7 @@ pub fn run_sheet(initial: Option<PathBuf>) -> Result<()> {
     r
 }
 
-fn run_inner(initial: Option<PathBuf>) -> Result<()> {
+fn run_inner(initial: Option<PathBuf>, ssh: Option<yy_remote::ConnectorFactory>) -> Result<()> {
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
             .ok()
@@ -279,16 +289,19 @@ fn run_inner(initial: Option<PathBuf>) -> Result<()> {
         };
         let _ = InitCommonControlsEx(&icc);
     }
-    std::thread::spawn(yy_io::remove_stale_temps);
+    std::thread::spawn(|| {
+        yy_io::remove_stale_temps();
+        remotefile::remove_stale();
+    });
     if let Ok(m) = unsafe { GetModuleHandleW(None) } {
         crate::help::use_sheet_help(m.into());
     }
-    let frame = create()?;
+    let frame = create(ssh)?;
     if let Some(msg) = PREVIOUS_CRASH.with(|p| p.borrow_mut().take()) {
         set_status(&msg);
     }
     if let Some(p) = initial {
-        open_path(&p);
+        remotefile::open_item(&p, remotefile::How::Open, false);
     }
     let _ = frame;
     unsafe {
@@ -304,7 +317,13 @@ fn run_inner(initial: Option<PathBuf>) -> Result<()> {
             entry::after_dispatch(&msg);
         }
     }
-    APP.with(|a| a.borrow_mut().take());
+    let app = APP.with(|a| a.borrow_mut().take());
+    // 取り寄せたファイルの写しを消す（文書を閉じてから）
+    if let Some(app) = app {
+        let files: Vec<PathBuf> = app.remote_files.keys().cloned().collect();
+        drop(app);
+        remotefile::forget_all(files);
+    }
     Ok(())
 }
 
@@ -320,6 +339,16 @@ fn create_menu() -> Result<HMENU> {
         let file = CreatePopupMenu()?;
         add(file, ID_NEW, "新規(&N)\tCtrl+N");
         add(file, ID_OPEN, "開く(&O)...\tCtrl+O");
+        add(
+            file,
+            workspace::ID_OPEN_REMOTE,
+            "リモートのファイルを開く(&R)...",
+        );
+        add(
+            file,
+            delimui::ID_OPEN_DELIMITED,
+            "区切りを指定して開く(&T)...",
+        );
         add(file, ID_OPEN_FIXED, "固定長ファイルを開く(&F)...");
         add(
             file,
@@ -339,7 +368,12 @@ fn create_menu() -> Result<HMENU> {
         sep(file);
         add(file, ID_SAVE, "上書き保存(&S)\tCtrl+S");
         add(file, ID_SAVE_AS, "名前を付けて保存(&A)...\tCtrl+Shift+S");
-        add(file, ID_EXPORT_CSV, "CSV に書き出し(&E)...");
+        add(file, ID_EXPORT_CSV, "CSV・TSV に書き出し(&E)...");
+        add(
+            file,
+            delimui::ID_EXPORT_DELIMITED,
+            "区切りを指定して書き出し(&D)...",
+        );
         add(file, ID_EXPORT_FIXED, "固定長ファイルに書き出し(&L)...");
         sep(file);
         add(file, ID_EXIT, "終了(&X)");
@@ -459,11 +493,12 @@ fn create_menu() -> Result<HMENU> {
         ] {
             AppendMenuW(bar, MF_POPUP, m.0 as usize, &HSTRING::from(t))?;
         }
+        workspace::add_menus(bar, view)?;
         Ok(bar)
     }
 }
 
-fn create() -> Result<HWND> {
+fn create(ssh: Option<yy_remote::ConnectorFactory>) -> Result<HWND> {
     unsafe {
         let instance: HINSTANCE = GetModuleHandleW(None)?.into();
         let (icon, icon_small) = crate::app_icons(instance);
@@ -598,11 +633,20 @@ fn create() -> Result<HWND> {
         catalogui::set_root(&config);
         let painter = GridPainter::new(&config.sheet.font_family, config.sheet.font_size, dpi)?;
         crate::remote::install(
-            crate::remote::RemoteState::new(None, config.remote.clone()),
+            crate::remote::RemoteState::new(ssh, config.remote.clone()),
             crate::remote::Host {
                 frame,
                 status: set_status,
             },
+        );
+        // 接続先の読み書きにエージェントを使うか（設定。メニューで切り替える）
+        crate::remote::set_use_agent(config.sheet.use_agent);
+        let sidebar = crate::wsbar::Sidebar::create(frame, instance, crate::wsbar::SHEET)?;
+        SendMessageW(
+            sidebar.tree,
+            WM_SETFONT,
+            Some(WPARAM(ui_font.0 as usize)),
+            Some(LPARAM(1)),
         );
         DragAcceptFiles(frame, true);
         STATUS.with(|s| s.set(status));
@@ -643,6 +687,8 @@ fn create() -> Result<HWND> {
             last_fill: None,
             fixed_last: None,
             fixed_paths: Default::default(),
+            sidebar,
+            remote_files: Default::default(),
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         with(|a| {
@@ -651,6 +697,7 @@ fn create() -> Result<HWND> {
             a.update_title();
             a.sync_formula();
         });
+        workspace::check_use_agent(frame);
         let _ = ShowWindow(frame, SW_SHOWDEFAULT);
         let _ = UpdateWindow(frame);
         let _ = SetFocus(Some(grid));
@@ -1001,15 +1048,29 @@ impl App {
     }
 
     fn update_title(&self) {
-        let name = self
+        let mut name = self
             .doc
             .path
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "無題".into());
+        // 接続先のファイルは接続先も出す
+        if let Some(l) = self
+            .doc
+            .path
+            .as_ref()
+            .and_then(|p| self.remote_files.get(p))
+        {
+            name = format!("{name} [{}]", l.uri.target());
+        }
         let star = if self.doc.dirty { "*" } else { "" };
-        let title = format!("{star}{name} - yysheet");
+        let ws = self
+            .sidebar
+            .title()
+            .map(|t| format!(" ({t})"))
+            .unwrap_or_default();
+        let title = format!("{star}{name}{ws} - yysheet");
         unsafe {
             let _ = SetWindowTextW(self.frame, &HSTRING::from(title));
         }
@@ -1209,13 +1270,31 @@ impl App {
             let bar_h = 26 * dpi / 96;
             let tabs_h = 26 * dpi / 96;
             let name_w = 90 * dpi / 96;
-            let w = rc.right;
             let h = rc.bottom - status_h;
-            let _ = MoveWindow(self.name_box, 2, 2, name_w, bar_h - 4, true);
-            let _ = MoveWindow(self.formula, name_w + 6, 2, w - name_w - 8, bar_h - 4, true);
+            // 左にワークスペースのサイドバー
+            let side = if self.sidebar.visible {
+                (workspace::SIDEBAR_WIDTH * dpi / 96).min(rc.right / 2)
+            } else {
+                0
+            };
+            let x = if side > 0 { side + 4 * dpi / 96 } else { 0 };
+            let _ = ShowWindow(self.sidebar.tree, if side > 0 { SW_SHOW } else { SW_HIDE });
+            if side > 0 {
+                let _ = MoveWindow(self.sidebar.tree, 0, 0, side, h.max(0), true);
+            }
+            let w = (rc.right - x).max(1);
+            let _ = MoveWindow(self.name_box, x + 2, 2, name_w, bar_h - 4, true);
+            let _ = MoveWindow(
+                self.formula,
+                x + name_w + 6,
+                2,
+                w - name_w - 8,
+                bar_h - 4,
+                true,
+            );
             let grid_h = (h - bar_h - tabs_h).max(1);
-            let _ = MoveWindow(self.grid, 0, bar_h, w, grid_h, true);
-            let _ = MoveWindow(self.tabs, 0, bar_h + grid_h, w, tabs_h, true);
+            let _ = MoveWindow(self.grid, x, bar_h, w, grid_h, true);
+            let _ = MoveWindow(self.tabs, x, bar_h + grid_h, w, tabs_h, true);
         }
         self.update_fixed_status();
         // MoveWindow は格子の WM_SIZE をその場で送るが、そのとき状態は借りられていて受け取れないので、
@@ -1844,6 +1923,10 @@ impl App {
         self.doc = doc;
         self.doc.defer_recalc = true;
         self.origin = origin;
+        // 前の文書のために取り寄せた写しを片付ける（状態を借りたままなので後で）
+        unsafe {
+            let _ = PostMessageW(Some(self.frame), WM_APP_FORGET, WPARAM(0), LPARAM(0));
+        }
         self.sheet = 0;
         self.top = 0;
         self.left = 0;
@@ -2003,7 +2086,7 @@ fn show_open(owner: HWND) -> Option<PathBuf> {
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         let filters = [
             COMDLG_FILTERSPEC {
-                pszName: w!("yysheet・CSV (*.yys;*.csv;*.tsv;*.txt)"),
+                pszName: w!("yysheet・CSV・TSV (*.yys;*.csv;*.tsv;*.txt)"),
                 pszSpec: w!("*.yys;*.csv;*.tsv;*.txt"),
             },
             COMDLG_FILTERSPEC {
@@ -2031,10 +2114,22 @@ fn show_save(owner: HWND, current: Option<&Path>, csv_only: bool) -> Option<Path
             pszSpec: w!("*.yys"),
         };
         let csv = COMDLG_FILTERSPEC {
-            pszName: w!("CSV（UTF-8・カンマ区切り）(*.csv)"),
+            pszName: w!("CSV（カンマ区切り）(*.csv)"),
             pszSpec: w!("*.csv"),
         };
-        let filters: Vec<COMDLG_FILTERSPEC> = if csv_only { vec![csv] } else { vec![yys, csv] };
+        let tsv = COMDLG_FILTERSPEC {
+            pszName: w!("TSV（タブ区切り）(*.tsv)"),
+            pszSpec: w!("*.tsv"),
+        };
+        let any = COMDLG_FILTERSPEC {
+            pszName: w!("すべてのファイル (*.*)"),
+            pszSpec: w!("*.*"),
+        };
+        let filters: Vec<COMDLG_FILTERSPEC> = if csv_only {
+            vec![csv, tsv, any]
+        } else {
+            vec![yys, csv, tsv]
+        };
         let _ = dialog.SetFileTypes(&filters);
         let _ = dialog.SetDefaultExtension(if csv_only { w!("csv") } else { w!("yys") });
         let stem = current
@@ -2119,8 +2214,12 @@ fn open_dialog() {
     }
 }
 
-/// ファイルを開く（`.yys` か CSV）。
+/// ファイルを開く（`.yys` か CSV、それ以外は固定長として）。
 fn open_path(path: &Path) {
+    if remotefile::remote_uri(path).is_some() {
+        remotefile::open_item(path, remotefile::How::Open, false);
+        return;
+    }
     let Some((frame, ctx)) = with(|a| (a.frame, a.ctx.clone())) else {
         return;
     };
@@ -2135,52 +2234,7 @@ fn open_path(path: &Path) {
                 return;
             }
         };
-        let opts = pv.options.clone();
-        let p = path.to_owned();
-        let label = format!("{} を取り込んでいます…（Esc で中止）", path.display());
-        set_status(&label);
-        let ctx2 = ctx.clone();
-        let o2 = opts.clone();
-        let r = crate::remote::wait(&set_status, move |w| {
-            yy_sheet::csv::import(&ctx2, &p, &o2, &|done, total| {
-                w.report(format!(
-                    "取り込み中… {}%（Esc で中止）",
-                    done * 100 / total.max(1)
-                ));
-                !w.cancelled()
-            })
-        });
-        match r {
-            Ok(sheet) => {
-                let mut doc = Document::with_book(
-                    ctx,
-                    Workbook {
-                        sheets: vec![sheet],
-                        date_system: DateSystem::D1900,
-                    },
-                );
-                doc.path = Some(path.to_owned());
-                let rows = doc.book.sheets[0].table.rows;
-                let cols = doc.book.sheets[0].table.cols();
-                with(|a| a.set_document(doc, Origin::Csv(opts.clone())));
-                set_status(&format!(
-                    "{} 行 × {} 列を取り込みました（{}・{}）",
-                    crate::util::group_digits(rows),
-                    cols,
-                    opts.encoding.label(),
-                    opts.dialect.name()
-                ));
-            }
-            Err(e) => {
-                set_status("");
-                if e.kind() != std::io::ErrorKind::Interrupted {
-                    error_box(
-                        frame,
-                        &format!("{} を取り込めませんでした。\n{e}", path.display()),
-                    );
-                }
-            }
-        }
+        import_csv(path, pv.options);
         return;
     }
     // .yys・CSV でなければ固定長ファイルとして開く（レイアウトを尋ねる）
@@ -2208,6 +2262,62 @@ fn open_path(path: &Path) {
     }
 }
 
+/// 区切り文字形式（CSV・TSV など）のファイルを、設定 `opts` で取り込んで文書にする。
+fn import_csv(path: &Path, opts: CsvOptions) {
+    let Some((frame, ctx)) = with(|a| (a.frame, a.ctx.clone())) else {
+        return;
+    };
+    let p = path.to_owned();
+    let label = format!("{} を取り込んでいます…（Esc で中止）", path.display());
+    set_status(&label);
+    let ctx2 = ctx.clone();
+    let o2 = opts.clone();
+    let r = crate::remote::wait(&set_status, move |w| {
+        yy_sheet::csv::import(&ctx2, &p, &o2, &|done, total| {
+            w.report(format!(
+                "取り込み中… {}%（Esc で中止）",
+                done * 100 / total.max(1)
+            ));
+            !w.cancelled()
+        })
+    });
+    match r {
+        Ok(sheet) => {
+            let mut doc = Document::with_book(
+                ctx,
+                Workbook {
+                    sheets: vec![sheet],
+                    date_system: DateSystem::D1900,
+                },
+            );
+            doc.path = Some(path.to_owned());
+            let rows = doc.book.sheets[0].table.rows;
+            let cols = doc.book.sheets[0].table.cols();
+            with(|a| a.set_document(doc, Origin::Csv(opts.clone())));
+            let end = match &opts.record_end {
+                yy_sheet::csv::RecordEnd::Newline => String::new(),
+                e => format!("・レコードの終わり {}", e.label()),
+            };
+            set_status(&format!(
+                "{} 行 × {} 列を取り込みました（{}・区切り {}{end}）",
+                crate::util::group_digits(rows),
+                cols,
+                opts.encoding.label(),
+                opts.dialect.name()
+            ));
+        }
+        Err(e) => {
+            set_status("");
+            if e.kind() != std::io::ErrorKind::Interrupted {
+                error_box(
+                    frame,
+                    &format!("{} を取り込めませんでした。\n{e}", path.display()),
+                );
+            }
+        }
+    }
+}
+
 /// 保存する（`ask` か、まだ保存先がなければ尋ねる）。CSV から開いたものは、CSV のまま保存するかを
 /// 尋ねる。
 fn save(ask: bool) -> bool {
@@ -2231,7 +2341,7 @@ fn save(ask: bool) -> bool {
                 return false;
             };
             let what = match &src {
-                Some(s) => format!("{} で上書きする", s.display()),
+                Some(s) => format!("{} で上書きする", remotefile::shown(s)),
                 None => "書き出す（保存先を尋ねます）".to_string(),
             };
             let others = if many {
@@ -2246,7 +2356,7 @@ fn save(ask: bool) -> bool {
                         "{} は固定長ファイルです。シート「{name}」を固定長のまま保存しますか？\n\n\
                          はい: このシートを固定長で{what}（文字コードを選べます。色・罫線・式は保存されません。{others}）\n\
                          いいえ: yysheet の形式（.yys）で保存する（すべてのシートとシートごとのレイアウトを保存します）",
-                        p.display()
+                        remotefile::shown(p)
                     )),
                     w!("yysheet"),
                     MB_YESNOCANCEL | MB_ICONQUESTION,
@@ -2269,7 +2379,7 @@ fn save(ask: bool) -> bool {
                         "{} は CSV です。CSV のまま保存しますか？\n\n\
                          はい: CSV で上書きする（色・罫線・複数のシートは保存されません）\n\
                          いいえ: yysheet の形式（.yys）で保存する",
-                        p.display()
+                        remotefile::shown(p)
                     )),
                     w!("yysheet"),
                     MB_YESNOCANCEL | MB_ICONQUESTION,
@@ -2314,9 +2424,22 @@ fn save(ask: bool) -> bool {
     with(|a| a.update_title());
     match res {
         Ok(kind) => {
-            set_status(match kind {
-                yys::SaveKind::Appended => "保存しました（変わった部分を書き足しました）",
-                yys::SaveKind::Rewritten => "保存しました",
+            // 接続先から取り寄せたファイルなら送り返す
+            if !remotefile::push(frame, &target) {
+                with(|a| {
+                    a.doc.dirty = true;
+                    a.update_title();
+                });
+                return false;
+            }
+            let remote = remotefile::uri_of(&target)
+                .map(|u| format!("（{u}）"))
+                .unwrap_or_default();
+            set_status(&match kind {
+                yys::SaveKind::Appended => {
+                    format!("保存しました{remote}（変わった部分を書き足しました）")
+                }
+                yys::SaveKind::Rewritten => format!("保存しました{remote}"),
             });
             true
         }
@@ -2331,8 +2454,38 @@ fn save(ask: bool) -> bool {
     }
 }
 
-/// CSV に書き出す（`target` がなければ尋ねる）。
+/// CSV に書き出す（`target` がなければ尋ねる）。区切り文字などは、開いたときのもの（別の名前の
+/// `.csv`・`.tsv` なら拡張子のもの）。
 fn export_csv(target: Option<PathBuf>) -> bool {
+    export_csv_with(target, None)
+}
+
+/// 書き出しの既定の設定（[`export_csv`]）。
+fn default_export(origin: &Origin, doc_path: Option<&Path>, target: &Path) -> ExportOptions {
+    let mut o = ExportOptions::default();
+    if let Origin::Csv(c) = origin {
+        o.dialect = c.dialect;
+        o.encoding = c.encoding;
+        o.record_end = c.record_end.clone();
+    }
+    if doc_path != Some(target) {
+        let ext = target
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        if let Some(d) = ext
+            .as_deref()
+            .and_then(yy_delimited::Dialect::for_extension)
+        {
+            o.dialect = d;
+            o.record_end = yy_sheet::csv::RecordEnd::Newline;
+        }
+    }
+    o
+}
+
+/// 区切り文字形式で書き出す（`target` がなければ尋ねる。`given` がなければ [`default_export`]）。
+fn export_csv_with(target: Option<PathBuf>, given: Option<ExportOptions>) -> bool {
     let Some((frame, path, ctx, sheet, sys, origin)) = with(|a| {
         a.end_edit(true);
         (
@@ -2374,12 +2527,8 @@ fn export_csv(target: Option<PathBuf>) -> bool {
             _ => return false,
         }
     }
-    let mut opts = ExportOptions::default();
-    if let Origin::Csv(o) = &origin {
-        // 開いたときの区切り文字・文字コードで書く
-        opts.dialect = o.dialect;
-        opts.encoding = o.encoding;
-    }
+    let opts = given.unwrap_or_else(|| default_export(&origin, path.as_deref(), &target));
+    let written = opts.clone();
     let t = target.clone();
     let r = crate::remote::wait(&set_status, move |w| {
         let order = order.as_deref().map(Vec::as_slice);
@@ -2398,11 +2547,28 @@ fn export_csv(target: Option<PathBuf>) -> bool {
                 ));
                 error_box(frame, &msg);
             }
+            // 接続先から取り寄せたファイルなら送り返す（送れなければ未保存のまま）
+            if !remotefile::push(frame, &target) {
+                with(|a| {
+                    if a.doc.path.as_deref() == Some(target.as_path()) {
+                        a.doc.dirty = true;
+                        a.update_title();
+                    }
+                });
+                return false;
+            }
+            if let Some(u) = remotefile::uri_of(&target) {
+                msg.push_str(&format!("（{u}）"));
+            }
             set_status(&msg);
             with(|a| {
-                if matches!(a.origin, Origin::Csv(_))
-                    && a.doc.path.as_deref() == Some(target.as_path())
+                if a.doc.path.as_deref() == Some(target.as_path())
+                    && let Origin::Csv(o) = &mut a.origin
                 {
+                    // 次の上書き保存も、書いた区切り・文字コードで
+                    o.dialect = written.dialect;
+                    o.encoding = written.encoding;
+                    o.record_end = written.record_end.clone();
                     a.doc.dirty = false;
                     a.update_title();
                 }
@@ -2471,6 +2637,9 @@ fn show_memory() {
 }
 
 fn command(id: u16) {
+    if workspace::command(id) || delimui::command(id) {
+        return;
+    }
     match id {
         ID_NEW => new_document(),
         ID_OPEN => open_dialog(),
@@ -2780,6 +2949,7 @@ fn key_hook(msg: &MSG) -> bool {
         (VK_F, false) => ID_FIND,
         (VK_H, false) => ID_REPLACE,
         (VK_I, false) => ID_ITALIC,
+        (VK_E, true) => workspace::ID_SIDEBAR,
         // コピー・貼り付けは格子にフォーカスがあるときだけ（数式バーの EDIT では EDIT に任せる）
         (VK_C | VK_X | VK_V, false) => {
             let Some(grid) = with(|a| a.grid) else {
@@ -2838,6 +3008,9 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
         }
         WM_NOTIFY => {
             let hdr = unsafe { &*(lparam.0 as *const NMHDR) };
+            if hdr.idFrom == crate::wsbar::ID_TREE as usize {
+                return workspace::on_notify(hwnd, hdr, lparam);
+            }
             if hdr.idFrom == IDC_TABS as usize && hdr.code == TCN_SELCHANGE {
                 with(|a| {
                     let i = unsafe { SendMessageW(a.tabs, TCM_GETCURSEL, None, None) }.0;
@@ -2860,8 +3033,11 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             let mut buf = [0u16; 1024];
             let n = unsafe { DragQueryFileW(drop, 0, Some(&mut buf)) } as usize;
             unsafe { DragFinish(drop) };
-            if n > 0 && confirm_discard() {
-                let p = PathBuf::from(String::from_utf16_lossy(&buf[..n]));
+            let p = PathBuf::from(String::from_utf16_lossy(&buf[..n]));
+            if n > 0 && p.is_dir() {
+                // フォルダはワークスペースに加える
+                workspace::add_local_folder(&p);
+            } else if n > 0 && confirm_discard() {
                 open_path(&p);
             }
             LRESULT(0)
@@ -2871,7 +3047,7 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             with(|a| {
                 a.painter.set_dpi(dpi);
                 let f = crate::util::ui_font(dpi);
-                for h in [a.formula, a.name_box, a.tabs, a.status] {
+                for h in [a.formula, a.name_box, a.tabs, a.status, a.sidebar.tree] {
                     unsafe {
                         SendMessageW(h, WM_SETFONT, Some(WPARAM(f.0 as usize)), Some(LPARAM(1)));
                     }
@@ -2908,6 +3084,18 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             LRESULT(0)
         }
         crate::remote::WM_APP_REMOTE_WAKE => LRESULT(0),
+        m if m == crate::remote::WM_APP_REMOTE_PROMPT => {
+            crate::remote::on_prompt(hwnd, lparam);
+            LRESULT(0)
+        }
+        workspace::WM_APP_SHEET_REMOTE_DIR => {
+            workspace::load_remote_dir(hwnd, wparam.0, lparam.0 as usize);
+            LRESULT(0)
+        }
+        WM_APP_FORGET => {
+            remotefile::forget_unused();
+            LRESULT(0)
+        }
         WM_APP_RECALC => {
             recalc_in_background();
             LRESULT(0)

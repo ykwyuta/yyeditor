@@ -4,6 +4,10 @@
 //! 読んで終わりの状態を求め、先頭から順に本当の状態を決めてから、区画ごとに値を列のチャンクに詰める
 //! （`yy-delimited` の状態機械を使う。引用符の扱いはエディタの CSV モードと同じく寛容）。
 //!
+//! 区切り文字は任意（タブ・`|`・制御コードの US など）、レコードの終わりも改行（LF・CR LF）のほか任意の
+//! バイト列（CR だけ・RS（0x1E）など。[`RecordEnd`]）にできる。改行以外で終わるレコードでは、値の中の
+//! 改行はただの文字。
+//!
 //! 文字コードは `yy-encoding` で判別・変換する。改行（LF）で区切って読める文字コード（UTF-8・
 //! Shift_JIS・EUC-JP など）は区画ごとに並列に UTF-8 にし、それ以外（UTF-16 など）は先に作業用の
 //! UTF-8 のファイルに変換する。
@@ -38,10 +42,74 @@ pub enum ColType {
     Bool,
 }
 
+/// レコードの終わり。
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum RecordEnd {
+    /// 改行（読むときは LF。前の CR も外す。書くときは [`ExportOptions::crlf`] で CR LF か LF）
+    #[default]
+    Newline,
+    /// 指定したバイト列（1〜8 バイトの ASCII。CR だけ・RS（0x1E）・NUL など）
+    Custom(Vec<u8>),
+}
+
+impl RecordEnd {
+    /// 改行以外を指定していれば、そのバイト列。
+    pub fn custom(&self) -> Option<&[u8]> {
+        match self {
+            RecordEnd::Newline => None,
+            RecordEnd::Custom(b) => Some(b),
+        }
+    }
+
+    /// 表示用の名前（`改行`・`<RS>`・`<CR>` など）。
+    pub fn label(&self) -> String {
+        match self {
+            RecordEnd::Newline => "改行".into(),
+            RecordEnd::Custom(b) => yy_delimited::describe_bytes(b),
+        }
+    }
+}
+
+/// 区切り文字とレコードの終わりの組み合わせを確かめる。
+pub fn check_separators(d: &Dialect, end: &RecordEnd) -> Result<(), String> {
+    let delim = d.delimiter();
+    match end {
+        RecordEnd::Newline => {
+            if delim.iter().any(|&b| b == b'\n' || b == b'\r') {
+                return Err(
+                    "レコードの終わりが改行のときは、区切り文字に CR・LF を使えません。".into(),
+                );
+            }
+        }
+        RecordEnd::Custom(t) => {
+            if t.is_empty() || t.len() > 8 {
+                return Err("レコードの終わりは 1〜8 バイトにしてください。".into());
+            }
+            if !t.is_ascii() || !delim.is_ascii() {
+                return Err(
+                    "レコードの終わりを指定するときは、区切り文字もレコードの終わりも ASCII の文字（制御コードを含む）にしてください。"
+                        .into(),
+                );
+            }
+            if t.starts_with(delim) || delim.starts_with(t) {
+                return Err("区切り文字とレコードの終わりは、一方が他方の始めと同じにならないようにしてください。".into());
+            }
+            if let Some(q) = d.quote
+                && t.contains(&q)
+            {
+                return Err("レコードの終わりに引用符を含められません。".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 取り込みの設定。
 #[derive(Clone, Debug)]
 pub struct CsvOptions {
     pub dialect: Dialect,
+    /// レコードの終わり
+    pub record_end: RecordEnd,
     pub encoding: Encoding,
     /// 1 行目を見出しにする
     pub header: bool,
@@ -96,19 +164,36 @@ impl Sink for Collect {
 
 /// UTF-8 のバイト列のレコードを順に読んで `sink` に渡す（UTF-8 として正しくなければ U+FFFD に
 /// 置き換えてから）。`limit` レコードで止める。
-fn parse_records(data: &[u8], d: &Dialect, limit: usize, sink: &mut dyn Sink) -> usize {
+fn parse_records(
+    data: &[u8],
+    d: &Dialect,
+    end: &RecordEnd,
+    limit: usize,
+    sink: &mut dyn Sink,
+) -> usize {
     match std::str::from_utf8(data) {
-        Ok(text) => parse_text(text, d, limit, sink),
-        Err(_) => parse_text(&String::from_utf8_lossy(data), d, limit, sink),
+        Ok(text) => parse_text(text, d, end, limit, sink),
+        Err(_) => parse_text(&String::from_utf8_lossy(data), d, end, limit, sink),
     }
 }
 
-/// [`parse_records`] の本体。区切りはすべて ASCII のバイト（区切り文字・引用符・改行）なので、
+/// [`parse_records`] の本体。区切り（区切り文字・引用符・レコードの終わり）は文字の境目にあるので、
 /// その位置で切った部分も UTF-8 として正しい。
-fn parse_text(text: &str, d: &Dialect, limit: usize, sink: &mut dyn Sink) -> usize {
+fn parse_text(
+    text: &str,
+    d: &Dialect,
+    end: &RecordEnd,
+    limit: usize,
+    sink: &mut dyn Sink,
+) -> usize {
     let data = text.as_bytes();
     let delim = d.delimiter();
     let q = d.quote;
+    // レコードの終わり（改行なら LF で、前の CR も外す）
+    let (term, strip_cr): (&[u8], bool) = match end {
+        RecordEnd::Newline => (b"\n", true),
+        RecordEnd::Custom(t) => (t, false),
+    };
     let n = data.len();
     let mut i = 0;
     let mut scratch = String::new();
@@ -150,9 +235,9 @@ fn parse_text(text: &str, d: &Dialect, limit: usize, sink: &mut dyn Sink) -> usi
                         next = n;
                         break;
                     }
-                    if data[k] == b'\n' {
+                    if data[k..].starts_with(term) {
                         rec_end = true;
-                        next = k + 1;
+                        next = k + term.len();
                         break;
                     }
                     if data[k..].starts_with(delim) {
@@ -163,7 +248,7 @@ fn parse_text(text: &str, d: &Dialect, limit: usize, sink: &mut dyn Sink) -> usi
                     k += 1;
                 }
                 let mut extra_end = k;
-                if rec_end && extra_end > j && data[extra_end - 1] == b'\r' {
+                if strip_cr && rec_end && extra_end > j && data[extra_end - 1] == b'\r' {
                     extra_end -= 1;
                 }
                 scratch.push_str(&text[j..extra_end]);
@@ -171,7 +256,7 @@ fn parse_text(text: &str, d: &Dialect, limit: usize, sink: &mut dyn Sink) -> usi
             } else {
                 let mut k = i;
                 loop {
-                    match memchr::memchr2(delim[0], b'\n', &data[k..]) {
+                    match memchr::memchr2(delim[0], term[0], &data[k..]) {
                         None => {
                             k = n;
                             rec_end = true;
@@ -180,10 +265,10 @@ fn parse_text(text: &str, d: &Dialect, limit: usize, sink: &mut dyn Sink) -> usi
                         }
                         Some(m) => {
                             let p = k + m;
-                            if data[p] == b'\n' {
+                            if data[p..].starts_with(term) {
                                 k = p;
                                 rec_end = true;
-                                next = p + 1;
+                                next = p + term.len();
                                 break;
                             }
                             if data[p..].starts_with(delim) {
@@ -197,7 +282,7 @@ fn parse_text(text: &str, d: &Dialect, limit: usize, sink: &mut dyn Sink) -> usi
                     }
                 }
                 let mut e = k;
-                if rec_end && e > i && data[e - 1] == b'\r' {
+                if strip_cr && rec_end && e > i && data[e - 1] == b'\r' {
                     e -= 1;
                 }
                 sink.field(field, &text[i..e]);
@@ -222,24 +307,54 @@ fn parse_text(text: &str, d: &Dialect, limit: usize, sink: &mut dyn Sink) -> usi
 
 // ---- 見本と推定 ----------------------------------------------------------------------
 
-/// 先頭を読んで、文字コード・区切り文字・見出し・列の型を推定する。
+/// 先頭を読んで、文字コード・区切り文字・レコードの終わり・見出し・列の型を推定する。
 pub fn preview(path: &Path) -> io::Result<CsvPreview> {
+    preview_as(path, None, None, None)
+}
+
+/// [`preview`]（区切り文字・レコードの終わり・文字コードを決めて。`None` のものは推定する）。
+pub fn preview_as(
+    path: &Path,
+    dialect: Option<Dialect>,
+    record_end: Option<RecordEnd>,
+    encoding: Option<Encoding>,
+) -> io::Result<CsvPreview> {
     let (head, complete) = yy_io::read_shared_head(path, 1 << 20)?;
-    let det = yy_encoding::detect(&head, complete);
-    let text = utf8_of(det.encoding, &head[det.bom_len..]);
-    let dialect = yy_delimited::sniff(&text)
-        .or_else(|| {
-            let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-            Dialect::for_extension(&ext)
-        })
-        .unwrap_or_else(Dialect::csv);
-    let rows = sample_records(&text, &dialect, 2000, !complete);
+    let (encoding, bom_len) = match encoding {
+        Some(e) => {
+            let bom = e.bom();
+            (
+                e,
+                if !bom.is_empty() && head.starts_with(bom) {
+                    bom.len()
+                } else {
+                    0
+                },
+            )
+        }
+        None => {
+            let det = yy_encoding::detect(&head, complete);
+            (det.encoding, det.bom_len)
+        }
+    };
+    let text = utf8_of(encoding, &head[bom_len.min(head.len())..]);
+    let record_end = record_end.unwrap_or_else(|| sniff_record_end(&text));
+    let dialect = dialect.unwrap_or_else(|| {
+        sniff_dialect(&text, &record_end)
+            .or_else(|| {
+                let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+                Dialect::for_extension(&ext)
+            })
+            .unwrap_or_else(Dialect::csv)
+    });
+    let rows = sample_records(&text, &dialect, &record_end, 2000, !complete);
     let header = guess_header(&rows);
     let types = infer_types(&rows[header as usize..], DateSystem::D1900);
     Ok(CsvPreview {
         options: CsvOptions {
             dialect,
-            encoding: det.encoding,
+            record_end,
+            encoding,
             header,
             types,
             all_text: false,
@@ -247,6 +362,59 @@ pub fn preview(path: &Path) -> io::Result<CsvPreview> {
         },
         rows: rows.into_iter().take(50).collect(),
     })
+}
+
+/// 改行以外でレコードが終わるファイルの候補（ふつうの文章には現れない区切りの制御コード）。
+const RECORD_END_CANDIDATES: [u8; 3] = [0x1E, 0x1D, 0x1C];
+
+/// レコードの終わりを推定する。RS・GS・FS が LF と同じくらい（LF の 1/4 以上）あればそれ、LF がなく
+/// CR があれば CR、そうでなければ改行。
+fn sniff_record_end(text: &[u8]) -> RecordEnd {
+    let lf = memchr::memchr_iter(b'\n', text).count();
+    let best = RECORD_END_CANDIDATES
+        .iter()
+        .map(|&b| (memchr::memchr_iter(b, text).count(), b))
+        .max_by_key(|&(n, _)| n);
+    if let Some((n, b)) = best
+        && n >= 2
+        && n * 4 >= lf
+    {
+        return RecordEnd::Custom(vec![b]);
+    }
+    if lf == 0 && memchr::memchr_iter(b'\r', text).count() >= 2 {
+        return RecordEnd::Custom(vec![b'\r']);
+    }
+    RecordEnd::Newline
+}
+
+/// 区切り文字を推定する（よくある区切り文字か、ASCII の区切りの US（0x1F））。
+fn sniff_dialect(text: &[u8], end: &RecordEnd) -> Option<Dialect> {
+    // 推定は LF で区切る前提なので、改行以外の終わりは LF に読み替える（見本だけ。値の中の LF は空白に）
+    let lf;
+    let text = match end.custom() {
+        Some(t) if t.len() == 1 => {
+            lf = text
+                .iter()
+                .map(|&b| match b {
+                    b'\n' | b'\r' if b != t[0] => b' ',
+                    b if b == t[0] => b'\n',
+                    b => b,
+                })
+                .collect::<Vec<u8>>();
+            &lf
+        }
+        _ => text,
+    };
+    // US（0x1F）が行の数ほどあれば、それが区切り文字（ふつうの文章には現れない）
+    let lines = text
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .count();
+    let us = memchr::memchr_iter(0x1F, text).count();
+    if us > 0 && us * 2 >= lines {
+        return Dialect::new(b"\x1f", Some(b'"'));
+    }
+    yy_delimited::sniff(text)
 }
 
 fn utf8_of(enc: Encoding, bytes: &[u8]) -> Vec<u8> {
@@ -258,9 +426,15 @@ fn utf8_of(enc: Encoding, bytes: &[u8]) -> Vec<u8> {
 }
 
 /// 先頭のレコード（`drop_last` なら途中で切れたかもしれない最後のレコードを除く）。
-fn sample_records(text: &[u8], d: &Dialect, limit: usize, drop_last: bool) -> Vec<Vec<String>> {
+fn sample_records(
+    text: &[u8],
+    d: &Dialect,
+    end: &RecordEnd,
+    limit: usize,
+    drop_last: bool,
+) -> Vec<Vec<String>> {
     let mut c = Collect::default();
-    parse_records(text, d, limit + 1, &mut c);
+    parse_records(text, d, end, limit + 1, &mut c);
     let mut rows = c.rows;
     if drop_last && rows.len() > 1 {
         rows.pop();
@@ -479,7 +653,7 @@ fn parse_section(
         rows: 0,
         err: None,
     };
-    parse_records(text, &opts.dialect, usize::MAX, &mut s);
+    parse_records(text, &opts.dialect, &opts.record_end, usize::MAX, &mut s);
     if s.in_chunk > 0 {
         s.flush();
     }
@@ -517,6 +691,8 @@ fn import_with(
             eprintln!("[import] {what}: {:.3}s", t0.elapsed().as_secs_f64());
         }
     };
+    check_separators(&opts.dialect, &opts.record_end).map_err(data_err)?;
+    let term = opts.record_end.custom();
     let file = yy_io::open_file(path)?;
     let raw = file.bytes();
     let enc = opts.encoding;
@@ -525,11 +701,15 @@ fn import_with(
     } else {
         0
     };
-    // UTF-16 など、LF で区切って読めない文字コードは先に UTF-8 にする
+    // UTF-16 など、LF で区切って読めない文字コードは先に UTF-8 にする。改行以外で終わるときは、
+    // 区切りが 2 バイト目に現れない制御コード（0x40 未満）だけのときに限って区画ごとに変換する
+    let low = |b: &[u8]| b.iter().all(|&x| x < 0x40);
+    let per_section_ok =
+        enc.splits_at_lf() && term.is_none_or(|t| low(t) && low(opts.dialect.delimiter()));
     let transcoded;
     let (data, per_section): (&[u8], Option<Encoding>) = if enc == Encoding::Utf8 {
         (&raw[bom..], None)
-    } else if enc.splits_at_lf() {
+    } else if per_section_ok {
         (&raw[bom..], Some(enc))
     } else {
         transcoded = transcode_to_temp(enc, &raw[bom..], progress)?;
@@ -542,13 +722,16 @@ fn import_with(
     let mut start = 0usize;
     let mut names: Vec<String> = Vec::new();
     if opts.header && !data.is_empty() {
-        let head_end = first_record_end(data, &d);
+        let head_end = match term {
+            None => first_record_end(data, &d),
+            Some(t) => walk(data, &d, t, false, 1).pos,
+        };
         let head = match per_section {
             Some(e) => yy_encoding::decode_all(e, &data[..head_end], false).0,
             None => data[..head_end].to_vec(),
         };
         let mut c = Collect::default();
-        parse_records(&head, &d, 1, &mut c);
+        parse_records(&head, &d, &opts.record_end, 1, &mut c);
         names = c.rows.into_iter().next().unwrap_or_default();
         start = head_end;
     }
@@ -560,7 +743,13 @@ fn import_with(
         Some(e) => yy_encoding::decode_all(e, sample, false).0,
         None => sample.to_vec(),
     };
-    let sample_rows = sample_records(&sample_text, &d, 5000, sample.len() < body.len());
+    let sample_rows = sample_records(
+        &sample_text,
+        &d,
+        &opts.record_end,
+        5000,
+        sample.len() < body.len(),
+    );
     let types: Vec<ColType> = if !opts.types.is_empty() {
         opts.types.clone()
     } else {
@@ -588,13 +777,15 @@ fn import_with(
         rows_per_chunk
     };
 
-    // 区画の境目（LF の直後）
+    // 区画の境目（LF・レコードの終わりの直後）
+    let term_bytes: &[u8] = term.unwrap_or(b"\n");
+    let finder = memchr::memmem::Finder::new(term_bytes);
     let mut bounds = vec![0usize];
     let mut pos = section.min(body.len());
     while pos < body.len() {
-        match memchr::memchr(b'\n', &body[pos..]) {
+        match finder.find(&body[pos..]) {
             Some(k) => {
-                let b = pos + k + 1;
+                let b = pos + k + term_bytes.len();
                 if b < body.len() {
                     bounds.push(b);
                 }
@@ -614,6 +805,12 @@ fn import_with(
         .into_par_iter()
         .map(|k| {
             let s = &body[bounds[k]..bounds[k + 1]];
+            if let Some(t) = term {
+                return (
+                    walk(s, &d, t, false, usize::MAX).in_quotes,
+                    walk(s, &d, t, true, usize::MAX).in_quotes,
+                );
+            }
             let mut out = Scanner::new(d);
             out.feed(s);
             let mut inq = Scanner::at_line(
@@ -638,6 +835,9 @@ fn import_with(
         .map(|k| {
             if !starts_in_quotes[k] {
                 return bounds[k];
+            }
+            if let Some(t) = term {
+                return bounds[k] + walk(&body[bounds[k]..], &d, t, true, 1).pos;
             }
             let mut s = Scanner::at_line(
                 d,
@@ -778,6 +978,87 @@ fn empty_run(ctx: &Context, n: u64) -> io::Result<Vec<Piece>> {
     Ok(c.pieces().to_vec())
 }
 
+/// [`walk`] の結果。
+struct Walked {
+    /// 読み終えた位置（`records` 個目のレコードの終わりの直後か、データの終わり）
+    pos: usize,
+    /// 引用符の中で終わったか
+    in_quotes: bool,
+}
+
+/// レコードの終わりが `term` のデータを、`max_records` レコードまで読み進める（値は取り出さない。
+/// 引用符の扱いは [`parse_text`] と同じ）。`start_quoted` なら引用符の中から読み始める。
+fn walk(data: &[u8], d: &Dialect, term: &[u8], start_quoted: bool, max_records: usize) -> Walked {
+    let delim = d.delimiter();
+    let q = d.quote;
+    let n = data.len();
+    let mut i = 0;
+    let mut quoted = start_quoted && q.is_some();
+    let mut field_start = !start_quoted;
+    let mut records = 0;
+    while i < n {
+        if quoted {
+            let qc = q.unwrap_or(b'"');
+            match memchr::memchr(qc, &data[i..]) {
+                None => {
+                    i = n;
+                    break;
+                }
+                Some(k) => {
+                    let p = i + k;
+                    if data.get(p + 1) == Some(&qc) {
+                        i = p + 2;
+                    } else {
+                        // 閉じ引用符（この後は区切りまで普通の文字）
+                        quoted = false;
+                        field_start = false;
+                        i = p + 1;
+                    }
+                }
+            }
+            continue;
+        }
+        if field_start && q == Some(data[i]) {
+            quoted = true;
+            field_start = false;
+            i += 1;
+            continue;
+        }
+        // 引用符の外: 区切り文字かレコードの終わりまで
+        let mut k = i;
+        loop {
+            match memchr::memchr2(delim[0], term[0], &data[k..]) {
+                None => {
+                    i = n;
+                    break;
+                }
+                Some(m) => {
+                    let p = k + m;
+                    if data[p..].starts_with(term) {
+                        i = p + term.len();
+                        records += 1;
+                        field_start = true;
+                        break;
+                    }
+                    if data[p..].starts_with(delim) {
+                        i = p + delim.len();
+                        field_start = true;
+                        break;
+                    }
+                    k = p + 1;
+                }
+            }
+        }
+        if records >= max_records {
+            break;
+        }
+    }
+    Walked {
+        pos: i.min(n),
+        in_quotes: quoted,
+    }
+}
+
 /// 最初のレコードの終わり（次のレコードの先頭）。
 fn first_record_end(data: &[u8], d: &Dialect) -> usize {
     let mut s = Scanner::new(*d);
@@ -843,6 +1124,8 @@ fn transcode_to_temp(
 pub struct ExportOptions {
     pub dialect: Dialect,
     pub encoding: Encoding,
+    /// レコードの終わり（改行なら [`ExportOptions::crlf`] で CR LF か LF）
+    pub record_end: RecordEnd,
     /// 改行を CRLF にする（`false` なら LF）
     pub crlf: bool,
     /// BOM を付ける（Unicode のとき）
@@ -856,6 +1139,7 @@ impl Default for ExportOptions {
         ExportOptions {
             dialect: Dialect::csv(),
             encoding: Encoding::Utf8,
+            record_end: RecordEnd::Newline,
             crlf: true,
             bom: false,
             formatted: true,
@@ -876,16 +1160,24 @@ fn is_date_format(f: &str) -> bool {
     l.contains('y') || l.contains('d') || l.contains('h') || l.contains('s')
 }
 
-/// フィールドを書く（区切り文字・引用符・改行を含めば引用符で囲む）。
-fn push_field(buf: &mut Vec<u8>, v: &[u8], d: &Dialect) {
+/// `v` が `pat` を含むか。
+fn contains(v: &[u8], pat: &[u8]) -> bool {
+    match pat {
+        [] => false,
+        [b] => memchr::memchr(*b, v).is_some(),
+        _ => memchr::memmem::find(v, pat).is_some(),
+    }
+}
+
+/// フィールドを書く（区切り文字・引用符・改行・レコードの終わりを含めば引用符で囲む）。
+fn push_field(buf: &mut Vec<u8>, v: &[u8], d: &Dialect, term: &[u8]) {
     let Some(q) = d.quote else {
         buf.extend_from_slice(v);
         return;
     };
-    let delim = d.delimiter();
     let needs = v.iter().any(|&b| b == q || b == b'\n' || b == b'\r')
-        || (delim.len() == 1 && memchr::memchr(delim[0], v).is_some())
-        || (delim.len() > 1 && v.windows(delim.len()).any(|w| w == delim));
+        || contains(v, d.delimiter())
+        || contains(v, term);
     if !needs {
         buf.extend_from_slice(v);
         return;
@@ -918,15 +1210,41 @@ fn push_cell(
     opts: &ExportOptions,
     sys: DateSystem,
 ) {
+    let term = opts.terminator();
     match v {
         CellRef::Empty => {}
         CellRef::Text(s) => {
             let s = crate::value::figurative_label(s).unwrap_or(s);
-            push_field(buf, s.as_bytes(), &opts.dialect)
+            push_field(buf, s.as_bytes(), &opts.dialect, term)
         }
         _ => {
             let s = cell_text(v, format, opts, sys);
-            push_field(buf, s.as_bytes(), &opts.dialect);
+            push_field(buf, s.as_bytes(), &opts.dialect, term);
+        }
+    }
+}
+
+/// 1 レコードを書く（終わりの区切りも）。
+fn push_record<V: AsRef<[u8]>>(buf: &mut Vec<u8>, fields: &[V], opts: &ExportOptions) {
+    let row_start = buf.len();
+    let term = opts.terminator();
+    for (i, f) in fields.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(opts.dialect.delimiter());
+        }
+        push_field(buf, f.as_ref(), &opts.dialect, term);
+    }
+    empty_record(buf, row_start, fields.len(), &opts.dialect);
+    buf.extend_from_slice(term);
+}
+
+impl ExportOptions {
+    /// レコードの終わりに書くバイト列。
+    pub fn terminator(&self) -> &[u8] {
+        match &self.record_end {
+            RecordEnd::Custom(t) => t,
+            RecordEnd::Newline if self.crlf => b"\r\n",
+            RecordEnd::Newline => b"\n",
         }
     }
 }
@@ -1002,10 +1320,11 @@ fn export_to(
     order: Option<&[u32]>,
     progress: &(dyn Fn(u64, u64) -> bool + Sync),
 ) -> io::Result<ExportReport> {
+    check_separators(&opts.dialect, &opts.record_end).map_err(data_err)?;
     let mut out = BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
     let mut enc = opts.encoding.new_encoder(EscapeMode::Reject);
     let mut report = ExportReport::default();
-    let term: &[u8] = if opts.crlf { b"\r\n" } else { b"\n" };
+    let term = opts.terminator();
     let mut write = |text: &[u8], last: bool, report: &mut ExportReport| -> io::Result<()> {
         if opts.encoding == Encoding::Utf8 {
             return out.write_all(text);
@@ -1054,7 +1373,7 @@ fn export_to(
     let mut line = Vec::new();
     if t.header && !cols.is_empty() {
         let names: Vec<&[u8]> = cols.iter().map(|c| c.name.as_bytes()).collect();
-        yy_delimited::write_record(&names, &opts.dialect, term, &mut line);
+        push_record(&mut line, &names, opts);
         write(&line, false, &mut report)?;
     }
     if simple {
@@ -1143,7 +1462,7 @@ fn export_to(
                 row.push(cell_text(CellRef::of(&v), f.as_deref(), opts, sys));
             }
             line.clear();
-            yy_delimited::write_record(&row, &opts.dialect, term, &mut line);
+            push_record(&mut line, &row, opts);
             write(&line, false, &mut report)?;
             if r % 65_536 == 0 && !progress(r, grid_rows) {
                 return Err(cancelled());

@@ -465,6 +465,7 @@ font_family = ""        # 格子のフォント（空なら Yu Gothic UI）
 font_size = 11.0
 column_width = 8.43     # 既定の列幅（半角の文字数）
 layout_catalog = ""     # 固定長のレイアウトカタログのルート（空なら %APPDATA%\yyeditor\layouts）
+use_agent = false       # 接続先のファイルの読み書きにエージェントを使う（false なら SFTP）
 ```
 
 ## 3270（メインフレーム） {#tn3270}

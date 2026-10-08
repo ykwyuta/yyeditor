@@ -34,6 +34,8 @@ const CLASS_COMBOBOX: u16 = 0x0085;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
     Open,
+    /// 開く（文字コードの欄なし。スプレッドシートは中身から判別する）
+    OpenData,
     Save,
     /// フォルダを選ぶ（ワークスペースに加える）
     Folder,
@@ -91,7 +93,8 @@ pub(crate) fn show(
     let targets = crate::remote::with_state(|r| r.known_targets()).unwrap_or_default();
     let (target, dir, name) = match &initial {
         Some(u) => {
-            let is_file = mode == Mode::Save || (mode == Mode::Open && !u.path.ends_with(b"/"));
+            let is_file = mode == Mode::Save
+                || (matches!(mode, Mode::Open | Mode::OpenData) && !u.path.ends_with(b"/"));
             if is_file {
                 (
                     Some(u.target()),
@@ -136,7 +139,7 @@ pub(crate) fn show(
 fn build_template(mode: Mode) -> Template {
     let (w, h) = (400i16, 282i16);
     let title = match mode {
-        Mode::Open => "リモートのファイルを開く",
+        Mode::Open | Mode::OpenData => "リモートのファイルを開く",
         Mode::Save => "リモートに名前を付けて保存",
         Mode::Folder => "ワークスペースに追加するリモートのフォルダ",
     };
@@ -182,7 +185,7 @@ fn build_template(mode: Mode) -> Template {
     }
     t.item(0, 7, 240, w - 14, 18, ID_INFO, CLASS_STATIC, "");
     let ok = match mode {
-        Mode::Open => "開く",
+        Mode::Open | Mode::OpenData => "開く",
         Mode::Save => "保存",
         Mode::Folder => "このフォルダを追加",
     };
@@ -224,6 +227,9 @@ fn add_file_fields(t: &mut Template, mode: Mode, w: i16) {
         CLASS_EDIT,
         "",
     );
+    if mode == Mode::OpenData {
+        return;
+    }
     t.item(0, 7, 222, 42, 10, 0, CLASS_STATIC, "文字コード:");
     t.item(
         tab | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32,
@@ -276,6 +282,9 @@ fn set_info(hwnd: HWND, text: &str) {
 /// 文字コードの欄の項目（開く: 先頭が「自動判別」）。
 fn encoding_items(mode: Mode) -> Vec<Option<Encoding>> {
     let mut v: Vec<Option<Encoding>> = Vec::new();
+    if mode == Mode::OpenData {
+        return vec![None];
+    }
     if mode == Mode::Open {
         v.push(None);
     }
@@ -552,7 +561,7 @@ fn accept_name(hwnd: HWND) {
         path,
     };
     match (st.mode, &existing) {
-        (Mode::Open, None) => {
+        (Mode::Open | Mode::OpenData, None) => {
             set_info(hwnd, &format!("{name} が見つかりません"));
             return;
         }

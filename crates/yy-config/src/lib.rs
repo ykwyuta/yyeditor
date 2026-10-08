@@ -81,6 +81,9 @@ pub struct SheetConfig {
     /// レイアウトカタログのルート（固定長ファイルのレイアウトの定義ファイルを置くフォルダ。空なら
     /// `%APPDATA%\yyeditor\layouts`。15 章 6.6）
     pub layout_catalog: String,
+    /// 接続先のファイル・フォルダの読み書きに、接続先のエージェントを使う（使わなければ SFTP。
+    /// 接続先に何も置かない）
+    pub use_agent: bool,
 }
 
 impl Default for SheetConfig {
@@ -92,6 +95,7 @@ impl Default for SheetConfig {
             font_size: 11.0,
             column_width: 8.43,
             layout_catalog: String::new(),
+            use_agent: false,
         }
     }
 }
