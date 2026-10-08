@@ -478,12 +478,52 @@ fn raw_row_values(spec: &FixedSpec, bytes: &[u8], k: u32) -> Value {
     }
 }
 
+/// 行のバイト列をレイアウトで読んだとき、デコードエラー（数値として読めない項目）になる最初の項目の名前。
+fn decode_error(spec: &FixedSpec, l: &NamedLayout, bytes: &[u8]) -> Option<String> {
+    let mut rec = bytes.to_vec();
+    let need = spec.data_len.max(l.layout.record_len);
+    if rec.len() < need {
+        rec.resize(need, spec.codec.charset.space());
+    }
+    l.layout
+        .fields
+        .iter()
+        .find(|f| {
+            matches!(
+                spec.codec.decode(f, &rec[f.offset..f.offset + f.len]),
+                Decoded::Invalid
+            )
+        })
+        .map(|f| f.name.clone())
+}
+
+/// 行（格子の行）で選べるレイアウトの名前: 行のバイト列（レイアウトが決まっていれば項目を書いたもの、
+/// 未確定なら元のバイト）をデコードエラーなしで読めるもの。バイト列のない行（手で入力している行）は
+/// すべて。
+pub fn usable_layouts(ctx: &Context, sheet: &Sheet, row: u64) -> io::Result<Vec<Arc<str>>> {
+    let Some(spec) = sheet.fixed.as_deref().filter(|s| s.is_multi()) else {
+        return Ok(Vec::new());
+    };
+    let bytes = row_bytes(ctx, sheet, sheet.source_row(row))?;
+    Ok(spec
+        .multi
+        .iter()
+        .filter(|m| {
+            bytes
+                .as_ref()
+                .is_none_or(|b| decode_error(spec, m, b).is_none())
+        })
+        .map(|m| m.name.clone())
+        .collect())
+}
+
 /// 行（格子の行）のレイアウトを `name` にする（マルチレイアウト）。名前が登録されていなければ、その名前の
 /// まま「レイアウト未確定」にする（空なら名前を消す）。
 ///
 /// レイアウトが変わるときは、COBOL の `REDEFINES` と同じく行のバイト列を新しいレイアウトで読み直す
-/// （前のレイアウトで項目を書いたバイト列か、未確定の行なら元のバイト〔項目1 の `X'…'`〕）。バイト列の
-/// ない行（手で入力している行）は値をそのままにする。未確定に戻すと、元のバイトを項目1・2 に置く。
+/// （前のレイアウトで項目を書いたバイト列か、未確定の行なら元のバイト〔項目1 の `X'…'`〕）。そのバイト列を
+/// デコードエラーなしで読めないレイアウトは選べない（`Err`。選べるレイアウトを示す）。バイト列のない行
+/// （手で入力している行）は値をそのままにする。未確定に戻すと、元のバイトを項目1・2 に置く。
 pub fn set_row_layout(
     ctx: &Context,
     sheet: &mut Sheet,
@@ -509,6 +549,27 @@ pub fn set_row_layout(
         return Ok(());
     }
     let bytes = row_bytes(ctx, sheet, src).map_err(|e| e.to_string())?;
+    // 行のバイト列をデコードエラーなしで読めるレイアウトだけを選べる
+    if let (Some(n), Some(b)) = (&new, &bytes)
+        && let Some(field) = decode_error(&spec, n, b)
+    {
+        let usable: Vec<&str> = spec
+            .multi
+            .iter()
+            .filter(|m| decode_error(&spec, m, b).is_none())
+            .map(|m| &*m.name)
+            .collect();
+        return Err(format!(
+            "レイアウト {} ではこの行を読めません（項目 {field} がデコードエラーになります）。\n\
+             この行で選べるレイアウト: {}",
+            n.name,
+            if usable.is_empty() {
+                "なし".to_string()
+            } else {
+                usable.join("・")
+            }
+        ));
+    }
     let label = match &new {
         Some(n) => Value::text(&n.name),
         None if name.trim().is_empty() => Value::Empty,
@@ -1882,10 +1943,15 @@ mod tests {
 
     const HDR: &str = "01 H.\n 05 TYP PIC X.\n 05 DT PIC 9(8).\n 05 FILLER PIC X(11).\n";
     const DTL: &str = "01 D.\n 05 TYP PIC X.\n 05 AMT PIC S9(7)V99 COMP-3.\n 05 NAME PIC X(14).\n";
+    const TXT: &str = "01 T.\n 05 ALLTEXT PIC X(20).\n";
 
     fn multi_spec(cs: Charset, sep: RecordSep) -> FixedSpec {
         FixedSpec::new_multi(
-            &[("HDR".into(), HDR.into()), ("DTL".into(), DTL.into())],
+            &[
+                ("HDR".into(), HDR.into()),
+                ("DTL".into(), DTL.into()),
+                ("TXT".into(), TXT.into()),
+            ],
             20,
             Codec::new(cs),
             sep,
@@ -1943,6 +2009,7 @@ mod tests {
             let spec = multi_spec(cs, sep);
             assert!(spec.is_multi());
             assert_eq!(spec.max_fields(), 3);
+            assert_eq!(spec.multi.len(), 3);
             let bytes = multi_file(&spec);
             let path = dir.path().join(format!("multi-{}.dat", cs.name()));
             std::fs::write(&path, &bytes).unwrap();
@@ -1962,6 +2029,21 @@ mod tests {
             assert!(matches!(get(&d, 1, 1), Value::Text(s) if s.starts_with("X'")));
             assert!(matches!(get(&d, 1, 2), Value::Text(s) if s.starts_with("H20261007")));
             assert!(field_at(&ctx, &d.book.sheets[0], 1, 2).is_none());
+            // 選べるレイアウトは、行のバイト列をデコードエラーなしで読めるものだけ
+            let names = |d: &Document, r: u64| -> Vec<String> {
+                usable_layouts(&ctx, &d.book.sheets[0], r)
+                    .unwrap()
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect()
+            };
+            assert_eq!(names(&d, 1), ["HDR", "TXT"]);
+            assert_eq!(names(&d, 2), ["DTL", "TXT"]);
+            assert_eq!(names(&d, 3), ["DTL", "TXT"]);
+            let mut sh = d.book.sheets[0].clone();
+            let e = set_row_layout(&ctx, &mut sh, 1, "DTL").unwrap_err();
+            assert!(e.contains("項目 AMT") && e.contains("HDR・TXT"), "{e}");
+            assert_eq!(row_layout(&ctx, &sh, 1), RowLayout::Undetermined(None));
             // 行のレイアウトを指定すると、そのレイアウトで読み直す
             d.edit(|b, ctx| {
                 let sh = &mut b.sheets[0];
@@ -1999,13 +2081,16 @@ mod tests {
             let rep = export(&ctx, sh, &out, &spec, None, &|_, _| true).unwrap();
             assert_eq!((rep.records, rep.undetermined), (3, 0));
             assert_eq!(std::fs::read(&out).unwrap(), bytes, "{cs:?}");
+            // 決まった行も、読めないレイアウトには変えられない
+            assert_eq!(names(&d, 2), ["DTL", "TXT"]);
+            let mut sh = d.book.sheets[0].clone();
+            assert!(set_row_layout(&ctx, &mut sh, 2, "HDR").is_err());
             // 別のレイアウトで読み直す（REDEFINES と同じ）→ 戻すと元の値
             d.edit(|b, ctx| {
-                set_row_layout(ctx, &mut b.sheets[0], 2, "HDR").map_err(io::Error::other)
+                set_row_layout(ctx, &mut b.sheets[0], 2, "TXT").map_err(io::Error::other)
             })
             .unwrap();
-            assert_eq!(get(&d, 2, 1), Value::text("D"));
-            assert!(matches!(get(&d, 2, 2), Value::Text(s) if s.starts_with("X'")));
+            assert!(matches!(get(&d, 2, 1), Value::Text(s) if s.starts_with('D')));
             d.edit(|b, ctx| {
                 set_row_layout(ctx, &mut b.sheets[0], 2, "DTL").map_err(io::Error::other)
             })
@@ -2100,9 +2185,13 @@ mod tests {
         sh.set(&ctx, 1, 0, Value::text("DTL")).unwrap();
         sh.set(&ctx, 1, 3, Value::text("X")).unwrap();
         assert!(matches!(row_layout(&ctx, &sh, 1), RowLayout::Known(_)));
-        // 手で入力した行はバイト列がないので、レイアウトを変えても値はそのまま
-        set_row_layout(&ctx, &mut sh, 1, "HDR").unwrap();
-        assert_eq!(sh.get(&ctx, 1, 0).unwrap(), Value::text("HDR"));
+        // レイアウトの決まった行は項目を書いたバイト列で確かめる（DTL の AMT は HDR の DT として読めない）
+        assert!(set_row_layout(&ctx, &mut sh, 1, "HDR").is_err());
+        set_row_layout(&ctx, &mut sh, 1, "TXT").unwrap();
+        assert_eq!(sh.get(&ctx, 1, 0).unwrap(), Value::text("TXT"));
+        // 名前だけの行（バイト列のない未確定の行）はどのレイアウトも選べる
+        sh.set(&ctx, 2, 0, Value::text("?")).unwrap();
+        assert_eq!(usable_layouts(&ctx, &sh, 2).unwrap().len(), 3);
         // 表のある（マルチレイアウトでない）シートには設定できない
         let mut t = Sheet::new("T");
         t.set(&ctx, 0, 0, Value::Number(1.0)).unwrap();

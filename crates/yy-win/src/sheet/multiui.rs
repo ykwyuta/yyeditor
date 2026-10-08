@@ -682,26 +682,49 @@ extern "system" fn row_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
 
 /// データ > 行のレイアウトを指定（選んだ行）。
 pub(super) fn row_layout_dialog() {
-    let Some((frame, names, rows)) = with(|a| {
+    let Some((frame, all, names, rows)) = with(|a| {
         a.end_edit(true);
         let s = a.sheet();
-        let names: Vec<String> = s
+        let all: Vec<String> = s
             .fixed
             .as_deref()
             .map(|f| f.multi.iter().map(|m| m.name.to_string()).collect())
             .unwrap_or_default();
         let (t, _, b, _) = a.selection();
         let last = s.extent().0.max(t + 1) - 1;
-        (a.frame, names, (t, b.min(last)))
+        let rows = (t, b.min(last));
+        // 選んだどの行もデコードエラーなしで読めるレイアウトだけを選択肢にする
+        let mut names = all.clone();
+        for r in rows.0..=rows.1 {
+            if names.is_empty() {
+                break;
+            }
+            if matches!(s.place(r, 0), yy_sheet::Place::Header(_)) {
+                continue;
+            }
+            let ok = fixed::usable_layouts(&a.ctx, s, r).unwrap_or_default();
+            names.retain(|n| ok.iter().any(|o| **o == **n));
+        }
+        (a.frame, all, names, rows)
     }) else {
         return;
     };
-    if names.is_empty() {
+    if all.is_empty() {
         info_box(
             frame,
             "このシートはマルチレイアウトではありません。\nデータ > マルチレイアウトの設定 で、レイアウトを登録してください。",
         );
         return;
+    }
+    if names.is_empty() {
+        info_box(
+            frame,
+            &format!(
+                "選んだ行をデコードエラーなしで読めるレイアウトがありません（登録しているレイアウト: {}）。\n\
+                 1 行ずつ選ぶか、レイアウト（コピーブック）を確かめてください。レイアウト未確定には戻せます。",
+                all.join("・")
+            ),
+        );
     }
     let mut t = Template::dialog("行のレイアウトを指定", 200, 190);
     label(
@@ -710,7 +733,10 @@ pub(super) fn row_layout_dialog() {
         7,
         186,
         0,
-        &format!("選んだ {} 行のレイアウト:", rows.1 - rows.0 + 1),
+        &format!(
+            "選んだ {} 行をデコードエラーなしで読めるレイアウト:",
+            rows.1 - rows.0 + 1
+        ),
     );
     t.item(
         (WS_BORDER | WS_TABSTOP | WS_VSCROLL).0 | LBS_NOTIFY as u32,
