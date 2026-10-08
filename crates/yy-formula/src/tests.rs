@@ -883,3 +883,32 @@ fn and_or_ifs_and_row() {
         );
     }
 }
+
+#[test]
+fn power_function() {
+    let mut g = Mem::new();
+    g.set(0, "A1", n(2.0));
+    g.set(0, "A2", n(3.0));
+    g.set(0, "A3", t("x"));
+    assert_eq!(g.eval("=POWER(2,10)"), n(1024.0));
+    assert_eq!(g.eval("=POWER(A1,A2)"), n(8.0));
+    assert_eq!(g.eval("=POWER(9,0.5)"), n(3.0));
+    assert_eq!(g.eval("=POWER(2,-1)"), n(0.5));
+    assert_eq!(g.eval("=POWER(\"3\",2)"), n(9.0));
+    assert_eq!(g.eval("=POWER(-2,3)"), n(-8.0));
+    assert_eq!(g.eval("=POWER(-8,1/3)"), Val::Err(Error::Num));
+    assert_eq!(g.eval("=POWER(0,0)"), Val::Err(Error::Num));
+    assert_eq!(g.eval("=POWER(0,-1)"), Val::Err(Error::Div0));
+    assert_eq!(g.eval("=POWER(10,400)"), Val::Err(Error::Num));
+    assert_eq!(g.eval("=POWER(A3,2)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=POWER(1/0,2)"), Val::Err(Error::Div0));
+    assert_eq!(g.eval("=POWER(2)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=POWER(2,)"), Val::Err(Error::Value));
+    assert_eq!(g.eval("=POWER(A1:A2,2)"), arr(2, 1, vec![n(4.0), n(9.0)]));
+    assert_eq!(
+        g.eval("=POWER(2,{1,2,3})"),
+        arr(1, 3, vec![n(2.0), n(4.0), n(8.0)])
+    );
+    assert_eq!(g.eval("=POWER(2,3)"), g.eval("=2^3"));
+    assert_eq!(formula_text(&parse("=power(2,3)").unwrap()), "=POWER(2,3)");
+}

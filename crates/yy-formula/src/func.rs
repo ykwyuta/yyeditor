@@ -33,6 +33,7 @@ pub(crate) fn call(f: &Func, args: &[Expr], cx: &Context<'_>) -> Val {
         Func::Iferror => iferror(args, cx),
         Func::CblMove => cbl_move(args, cx),
         Func::Mod => modulo(args, cx),
+        Func::Power => power(args, cx),
         Func::Pi | Func::Logical(_) if !args.is_empty() => Val::Err(Error::Value),
         Func::Pi => Val::Num(std::f64::consts::PI),
         Func::Logical(b) => Val::Bool(*b),
@@ -364,6 +365,18 @@ fn modulo(args: &[Expr], cx: &Context<'_>) -> Val {
         } else {
             Val::Err(Error::Num)
         }
+    })
+}
+
+/// `POWER(数値, 指数)`: べき乗（`数値^指数` と同じ。`POWER(0,0)` と負の数の小数乗は `#NUM!`、
+/// `POWER(0,負)` は `#DIV/0!`）。配列なら要素ごと。
+fn power(args: &[Expr], cx: &Context<'_>) -> Val {
+    if args.len() != 2 || args.iter().any(|a| matches!(a, Expr::Missing)) {
+        return Val::Err(Error::Value);
+    }
+    let (a, b) = (eval(&args[0], cx), eval(&args[1], cx));
+    zip(&a, &b, &|x, y| {
+        crate::eval::binary(crate::parse::BinOp::Pow, x, y, cx.sys)
     })
 }
 

@@ -152,6 +152,12 @@ pub const FUNCTIONS: &[FuncInfo] = &[
         repeat: None,
     },
     FuncInfo {
+        name: "POWER",
+        desc: "数値のべき乗（数値^指数）を返します。",
+        params: &["数値", "指数"],
+        repeat: None,
+    },
+    FuncInfo {
         name: "PRODUCT",
         desc: "数値の積を返します。",
         params: &["数値1", "[数値2]"],

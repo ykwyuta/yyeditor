@@ -130,6 +130,8 @@ pub enum Func {
     /// `ROW([参照])`
     Row,
     Mod,
+    /// `POWER(数値, 指数)`
+    Power,
     Pi,
     /// `TRUE()`（`true`）・`FALSE()`
     Logical(bool),
@@ -183,6 +185,7 @@ impl Func {
             "OR" => Func::AndOr(false),
             "ROW" => Func::Row,
             "MOD" => Func::Mod,
+            "POWER" => Func::Power,
             "PI" => Func::Pi,
             "TRUE" => Func::Logical(true),
             "FALSE" => Func::Logical(false),
@@ -220,6 +223,7 @@ impl Func {
             Func::AndOr(false) => "OR",
             Func::Row => "ROW",
             Func::Mod => "MOD",
+            Func::Power => "POWER",
             Func::Pi => "PI",
             Func::Logical(true) => "TRUE",
             Func::Logical(false) => "FALSE",
