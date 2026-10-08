@@ -25,6 +25,7 @@ members = [
     "crates/yy-sheet",
     "crates/yy-cobol",
     "crates/yy-git",
+    "crates/yy-files",
     "crates/yy-win",
     "apps/yyeditor",
     "apps/yyterm",
@@ -58,6 +59,7 @@ yy-formula = { path = "crates/yy-formula" }
 yy-sheet = { path = "crates/yy-sheet" }
 yy-cobol = { path = "crates/yy-cobol" }
 yy-git = { path = "crates/yy-git" }
+yy-files = { path = "crates/yy-files" }
 yy-search = { path = "crates/yy-search" }
 yy-delimited = { path = "crates/yy-delimited" }
 yy-core = { path = "crates/yy-core" }
@@ -89,6 +91,7 @@ pulldown-cmark = { version = "0.13.4", default-features = false, features = ["ht
 miniz_oxide = "0.9.1"
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 sha2 = "0.11"
+blake3 = "1"
 sha1 = "0.11"
 hmac = "0.13"
 data-encoding = "2"

@@ -1,0 +1,25 @@
+[package]
+name = "yy-files"
+description = "File management core for yyfilemanager: scanning and catalogs, folder sync to shares with resume, duplicate and version detection, reviewed purge and file search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+blake3.workspace = true
+miniz_oxide.workspace = true
+postcard.workspace = true
+rayon.workspace = true
+serde.workspace = true
+unicode-normalization.workspace = true
+yy-buffer.workspace = true
+yy-core.workspace = true
+yy-search.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true
