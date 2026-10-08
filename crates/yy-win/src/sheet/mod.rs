@@ -80,6 +80,7 @@ const ID_REDO: u16 = 11;
 const ID_CUT: u16 = 12;
 const ID_COPY: u16 = 13;
 const ID_PASTE: u16 = 14;
+const ID_PASTE_TRANSPOSE: u16 = 67;
 const ID_DELETE: u16 = 15;
 const ID_SELECT_ALL: u16 = 16;
 const ID_FILL_DOWN: u16 = 17;
@@ -384,6 +385,11 @@ fn create_menu() -> Result<HMENU> {
         add(edit, ID_CUT, "切り取り(&T)\tCtrl+X");
         add(edit, ID_COPY, "コピー(&C)\tCtrl+C");
         add(edit, ID_PASTE, "貼り付け(&P)\tCtrl+V");
+        add(
+            edit,
+            ID_PASTE_TRANSPOSE,
+            "行列を入れ替えて貼り付け(&E)\tCtrl+Alt+V",
+        );
         add(edit, ID_DELETE, "内容を消す(&D)\tDelete");
         add(edit, ID_FILL_DOWN, "下へコピー(&W)\tCtrl+D");
         sep(edit);
@@ -1720,8 +1726,16 @@ impl App {
         crate::clipboard::set_text(self.frame, &out, false)
     }
 
-    fn paste(&mut self, text: &str) {
-        let rows = parse_tsv(text);
+    /// クリップボードの表を貼り付ける（`transpose` なら行と列を入れ替えて）。
+    fn paste(&mut self, text: &str, transpose: bool) {
+        let rows: Vec<Vec<Option<String>>> = if transpose {
+            transpose_rows(parse_tsv(text))
+        } else {
+            parse_tsv(text)
+                .into_iter()
+                .map(|r| r.into_iter().map(Some).collect())
+                .collect()
+        };
         let cells: u64 = rows.iter().map(|r| r.len() as u64).sum();
         if cells > CLIP_LIMIT {
             error_box(
@@ -1742,6 +1756,10 @@ impl App {
             let s = &mut b.sheets[sheet];
             for (i, row) in rows.iter().enumerate() {
                 for (j, v) in row.iter().enumerate() {
+                    // 入れ替えで生まれた穴（元の短い行の先）はそのまま
+                    let Some(v) = v else {
+                        continue;
+                    };
                     let (r, c) = (r0 + i as u64, c0 + j as u32);
                     // 式は式として（読めなければ文字列として）
                     if !(is_formula(v) && s.set_formula(ctx, r, c, v).is_ok()) {
@@ -2020,6 +2038,24 @@ fn window_text(h: HWND) -> String {
 }
 
 /// タブ区切り（Excel のクリップボードの形。引用符で囲んだ値の中の改行・タブ・`""`）を読む。
+/// 表の行と列を入れ替える（短い行の先は `None`。そこには貼り付けない）。
+fn transpose_rows(rows: Vec<Vec<String>>) -> Vec<Vec<Option<String>>> {
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut out: Vec<Vec<Option<String>>> = vec![vec![None; rows.len()]; width];
+    for (i, row) in rows.into_iter().enumerate() {
+        for (j, v) in row.into_iter().enumerate() {
+            out[j][i] = Some(v);
+        }
+    }
+    // 各行の最後の値より後ろの穴は要らない
+    for r in &mut out {
+        while matches!(r.last(), Some(None)) {
+            r.pop();
+        }
+    }
+    out
+}
+
 fn parse_tsv(text: &str) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
     let mut row = Vec::new();
@@ -2704,7 +2740,18 @@ fn command(id: u16) {
                 return;
             };
             if let Some((text, _)) = crate::clipboard::get_text(frame) {
-                with(|a| a.paste(&text));
+                with(|a| a.paste(&text, false));
+            }
+        }
+        ID_PASTE_TRANSPOSE => {
+            let Some(frame) = with(|a| a.frame) else {
+                return;
+            };
+            if let Some((text, _)) = crate::clipboard::get_text(frame) {
+                with(|a| {
+                    a.end_edit(true);
+                    a.paste(&text, true);
+                });
             }
         }
         ID_DELETE => {
@@ -2928,6 +2975,14 @@ fn key_hook(msg: &MSG) -> bool {
         return false;
     }
     let alt = unsafe { GetKeyState(VK_MENU.0 as i32) } < 0;
+    // 行列を入れ替えて貼り付け（格子にフォーカスがあるときだけ）
+    if vk == VK_V && alt && !shift {
+        if with(|a| a.grid == msg.hwnd) == Some(true) {
+            command(ID_PASTE_TRANSPOSE);
+            return true;
+        }
+        return false;
+    }
     if vk == VK_L && (shift || alt) {
         command(if alt { ID_REAPPLY } else { ID_FILTER });
         return true;
@@ -3452,6 +3507,7 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                         (ID_CUT, "切り取り"),
                         (ID_COPY, "コピー"),
                         (ID_PASTE, "貼り付け"),
+                        (ID_PASTE_TRANSPOSE, "行列を入れ替えて貼り付け"),
                         (0, ""),
                         (ID_INSERT_ROWS, "行を挿入"),
                         (ID_DELETE_ROWS, "行を削除"),
@@ -3544,6 +3600,34 @@ mod tests {
         );
         assert_eq!(parse_tsv("1\t2"), vec![vec!["1", "2"]]);
         assert_eq!(parse_tsv("\"改\n行\"\tz\n"), vec![vec!["改\n行", "z"]]);
+    }
+
+    #[test]
+    fn transposes_pasted_tables() {
+        let s = |v: &str| Some(v.to_owned());
+        assert_eq!(
+            transpose_rows(parse_tsv("a\tb\tc\n1\t2\t3\n")),
+            vec![
+                vec![s("a"), s("1")],
+                vec![s("b"), s("2")],
+                vec![s("c"), s("3")]
+            ]
+        );
+        // 長さの違う行: 短い行の先は穴（貼り付けない）
+        assert_eq!(
+            transpose_rows(parse_tsv("a\tb\tc\n1\n")),
+            vec![vec![s("a"), s("1")], vec![s("b")], vec![s("c")]]
+        );
+        assert_eq!(
+            transpose_rows(parse_tsv("a\n1\tx\n")),
+            vec![vec![s("a"), s("1")], vec![None, s("x")]]
+        );
+        // 1 行は 1 列に
+        assert_eq!(
+            transpose_rows(parse_tsv("=A1*2\t\"x\ty\"")),
+            vec![vec![s("=A1*2")], vec![s("x\ty")]]
+        );
+        assert!(transpose_rows(Vec::new()).is_empty());
     }
 
     #[test]
