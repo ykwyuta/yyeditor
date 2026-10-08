@@ -3371,11 +3371,13 @@ dependencies = [
  "postcard",
  "proptest",
  "rayon",
+ "regex-automata",
  "serde",
  "tempfile",
  "unicode-normalization",
  "yy-buffer",
  "yy-core",
+ "yy-encoding",
  "yy-search",
 ]
 
