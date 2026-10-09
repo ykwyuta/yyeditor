@@ -715,7 +715,10 @@ fn serve_document_file(
     args: &ICoreWebView2WebResourceRequestedEventArgs,
     rel: &str,
 ) -> Result<()> {
-    let Some(request) = RequestPermit::acquire() else {
+    let permit = RequestPermit::acquire();
+    #[cfg(test)]
+    DOC_REQUESTS.with(|r| r.borrow_mut().push((rel.to_owned(), permit.is_none())));
+    let Some(request) = permit else {
         return resource_response(env, args, 503, b"Too many preview requests", "text/plain");
     };
     let base = shared.page.borrow().folder.clone();
@@ -1121,6 +1124,8 @@ fn shell_open(target: &HSTRING) {
 thread_local! {
     static SHELL_OPEN_REQUESTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static BLOCKED_SCRIPT_LINKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// 文書のフォルダへの要求（試験で、どの要求が上限で断られたかを見る）: (URL, 断ったか)
+    static DOC_REQUESTS: RefCell<Vec<(String, bool)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// WebView2 が返す文字列（CoTaskMemAlloc で確保）を受け取って解放する。
@@ -1482,7 +1487,13 @@ mod tests {
             *observed.borrow_mut() = r;
             done
         });
-        assert!(overloaded, "overload result: {:?}", observed.borrow());
+        assert!(
+            overloaded,
+            "overload result: {:?}, active requests: {}, document requests: {:?}",
+            observed.borrow(),
+            ACTIVE_REQUESTS.load(Ordering::Acquire),
+            DOC_REQUESTS.with(|r| r.borrow().clone())
+        );
         drop(requests);
 
         eval(
