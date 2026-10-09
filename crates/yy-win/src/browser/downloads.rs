@@ -10,7 +10,12 @@ static DEDUP_WORKERS: AtomicUsize = AtomicUsize::new(0);
 struct DedupPermit;
 impl DedupPermit {
     fn acquire() -> Option<Self> {
-        crate::util::try_increment(&DEDUP_WORKERS, 2).then_some(Self)
+        // 増やせたときだけ作る（作ってから捨てると Drop で数が減ってしまう）
+        if crate::util::try_increment(&DEDUP_WORKERS, 2) {
+            Some(Self)
+        } else {
+            None
+        }
     }
 }
 impl Drop for DedupPermit {

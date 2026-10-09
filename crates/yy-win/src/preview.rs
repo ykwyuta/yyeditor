@@ -62,7 +62,12 @@ static ACTIVE_FETCHES: AtomicUsize = AtomicUsize::new(0);
 struct FetchPermit;
 impl FetchPermit {
     fn acquire() -> Option<Self> {
-        crate::util::try_increment(&ACTIVE_FETCHES, MAX_FETCHES).then_some(Self)
+        // 増やせたときだけ作る（作ってから捨てると Drop で数が減ってしまう）
+        if crate::util::try_increment(&ACTIVE_FETCHES, MAX_FETCHES) {
+            Some(Self)
+        } else {
+            None
+        }
     }
 }
 impl Drop for FetchPermit {
@@ -100,7 +105,12 @@ static ACTIVE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 struct RequestPermit;
 impl RequestPermit {
     fn acquire() -> Option<Self> {
-        crate::util::try_increment(&ACTIVE_REQUESTS, MAX_REQUESTS).then_some(Self)
+        // 増やせたときだけ作る（作ってから捨てると Drop で数が減ってしまう）
+        if crate::util::try_increment(&ACTIVE_REQUESTS, MAX_REQUESTS) {
+            Some(Self)
+        } else {
+            None
+        }
     }
 }
 impl Drop for RequestPermit {
@@ -1552,5 +1562,29 @@ mod tests {
         unsafe {
             let _ = DestroyWindow(parent);
         }
+    }
+
+    /// 上限で断った取得は、使用数を変えない（作ってすぐ捨てると Drop で減ってしまう）。
+    #[test]
+    fn refused_permits_do_not_change_the_count() {
+        let _serial = testing::webview2_lock();
+        let before = ACTIVE_REQUESTS.load(Ordering::Acquire);
+        let held: Vec<_> = (before..MAX_REQUESTS)
+            .map(|_| RequestPermit::acquire().unwrap())
+            .collect();
+        for _ in 0..3 {
+            assert!(RequestPermit::acquire().is_none());
+        }
+        assert_eq!(ACTIVE_REQUESTS.load(Ordering::Acquire), MAX_REQUESTS);
+        drop(held);
+        assert_eq!(ACTIVE_REQUESTS.load(Ordering::Acquire), before);
+        let fetches = ACTIVE_FETCHES.load(Ordering::Acquire);
+        let held: Vec<_> = (fetches..MAX_FETCHES)
+            .map(|_| FetchPermit::acquire().unwrap())
+            .collect();
+        assert!(FetchPermit::acquire().is_none());
+        assert_eq!(ACTIVE_FETCHES.load(Ordering::Acquire), MAX_FETCHES);
+        drop(held);
+        assert_eq!(ACTIVE_FETCHES.load(Ordering::Acquire), fetches);
     }
 }

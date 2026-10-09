@@ -68,6 +68,8 @@ pub(crate) fn info_box(owner: HWND, text: &str) {
 
 /// NUL 終端付きの UTF-16 文字列。
 /// 上限付きの数を 1 つ増やす（上限に達していれば増やさず `false`）。同時に動かすものの数を抑えるのに使う。
+/// Drop で数を減らす型を作るときは、`true` のときだけ作ること（`then_some(Permit)` は `false` でも作って
+/// すぐ捨てるので、数がずれる）。
 pub(crate) fn try_increment(n: &std::sync::atomic::AtomicUsize, max: usize) -> bool {
     use std::sync::atomic::Ordering;
     let mut cur = n.load(Ordering::Acquire);
