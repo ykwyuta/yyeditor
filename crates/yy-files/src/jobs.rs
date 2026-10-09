@@ -60,6 +60,61 @@ impl JobList {
     }
 }
 
+/// 保存した検索（18 章 8.1）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedSearch {
+    pub name: String,
+    /// 1 行の検索欄の書き方
+    pub query: String,
+    /// 探す場所
+    pub roots: Vec<PathBuf>,
+    /// Office の文書の中も探す
+    #[serde(default = "yes")]
+    pub office: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// 保存した検索の一覧（`searches.toml`）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchList {
+    #[serde(default, rename = "search")]
+    pub searches: Vec<SavedSearch>,
+}
+
+impl SearchList {
+    pub fn load(path: &Path) -> io::Result<SearchList> {
+        match std::fs::read_to_string(path) {
+            Ok(t) => toml::from_str(&t).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(SearchList::default()),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        let t = toml::to_string_pretty(self).map_err(io::Error::other)?;
+        crate::index::write_atomic(path, t.as_bytes())
+    }
+
+    pub fn get(&self, name: &str) -> Option<&SavedSearch> {
+        self.searches.iter().find(|j| j.name == name)
+    }
+
+    /// 同じ名前があれば置き換え、なければ足す。
+    pub fn put(&mut self, s: SavedSearch) {
+        match self.searches.iter_mut().find(|j| j.name == s.name) {
+            Some(j) => *j = s,
+            None => self.searches.push(s),
+        }
+    }
+
+    pub fn remove(&mut self, name: &str) {
+        self.searches.retain(|j| j.name != name);
+    }
+}
+
 /// 置き場所（設定のフォルダの `filemanager\`）。
 #[derive(Clone, Debug)]
 pub struct Dirs {
@@ -72,6 +127,13 @@ impl Dirs {
     }
     pub fn jobs_file(&self) -> PathBuf {
         self.root.join("jobs.toml")
+    }
+    pub fn searches_file(&self) -> PathBuf {
+        self.root.join("searches.toml")
+    }
+    /// 保存した目録（[`crate::catalogs`]）。
+    pub fn catalogs(&self) -> PathBuf {
+        self.root.join("catalogs")
     }
     pub fn runs(&self) -> PathBuf {
         self.root.join("runs")
@@ -269,6 +331,18 @@ mod tests {
             std::fs::read_to_string(d.path().join("share/案件A/a.txt")).unwrap(),
             "theirs"
         );
+        let mut ss = SearchList::default();
+        ss.put(SavedSearch {
+            name: "見積".into(),
+            query: "見積 ext:xlsx".into(),
+            roots: vec![src.clone()],
+            office: false,
+        });
+        ss.save(&dirs.searches_file()).unwrap();
+        assert_eq!(SearchList::load(&dirs.searches_file()).unwrap(), ss);
+        assert!(ss.get("見積").is_some());
+        ss.remove("見積");
+        assert!(ss.searches.is_empty());
         list.remove("案件A");
         assert!(list.jobs.is_empty());
         assert!(dirs.next_run_id() >= 1);

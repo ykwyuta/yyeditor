@@ -77,6 +77,8 @@ pub struct FileManagerConfig {
     pub copy_threads: usize,
     /// 更新日時の誤差の許し幅（秒）
     pub time_tolerance_sec: f64,
+    /// この大きさ以上のファイルは差分の送り方にする（MB。0 は使わない）
+    pub delta_min_mb: u64,
     /// 送った後の確かめ（"size" か "hash"）
     pub verify: String,
     /// 似ている度合いのしきい値
@@ -87,6 +89,8 @@ pub struct FileManagerConfig {
     pub search_threads: usize,
     /// これより大きなファイルの中身は探さない（MB）
     pub search_max_mb: u64,
+    /// 検索で使う目録がこれより古ければ走査し直す（分）
+    pub index_max_age_min: u64,
     /// 除くファイル（名前のパターン。既定に足す）
     pub exclude: Vec<String>,
     /// 削除の候補にしないフォルダ
@@ -99,11 +103,13 @@ impl Default for FileManagerConfig {
             scan_threads: 16,
             copy_threads: 4,
             time_tolerance_sec: 2.0,
+            delta_min_mb: 64,
             verify: "size".into(),
             similar_threshold: 0.85,
             trash_days: 30,
             search_threads: 8,
             search_max_mb: 1024,
+            index_max_age_min: 60,
             exclude: Vec::new(),
             protect: Vec::new(),
         }

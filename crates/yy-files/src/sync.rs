@@ -7,6 +7,9 @@
 //! 3. 途中で切れたら（回線・アプリの終了・電源断）、ジャーナルから続ける（同じ [`execute`]）。送りかけの
 //!    ファイルは「ジャーナルの位置」と「途中のファイルの大きさ」の小さい方から、直前の 64 KiB を照合して
 //!    続ける。
+//! 4. 大きなファイル（既定 64 MiB 以上）は、前回送ったときの送り先のブロックごとのハッシュを覚えておき、
+//!    送り先が前回のままなら、送り先を `.yypart` にサーバー側でコピーして、違うブロックだけを書く
+//!    （差分の送り方。18 章 4.3）。
 
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -57,6 +60,10 @@ pub struct SyncOptions {
     pub verify_hash: bool,
     /// これだけ書くごとに、確かな位置を進める（時間でも 1 秒ごとに進める）
     pub checkpoint_bytes: u64,
+    /// この大きさ以上のファイルは差分の送り方にする（0 は使わない）
+    pub delta_min: u64,
+    /// 差分の送り方のブロックの大きさ
+    pub delta_block: u64,
 }
 
 impl Default for SyncOptions {
@@ -68,6 +75,8 @@ impl Default for SyncOptions {
             threads: 4,
             verify_hash: false,
             checkpoint_bytes: 64 << 20,
+            delta_min: 64 << 20,
+            delta_block: 1 << 20,
         }
     }
 }
@@ -149,25 +158,124 @@ impl Plan {
     }
 }
 
-/// 前回の同期のあとの送り先の状態（同期ジョブごとに保存する。衝突の判定に使う）。
+/// 前回の同期のあとの送り先の状態（同期ジョブごとに保存する。衝突の判定と差分の送り方に使う）。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncState {
     /// 送り先の相対パスの比べる形（[`crate::rel_key`]） → 大きさ・更新日時
     pub files: HashMap<String, (u64, i64)>,
+    /// 送り先の相対パスの比べる形 → 送ったときの中身のブロックごとのハッシュ（大きなファイルだけ。
+    /// `files` の大きさ・日時のときのもの）
+    pub blocks: HashMap<String, Blocks>,
 }
+
+/// ブロックごとのハッシュ。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blocks {
+    /// このハッシュを求めたときの送り先の大きさ・更新日時（違えば使わない）
+    pub size: u64,
+    pub mtime: i64,
+    pub block: u64,
+    /// BLAKE3 の先頭 16 バイト
+    pub hashes: Vec<[u8; 16]>,
+}
+
+/// 前の形の状態（ブロックのハッシュがない）。
+#[derive(Deserialize)]
+struct SyncStateV1 {
+    files: HashMap<String, (u64, i64)>,
+}
+
+/// 状態のファイルの印（前の形にはない）。
+const STATE_MAGIC: &[u8; 8] = b"YYFMST02";
 
 impl SyncState {
     pub fn load(path: &Path) -> io::Result<SyncState> {
         let raw = std::fs::read(path)?;
-        postcard::from_bytes(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let bad = |e: postcard::Error| io::Error::new(io::ErrorKind::InvalidData, e);
+        match raw.strip_prefix(STATE_MAGIC.as_slice()) {
+            Some(body) => postcard::from_bytes(body).map_err(bad),
+            None => {
+                let v1: SyncStateV1 = postcard::from_bytes(&raw).map_err(bad)?;
+                Ok(SyncState {
+                    files: v1.files,
+                    blocks: HashMap::new(),
+                })
+            }
+        }
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        crate::index::write_atomic(
-            path,
-            &postcard::to_allocvec(self).map_err(io::Error::other)?,
-        )
+        let mut data = STATE_MAGIC.to_vec();
+        data.extend(postcard::to_allocvec(self).map_err(io::Error::other)?);
+        crate::index::write_atomic(path, &data)
     }
+}
+
+/// ブロックごとのハッシュを求める（流し込みながら）。
+pub struct BlockHasher {
+    block: u64,
+    filled: u64,
+    cur: blake3::Hasher,
+    out: Vec<[u8; 16]>,
+}
+
+impl BlockHasher {
+    pub fn new(block: u64) -> BlockHasher {
+        BlockHasher {
+            block: block.max(1),
+            filled: 0,
+            cur: blake3::Hasher::new(),
+            out: Vec::new(),
+        }
+    }
+
+    pub fn feed(&mut self, mut data: &[u8]) {
+        while !data.is_empty() {
+            let take = ((self.block - self.filled) as usize).min(data.len());
+            self.cur.update(&data[..take]);
+            self.filled += take as u64;
+            data = &data[take..];
+            if self.filled == self.block {
+                self.out.push(short(&self.cur));
+                self.cur = blake3::Hasher::new();
+                self.filled = 0;
+            }
+        }
+    }
+
+    pub fn finish(mut self) -> Blocks {
+        if self.filled > 0 {
+            self.out.push(short(&self.cur));
+        }
+        Blocks {
+            size: 0,
+            mtime: 0,
+            block: self.block,
+            hashes: self.out,
+        }
+    }
+}
+
+fn short(h: &blake3::Hasher) -> [u8; 16] {
+    let mut o = [0u8; 16];
+    o.copy_from_slice(&h.finalize().as_bytes()[..16]);
+    o
+}
+
+/// ファイルのブロックごとのハッシュ。
+pub fn file_blocks(fs: &dyn Fs, path: &Path, block: u64) -> io::Result<Blocks> {
+    let mut r = fs.open_read(path)?;
+    let mut h = BlockHasher::new(block);
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => h.feed(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(h.finish())
 }
 
 fn close(a: i64, b: i64, tol: i64) -> bool {
@@ -386,6 +494,8 @@ struct Exec<'a> {
     abort: Mutex<Option<io::Error>>,
     /// 送り先の状態の書き換え（`None` は消した）
     state_updates: Mutex<Vec<StateUpdate>>,
+    /// 始めたときの送り先の状態（差分の送り方に使う）
+    prior: &'a SyncState,
 }
 
 impl Exec<'_> {
@@ -421,8 +531,9 @@ impl Exec<'_> {
     }
 }
 
-/// 送り先の状態の書き換え（比べる形の相対パス・大きさと更新日時。`None` は消した）。
-type StateUpdate = (String, Option<(u64, i64)>);
+/// 送り先の状態の書き換え（比べる形の相対パス・大きさと更新日時（`None` は消した）・ブロックの
+/// ハッシュ（`None` は覚えない））。
+type StateUpdate = (String, Option<(u64, i64)>, Option<Blocks>);
 
 /// 実行のジャーナルの置き場所。
 pub fn journal_path(dir: &Path, id: u64) -> PathBuf {
@@ -448,6 +559,7 @@ pub fn execute(
         hooks,
         abort: Mutex::new(None),
         state_updates: Mutex::new(Vec::new()),
+        prior: &*state,
     };
     ex.save_now()?;
     let n = run.items.len();
@@ -479,13 +591,18 @@ pub fn execute(
         }
     });
     *run = ex.run.into_inner().unwrap();
-    for (k, v) in ex.state_updates.into_inner().unwrap() {
+    let updates = ex.state_updates.into_inner().unwrap();
+    let abort = ex.abort.into_inner().unwrap();
+    for (k, v, b) in updates {
         match v {
-            Some(v) => state.files.insert(k, v),
+            Some(v) => state.files.insert(k.clone(), v),
             None => state.files.remove(&k),
         };
+        match b {
+            Some(b) => state.blocks.insert(k, b),
+            None => state.blocks.remove(&k),
+        };
     }
-    let abort = ex.abort.into_inner().unwrap();
     // 落ちたとき（試験）はジャーナルを書けない
     if !abort.as_ref().is_some_and(is_crash) {
         crate::index::write_atomic(
@@ -586,7 +703,10 @@ fn attempt(ex: &Exec<'_>, i: usize) -> io::Result<()> {
         Action::Touch => {
             let m = item.src.unwrap_or_default();
             fs.set_mtime(&dst, m.mtime)?;
-            record(ex, &item, &dst)?;
+            // 中身は同じなのでブロックのハッシュはそのまま使える
+            let key = crate::rel_key(&item.dst_rel);
+            let blocks = ex.prior.blocks.get(&key).cloned();
+            record(ex, &item, &dst, blocks)?;
             ex.set_state(i, ItemState::Done)
         }
         Action::Delete => {
@@ -608,7 +728,7 @@ fn attempt(ex: &Exec<'_>, i: usize) -> io::Result<()> {
             ex.state_updates
                 .lock()
                 .unwrap()
-                .push((crate::rel_key(&item.dst_rel), None));
+                .push((crate::rel_key(&item.dst_rel), None, None));
             ex.set_state(i, ItemState::Done)
         }
         Action::New | Action::Update | Action::KeepBoth => {
@@ -626,12 +746,18 @@ fn attempt(ex: &Exec<'_>, i: usize) -> io::Result<()> {
 }
 
 /// 送り先の状態を前回の同期の記録に書く。
-fn record(ex: &Exec<'_>, item: &Item, dst: &Path) -> io::Result<()> {
+fn record(ex: &Exec<'_>, item: &Item, dst: &Path, blocks: Option<Blocks>) -> io::Result<()> {
     let m = ex.fs.metadata(dst)?;
-    ex.state_updates
-        .lock()
-        .unwrap()
-        .push((crate::rel_key(&item.dst_rel), Some((m.size, m.mtime))));
+    let blocks = blocks.map(|b| Blocks {
+        size: m.size,
+        mtime: m.mtime,
+        ..b
+    });
+    ex.state_updates.lock().unwrap().push((
+        crate::rel_key(&item.dst_rel),
+        Some((m.size, m.mtime)),
+        blocks,
+    ));
     Ok(())
 }
 
@@ -667,7 +793,12 @@ fn copy_file(
         && close(d.mtime, now.mtime, ex.opts.time_tolerance)
         && (item.action == Action::New || item.dst.is_none_or(|old| old != d))
     {
-        record(ex, item, dst)?;
+        let blocks = if ex.opts.delta_min > 0 && now.size >= ex.opts.delta_min {
+            Some(file_blocks(fs, src, ex.opts.delta_block)?)
+        } else {
+            None
+        };
+        record(ex, item, dst, blocks)?;
         (ex.hooks.event)(Event::Log(format!(
             "{}: 送り終えていたので済みにしました",
             item.rel
@@ -676,6 +807,16 @@ fn copy_file(
     }
     if let Some(p) = dst.parent() {
         fs.create_dir_all(p)?;
+    }
+    let delta = ex.opts.delta_min > 0 && now.size >= ex.opts.delta_min;
+    if delta
+        && item.action == Action::Update
+        && matches!(state, ItemState::Pending)
+        && now.size == planned.size
+        && now.mtime == planned.mtime
+        && let Some(done) = try_delta(ex, i, item, src, dst, &part, &now)?
+    {
+        return finish(ex, i, item, src, dst, &part, &now, Some(done));
     }
     // 続ける位置
     let mut offset = match state {
@@ -717,6 +858,8 @@ fn copy_file(
     let mut r = fs.open_read(src)?;
     r.seek(SeekFrom::Start(offset))?;
     let mut w = fs.open_write(&part, offset)?;
+    // 大きなファイルは、次の差分の送り方のためにブロックのハッシュを求めながら送る
+    let mut hasher = (delta && offset == 0).then(|| BlockHasher::new(ex.opts.delta_block));
     let mut buf = vec![0u8; 1 << 20];
     let mut pos = offset;
     let mut last = Instant::now();
@@ -735,6 +878,9 @@ fn copy_file(
             Err(e) => return Err(e),
         };
         w.write_all(&buf[..n])?;
+        if let Some(h) = &mut hasher {
+            h.feed(&buf[..n]);
+        }
         pos += n as u64;
         unsynced += n as u64;
         (ex.hooks.event)(Event::Progress(i, n as u64));
@@ -748,10 +894,31 @@ fn copy_file(
     w.sync()?;
     drop(w);
     ex.set_state(i, ItemState::Partial(pos))?;
-    // 確かめる
-    let got = fs.metadata(&part)?;
+    let blocks = match hasher {
+        Some(h) => Some(h.finish()),
+        // 続きから送ったときは送り元から求め直す（手元を読むだけ）
+        None if delta => Some(file_blocks(fs, src, ex.opts.delta_block)?),
+        None => None,
+    };
+    finish(ex, i, item, src, dst, &part, &now, blocks)
+}
+
+/// 送り終えた途中のファイルを確かめて、本来の名前に置き換える。
+#[allow(clippy::too_many_arguments)]
+fn finish(
+    ex: &Exec<'_>,
+    i: usize,
+    item: &Item,
+    src: &Path,
+    dst: &Path,
+    part: &Path,
+    now: &Meta,
+    blocks: Option<Blocks>,
+) -> io::Result<()> {
+    let fs = ex.fs;
+    let got = fs.metadata(part)?;
     if got.size != now.size {
-        fs.remove_file(&part)?;
+        fs.remove_file(part)?;
         ex.set_state(i, ItemState::Pending)?;
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -763,9 +930,9 @@ fn copy_file(
     }
     if ex.opts.verify_hash {
         let a = crate::hash::full(fs, src, &mut |_| true)?;
-        let b = crate::hash::full(fs, &part, &mut |_| true)?;
+        let b = crate::hash::full(fs, part, &mut |_| true)?;
         if a != b {
-            fs.remove_file(&part)?;
+            fs.remove_file(part)?;
             ex.set_state(i, ItemState::Pending)?;
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -773,19 +940,102 @@ fn copy_file(
             ));
         }
     }
-    fs.set_mtime(&part, now.mtime)?;
+    fs.set_mtime(part, now.mtime)?;
     // 読み取り専用の送り先は置き換えられないので外す
     if let Ok(d) = fs.metadata(dst)
         && d.readonly
     {
         fs.set_readonly(dst, false)?;
     }
-    fs.rename_replace(&part, dst)?;
+    fs.rename_replace(part, dst)?;
     if now.readonly {
         fs.set_readonly(dst, true)?;
     }
-    record(ex, item, dst)?;
+    record(ex, item, dst, blocks)?;
     ex.set_state(i, ItemState::Done)
+}
+
+/// 差分の送り方（18 章 4.3）。送り先が前回送ったときのままで、そのときのブロックのハッシュがあれば、
+/// 送り先を途中のファイルにサーバー側でコピーし、ハッシュの違うブロックだけを書く。できないときは
+/// `None`（ファイル全体を送る）。
+fn try_delta(
+    ex: &Exec<'_>,
+    i: usize,
+    item: &Item,
+    src: &Path,
+    dst: &Path,
+    part: &Path,
+    now: &Meta,
+) -> io::Result<Option<Blocks>> {
+    let fs = ex.fs;
+    let key = crate::rel_key(&item.dst_rel);
+    let block = ex.opts.delta_block.max(1);
+    let Some(old) = ex.prior.blocks.get(&key).filter(|b| b.block == block) else {
+        return Ok(None);
+    };
+    let Some(&(size, mtime)) = ex.prior.files.get(&key) else {
+        return Ok(None);
+    };
+    let d = fs.metadata(dst)?;
+    if d.size != size
+        || d.mtime != mtime
+        || old.size != size
+        || old.mtime != mtime
+        || old.hashes.len() as u64 != size.div_ceil(block)
+    {
+        return Ok(None);
+    }
+    let log = |m: String| (ex.hooks.event)(Event::Log(format!("{}: {m}", item.rel)));
+    if let Err(e) = fs.copy_file(dst, part) {
+        if is_transient(&e) || is_crash(&e) {
+            return Err(e);
+        }
+        log(format!(
+            "サーバー側のコピーができないので全体を送ります（{e}）"
+        ));
+        let _ = fs.remove_file(part);
+        return Ok(None);
+    }
+    let mut r = fs.open_read(src)?;
+    let mut w = fs.open_patch(part)?;
+    let mut buf = vec![0u8; block as usize];
+    let mut out = Vec::with_capacity(now.size.div_ceil(block) as usize);
+    let (mut written, mut changed) = (0u64, 0usize);
+    let mut pos = 0u64;
+    while pos < now.size {
+        if ex.stopped() {
+            return Err(crate::cancelled());
+        }
+        let len = (now.size - pos).min(block) as usize;
+        r.read_exact(&mut buf[..len])?;
+        let mut h = blake3::Hasher::new();
+        h.update(&buf[..len]);
+        let hash = short(&h);
+        let k = out.len();
+        if old.hashes.get(k) != Some(&hash) || pos + len as u64 > size {
+            w.seek(SeekFrom::Start(pos))?;
+            w.write_all(&buf[..len])?;
+            written += len as u64;
+            changed += 1;
+            (ex.hooks.event)(Event::Progress(i, len as u64));
+        }
+        out.push(hash);
+        pos += len as u64;
+    }
+    w.set_len(now.size)?;
+    w.sync()?;
+    drop(w);
+    log(format!(
+        "差分の送り方: {} ブロック中 {changed} ブロック（{}）を書きました",
+        out.len(),
+        crate::human_size(written)
+    ));
+    Ok(Some(Blocks {
+        size: 0,
+        mtime: 0,
+        block,
+        hashes: out,
+    }))
 }
 
 /// 日時の印（UTC。`2026-10-08 1530`）。

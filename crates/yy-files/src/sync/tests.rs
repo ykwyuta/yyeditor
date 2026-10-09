@@ -440,3 +440,216 @@ fn names_and_stamps() {
         Path::new("/x/a.txt.yypart")
     );
 }
+
+/// 送った量（Progress の合計）を数えながら実行する。
+fn run_counting(
+    fs: &dyn Fs,
+    run: &mut Run,
+    journal: &Path,
+    opts: &SyncOptions,
+    st: &mut SyncState,
+) -> (io::Result<RunCounts>, u64, Vec<String>) {
+    let sent = std::sync::atomic::AtomicU64::new(0);
+    let logs = Mutex::new(Vec::new());
+    let cancel = AtomicBool::new(false);
+    let ev = |e: Event| match e {
+        Event::Progress(_, n) => {
+            sent.fetch_add(n, Ordering::Relaxed);
+        }
+        Event::Log(m) => logs.lock().unwrap().push(m),
+        _ => {}
+    };
+    let r = execute(
+        fs,
+        run,
+        journal,
+        opts,
+        st,
+        &Hooks {
+            event: &ev,
+            sleep: NO_WAIT,
+            cancel: &cancel,
+        },
+    );
+    (r, sent.into_inner(), logs.into_inner().unwrap())
+}
+
+#[test]
+fn delta_writes_only_changed_blocks() {
+    let d = tempfile::tempdir().unwrap();
+    let (src, dst) = (d.path().join("src"), d.path().join("dst"));
+    let opts = SyncOptions {
+        delta_min: 100_000,
+        delta_block: 64 << 10,
+        threads: 1,
+        ..SyncOptions::default()
+    };
+    let mut body = big(1_000_000, 7);
+    write(&src, "db.bin", &body, T0);
+    write(&src, "small.txt", b"small", T0);
+    std::fs::create_dir_all(&dst).unwrap();
+    let mut st = SyncState::default();
+    let sync_once = |st: &mut SyncState, id: u64| {
+        let p = plan(&cat(&src), &cat(&dst), Some(st), &opts, &mut |_, _| {
+            Ok(false)
+        })
+        .unwrap();
+        let mut run = Run::new(id, &p, opts.mode, "t");
+        let (r, sent, logs) = run_counting(
+            &Local,
+            &mut run,
+            &d.path().join(format!("{id}.run")),
+            &opts,
+            st,
+        );
+        assert_eq!(r.unwrap().failed, 0, "{logs:?}");
+        (sent, logs)
+    };
+    // 1 回目は全体を送り、ブロックのハッシュを覚える（小さいファイルは覚えない）
+    let (sent, _) = sync_once(&mut st, 1);
+    assert_eq!(sent, 1_000_005);
+    assert_same(&src, &dst);
+    let b = &st.blocks[&crate::rel_key("db.bin")];
+    assert_eq!(b.hashes.len(), 1_000_000usize.div_ceil(64 << 10));
+    assert!(!st.blocks.contains_key("small.txt"));
+    assert_eq!(
+        b.hashes,
+        file_blocks(&Local, &dst.join("db.bin"), 64 << 10)
+            .unwrap()
+            .hashes
+    );
+    // 2 ブロックだけ書き換えて、末尾に足す
+    body[10] ^= 0xff;
+    body[700_000] ^= 0xff;
+    body.extend_from_slice(&[1, 2, 3]);
+    write(&src, "db.bin", &body, T0 + 100 * SEC);
+    let (sent, logs) = sync_once(&mut st, 2);
+    // 1 ブロック目・700000 を含むブロック・最後のブロック（伸びた）だけ
+    let blk = 64u64 << 10;
+    let last = 1_000_003 - (1_000_003 / blk) * blk;
+    assert_eq!(sent, 2 * blk + last, "{logs:?}");
+    assert!(logs.iter().any(|l| l.contains("差分の送り方")), "{logs:?}");
+    assert_same(&src, &dst);
+    assert_eq!(
+        st.blocks[&crate::rel_key("db.bin")].hashes,
+        file_blocks(&Local, &dst.join("db.bin"), blk)
+            .unwrap()
+            .hashes
+    );
+    // 縮んだときも合う
+    body.truncate(300_000);
+    body[5] ^= 1;
+    write(&src, "db.bin", &body, T0 + 200 * SEC);
+    let (sent, _) = sync_once(&mut st, 3);
+    assert!(sent <= 2 * blk, "{sent}");
+    assert_same(&src, &dst);
+    // 送り先がほかで書き換わっていたら（記録の取り違えがあっても）全体を送る
+    write(&dst, "db.bin", &big(300_000, 99), T0 + 200 * SEC + 3);
+    st.files
+        .insert(crate::rel_key("db.bin"), (300_000, T0 + 200 * SEC + 3));
+    body[100] ^= 1;
+    write(&src, "db.bin", &body, T0 + 300 * SEC);
+    let (sent, _) = sync_once(&mut st, 4);
+    assert_eq!(sent, 300_000);
+    assert_same(&src, &dst);
+}
+
+#[test]
+fn delta_resumes_after_crashing_anywhere() {
+    let base = tempfile::tempdir().unwrap();
+    let src = base.path().join("src");
+    let opts = SyncOptions {
+        delta_min: 100_000,
+        delta_block: 64 << 10,
+        threads: 1,
+        checkpoint_bytes: 128 << 10,
+        ..SyncOptions::default()
+    };
+    let mut body = big(900_000, 4);
+    write(&src, "db.bin", &body, T0);
+    // 前回の同期を済ませた状態を作る
+    let prep = tempfile::tempdir().unwrap();
+    let pdst = prep.path().join("dst");
+    std::fs::create_dir_all(&pdst).unwrap();
+    let mut st0 = SyncState::default();
+    let p = plan(&cat(&src), &cat(&pdst), None, &opts, &mut |_, _| Ok(false)).unwrap();
+    let mut run = Run::new(1, &p, opts.mode, "t");
+    run_once(
+        &Local,
+        &mut run,
+        &prep.path().join("1.run"),
+        &opts,
+        &mut st0,
+    )
+    .unwrap();
+    body[200_000] ^= 0x55;
+    body[850_000] ^= 0x55;
+    write(&src, "db.bin", &body, T0 + 50 * SEC);
+    let mut tried_delta = false;
+    for crash_after in 1..20u64 {
+        let d = tempfile::tempdir().unwrap();
+        let dst = d.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::copy(pdst.join("db.bin"), dst.join("db.bin")).unwrap();
+        let m = Local.metadata(&pdst.join("db.bin")).unwrap();
+        Local.set_mtime(&dst.join("db.bin"), m.mtime).unwrap();
+        let mut st = st0.clone();
+        let journal = d.path().join("2.run");
+        let p = plan(&cat(&src), &cat(&dst), Some(&st), &opts, &mut |_, _| {
+            Ok(false)
+        })
+        .unwrap();
+        let mut run = Run::new(2, &p, opts.mode, "t");
+        let (r, _, logs) = run_counting(
+            &Faulty::new(crash_after, 0),
+            &mut run,
+            &journal,
+            &opts,
+            &mut st,
+        );
+        tried_delta |= logs.iter().any(|l| l.contains("差分の送り方"));
+        if r.is_ok() {
+            assert_same(&src, &dst);
+            continue;
+        }
+        let mut run = Run::load(&journal).unwrap();
+        let c = run_once(&Local, &mut run, &journal, &opts, &mut st).unwrap();
+        assert_eq!(c.failed, 0, "crash_after {crash_after}");
+        assert_same(&src, &dst);
+        assert_eq!(
+            st.blocks[&crate::rel_key("db.bin")].hashes,
+            file_blocks(&Local, &dst.join("db.bin"), 64 << 10)
+                .unwrap()
+                .hashes,
+            "crash_after {crash_after}"
+        );
+    }
+    assert!(tried_delta);
+}
+
+#[test]
+fn state_reads_the_previous_format() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("s.state");
+    #[derive(Serialize)]
+    struct V1 {
+        files: HashMap<String, (u64, i64)>,
+    }
+    let mut files = HashMap::new();
+    files.insert("a".to_string(), (1u64, 2i64));
+    std::fs::write(&p, postcard::to_allocvec(&V1 { files }).unwrap()).unwrap();
+    let st = SyncState::load(&p).unwrap();
+    assert_eq!(st.files["a"], (1, 2));
+    let mut st2 = st.clone();
+    st2.blocks.insert(
+        "a".into(),
+        Blocks {
+            size: 1,
+            mtime: 2,
+            block: 4,
+            hashes: vec![[1; 16]],
+        },
+    );
+    st2.save(&p).unwrap();
+    assert_eq!(SyncState::load(&p).unwrap(), st2);
+}

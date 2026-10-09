@@ -351,11 +351,95 @@ fn order_keep(cats: &[Catalog], g: &mut Group, rule: &KeepRule) {
     g.files.sort_by_key(key);
 }
 
+/// 1 つのファイルと同じ中身のファイルを探す（18 章 8.4「同じ中身のファイルを探す」）。大きさが同じ
+/// ものだけを読む。見つかれば、そのファイルを先頭にしたグループ。
+pub fn same_content(
+    fs: &dyn Fs,
+    cats: &[Catalog],
+    target: FileRef,
+    cancel: &dyn Fn() -> bool,
+) -> io::Result<Option<Group>> {
+    let t = &cats[target.root].files[target.index];
+    let size = t.meta.size;
+    let tp = cats[target.root].path(t);
+    let th = crate::hash::full(fs, &tp, &mut |_| !cancel())?;
+    let mut files = vec![target];
+    for (ri, c) in cats.iter().enumerate() {
+        for (fi, f) in c.files.iter().enumerate() {
+            let r = FileRef {
+                root: ri,
+                index: fi,
+            };
+            if r == target || f.meta.size != size || f.meta.link {
+                continue;
+            }
+            // 同じファイル（ハードリンク・同じ場所を 2 回）は除く
+            if f.meta.file_id.is_some() && f.meta.file_id == t.meta.file_id {
+                continue;
+            }
+            if cancel() {
+                return Err(crate::cancelled());
+            }
+            match crate::hash::full(fs, &c.path(f), &mut |_| !cancel()) {
+                Ok(h) if h == th => files.push(r),
+                Ok(_) => {}
+                Err(e) if crate::is_cancelled(&e) => return Err(e),
+                Err(_) => {} // 読めないものは飛ばす
+            }
+        }
+    }
+    Ok((files.len() > 1).then_some(Group {
+        size,
+        hash: th,
+        files,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fs::Local;
     use crate::scan::{ScanOptions, scan};
+
+    #[test]
+    fn finds_files_with_the_same_content_as_one() {
+        let d = tempfile::tempdir().unwrap();
+        let a = d.path().join("a");
+        for (rel, body) in [
+            ("x.txt", "same body"),
+            ("sub/y.txt", "same body"),
+            ("z.txt", "same bodY"),
+            ("w.txt", "other"),
+        ] {
+            let p = a.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        let cats = vec![scan(&Local, &a, &ScanOptions::default(), &|_| true).unwrap()];
+        let at = |rel: &str| FileRef {
+            root: 0,
+            index: cats[0].files.iter().position(|f| f.rel == rel).unwrap(),
+        };
+        let g = same_content(&Local, &cats, at("x.txt"), &|| false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(g.files, vec![at("x.txt"), at("sub/y.txt")]);
+        assert!(
+            same_content(&Local, &cats, at("w.txt"), &|| false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(is_cancelled_err(same_content(
+            &Local,
+            &cats,
+            at("x.txt"),
+            &|| true
+        )));
+    }
+
+    fn is_cancelled_err(r: io::Result<Option<Group>>) -> bool {
+        r.is_err_and(|e| crate::is_cancelled(&e))
+    }
 
     #[test]
     fn finds_exact_duplicates_in_three_stages() {

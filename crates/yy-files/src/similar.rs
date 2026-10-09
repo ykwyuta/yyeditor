@@ -643,6 +643,47 @@ pub fn find_versions(cats: &[Catalog], opts: &SimilarOptions) -> Vec<VersionGrou
     out
 }
 
+/// 1 つのファイルの別の版を探す（18 章 8.4「このファイルの別の版を探す」）。同じ拡張子の仲間で、元の
+/// 名前が同じか、しきい値以上に似ているファイルを集めて順位を付ける。見つからなければ `None`。
+pub fn versions_of(
+    cats: &[Catalog],
+    target: FileRef,
+    opts: &SimilarOptions,
+) -> Option<VersionGroup> {
+    let t = cats.get(target.root)?.files.get(target.index)?;
+    let ti = parse_name(t.name());
+    if ti.base.is_empty() {
+        return None;
+    }
+    let mut members = vec![Member {
+        file: target,
+        info: ti.clone(),
+    }];
+    for (ri, c) in cats.iter().enumerate() {
+        for (fi, f) in c.files.iter().enumerate() {
+            let r = FileRef {
+                root: ri,
+                index: fi,
+            };
+            if r == target {
+                continue;
+            }
+            let info = parse_name(f.name());
+            if info.family != ti.family || info.base.is_empty() {
+                continue;
+            }
+            let mut s = similarity(&info.base, &ti.base);
+            if f.dir() == t.dir() && ri == target.root {
+                s += 0.05;
+            }
+            if s >= opts.threshold && size_ok(f.meta.size, t.meta.size, opts.max_size_ratio) {
+                members.push(Member { file: r, info });
+            }
+        }
+    }
+    (members.len() > 1).then(|| rank(cats, members))
+}
+
 fn size_ok(a: u64, b: u64, ratio: f64) -> bool {
     let (lo, hi) = (a.min(b).max(1) as f64, a.max(b).max(1) as f64);
     hi / lo < ratio
@@ -848,6 +889,19 @@ mod tests {
         assert_eq!(names(&g[1]), ["a/見積_v2.xlsx", "a/見積_v1.xlsx"]);
         assert_eq!(g[1].confidence, Confidence::Low);
         assert!(g[1].reason.contains("2 日"), "{}", g[1].reason);
+        // 1 つのファイルの別の版
+        let idx = |rel: &str| c.files.iter().position(|f| f.rel == rel).unwrap();
+        let t = FileRef {
+            root: 0,
+            index: idx("b/報告書.docx"),
+        };
+        let one = versions_of(std::slice::from_ref(&c), t, &SimilarOptions::default()).unwrap();
+        assert_eq!(names(&one), names(&g[0]));
+        let lone = FileRef {
+            root: 0,
+            index: idx("a/画像.png"),
+        };
+        assert!(versions_of(std::slice::from_ref(&c), lone, &SimilarOptions::default()).is_none());
     }
 
     #[test]

@@ -38,6 +38,8 @@ pub(super) enum Msg {
     Dupes(Result<(Vec<Catalog>, Vec<Group>), String>),
     /// 結果と、削除の記録（CSV）のパス
     Purged(Result<PurgeReport, String>, PathBuf),
+    /// 処理が終わった（ステータスバーと記録に出す）
+    Done(String),
     /// 作業スレッドが異常終了した
     Panicked(String),
 }
@@ -173,17 +175,52 @@ pub(super) fn scan_options(config: &Config) -> ScanOptions {
     o
 }
 
-/// いくつかの場所を走査する。
+/// 保存した目録の使い方（[`yy_files::catalogs`]）。
+#[derive(Clone)]
+pub(super) struct CatalogCache {
+    pub(super) dir: PathBuf,
+    /// これより新しい目録を使う（ナノ秒）
+    pub(super) max_age: i64,
+    pub(super) now: i64,
+    /// 必ず走査する（結果は保存する）
+    pub(super) force: bool,
+}
+
+/// いくつかの場所を走査する（`cache` があれば、新しい保存した目録を使い、走査した目録は保存する）。
 pub(super) fn scan_all(
     cx: &Ctx,
     roots: &[PathBuf],
     scan: &ScanOptions,
+    cache: Option<&CatalogCache>,
 ) -> Result<Vec<Catalog>, String> {
     let mut cats = Vec::new();
     for r in roots {
-        let c = yy_files::scan(&yy_files::Local, r, scan, &|p| {
+        let progress = |p: &yy_files::scan::ScanProgress| {
             cx.progress(&format!("{} を走査しています… {} 個", r.display(), p.files))
-        })
+        };
+        let c = match cache {
+            Some(k) => yy_files::catalogs::scan_cached(
+                &yy_files::Local,
+                r,
+                scan,
+                &k.dir,
+                k.max_age,
+                k.now,
+                k.force,
+                &progress,
+            )
+            .map(|(c, used)| {
+                if let Some(t) = used {
+                    cx.send(Msg::Log(format!(
+                        "{}: {} 分前の目録を使います（走査し直すには「走査し直す」をチェック）",
+                        r.display(),
+                        (k.now - t) / 60_000_000_000
+                    )));
+                }
+                c
+            }),
+            None => yy_files::scan(&yy_files::Local, r, scan, &progress),
+        }
         .map_err(|e| format!("{}: {}", r.display(), describe(&e)))?;
         if !c.errors.is_empty() {
             cx.send(Msg::Log(format!(

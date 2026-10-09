@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, PWSTR, Result, w};
 use yy_config::Config;
 use yy_files::dupes::{FileRef, Group};
-use yy_files::jobs::{Dirs, JobList, SyncJob};
+use yy_files::jobs::{Dirs, JobList, SavedSearch, SearchList, SyncJob};
 use yy_files::purge::{Candidate, Review};
 use yy_files::scan::Catalog;
 use yy_files::similar::VersionGroup;
@@ -66,12 +66,17 @@ const ID_DST_BROWSE: u16 = 5108;
 const ID_PLAN: u16 = 5109;
 const ID_RUN: u16 = 5110;
 const ID_RESUME: u16 = 5111;
+const ID_SWAP: u16 = 5112;
 // 検索
 const ID_QUERY: u16 = 5200;
 const ID_SEARCH: u16 = 5201;
 const ID_SEARCH_ROOTS: u16 = 5202;
 const ID_SEARCH_BROWSE: u16 = 5203;
 const ID_OFFICE: u16 = 5204;
+const ID_SAVED: u16 = 5205;
+const ID_SAVED_SAVE: u16 = 5206;
+const ID_SAVED_DELETE: u16 = 5207;
+const ID_RESCAN: u16 = 5208;
 // 似たファイル・重複
 const ID_SIM_ROOTS: u16 = 5300;
 const ID_SIM_BROWSE: u16 = 5301;
@@ -97,6 +102,7 @@ const ID_ABOUT: u16 = 5721;
 const ID_OPEN_LOGS: u16 = 5722;
 const ID_CRASH_LOGS: u16 = 5723;
 const ID_SETTINGS: u16 = 5724;
+const ID_EXPIRE_TRASH: u16 = 5725;
 // 一覧の右クリック
 const CM_OPEN: u32 = 1;
 const CM_LOCATE: u32 = 2;
@@ -110,6 +116,8 @@ const CM_SKIP: u32 = 9;
 const CM_CHECK: u32 = 10;
 const CM_UNCHECK: u32 = 11;
 const CM_REMOVE: u32 = 12;
+const CM_VERSIONS: u32 = 13;
+const CM_SAME_CONTENT: u32 = 14;
 
 /// 一覧の列（見出し・幅・右寄せ）。
 const COLUMNS: [&[(&str, i32, bool)]; 5] = [
@@ -199,6 +207,7 @@ struct App {
     /// 続けられる実行（ジャーナルのパス・実行）
     resume: Option<(PathBuf, Run)>,
     // 検索
+    searches: SearchList,
     search_cats: Vec<Catalog>,
     search_rows: Vec<SearchRow>,
     // 似たファイル
@@ -230,6 +239,8 @@ struct Edits {
     query: HWND,
     search_roots: HWND,
     office: HWND,
+    saved: HWND,
+    rescan: HWND,
     sim_roots: HWND,
     dup_roots: HWND,
     review_info: HWND,
@@ -424,6 +435,8 @@ fn create_menu() -> Result<HMENU> {
                 &format!("{t}(&{})\tCtrl+{}", i + 1, i + 1),
             );
         }
+        let tidy = CreatePopupMenu()?;
+        add(tidy, ID_EXPIRE_TRASH, "隔離フォルダの古いものを消す(&T)...");
         let help = CreatePopupMenu()?;
         add(help, ID_HELP, "yyfilemanager ヘルプ(&H)\tF1");
         let _ = AppendMenuW(help, MF_SEPARATOR, 0, None);
@@ -433,6 +446,7 @@ fn create_menu() -> Result<HMENU> {
         for (m, t) in [
             (file, "ファイル(&F)"),
             (view, "表示(&V)"),
+            (tidy, "整理(&O)"),
             (help, "ヘルプ(&H)"),
         ] {
             AppendMenuW(bar, MF_POPUP, m.0 as usize, &HSTRING::from(t))?;
@@ -633,6 +647,7 @@ fn create() -> Result<HWND> {
                 c(label("送り先"), 70),
                 c(e.dst, 0),
                 c(button("参照...", ID_DST_BROWSE), 70),
+                c(button("⇅ 入れ替え", ID_SWAP), 90),
             ],
             vec![
                 c(button("比べる", ID_PLAN), 80),
@@ -647,6 +662,8 @@ fn create() -> Result<HWND> {
         e.search_roots = edit(ID_SEARCH_ROOTS);
         e.office = check("Office の文書の中も", ID_OFFICE);
         SendMessageW(e.office, BM_SETCHECK, Some(WPARAM(1)), None);
+        e.saved = combo(ID_SAVED, true);
+        e.rescan = check("走査し直す", ID_RESCAN);
         let search_rows = vec![
             vec![
                 c(label("検索"), 50),
@@ -659,6 +676,13 @@ fn create() -> Result<HWND> {
                 c(e.search_roots, 0),
                 c(button("追加...", ID_SEARCH_BROWSE), 70),
                 c(e.office, 150),
+            ],
+            vec![
+                c(label("保存した検索"), 90),
+                c(e.saved, 240),
+                c(button("保存", ID_SAVED_SAVE), 60),
+                c(button("削除", ID_SAVED_DELETE), 60),
+                c(e.rescan, 110),
             ],
         ];
         e.sim_roots = edit(ID_SIM_ROOTS);
@@ -749,6 +773,15 @@ fn create() -> Result<HWND> {
         SendMessageW(log, EM_SETLIMITTEXT, Some(WPARAM(0)), None);
         let dirs = work::dirs();
         let jobs = JobList::load(&dirs.jobs_file()).unwrap_or_default();
+        let searches = SearchList::load(&dirs.searches_file()).unwrap_or_default();
+        for s in &searches.searches {
+            SendMessageW(
+                e.saved,
+                CB_ADDSTRING,
+                None,
+                Some(LPARAM(HSTRING::from(s.name.as_str()).as_ptr() as isize)),
+            );
+        }
         for j in &jobs.jobs {
             SendMessageW(
                 e.job,
@@ -777,6 +810,7 @@ fn create() -> Result<HWND> {
             plan: None,
             sync_rows: Vec::new(),
             resume,
+            searches,
             search_cats: Vec::new(),
             search_rows: Vec::new(),
             sim_cats: Vec::new(),
@@ -1187,11 +1221,36 @@ impl App {
             threads: fm.copy_threads.max(1),
             verify_hash: fm.verify == "hash",
             checkpoint_bytes: 64 << 20,
+            // 送り元が共有フォルダ（共有フォルダ → 手元）では、送り元のブロックを読むのに回線を使うので
+            // 差分の送り方にしない
+            delta_min: if is_network(Path::new(text_of(self.edits.src).trim())) {
+                0
+            } else {
+                fm.delta_min_mb << 20
+            },
+            delta_block: 1 << 20,
         }
     }
 
     fn scan_options(&self) -> yy_files::ScanOptions {
         work::scan_options(&self.config)
+    }
+
+    /// 保存した目録の使い方（`force` なら走査し直す）。
+    fn catalog_cache(&self, force: bool) -> work::CatalogCache {
+        work::CatalogCache {
+            dir: self.dirs.catalogs(),
+            max_age: self.config.filemanager.index_max_age_min as i64 * 60_000_000_000,
+            now: now_ns(),
+            force,
+        }
+    }
+
+    fn similar_options(&self) -> yy_files::similar::SimilarOptions {
+        yy_files::similar::SimilarOptions {
+            threshold: self.config.filemanager.similar_threshold,
+            ..yy_files::similar::SimilarOptions::default()
+        }
     }
 
     /// 処理を作業スレッドで始める（ほかの処理が動いていれば断る）。
@@ -1485,7 +1544,9 @@ fn cmd_search() {
             }
         };
         let office = unsafe { SendMessageW(a.edits.office, BM_GETCHECK, None, None).0 } == 1;
+        let force = unsafe { SendMessageW(a.edits.rescan, BM_GETCHECK, None, None).0 } == 1;
         let scan = a.scan_options();
+        let cache = a.catalog_cache(force);
         let copts = yy_files::search::ContentOptions {
             office,
             max_size: a.config.filemanager.search_max_mb << 20,
@@ -1495,18 +1556,13 @@ fn cmd_search() {
         a.search_rows.clear();
         a.refresh_list(TAB_SEARCH);
         a.start("探しています", move |cx| {
-            let mut cats = Vec::new();
-            for r in &roots {
-                match yy_files::scan(&yy_files::Local, r, &scan, &|p| {
-                    cx.progress(&format!("{} を走査しています… {} 個", r.display(), p.files))
-                }) {
-                    Ok(c) => cats.push(c),
-                    Err(e) => {
-                        cx.send(Msg::Searched(Err(work::describe(&e))));
-                        return;
-                    }
+            let cats = match work::scan_all(cx, &roots, &scan, Some(&cache)) {
+                Ok(c) => c,
+                Err(e) => {
+                    cx.send(Msg::Searched(Err(e)));
+                    return;
                 }
-            }
+            };
             let found = q.filter(&cats);
             let Some(content) = q.content.clone() else {
                 let rows = found.into_iter().map(|f| (f, 0, String::new())).collect();
@@ -1537,6 +1593,230 @@ fn cmd_search() {
     });
 }
 
+/// 保存した検索を欄に入れて探す（左の一覧から 1 クリックで実行。18 章 8.1）。
+fn run_saved_search(name: &str) {
+    let found = with(|a| {
+        let Some(s) = a.searches.get(name).cloned() else {
+            return false;
+        };
+        set_text(a.edits.query, &s.query);
+        let roots: Vec<String> = s
+            .roots
+            .iter()
+            .map(|r| r.to_string_lossy().into_owned())
+            .collect();
+        set_text(a.edits.search_roots, &roots.join("; "));
+        unsafe {
+            SendMessageW(
+                a.edits.office,
+                BM_SETCHECK,
+                Some(WPARAM(s.office as usize)),
+                None,
+            );
+        }
+        true
+    });
+    if found == Some(true) {
+        cmd_search();
+    }
+}
+
+fn refill_saved(a: &App) {
+    unsafe {
+        SendMessageW(a.edits.saved, CB_RESETCONTENT, None, None);
+        for s in &a.searches.searches {
+            SendMessageW(
+                a.edits.saved,
+                CB_ADDSTRING,
+                None,
+                Some(LPARAM(HSTRING::from(s.name.as_str()).as_ptr() as isize)),
+            );
+        }
+    }
+}
+
+fn save_search() {
+    with(|a| {
+        let name = text_of(a.edits.saved).trim().to_owned();
+        if name.is_empty() {
+            info_box(
+                a.frame,
+                "「保存した検索」の欄に名前を入力してから保存してください。",
+            );
+            return;
+        }
+        let query = text_of(a.edits.query).trim().to_owned();
+        if let Err(e) = yy_files::search::parse_query(&query, now_ns(), tz_offset()) {
+            error_box(a.frame, &e);
+            return;
+        }
+        a.searches.put(SavedSearch {
+            name: name.clone(),
+            query,
+            roots: roots_of(&text_of(a.edits.search_roots)),
+            office: unsafe { SendMessageW(a.edits.office, BM_GETCHECK, None, None).0 } == 1,
+        });
+        match a.searches.save(&a.dirs.searches_file()) {
+            Ok(()) => {
+                refill_saved(a);
+                set_text(a.edits.saved, &name);
+                a.set_status(&format!("検索「{name}」を保存しました"));
+            }
+            Err(e) => error_box(a.frame, &format!("保存できません: {e}")),
+        }
+    });
+}
+
+fn delete_search() {
+    with(|a| {
+        let name = text_of(a.edits.saved).trim().to_owned();
+        if a.searches.get(&name).is_none() {
+            return;
+        }
+        a.searches.remove(&name);
+        let _ = a.searches.save(&a.dirs.searches_file());
+        refill_saved(a);
+        set_text(a.edits.saved, "");
+        a.set_status(&format!("検索「{name}」を削除しました"));
+    });
+}
+
+/// 検索の結果の 1 件から、別の版（`versions`）か同じ中身のファイルを、検索した場所の中で探す
+/// （18 章 8.4）。結果は「似たファイル」「重複」のタブに出す。
+fn find_related(row: usize, versions: bool) {
+    with(|a| {
+        let Some(file) = a.search_rows.get(row).map(|r| r.file) else {
+            return;
+        };
+        let cats = a.search_cats.clone();
+        let name = cats[file.root].files[file.index].name().to_owned();
+        if versions {
+            let opts = a.similar_options();
+            a.start(
+                &format!("「{name}」の別の版を探しています"),
+                move |cx| {
+                    let groups: Vec<VersionGroup> =
+                        yy_files::similar::versions_of(&cats, file, &opts)
+                            .into_iter()
+                            .collect();
+                    if groups.is_empty() {
+                        cx.send(Msg::Log(format!(
+                            "「{name}」の別の版は見つかりませんでした"
+                        )));
+                    }
+                    cx.send(Msg::Similar(Ok((cats, groups))));
+                },
+            );
+        } else {
+            a.start(
+                &format!("「{name}」と同じ中身のファイルを探しています"),
+                move |cx| {
+                    let r = yy_files::dupes::same_content(&yy_files::Local, &cats, file, &|| {
+                        cx.cancelled()
+                    });
+                    match r {
+                        Ok(g) => {
+                            if g.is_none() {
+                                cx.send(Msg::Log(format!(
+                                    "「{name}」と同じ中身のファイルは見つかりませんでした"
+                                )));
+                            }
+                            cx.send(Msg::Dupes(Ok((cats, g.into_iter().collect()))));
+                        }
+                        Err(e) => cx.send(Msg::Dupes(Err(work::describe(&e)))),
+                    }
+                },
+            );
+        }
+    });
+}
+
+/// 隔離フォルダ（`.yyfm-trash`）のうち、設定の日数（`trash_days`）より古いものを消す。
+fn expire_trash() {
+    let Some((frame, days)) = with(|a| (a.frame, a.config.filemanager.trash_days)) else {
+        return;
+    };
+    let Some(root) = crate::grepdlg::browse_folder(frame) else {
+        return;
+    };
+    let limit = yy_files::sync::stamp(
+        now_ns() + tz_offset() * 1_000_000_000 - days as i64 * 86_400_000_000_000,
+    )
+    .replace([' ', ':'], "-");
+    let old = match yy_files::purge::expired_trash(&yy_files::Local, &root, &limit) {
+        Ok(v) => v,
+        Err(e) => {
+            error_box(frame, &format!("隔離フォルダを読めません: {e}"));
+            return;
+        }
+    };
+    if old.is_empty() {
+        info_box(
+            frame,
+            &format!(
+                "{} の隔離フォルダに、{days} 日より古いものはありません。",
+                root.display()
+            ),
+        );
+        return;
+    }
+    let names: Vec<String> = old
+        .iter()
+        .take(10)
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    let text = format!(
+        "{} の隔離フォルダの、{days} 日より古いもの {} 個を消します（元に戻せません）。\n\n{}{}\n\nよろしいですか？",
+        root.display(),
+        old.len(),
+        names.join("\n"),
+        if old.len() > names.len() { "\n…" } else { "" }
+    );
+    let ok = unsafe {
+        MessageBoxW(
+            Some(frame),
+            &HSTRING::from(text),
+            w!("yyfilemanager"),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
+    } == IDYES;
+    if !ok {
+        return;
+    }
+    with(|a| {
+        a.start(
+            "隔離フォルダの古いものを消しています",
+            move |cx| {
+                let mut removed = 0;
+                for d in &old {
+                    if cx.cancelled() {
+                        break;
+                    }
+                    cx.progress(&format!("{} を消しています…", d.display()));
+                    match yy_files::purge::remove_tree(&yy_files::Local, d) {
+                        Ok(()) => {
+                            removed += 1;
+                            cx.send(Msg::Log(format!(
+                                "隔離フォルダを消しました: {}",
+                                d.display()
+                            )));
+                        }
+                        Err(e) => cx.send(Msg::Log(format!(
+                            "隔離フォルダを消せません: {}: {}",
+                            d.display(),
+                            work::describe(&e)
+                        ))),
+                    }
+                }
+                cx.send(Msg::Done(format!(
+                    "隔離フォルダの古いもの {removed} / {} 個を消しました",
+                    old.len()
+                )));
+            },
+        );
+    });
+}
+
 fn cmd_similar() {
     with(|a| {
         let roots = roots_of(&text_of(a.edits.sim_roots));
@@ -1545,12 +1825,10 @@ fn cmd_similar() {
             return;
         }
         let scan = a.scan_options();
-        let opts = yy_files::similar::SimilarOptions {
-            threshold: a.config.filemanager.similar_threshold,
-            ..yy_files::similar::SimilarOptions::default()
-        };
+        let opts = a.similar_options();
+        let cache = a.catalog_cache(false);
         a.start("似たファイルを探しています", move |cx| {
-            let cats = match work::scan_all(cx, &roots, &scan) {
+            let cats = match work::scan_all(cx, &roots, &scan, Some(&cache)) {
                 Ok(c) => c,
                 Err(e) => {
                     cx.send(Msg::Similar(Err(e)));
@@ -1574,8 +1852,10 @@ fn cmd_dupes() {
         let scan = a.scan_options();
         let index_dir = a.dirs.index();
         let threads = a.config.filemanager.search_threads.max(1);
+        // 中身を読むので目録は使い回さない（走査し直して保存する）
+        let cache = a.catalog_cache(true);
         a.start("重複を探しています", move |cx| {
-            let cats = match work::scan_all(cx, &roots, &scan) {
+            let cats = match work::scan_all(cx, &roots, &scan, Some(&cache)) {
                 Ok(c) => c,
                 Err(e) => {
                     cx.send(Msg::Dupes(Err(e)));
@@ -1886,6 +2166,9 @@ fn handle(m: Msg) {
         Msg::Log(s) => {
             with(|a| a.log_line(&s));
         }
+        Msg::Done(s) => {
+            with(|a| finish(a, &s));
+        }
         Msg::Planned(r) => {
             with(|a| match r {
                 Ok(p) => {
@@ -2016,6 +2299,9 @@ fn handle(m: Msg) {
                     a.sim_cats = cats;
                     a.sim_groups = groups;
                     a.refresh_list(TAB_SIMILAR);
+                    if a.current != TAB_SIMILAR {
+                        a.show_tab(TAB_SIMILAR);
+                    }
                     let msg = format!(
                         "似たファイルのグループが {} 個（判定の自信が高いもの {} 個）",
                         a.sim_groups.len(),
@@ -2041,6 +2327,9 @@ fn handle(m: Msg) {
                     a.dup_cats = cats;
                     a.dup_groups = groups;
                     a.refresh_list(TAB_DUPES);
+                    if a.current != TAB_DUPES {
+                        a.show_tab(TAB_DUPES);
+                    }
                     let msg = format!(
                         "重複のグループが {} 個（写しを消すと {} 空きます）",
                         a.dup_groups.len(),
@@ -2175,6 +2464,11 @@ fn list_menu(hwnd: HWND, tab: usize) {
             }
             TAB_SEARCH => {
                 sep();
+                if rows.len() == 1 {
+                    add(CM_VERSIONS, "このファイルの別の版を探す(&V)");
+                    add(CM_SAME_CONTENT, "同じ中身のファイルを探す(&S)");
+                    sep();
+                }
                 add(CM_EXPORT, "一覧を CSV に書き出す(&X)...");
             }
             TAB_SIMILAR | TAB_DUPES if !rows.is_empty() => {
@@ -2229,6 +2523,11 @@ fn list_menu(hwnd: HWND, tab: usize) {
                 let _ = crate::clipboard::set_text(hwnd, &text.join("\r\n"), false);
             }
             CM_EXPORT => export_search(hwnd),
+            CM_VERSIONS | CM_SAME_CONTENT => {
+                if let Some(r) = first {
+                    find_related(r, cmd == CM_VERSIONS);
+                }
+            }
             CM_TO_REVIEW => to_review(tab, rows),
             CM_OVERWRITE | CM_KEEP_BOTH | CM_SKIP => {
                 with(|a| {
@@ -2480,6 +2779,35 @@ fn command(id: u16, code: u32) {
         }
         ID_JOB_SAVE => save_job(),
         ID_JOB_DELETE => delete_job(),
+        ID_SWAP => {
+            with(|a| {
+                let (s, d) = (text_of(a.edits.src), text_of(a.edits.dst));
+                set_text(a.edits.src, &d);
+                set_text(a.edits.dst, &s);
+                // 向きが変わったので計画は作り直す
+                a.plan = None;
+                a.sync_rows.clear();
+                a.refresh_list(TAB_SYNC);
+                set_text(
+                    a.edits.sync_info,
+                    "送り元と送り先を入れ替えました。「比べる」で確かめてください",
+                );
+            });
+        }
+        ID_SAVED if code == CBN_SELCHANGE => {
+            let name = with(|a| {
+                let i = unsafe { SendMessageW(a.edits.saved, CB_GETCURSEL, None, None).0 };
+                (i >= 0)
+                    .then(|| a.searches.searches.get(i as usize).map(|s| s.name.clone()))
+                    .flatten()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+            run_saved_search(&name);
+        }
+        ID_SAVED_SAVE => save_search(),
+        ID_SAVED_DELETE => delete_search(),
+        ID_EXPIRE_TRASH => expire_trash(),
         ID_SRC_BROWSE => {
             if let Some(h) = with(|a| a.edits.src) {
                 browse_into(h, false);

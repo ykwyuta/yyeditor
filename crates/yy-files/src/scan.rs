@@ -31,7 +31,7 @@ impl Default for ScanOptions {
 }
 
 /// 目録の 1 ファイル。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileEntry {
     /// ルートからの相対パス（`/` 区切り）
     pub rel: String,
@@ -51,7 +51,7 @@ impl FileEntry {
 }
 
 /// 走査の結果。
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Catalog {
     pub root: PathBuf,
     /// ファイル（相対パスの順）

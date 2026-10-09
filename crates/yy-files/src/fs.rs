@@ -45,6 +45,12 @@ pub trait WriteFile: Write + Send {
     fn sync(&mut self) -> io::Result<()>;
 }
 
+/// 書き換えるファイル（差分の送り方で、変わったブロックだけを書く）。
+pub trait PatchFile: Write + Seek + Send {
+    fn sync(&mut self) -> io::Result<()>;
+    fn set_len(&mut self, len: u64) -> io::Result<()>;
+}
+
 /// ファイル操作。
 pub trait Fs: Send + Sync {
     fn read_dir(&self, path: &Path) -> io::Result<Vec<DirEntry>>;
@@ -64,6 +70,11 @@ pub trait Fs: Send + Sync {
     /// 更新日時を合わせる（ナノ秒）。
     fn set_mtime(&self, path: &Path, mtime: i64) -> io::Result<()>;
     fn set_readonly(&self, path: &Path, readonly: bool) -> io::Result<()>;
+    /// ファイルを写す（`to` があれば置き換える）。同じ共有フォルダの中では、Windows の `CopyFileEx` が
+    /// SMB のサーバー側コピーになり、回線を使わない。
+    fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()>;
+    /// 書き換えるために開く（大きさはそのまま）。
+    fn open_patch(&self, path: &Path) -> io::Result<Box<dyn PatchFile>>;
 }
 
 /// 時刻を UNIX 時刻からのナノ秒にする。
@@ -132,6 +143,32 @@ impl Write for LocalWrite {
 impl WriteFile for LocalWrite {
     fn sync(&mut self) -> io::Result<()> {
         self.0.sync_data()
+    }
+}
+
+struct LocalPatch(File);
+
+impl Write for LocalPatch {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl Seek for LocalPatch {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
+impl PatchFile for LocalPatch {
+    fn sync(&mut self) -> io::Result<()> {
+        self.0.sync_data()
+    }
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        self.0.set_len(len)
     }
 }
 
@@ -227,6 +264,18 @@ impl Fs for Local {
         p.set_readonly(readonly);
         fs::set_permissions(path, p)
     }
+
+    fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        // 読み取り専用の写しは書き換えられないので外す（Windows の CopyFileEx は属性も写す）
+        fs::copy(from, to)?;
+        self.set_readonly(to, false)
+    }
+
+    fn open_patch(&self, path: &Path) -> io::Result<Box<dyn PatchFile>> {
+        Ok(Box::new(LocalPatch(
+            OpenOptions::new().read(true).write(true).open(path)?,
+        )))
+    }
 }
 
 // ---- 試験用 ------------------------------------------------------------------------------
@@ -297,31 +346,71 @@ struct FaultyWrite {
     state: Arc<FaultState>,
 }
 
+/// 試験用の書き込み: 落ちる・回線が切れるをまねる。
+fn faulty_write(s: &FaultState, inner: &mut dyn Write, buf: &[u8]) -> io::Result<usize> {
+    let n = s.ops.fetch_add(1, Ordering::SeqCst);
+    if n >= s.crash_after.load(Ordering::SeqCst) {
+        // 落ちる直前の書き込みは途中まで残る
+        if n == s.crash_after.load(Ordering::SeqCst) && buf.len() > 1 {
+            let _ = inner.write(&buf[..buf.len() / 2]);
+            let _ = inner.flush();
+        }
+        return Err(io::Error::other(Crashed));
+    }
+    let every = s.drop_every.load(Ordering::SeqCst);
+    let w = s.writes.fetch_add(1, Ordering::SeqCst) + 1;
+    if every > 0 && w % every == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "（試験）回線が切れました",
+        ));
+    }
+    inner.write(buf)
+}
+
 impl Write for FaultyWrite {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let s = &self.state;
-        let n = s.ops.fetch_add(1, Ordering::SeqCst);
-        if n >= s.crash_after.load(Ordering::SeqCst) {
-            // 落ちる直前の書き込みは途中まで残る
-            if n == s.crash_after.load(Ordering::SeqCst) && buf.len() > 1 {
-                let _ = self.inner.write(&buf[..buf.len() / 2]);
-                let _ = self.inner.flush();
-            }
-            return Err(io::Error::other(Crashed));
-        }
-        let every = s.drop_every.load(Ordering::SeqCst);
-        let w = s.writes.fetch_add(1, Ordering::SeqCst) + 1;
-        if every > 0 && w % every == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "（試験）回線が切れました",
-            ));
-        }
-        self.inner.write(buf)
+        faulty_write(&self.state, &mut self.inner, buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+
+struct FaultyPatch {
+    inner: Box<dyn PatchFile>,
+    state: Arc<FaultState>,
+}
+
+impl Write for FaultyPatch {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        faulty_write(&self.state, &mut self.inner, buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Seek for FaultyPatch {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+impl PatchFile for FaultyPatch {
+    fn sync(&mut self) -> io::Result<()> {
+        if self.state.ops.load(Ordering::SeqCst) >= self.state.crash_after.load(Ordering::SeqCst) {
+            return Err(io::Error::other(Crashed));
+        }
+        self.inner.sync()
+    }
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        let n = self.state.ops.fetch_add(1, Ordering::SeqCst);
+        if n >= self.state.crash_after.load(Ordering::SeqCst) {
+            return Err(io::Error::other(Crashed));
+        }
+        self.inner.set_len(len)
     }
 }
 
@@ -387,6 +476,17 @@ impl Fs for Faulty {
     fn set_readonly(&self, path: &Path, readonly: bool) -> io::Result<()> {
         self.op()?;
         self.inner.set_readonly(path, readonly)
+    }
+    fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.op()?;
+        self.inner.copy_file(from, to)
+    }
+    fn open_patch(&self, path: &Path) -> io::Result<Box<dyn PatchFile>> {
+        self.op()?;
+        Ok(Box::new(FaultyPatch {
+            inner: self.inner.open_patch(path)?,
+            state: self.state.clone(),
+        }))
     }
 }
 
