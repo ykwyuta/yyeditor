@@ -161,7 +161,7 @@ yyfilemanager の中核は `cargo test -p yy-files`、ブラウザの設定・�
 - ブラウザでは、直接接続・プロキシ・PAC、プロファイル分離、ドメイン規則、ホスト転送、証明書の指紋照合、ブックマークの HTML 入出力、フィルタの更新・除外を確認します。
 - 利用者向けの説明は [ファイル管理ヘルプ](crates/yy-win/help/filemanager.md) と [ブラウザヘルプ](crates/yy-win/help/browser.md) にあります。
 - ファイル管理の設定は共通 `config.toml` の `[filemanager]`、ジョブ・索引・削除記録は設定フォルダの `filemanager/`、ログは `logs/filemanager.log` に保存します。
-- ブラウザのプロファイル・フィルタ設定は設定フォルダの `browser.toml`、ブックマークは `bookmarks.toml`、開発者用証明書は `browser-devcerts/` に保存します。閲覧データは `%LOCALAPPDATA%\yyeditor\yybrowser\` にプロファイル別で保管します。
+- ブラウザのプロファイル・フィルタ設定は設定フォルダの `browser.toml`、ブックマークは `bookmarks.toml`、開発者用証明書は `browser-devcerts/` に保存します。閲覧データは `%LOCALAPPDATA%\yyeditor\yybrowser\` にプロファイル別で保管します（yybrowser の閲覧履歴 `yybrowser-history.tsv`・ダウンロード履歴 `yybrowser-downloads.tsv` を含む。広告ブロックのフィルタのキャッシュは同じ場所の `filters\`）。
 
 ## CI と配布
 

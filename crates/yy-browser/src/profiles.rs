@@ -13,6 +13,15 @@ pub struct ProfileList {
     /// 起動するときのプロファイルの名前
     #[serde(default)]
     pub default: String,
+    /// 検索の URL（`%s` を検索語に。空なら設定ファイルの `[browser] search_url`。19 章 4.4）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub search_url: String,
+    /// ダウンロードの保存先（空なら Windows の「ダウンロード」。19 章 4.3）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub download_dir: String,
+    /// ダウンロードのたびに保存先を尋ねる
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub download_ask: bool,
     #[serde(default, rename = "profile")]
     pub profiles: Vec<ProxyProfile>,
     /// 広告ブロックのフィルタリスト（全プロファイルで共通。20 章 3）
@@ -129,6 +138,9 @@ impl Default for ProfileList {
     fn default() -> Self {
         ProfileList {
             default: "OS と同じ".into(),
+            search_url: String::new(),
+            download_dir: String::new(),
+            download_ask: false,
             profiles: vec![
                 ProxyProfile::new("OS と同じ", ProxyMode::System),
                 ProxyProfile::new("直接", ProxyMode::Direct),
@@ -160,6 +172,10 @@ impl ProfileList {
             p.validate()
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         }
+        if !self.search_url.is_empty() {
+            crate::history::validate_search_url(&self.search_url)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        }
         for l in &self.adblock.lists {
             l.validate()
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -171,6 +187,15 @@ impl ProfileList {
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, path)
+    }
+
+    /// 使う検索の URL（`browser.toml` で選んだもの、なければ設定ファイルのもの）。
+    pub fn effective_search_url<'a>(&'a self, config: &'a str) -> &'a str {
+        if self.search_url.trim().is_empty() {
+            config
+        } else {
+            &self.search_url
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&ProxyProfile> {
@@ -278,6 +303,22 @@ mod tests {
         assert!(!list.adblock.lists[0].is_local());
         list.save(&p).unwrap();
         assert_eq!(ProfileList::load(&p).unwrap().adblock, list.adblock);
+        // 検索の URL・ダウンロードの設定も保存する
+        list.search_url = "https://duckduckgo.com/?q=%s".into();
+        list.download_dir = "D:\\dl".into();
+        list.download_ask = true;
+        list.save(&p).unwrap();
+        let back = ProfileList::load(&p).unwrap();
+        assert_eq!(
+            back.effective_search_url("x"),
+            "https://duckduckgo.com/?q=%s"
+        );
+        assert_eq!(back.download_dir, "D:\\dl");
+        assert!(back.download_ask);
+        list.search_url = "https://bad/".into();
+        assert!(list.save(&p).is_err());
+        list.search_url.clear();
+        assert_eq!(list.effective_search_url("cfg"), "cfg");
         // [adblock] がない古いファイルは既定の一覧
         std::fs::write(
             &p,

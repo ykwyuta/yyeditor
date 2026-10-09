@@ -1219,6 +1219,13 @@ pub(crate) mod testing {
     use std::time::{Duration, Instant};
     use webview2_com::ExecuteScriptCompletedHandler;
 
+    /// WebView2 を使う試験を 1 つずつ走らせる（並べて走らせると、ブラウザのプロセスが同時にいくつも立ち上がり、
+    /// CI の小さなマシンでは時間切れになる）。
+    pub(crate) fn webview2_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     impl Preview {
         /// 読み込み終わったページの種類。
         pub(crate) fn loaded_kind(&self) -> Option<Kind> {
@@ -1323,6 +1330,7 @@ mod tests {
     /// （`YY_REQUIRE_WEBVIEW2=1` なら失敗にする）。
     #[test]
     fn renders_markdown_with_mermaid_and_math_in_webview2() {
+        let _serial = testing::webview2_lock();
         let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);

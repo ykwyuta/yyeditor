@@ -161,7 +161,7 @@ Test the file manager core with `cargo test -p yy-files`, browser settings, rule
 - For the browser, cover direct connections, proxies and PAC, profile isolation, domain rules, host mapping, certificate fingerprints, bookmark HTML import / export, and filter updates and exceptions.
 - User documentation is in the [file manager help](crates/yy-win/help/filemanager.md) and [browser help](crates/yy-win/help/browser.md), both in Japanese.
 - File manager settings are under `[filemanager]` in the shared `config.toml`. Jobs, indexes, and deletion records are stored in `filemanager/` under the settings folder; the log is `logs/filemanager.log`.
-- Browser profiles and filter settings are in `browser.toml`, bookmarks in `bookmarks.toml`, and development certificates in `browser-devcerts/`, all under the settings folder. Browsing data is stored per profile under `%LOCALAPPDATA%\yyeditor\yybrowser\`.
+- Browser profiles and filter settings are in `browser.toml`, bookmarks in `bookmarks.toml`, and development certificates in `browser-devcerts/`, all under the settings folder. Browsing data is stored per profile under `%LOCALAPPDATA%\yyeditor\yybrowser\`, including yybrowser's history (`yybrowser-history.tsv`) and download history (`yybrowser-downloads.tsv`); ad-block filter caches are in `filters\` there.
 
 ## CI and Distribution
 
