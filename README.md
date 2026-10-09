@@ -1,517 +1,160 @@
-# yyeditor
-
-<img src="apps/yyeditor/res/yyeditor-256.png" alt="yyeditor のアイコン" width="96">
-
-Rust で実装する、Windows 向けの軽量テキストエディタです。数 GB のファイルを即座に開ける巨大ファイル対応、日本語の幅広い文字コード、区切り文字（CSV/TSV）編集などを目指しています。
-
-設計は [docs/proposal/](docs/proposal/README.md) の提案書を参照してください。
-
-## 現在の状態
-
-ロードマップ（[08 章](docs/proposal/08-roadmap-testing.md)）の **M0（基盤）・M1（巨大ファイルビューア）・M2（エディタ基本）・M2.5（矩形選択・マルチカーソル）・M3（文字コード）・M4（検索・置換）・M5（区切り文字 / CSV）・M6（タブ・比較などの追加要件）・M7（EBCDIC・外部の対応表）・M7.5（シンタックスハイライト）** と、**M9.1（リモート編集の接続基盤）** を実装済みです。
-
-| 機能 | 状態 |
-|------|------|
-| 複数ファイルをタブで開く（Ctrl+O / 複数ファイルのドラッグ＆ドロップ）。Ctrl+Tab / Ctrl+Shift+Tab で切り替え。タブの「×」・中ボタンのクリックで閉じる | ✅ |
-| 開いている２文書の左右比較（行の位置合わせ・差分行の色分け・縦スクロール連動） | ✅ |
-| 他のアプリケーションが開いているファイルの読み取り専用表示（安定した一時スナップショット） | ✅ |
-| 制御文字の記号表示を表示メニューで切り替え | ✅ |
-| 半角スペース（·）・タブ（→）・改行 CRLF（↵）/ LF（↓）の記号表示（表示メニューで切り替え。全角スペースはフォントの字形で表示。単独の CR は ␍） | ✅ |
-| 検索条件に一致する文字列を一括選択（Ctrl+Shift+M）し、Ctrl+C でコピー | ✅ |
-| メモリマップ＋永続ピースツリーによる巨大ファイル表示 | ✅ |
-| 行数のバックグラウンドカウント（進捗をステータスバーに表示） | ✅ |
-| 行番号表示（未確定範囲は推定値を薄く表示） | ✅ |
-| スクロール（キー・ホイール・スクロールバー。巨大ファイルはバイト位置比例） | ✅ |
-| 行へ移動（Ctrl+G） | ✅ |
-| 長い行も 1 行のまま表示して横スクロール（既定で 1 MiB まで。それを超える数 GB の行などは複数の表示行に分けて表示） | ✅ |
-| 不正な UTF-8 バイト（`\xNN`）・制御文字の可視化、UTF-8 BOM の判別 | ✅ |
-| 拡大・縮小（Ctrl+ホイール / Ctrl++ / Ctrl+-） | ✅ |
-| 文字入力・削除・改行（自動インデント）、上書きモード（Insert） | ✅ |
-| 日本語入力（IME の変換中文字列をインライン表示） | ✅ |
-| カーソル移動（文字＝書記素単位・単語・行頭／行末・スマートホーム・ページ） | ✅ |
-| 選択（Shift＋移動・マウスドラッグ・ダブルクリックで単語・すべて選択） | ✅ |
-| マルチカーソル（Ctrl+クリック / Ctrl+Alt+↑↓）と全カーソル同時編集、行ごとの貼り付け振り分け | ✅ |
-| 切り取り・コピー・貼り付け（改行コードを文書に合わせる） | ✅ |
-| Undo / Redo（連続入力を 1 単位にまとめる。保存後も元に戻せる） | ✅ |
-| 新規作成・上書き保存・名前を付けて保存 | ✅ |
-| 未保存の変更の確認（タブを閉じる・終了・文字コードを指定して開き直すとき）、タイトル・タブの `*` 表示 | ✅ |
-| 矩形選択（Alt+ドラッグ / Alt+Shift+矢印 / 矩形選択モード）。全角・タブを考慮した表示桁で範囲を決める | ✅ |
-| 矩形への入力・削除（行末より右は空白で埋める）、矩形のコピー・切り取り・貼り付け | ✅ |
-| 矩形データのクリップボード形式（Visual Studio・EmEditor と共通の `MSDEVColumnSelect`） | ✅ |
-| 次の出現箇所を選択（Ctrl+D）、すべての出現箇所を選択（Ctrl+Shift+L）、各行末にカーソル（Alt+Shift+I）、矩形をカーソルに変換 | ✅ |
-| IME の変換中文字列を全カーソル位置にプレビュー | ✅ |
-| 文字コードの自動判別（BOM、BOM なし UTF-16/32、ISO-2022-JP、UTF-8、CP932 / EUC-JP） | ✅ |
-| 文字コードを指定して開く・開き直す（「開く」ダイアログの文字コード欄、ファイル メニュー） | ✅ |
-| 別名保存での文字コード・BOM・改行コードの変換（改行コードの変換は 1 回の Undo で戻せる） | ✅ |
-| 保存できない文字の確認（「?」または数値文字参照に置き換え / 最初の文字へ移動） | ✅ |
-| 読み込み時に不正だったバイトの保持（`\xNN` と表示し、同じ文字コードで保存すると元のバイトに戻る） | ✅ |
-| 大きな UTF-8 以外のファイルのバックグラウンド変換（変換中は先頭部分を読み取り専用で表示） | ✅ |
-| 検索バー（Ctrl+F）・置換バー（Ctrl+H）、次を検索（F3 / Enter）・前を検索（Shift+F3 / Shift+Enter）、入力中のインクリメンタル検索 | ✅ |
-| 検索欄の下のボタン: 置換の表示・非表示、一致箇所をすべて選択、フォルダ内を検索 (Grep)（メニューと同じ機能） | ✅ |
-| ヘルプ（F1。機能・キーボードショートカット・設定の説明）、「設定ファイルを開く」（なければ既定値で作る） | ✅ |
-| 検索オプション（大文字小文字・単語単位・正規表現）、表示範囲の一致箇所のハイライト、件数表示 | ✅ |
-| 正規表現（`regex-automata`、線形時間保証。行頭・行末は CRLF 対応）、置換文字列の `$1` `${name}` `\n` `\U` `\L` など | ✅ |
-| すべて置換（1 回の Undo で戻せる。大きな文書はバックグラウンドで一時ファイルに書き直し、Esc で中止） | ✅ |
-| ファイルから検索（Grep、Ctrl+Shift+F。文字コードを判別して検索）とタグジャンプ（F12） | ✅ |
-| 区切り文字モード（CSV / TSV / セミコロン / パイプ。拡張子 .csv .tsv で自動、CSV メニューで切り替え・自動判別） | ✅ |
-| 列揃え表示（区切り文字は ` │ ` で表示、ファイルの内容は変えない）、フィールド内改行の続きの行もその列の位置に表示 | ✅ |
-| RFC 4180（引用符・`""`・フィールド内改行）。バックグラウンドのレコードインデックスで任意の位置の引用符の内外を判定 | ✅ |
-| セル移動（Tab / Shift+Tab）、区切り文字・引用符・改行を入力すると自動で引用符を付ける、ステータスバーにレコード番号・列番号 | ✅ |
-| 列見出し（本文の上に Excel と同じ規則の列名 A, B, …, Z, AA, … を表示。カーソルの列を強調） | ✅ |
-| 列の挿入・削除、カンマ ⇔ タブの変換（1 回の Undo で戻せる。大きな文書はバックグラウンド）、別名保存で拡張子を変えたときの変換 | ✅ |
-| 列ごとのセル範囲の選択（Alt+ドラッグの矩形選択がそのまま列に沿う） | ✅ |
-| EBCDIC（IBM-930/939/1390/1399 ほか。SO/SI、改行 NL・LF・固定長レコード、不正なデータも含めてバイト列が往復） | ✅ |
-| 外部の対応表（`.map`）によるベンダー漢字コード（JEF・KEIS・JIPS など）・外字 | ✅ |
-| 保存できない文字を似た文字に置き換え（① → (1)、ｶﾞ → ガ、全角英数 → 半角 など） | ✅ |
-| シンタックスハイライト（38 種類。C / C++・C#・Java・Rust・Go・Python・JavaScript / TypeScript・PHP・Ruby・Perl・VB・Kotlin・Swift・バッチ・PowerShell・シェル・HTML・XML・CSS・JSON・YAML・TOML・INI・Markdown・SQL・COBOL（固定 / 自由形式）・JCL・PL/I・RPG・Rhai（3270 のマクロ）・ログ・diff・Makefile・Dockerfile・.gitignore） | ✅ |
-| ファイル種類の判定（設定・モードライン・ファイル名・拡張子・先頭行）、表示メニューの「ハイライト」で切り替え | ✅ |
-| 巨大ファイルでも表示範囲だけを色付け（行の開始状態の記録、編集後は変わった位置から読み直し） | ✅ |
-| 対応する括弧の強調表示と移動（Ctrl+]）、コメント化 / 解除（Ctrl+/）。文字列・コメント内の括弧は数えない | ✅ |
-| 利用者のハイライト定義（`%APPDATA%\yyeditor\syntax\*.toml`）、トークンの色の設定 | ✅ |
-| 16 進数（バイナリ）編集（表示メニューの「16 進数表示」Ctrl+Shift+X、ファイル メニューの「バイナリとして開く」） | ✅ |
-| ワークスペース（VS Code のように起点のフォルダを複数登録し、左のサイドバーにツリー表示。Ctrl+Shift+E。ターミナル・エクスプローラーで開く、フォルダ内を検索、パスのコピー。ファイル・フォルダの作成・名前の変更・削除（手元はごみ箱へ）・移動（ドラッグ＆ドロップ、切り取り・貼り付け）・コピー（このパソコンとリモートの間も）・リモートのファイル・フォルダをダウンロード フォルダにコピー（右クリック。ターミナルのワークスペースも）。`*.yyworkspace` に保存、次回起動時に復元。SSH 接続先のフォルダも登録でき、同じ操作ができる） | ✅ |
-| ソース管理（Git。VS Code 風。Ctrl+Shift+G でサイドバーを切り替え。ワークスペースのフォルダの下の `.git` を探して一覧にし、表示するリポジトリを選ぶ。ブランチと上流との差・切り替え・作成、ステージ済み／変更／競合の一覧、差分、ステージ・解除・破棄、コミット（Ctrl+Enter・amend）、プル・プッシュ・同期・フェッチ。入っている git コマンドを裏で動かす。ワークスペースのリモート〔SSH〕のフォルダのリポジトリも、接続先の git を SSH で動かして同じように使える） | ✅ |
-| 最近開いたファイル（履歴。最大 1,000 件、Ctrl+E）とブックマーク（最大 100 件、Ctrl+B・Ctrl+Shift+B）。絞り込み・複数選択で開く・削除・並べ替え。`%APPDATA%\yyeditor\history.txt`・`bookmarks.txt` に保存 | ✅ |
-| 固定長表示（表示メニューの「固定長表示」Ctrl+Shift+R。バイト位置の目盛りの下に 1 レコードをコード値・16 進数・文字の 3 行で表示、上書き編集） | ✅ |
-| コード値の表示・編集（表示メニューの「コード値表示」Ctrl+Shift+K。16 進数表示と同じ形で 1 行 8 文字、Unicode のコード値を入力して文字を書き換え・挿入） | ✅ |
-| 変換（大文字・小文字、全角・半角カタカナ、キャメル・スネーク・ケバブケース）、重複行の削除、選択した文字列のコード値の表示 | ✅ |
-| リモート（SSH）のファイルの編集（Ctrl+Shift+O。接続先に置くエージェント経由。OpenSSH を使わない組み込みの SSH、ホスト鍵の確認、公開鍵・パスワード・対話式の認証、外部での変更の検出、`ssh://` の履歴） | ✅（M9.1） |
-| リモートの巨大ファイル（表示範囲だけの取り寄せ）、Linux aarch64 の接続先、接続先での Grep・全置換 | 今後（M9.2〜M9.4） |
-| 仕上げ（M8） | 今後 |
-
-自動バックアップ（旧 M6）は要件から取り下げました。
-
-### タブ・比較・読み取り専用・一括選択
-
-- ファイル メニューの「共有中のファイルを読み取り専用で開く」は、元ファイルを作業用ファイルにコピーしてから表示します。外部アプリのその後の変更は自動反映されません。閉じて開き直すと最新の内容になります。
-- 表示メニューの「開いているファイルを比較」は現在のタブと別のタブを左右に並べ、変更行を赤・緑で示します。巨大文書もバックグラウンドで比較し、画面には表示範囲だけを読み込みます。縦・横スクロールで全体を閲覧できます。差分索引は OS の一時フォルダに作成し、比較画面を閉じると削除します。文字コードの変換中は完了後に比較してください。
-- 検索バーで条件を入力し、検索欄の下の「一致箇所をすべて選択」ボタン（編集メニューの「検索条件に一致する箇所をすべて選択」、Ctrl+Shift+M と同じ）を使います。そのまま入力すると一致箇所がまとめて書き換わります。複数選択のコピーは各一致文字列を改行で連結します。選択上限は 100,000 箇所です。
-
-### リモート（SSH）のファイル
-
-提案書 [11 章](docs/proposal/11-remote-ssh.md) の方式で、SSH 接続先（Linux の x86_64・aarch64）のファイルを編集できます。
-
-- SSH は Pure Rust の `russh`（暗号は `ring`）で yyeditor に組み込んであり、`ssh.exe` など OpenSSH のプログラムは使いません。`~/.ssh/config` と `~/.ssh/known_hosts` は読むだけで使います（承認したホスト鍵は `%APPDATA%\yyeditor\known_hosts` に記録します）。
-- 踏み台（`ProxyJump`、多段も可）は踏み台の SSH 接続の `direct-tcpip` チャネルの上で次の SSH を話し、HTTP CONNECT・SOCKS5・SOCKS4 のプロキシも組み込みで扱います（設定の `proxy_jump`・`proxy`）。`ProxyCommand` は外部のプログラムを起動しないため、`ssh -W`・`nc -X`・`ncat --proxy`・`connect -S/-H` の形だけを読み替えます。
-- パスワード・秘密鍵のパスフレーズは入力欄で選んだ場合だけ Windows の資格情報マネージャーに保存し、次からは自動で使います（受け付けられなければ保存を消して尋ね直す。設定 `remember_passwords`）。
-- 接続の各段階（経路、ホスト鍵の照合、試した認証方式、エージェントの配置）を `%APPDATA%\yyeditor\logs\remote-ssh.log` に記録し、接続に失敗したときはその最後の部分をメッセージに表示します（ヘルプ メニューの「リモート接続の記録を開く」）。
-- 初めて接続するとき、接続先の `~/.yyeditor/agent/<版>-<ハッシュ>/yy-agent` にエージェント（静的リンクの Linux 用バイナリ、約 0.5 MB）を SSH 越しに置き、SHA-256 を照合します。`curl`・`sftp-server`・インターネット接続は使いません。エージェントはポートを待ち受けず、SSH のチャネルの標準入出力だけで通信します。
-- エージェントは配布物の `agents\yy-agent-x86_64-linux`・`agents\yy-agent-aarch64-linux`（exe と同じフォルダ）から、接続先の CPU（`uname -m`）に合うものを使います。開発中は環境変数 `YY_AGENT_DIR` でフォルダを指定できます。
-- 保存は、接続先の同じフォルダの一時ファイルに書いてから置き換えます（権限・所有者・シンボリックリンク・ハードリンクを保つ）。開いたあとで外部で変更されていれば、上書きするか尋ねます。
-- 今のところ、ファイルは全体を取り寄せてから開きます（M9.2 で表示範囲だけの取り寄せにします）。`sudo` による保存には対応しません。
-
-### ターミナル（yyterm）
-
-提案書 [12 章](docs/proposal/12-terminal.md) の方式で、エディタと同じクレートを使った別のアプリとしてターミナル（`yyterm.exe`）を作っています。
-
-- 手元のシェルは ConPTY（Windows 10 1809 以降）で動かします。既定は PowerShell 7、なければ Windows PowerShell、なければコマンド プロンプト（設定 `[terminal] shell`）。
-- SSH はエディタと同じ組み込みの SSH（OpenSSH を使わない）で、接続設定・踏み台・プロキシ・ホスト鍵・保存したパスワード・接続の記録も共通です（Ctrl+Shift+O）。シェルにはエージェントを使わないので、Linux 以外の接続先にも使えます。ポートフォワーディング（`-L`・`-R`・`-D`。「SSH で接続」の入力、接続設定の `forward`、`~/.ssh/config` の LocalForward など）に対応し、始められなかったものはタブに警告を表示するだけで接続は続けます（エディタと yysftp は無視します）。ワークスペースのリモートのフォルダの一覧にエージェントを使うかは選べます（設定 `[terminal] use_agent`・ワークスペース メニュー。使わなければ SFTP で、接続先に何も置きません）。
-- フォントはエディタと同じ同梱の UDEV Gothic。全角・結合文字、256 色・24 ビット色、代替画面（vim・less など）、マウス、ブラケット ペースト、IME の入力に対応します。
-- ワークスペースはエディタと同じ `*.yyworkspace`。中身がフォルダ 1 つだけのフォルダは、VS Code のように `src/main/java` と束ねて表示します（エディタも同じ）。サイドバー（Ctrl+Shift+E）のフォルダをダブルクリックするとそこでターミナルを開き（リモートのフォルダは SSH）、ファイルはエディタで開きます。エディタのワークスペースの「ターミナルで開く」は、yyterm.exe が同じフォルダにあれば yyterm で開きます。
-- タブ（Ctrl+Shift+T・Ctrl+Shift+W・Ctrl+Tab。エディタと同じ「×」・中ボタンで閉じる。右クリックで、ほかのタブ・右側・左側をまとめて閉じる）、コピー・貼り付け（Ctrl+Shift+C/V、選択中の Ctrl+C、右クリックのメニュー、すべて選択 Ctrl+Shift+A、表示している画面をコピー）、画面の URL・ファイルのパスのリンク（Ctrl+クリックで URL はブラウザ、ファイルはエディタで行へ。SSH のタブは接続先のファイル）、SSH のタブのカレントディレクトリを yysftp で開く（右クリックのメニュー）、スクロールバック（Shift+PageUp/PageDown、ホイール）、文字の大きさ（Ctrl++/-/0）。
-
-### 3270（yyterm のタブ）
-
-提案書 [14 章](docs/proposal/14-tn3270.md) の方式で、yyterm のタブとして IBM メインフレームの 3270 端末（TN3270・TN3270E）を作っています（M1〜M6）。
-
-- 3270 データストリーム（フィールド・拡張属性・色・Query Reply）と端末の入力の規則（保護・数字・自動スキップ・挿入・AID）、TN3270E の LU 名の指定、モデル 2〜5。
-- 日本語（CCSID 930・939・1390・1399）。IME で漢字を入れると SO/SI を自動で入れます。
-- 独自のキー割り当てと、PF13〜24・PA・Clear・Attn などを押せる画面のキーパッド。
-- 直接の TCP か、組み込みの SSH の direct-tcpip（踏み台・プロキシの先のホスト）で接続します。
-- マクロ（Rhai）: 画面の文字を待つ・読む・入力する・IND$FILE・CSV への書き出し。操作の記録からマクロを作れます。パスワードは資格情報マネージャーから入れ、スクリプトには渡しません。
-- プリンター（3287。TN3270E のプリンター LU、LU1 の SCS・LU3、日本語）。受け取った印刷を Windows のプリンター・PDF・テキストに出します。
-- 通信の記録（トレース）: 送受信の 16 進と解釈（オーダー・属性・AID など）。パスワードは伏せ字にし、記録から画面を再現できます。
-- IND$FILE のファイル転送（DFT。TSO・CMS・CICS の GET・PUT）。日本語のテキストはバイナリで転送して端末で CCSID と UTF-8 を変換します。
-- TLS（`tn3270s://` の暗黙の TLS と Telnet の STARTTLS。rustls）。検証できない証明書（社内の自己署名など）は SSH のホスト鍵と同じく初めて見たときに確かめて記録し、変わったら接続しません。PEM のクライアント証明書も使えます。
-- 中核は OS に依存しない `yy-3270`・`yy-3270-tls`。テスト用の模擬ホスト `yy-3270-mock`（TN3270E の LU・ASSOCIATE・RESPONSES・PRINT-EOJ、日本語、Query、IND$FILE、SCS/LU3、TLS）を x3270（s3270・pr3287）で確かめたうえで、Linux の CI で yyterm の 3270 の中核を試験しています。
-
-### スプレッドシート（yysheet）
-
-提案書 [15 章](docs/proposal/15-spreadsheet.md) の方式で、50 億セル（1000 列 × 500 万行、100 列 × 5000 万行）のデータを、メモリ 8 GB までで扱う別のアプリ（`yysheet.exe`）を作っています（M1 を実装中）。
-
-- 列指向の保管（6.5 万行ずつの変更しないチャンク。型ごとに詰めた形と統計）、行の挿入・削除はデータをコピーしない区間の付け替え、編集の差分、O(1) のスナップショットと Undo。
-- 独自形式（`.yys`）: 末尾の目次だけを読んで開き、保存は変わったチャンクだけを書き足す（書き足しの途中で落ちても前の状態で開ける）。
-- RFC 4180 の CSV の並列の取り込み（区画ごとに引用符の内外の 2 通りで読んで状態を決める）と書き出し。文字コード・列の型の推定。TSV と任意の区切り文字（制御コードを含む。`<US>`・`\x1F` などで指定）、改行以外のレコードの終わり（CR だけ・RS（0x1E）など任意のバイト列）も読み書きできます（ASCII の区切りの US・RS は推定もします）。
-- Excel 互換の表示形式（`yy-numfmt`。区分・条件・色・桁区切り・指数・分数・日付・時刻・経過時間・和暦）。
-- 格子（Direct2D）・セルの編集（IME）・数式バー・シートのタブ・クリップボード・行と列の挿入と削除。
-- 複数段階の絞り込み（値の一覧・文字列・数値・上位・平均・空。列見出しの ▼ から）と、複数のキーの並べ替え（Excel と同じ値の順。安定）。データは動かさず表示する行の並びだけを持ち、条件はファイルに保存します。並べ替えはキーを 128 ビットに詰めて全コアで並べます。
-- セルの書式: 表示形式・塗りつぶし・文字の色・太字・斜体・配置・罫線（6 種類と線の色）。5000 万行でも軽いように、書式は範囲（列全体・行全体を含む）の層として重ねて持ちます。
-- 数式（`yy-formula`）: Excel と同じ文法と型の変換、`SUM`・`COUNT`・`SUMIFS`・`COUNTIFS`・`XLOOKUP`・`PRODUCT`・`ABS`・`CONCAT`・`TEXTJOIN`・`TEXTSPLIT`・`IF`・`IFS`・`AND`・`OR`・`ROW`・`POWER`・四則演算・`&`、スピル（動的配列）、依存の順の再計算、行・列の挿入と削除での参照の付け替え。表の列は列ごとにまとめて読んで計算します。
-- 固定長ファイル（`yy-cobol`）: IBM COBOL のコピーブック互換のレイアウト定義から、項目ごとの列を作って読み書きします（`PIC X`・`N`・`G`・`NATIONAL`・ゾーン 10 進数・`COMP-3`・`COMP`・`COMP-5`・`COMP-1`・`COMP-2`・数字編集、`OCCURS`・`REDEFINES`・`SIGN`・`SYNC`）。文字コードは MS932 と EBCDIC（930・939・1390・1399 など）で、開くとき・レイアウトを当てるとき・書き出すときに選べます（MS932 ⇔ EBCDIC の変換もできます）。読めない数値の項目は `X'…'` で表示して元のバイトのまま書き戻します。500 万レコード（415 MB）の取り込みは約 4 秒。列見出しに項目の型、ステータスバーにレコード長を出し、セルの書式設定で列の COBOL の型を選び直せます（コピーブックを書き直します）。型に合わない入力は受け付けません。値は COBOL と同じく項目の長さまで埋めます。マルチレイアウト（名前を付けた複数のレイアウトを行ごとに指定。未確定の行は赤く表示）にも対応します。yysheet には、COBOL の型と関数の一覧を含む利用ガイド（F1）があります。
-- ワークスペース（エディタ・ターミナルと同じ `*.yyworkspace`。左のサイドバー）に手元と SSH 接続先のフォルダを並べ、接続先のファイルも直接開いて保存できます（手元に取り寄せて開き、保存すると接続先で一時の名前に書いてから置き換えて送り返す。開いたあとでほかで変更されていたら確かめる）。読み書きは既定で SFTP（接続先に何も置かない）、設定でエージェントにも切り替えられます。
-- 中核（`yy-sheet`・`yy-numfmt`・`yy-formula`・`yy-cobol`）は OS に依存せず、Linux の CI でテストします。
-
-### ファイル転送（yysftp）
-
-提案書 [13 章](docs/proposal/13-transfer.md) の方式で、エディタ・ターミナルと同じクレートを使った別のアプリとして SFTP・SCP のファイル転送（`yysftp.exe`）を作っています。
-
-- エクスプローラー風の画面です。左に接続先とフォルダのツリー、右にフォルダの中身（名前・更新日時・種類・サイズ・属性。エクスプローラーと同じアイコン）、上に戻る・進む・上へとアドレスバー（`ユーザー@ホスト:/パス`）、下に転送の一覧と記録。
-- エクスプローラーからドラッグ＆ドロップ（ファイル・フォルダ）でアップロード、選んだ項目を Ctrl+D でダウンロード。名前の変更（F2）、削除（Del）、新しいフォルダ（Ctrl+Shift+N）。
-- 数十 GB のファイルも送れます（SFTP は要求を並べて送り、回線の遅延を隠します）。送り先には `<名前>.yypart` に書き、大きさを確かめてから本来の名前にします。
-- 途中で切断されたら、間を空けて自動で接続し直し、続きから送ります（レジューム）。送り終えた位置はジャーナルに書くので、一時停止やアプリの終了の後でも、アプリが落ちた後でも（次の起動で）続きから送れます（ジャーナルと途中のファイルはディスクに書き出しながら進めます）。SFTP のアップロードでは続ける位置の直前を照合します。
-- 転送の様子（接続、続ける位置の決め方、進みと速さ、切断と再接続、確認、名前の変更）を `%APPDATA%\yyeditor\logs\transfer.log` と画面の「記録」に細かく残します。
-- 接続（組み込みの SSH、踏み台・プロキシ・ホスト鍵・保存したパスワード・接続の記録）、設定ファイル、同梱フォントはエディタ・ターミナルと共通です。転送は sftp-server（SFTP）か scp（SCP）を使います（`sudo` は使いません）。接続先にエージェントを置いて使うかは選べます（設定 `[transfer] use_agent`・転送メニュー。既定は使わない）。使うと、一覧・ファイル操作をエージェントで行い（sftp-server がなくても一覧を表示できる）、送り終えた内容をファイル全体の SHA-256 で照合します（一致しなければ 1 回送り直す）。
-
-### ファイル管理（yyfilemanager）
-
-提案書 [18 章](docs/proposal/18-filemanager.md) の方式で、同じクレートを使った別のアプリとしてファイル管理（`yyfilemanager.exe`）を作っています。中核は OS に依存しない `yy-files` で、Linux でもテストできます。
-
-- **同期**: 手元のフォルダを共有フォルダ（Windows のファイル共有・NAS）へ、フォルダ単位で一方向に同期します（更新・ミラー）。比べてから送るものの一覧（新規・更新・日時だけ・削除・衝突）を確かめて実行します。前回の同期のあとで送り先も変わったものは「衝突」として送りません。送り先には `.yypart` に書いてから置き換え、送った位置をジャーナルに書くので、切断（自動で間を空けて続ける）・中止・アプリの終了・PC の停止の後でも **ファイルの途中から** 続けられます。大きなファイル（既定 64 MB 以上）は、前回送ったときのブロック（1 MB）ごとのハッシュを覚えておき、送り先をサーバー側でコピーしてから **変わったブロックだけ** を書きます（差分の送り方）。送り元・送り先を入れ替えれば「共有フォルダ → 手元」の向きにも使えます。設定でアクセス権（ACL）も写せます。同期ジョブを保存でき、`yyfilemanager.exe --sync <名前>` で画面なしに実行できます（タスク スケジューラー向け）。
-- **検索**: 複数の場所から、名前（部分一致・ワイルドカード・正規表現。全角半角・かなの違いは無視）・拡張子・種類・大きさ・日時・属性・中身で探します（`見積 ext:xlsx size:>1MB modified:>=2026-09-01 content:"税込"`）。中身はエディタの Grep と同じ部品で文字コードを判別しながら並列に読み、Office の文書（docx・xlsx・pptx）と PDF の中の文字列も探します。中身を読むのは設定で名指ししたパターン（拡張子）のファイルだけで、読んだファイルは中身の索引（2 文字の組）に残し、次からは候補だけを読みます（「整理」メニューでバキュームできます）。「重複がある」「古い版」などの整理の結果でも絞れます。検索は名前を付けて保存でき、走査した目録は保存して、新しいうちは走査し直さずに使います。結果の 1 件から「別の版」「同じ中身のファイル」を探せます。
-- **似たファイル**: `見積_v2.xlsx`・`見積_最終.xlsx`・`見積 - コピー (2).xlsx` のような版をまとめ、名前の手がかり（版の番号・日付・「最終」）を日時より優先して、どれが新しいかを理由と自信つきで提案します（MinHash で候補を絞るので数十万ファイルでも速い）。
-- **重複**: 大きさ → 先頭と末尾 → 全体の BLAKE3 の 3 段で、中身が完全に同じファイルを探します（ハッシュは索引に残し、2 回目は変わったものだけを読む）。
-- **削除の確認**: 古い版・写しを一覧にしてチェックで選び、消す直前に変わっていないか・残すものがあるかを確かめてから、手元はごみ箱へ、共有フォルダは隔離フォルダ（`.yyfm-trash`）へ移します（作る場所は作業ごとに選びます。記録から元に戻せます）。隔離フォルダを作れない共有では、確認を 2 回してから消します。隔離フォルダの古いもの（既定 30 日）は「整理」メニューで消せます。
-- 操作と結果は画面の「記録」と `%APPDATA%\yyeditor\logs\filemanager.log` に残します。利用ガイド（F1）があります。
-
-### タブブラウザ（yybrowser）
-
-提案書 [19 章](docs/proposal/19-browser.md) の方式で、**OS とは別のプロキシを指定できる** タブブラウザ（`yybrowser.exe`）を作っています。表示は WebView2（Edge と同じ Chromium）です。
-
-- プロキシは「OS と同じ」「使わない（直接）」「指定（HTTP・HTTPS・SOCKS4/5、スキームごと）」「自動構成（PAC）」から選び、除くホストも指定できます。名前を付けたプロファイルとして保存し、メニューで切り替えます。違うプロキシのウィンドウを同時に開けます。
-- Cookie・キャッシュはプロファイルごとに分かれます。yyterm の `-D`（SOCKS）と組み合わせれば、踏み台の先のサイトを開けます。
-- ドメインごとに別のプロキシを使えます（`*.corp.example.jp = 10.0.0.1:8080`・`example.org = direct`。PAC を作って渡します）。
-- 特定のホストだけを IP アドレスとポートに転送できます（`www.example.com = 127.0.0.1:8443`。URL・Host・SNI はそのまま）。転送先用の **開発者用証明書** を作り、その指紋の証明書のときだけ証明書のエラーを許して、アドレスバーに「開発者用証明書を利用中」と出します（OS の証明書ストアは変えません）。
-- **広告ブロック** を組み込んでいます。EasyList・EasyPrivacy・AdGuard 日本語フィルタ（既定）などを自動でダウンロード・更新し、広告・追跡の要求を止めて、残った広告の枠も隠します。プロファイルごと・サイトごとに切れます（[20 章](docs/proposal/20-adblock.md)）。
-- ブックマーク（☆・Ctrl+D、フォルダ、管理の画面、Edge・Chrome の HTML の読み込みと書き出し）があります。
-- ほかは最低限: タブ、アドレスバー（URL か検索語）、戻る・進む・再読み込み・ホーム、ページ内検索、拡大・縮小、印刷、全画面、閉じたタブを開き直す。利用ガイド（F1）があります。
-
-### 対応している文字コード
-
-| 文字コード | 備考 |
-|-----------|------|
-| UTF-8 / UTF-16LE / UTF-16BE / UTF-32LE / UTF-32BE（BOM あり・なし） | 不対サロゲートなども保持 |
-| CP932（Windows-31J） | NEC 特殊文字・IBM 拡張文字・ユーザー定義文字を含む |
-| Shift_JIS（JIS X 0208 準拠） | 0x8160 = U+301C（波ダッシュ）など JIS の対応。CP932 の拡張文字は不正バイト扱い |
-| Shift_JIS-2004 / EUC-JIS-2004（JIS X 0213） | 第 3・第 4 水準漢字、2 文字に対応する符号（か゚ など） |
-| EUC-JP | JIS X 0212 補助漢字（3 バイト）を含む |
-| ISO-2022-JP | 半角カナは全角になります |
-| IBM-930 / 939（= 5026 / 5035）・1390 / 1399 | EBCDIC 日本語（1 バイト部＋SO/SI で切り替える 2 バイト部）。1390/1399 は JIS X 0213 相当の拡張と € |
-| IBM-290 / 1027 / 037 / 500 / 1047 | EBCDIC 1 バイト（日本語カタカナ・英小文字、英語、国際、Latin-1） |
-| Windows-1252・ISO-8859 系・Windows-125x・KOI8・GBK・GB18030・Big5・EUC-KR など | `encoding_rs` による |
-
-保存時は、波ダッシュ（U+301C）と全角チルダ（U+FF5E）など JIS と Microsoft で対応が異なる 6 文字は、どちらもその文字コードの符号に変換します。
-
-保存先の文字コードで表せない文字があると、まず似た文字（互換文字の畳み込み ① → (1)・Ⅱ → II・㈱ → (株)、半角カナ → 全角カナ、全角英数 → 半角など）に置き換えるかを尋ね、残った文字は「?」か数値文字参照に置き換えるかを尋ねます。どれも「元に戻す」で取り消せます。
-
-### シンタックスハイライト
-
-- ファイルを開くと、設定のファイル種類（`[filetype.*]` の `syntax`）→ モードライン（`vim: ft=python`・`-*- mode: ruby -*-`）→ ファイル名（`Makefile` など）→ 拡張子（`.d.ts` などの複合拡張子を優先）→ 先頭行（`#!/usr/bin/env python`・`<?xml` など）の順に種類を決めます。表示メニューの「ハイライト」で切り替えられます（「なし」で色を付けません）。区切り文字モードでは色を付けません。
-- 行をまたぐ状態（ブロックコメント・複数行の文字列）は、64 KB ごとに行頭の状態を記録して求めます（CSV のレコードインデックスと同じ方式）。記録がまだない遠い位置は、手前から初期状態を仮定して暫定の色を付け、バックグラウンドの読み込みが追いついたら描き直します。編集後は変わった位置から読み直します。1 GB を超える文書は全体を読まず、表示範囲の近くだけを色付けします。
-- 行の中の範囲がすべて行末で終わる定義（COBOL・ログ・INI など）は、記録を作らずに表示範囲だけを処理します。
-- 表示範囲の色付けは、状態が分からない位置（最悪の場合）でも 1 画面 7 ms 程度です（Linux、59 MB の C ファイルの中央、release ビルド）。
-- 定義は TOML で書きます（[docs/proposal/10-syntax-highlight.md](docs/proposal/10-syntax-highlight.md) の形式）。`%APPDATA%\yyeditor\syntax\<名前>.toml` を置くと、同じ名前の組み込み定義を置き換えるか、新しい種類として加わります。組み込みの定義は `crates/yy-syntax/syntaxes/` にあります。
-
-```toml
-name = "My Language"
-extensions = ["my"]
-line_comment = "#"                # コメント化（Ctrl+/）に使う
-block_comment = ["/*", "*/"]
-sync = '^\S'                      # この行頭では必ず初期状態（遡りを止める。省略可）
-
-[keywords]
-keyword = ["if", "else", "end"]
-case_sensitive = false
-
-[[context.main]]
-match = '#.*$'
-token = "comment"
-
-[[context.main]]
-begin = '"'                       # 範囲（end が行内になければ次の行へ続く）
-end = '"'
-skip = '\\.'
-token = "string"
-
-[[context.main]]
-match = '\b([a-z_]\w*)\s*\('
-captures = { 1 = "function" }     # グループ単位の色（キーワードが優先）
-
-[[columns]]                       # 固定桁（COBOL・JCL・RPG など。表示桁、1 始まり）
-range = [1, 6]
-token = "line-number"
-```
-
-### Markdown・HTML のプレビュー
-
-表示メニューの「プレビュー」（Ctrl+Shift+V）で、エディタの右側にプレビューを表示します。境界はドラッグで動かせます。
-
-- Markdown は CommonMark に加えて拡張構文に対応します: 表、脚注、取り消し線（`~~x~~`）、タスクリスト、定義リスト、上付き・下付き（`^x^`・`~x~`）、見出しの属性（`{#id .class}`）、GitHub のアラート（`> [!NOTE]` など）、Wiki リンク（`[[page]]`）、YAML のフロントマター
-- ```` ```mermaid ```` のコードブロックを図にします（[Mermaid](https://mermaid.js.org/)）
-- ```` ```d3 ```` のコードブロックを [d3.js](https://d3js.org/)（v7）の JavaScript として実行し、グラフを描きます（`d3`・描く場所の `el`・幅の `width` を使える。要素や選択を `return` すると表示。`await` 可）。d3 はブロックがあるときだけ読み込みます
-- `$…$`（インライン）・`$$…$$`（別行立て）・```` ```math ```` を数式にします（[KaTeX](https://katex.org/)）
-- コードブロックはシンタックスハイライトの定義で色付けします（色はハイライトの設定と同じ）
-- HTML 文書はそのまま表示します（スクリプトも動きます）
-- 入力するとすぐに（0.25 秒後）反映され、Markdown はエディタのスクロールに合わせてプレビューもスクロールします
-- 画像などの相対パスは文書のフォルダから読みます。リンクは、文書のフォルダの Markdown・HTML ならエディタで、それ以外（Web ページなど）は既定のブラウザで開きます
-- Mermaid・KaTeX・d3 は実行ファイルに埋め込んでいるので、インターネットに接続していなくても表示できます
-
-表示には Microsoft Edge WebView2 ランタイム（Windows 10 / 11 には通常インストール済み）を使います。ランタイムがない環境ではその旨を表示します。
-
-### 16 進数（バイナリ）編集
-
-- 表示メニューの「16 進数表示」（Ctrl+Shift+X）で、1 行 16 バイトの 16 進ダンプ（オフセット・16 進・文字）に切り替えます。ファイル メニューの「バイナリとして開く」は最初から 16 進数表示で開きます。
-- 表示位置はバイト位置から直接決めるので、数 GB のファイルでも行数を数えずに任意の位置をすぐに表示できます。文書（ピースツリー）はテキスト編集と共通で、Undo / Redo・検索・置換もそのまま使えます。
-- UTF-8 以外の文字コードや BOM 付きで読み込んだ文書は、16 進数表示にするときにファイルをバイト列のまま開き直します（変更があれば確認します）。バイト列のまま開いた文書は、保存時もバイト列をそのまま書きます。
-- 操作: 矢印・PageUp/Down・Home/End（行内）・Ctrl+Home/End で移動、Shift で選択、Tab で 16 進と文字の欄を切り替え、Insert で上書き（既定）と挿入を切り替え。16 進の欄では 0〜9・A〜F で 1 桁ずつ、文字の欄では文字のバイト列を入力します。BackSpace / Delete は 1 バイト（または選択範囲）を削除します。
-- コピーは 16 進の欄では `48 65 6C` の形、文字の欄では文字として。貼り付けは 16 進の欄では 16 進表記として読みます（読めなければ文字のバイト列）。Ctrl+G はオフセットへ移動します（`0x1F`・`1Fh` は 16 進）。
-- 文字の欄（右側）の文字コードは、表示メニューの「16 進数表示の文字の欄の文字コード」で選べます（ASCII と、対応しているすべての文字コード）。テキストとして開いていた文書を 16 進数表示にすると、その文字コードになります（「バイナリとして開く」は ASCII）。多バイト文字はその先頭のバイトの桁に表示し、残りのバイトの桁は空けるので、各バイトの位置はずれません。行の境界をまたぐ文字は前の行の末尾に表示します。不正なバイトは赤い `.`、制御文字は `.` です。文字の欄での入力・貼り付け・コピーも選んだ文字コードで行います（表せない文字は入力できません）。EBCDIC の SO・SI は `.` で表示します。
-
-### コード値の編集
-
-- 表示メニューの「コード値表示」（Ctrl+Shift+K）で、1 行 8 文字ずつ、各文字の Unicode のコード値と文字を並べて表示します（16 進数表示と同じ形。左端は行番号）。
-- 表示の行は文書の行を 8 文字ごとに区切ったもので、先頭は近くの改行から求めます。改行のない長い行は 64 KiB ごとの位置でも区切るので、行の索引がなくても巨大なファイルの任意の位置をすぐに表示できます。
-- コード値の欄で 16 進数を入力して Space / Enter（または 6 桁・カーソル移動）で確定すると、その文字で上書き・挿入します。文字の欄では文字（日本語入力を含む）を入力します。コピー・貼り付けはコード値の並び（`3042 U+3044 \u{1F600}` など）にも対応します。
-- コード値はファイルの文字コードによらず Unicode です。読み込み時の不正なバイトは `\x82` と表示します。
-
-### EBCDIC
-
-- EBCDIC は自動判別に含めません。「開く」ダイアログの文字コード欄、ファイル メニューの「文字コードを指定して開き直す」、または設定のファイル種類（拡張子）で指定します。設定の `detect_ebcdic = true` で自動判別に含めることもできます（930 と 939 は濁点の位置や英小文字とカナの並びで選びます）。
-- EBCDIC を選ぶと、レコード（行）の区切り方を尋ねます: 改行 NL (0x15)（z/OS のテキスト）、改行 LF (0x25)、固定長レコード（バイト数を指定）。固定長では各レコードを 1 行として表示し、保存時は短い行を空白 (0x40) で埋めます。レコード長を超える行は保存できない文字として報告します。ステータスバーに区切り方を表示します。
-- SO (0x0E) / SI (0x0F) は文字の種類に合わせて保存時に出し直します。空の SO…SI や重複したシフトなど、そのままでは出し直せないシフトは `\x0E` のように表示して元のバイトを保ちます。ファイルが SO の後に SI なしで終わっている場合は、同じ文字コードで保存するときも最後に SI を加えません（開いたときの統計 `open_shift_at_end` で判断）。
-- ICU の変換表の「Unicode → 符号のみ」の対応（全角英数 → 半角など）は使いません（保存すると文書とファイルの内容が食い違うため）。保存できない文字として報告し、似た文字への置き換えで選べます。
-- 対応表は ICU が配布している IBM の変換表（`.ucm`）から `tools/gen-tables` で生成しています（Unicode License V3）。
-
-### 外部の対応表（ベンダー漢字コード・外字）
-
-`%APPDATA%\yyeditor\mappings\*.map`（UTF-8）を起動時に読み込み、文字コードの一覧に加えます。富士通 JEF・日立 KEIS・NEC JIPS など対応表が公開されていない文字コードや、外字（ユーザー定義文字）を、手元の対応表で扱えます。
-
-```text
-# コメント
-@name JEF            # 文字コードの名前（省略するとファイル名）
-@base IBM-930        # 土台（EBCDIC か CP932・Shift_JIS・EUC-JP など。省略すると空の EBCDIC）
-@shift 0x28 0x29     # 2 バイト部に入る・出るシフト（EBCDIC のみ。既定は 0x0E 0x0F）
-0x4E6F	U+6F22       # 2 バイトの符号<TAB>文字
-0xC1	U+0041       # 1 バイトの符号
-0xECC3	U+00E6+0300  # 2 文字に対応する符号（EBCDIC のみ）
-```
-
-同じ符号の土台の対応は置き換えます（例: `@base CP932` で 0xF040 を私用領域の U+E000 ではなく実際の文字にする）。EBCDIC が土台の場合はレコードの区切り方も選べます（設定では `JEF/fixed:80` のように書きます）。
-
-「開く→保存」でバイト列が変わらないことを、全符号の往復・ランダムなバイト列・区切り位置を変えた場合についてテストしています（`crates/yy-encoding/tests/roundtrip.rs`、`crates/yy-core/tests/encodings.rs`）。例外は次の 2 つで、意味は同じまま符号が正規化されます。
-
-- 同じ文字に複数の符号がある文字（CP932 の NEC 選定 IBM 拡張文字 0xED40〜 → IBM 拡張文字 0xFA40〜 など、Windows と同じ優先順位）。該当する文字を含むファイルを上書き保存するときは確認を表示します
-- ISO-2022-JP の冗長なエスケープシーケンス
-
-### 性能（M1 の完了条件の確認）
-
-`tools/gen-bigfile` の `open-bench` による計測値（Linux、ページキャッシュに載った状態、4 コア）:
-
-| 項目 | 10 GB のログ（1.57 億行） | 2 GB・改行なしの 1 行 |
-|------|-----------------------|---------------------|
-| ファイルを開いて最初の画面を用意 | 98 ms | 7 ms |
-| 行数未確定のまま中央へジャンプ | 0.06 ms | 1.7 ms |
-| 全行数のカウント（バックグラウンド） | 0.62 秒 | 0.08 秒 |
-| 行番号での移動（カウント後） | 0.14 ms | — |
-
-## プロジェクト構成
-
-```
-crates/
-  yy-buffer/   永続ピースツリー（スナップショット、行 ⇔ オフセット変換）
-  yy-jobs/     バックグラウンドジョブ（進捗・キャンセル）
-  yy-config/   設定ファイル（%APPDATA%\yyeditor\config.toml）
-  yy-encoding/ 文字コード（ストリーミング変換、不正バイトのエスケープ、自動判別。JIS X 0213 の対応表を含む）
-  yy-delimited/ 区切り文字形式（方言、RFC 4180 の状態機械、レコードインデックス、方言の推定）
-  yy-search/   正規表現検索（重なり付きウィンドウで境界をまたぐ一致も検出）、置換文字列、ストリーミング置換
-  yy-io/       メモリマップによるファイルオープン（通常は書き込み共有を拒否、読み取り専用では一時スナップショット）、一時ファイル経由の保存（文字コード変換）
-  yy-core/     文書モデル、選択（マルチカーソル）、一括編集、Undo/Redo、カーソル移動、行数カウント
-  yy-layout/   表示行の分割（長大行のセグメント化）、表示テキスト ⇔ オフセット変換、スクロール位置
-  yy-syntax/   シンタックスハイライト（TOML の定義、複数パターンの正規表現、行の開始状態の記録、ファイル種類の判定）
-  yy-preview/  Markdown・HTML のプレビュー（Markdown → HTML、ページ、同梱の Mermaid・KaTeX・d3）
-  yy-proto/    リモート編集のプロトコル（端末とエージェントで共有するメッセージとフレーム）
-  yy-remote/   リモート編集の端末側（エージェントの配置、要求と応答、~/.ssh/config・known_hosts の読み取り）、
-               ファイル転送の中核（SFTP v3・SCP・ジャーナル付きのレジューム・転送の記録）
-  yy-ssh/      組み込みの SSH クライアント（russh + ring。OpenSSH を使わない）
-  yy-3270/     3270 の中核（Telnet・TN3270E・3270 データストリーム・フィールド・入力の規則・DBCS・IND$FILE・SCS と LU3 の印刷・通信の記録）
-  yy-3270-macro/ 3270 のマクロ（Rhai。待つ・読む・入力・転送・記録）
-  yy-3270-tls/ 3270 の TLS（暗黙の TLS・STARTTLS・証明書の TOFU・クライアント証明書。rustls + ring）
-  yy-3270-mock/ 3270 の模擬ホスト（試験用。x3270 で確かめる check-with-x3270.sh）
-  yy-sheet/    スプレッドシートの中核（列のチャンク・差分・スナップショット・メモリの予算・.yys・CSV の並列の取り込み）
-  yy-numfmt/   Excel 互換の表示形式（書式記号・標準・日付のシリアル値・入力の解釈）
-  yy-cobol/    COBOL のコピーブックの解析と、固定長レコードの項目の読み書き（ゾーン・パック・2 進数・浮動小数点・編集・DBCS）
-  yy-adblock/  yybrowser の広告ブロックの中核（フィルタリストのキャッシュと更新の間隔・adblock クレートによる照合と非表示の CSS）
-  yy-browser/  タブブラウザの中核（プロキシのプロファイル・ドメインごとの規則（PAC）・ホストの転送・開発者用証明書・WebView2 の起動引数・アドレスバーの入力の解釈）
-  yy-files/    ファイル管理の中核（走査・目録・BLAKE3・レジュームつきの同期・重複・似た名前の版・削除と取り消し・検索）
-  yy-term/     ターミナルの中核（制御シーケンスの解釈、画面、スクロールバック、キーの送り方。OS 非依存）
-  yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
-apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
-apps/yyterm/   ターミナルの実行ファイル（yy-win の term モジュール。ビルドスクリプトは yyeditor と共通）
-apps/yysftp/   ファイル転送の実行ファイル（yy-win の sftp モジュール。ビルドスクリプトは yyeditor と共通）
-apps/yysheet/  スプレッドシートの実行ファイル（yy-win の sheet モジュール。ビルドスクリプトは yyeditor と共通）
-apps/yyfilemanager/  ファイル管理の実行ファイル（yy-win の fm モジュール。ビルドスクリプトは yyeditor と共通）
-apps/yybrowser/  タブブラウザの実行ファイル（yy-win の browser モジュール。OS と別のプロキシ）
-apps/yyclip/   クリップボードの履歴の常駐アプリ（お気に入りのランチャー。詳しくは apps/yyclip/README.md）
-apps/yy-agent/ SSH 接続先に置くエージェント（Linux 用、musl で静的リンク）
-tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
-tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
-                    ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
-tools/gen-icon/     アイコン（apps/yyeditor・yyterm・yysftp・yysheet・yyclip・yyfilemanager・yybrowser の res/*.ico）の生成（Python + Pillow）
-tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の取得（npm から）
-```
-
-`yy-win` 以外は OS に依存しないため、Linux でもテストできます。
-
-## ビルド
-
-Windows（MSVC）:
-
-```sh
-cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser
-target\release\yyeditor.exe [開くファイル]
-target\release\yyterm.exe [フォルダ | ssh://接続先/パス | ユーザー@ホスト]
-target\release\yysftp.exe [ssh://接続先/パス | ユーザー@ホスト:/パス | ユーザー@ホスト]
-target\release\yyfilemanager.exe [--sync 同期ジョブの名前]
-target\release\yyclip.exe
-target\release\yybrowser.exe [--profile 名前] [--proxy プロキシ] [URL ...]
-```
-
-リモート編集のエージェント（Linux 用。exe と同じフォルダの `agents\yy-agent-<x86_64|aarch64>-linux` に置く）:
-
-```sh
-rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-cargo build --release -p yy-agent --target x86_64-unknown-linux-musl
-# aarch64: Arm の Linux ではそのまま。x86_64 の Linux からは同梱の rust-lld でリンクできる
-CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
-CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker-flavor=ld.lld" \
-cargo build --release -p yy-agent --target aarch64-unknown-linux-musl
-```
-
-CI では aarch64 を Arm のランナー（`ubuntu-24.04-arm`）で作り、そこでエージェント・組み込みの SSH・転送の結合テストも行います。
-
-テスト・静的解析:
-
-```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-# Linux から Windows UI 層の型検査のみ行う場合
-rustup target add x86_64-pc-windows-msvc
-# （組み込みの SSH が使う ring は Windows SDK がないと C のビルドができないので外す）
-cargo check -p yy-win -p yyeditor -p yyterm -p yysftp --no-default-features --target x86_64-pc-windows-msvc
-```
-
-巨大ファイルでの性能確認:
-
-```sh
-cargo run --release -p gen-bigfile --bin gen-bigfile -- big.log 10G log   # log|japanese|long|single|csv
-cargo run --release -p gen-bigfile --bin gen-bigfile -- sjis.txt 1G japanese cp932   # 文字コードを指定
-cargo run --release -p gen-bigfile --bin open-bench -- big.log
-```
-
-描画の確認・不具合調査用に、ファイルの先頭 1 画面を画面外に描画して BMP に保存できます:
-
-```sh
-yyeditor.exe --render-bmp input.txt out.bmp
-```
-
-## 設定
-
-`%APPDATA%\yyeditor\config.toml`（任意）。書いた項目だけが既定値を上書きします。
-
-```toml
-[editor]
-font_family = "UDEV Gothic"      # 既定は同梱の UDEV Gothic。見つからない場合は UDEV Gothic → Consolas → BIZ UDゴシック → MS Gothic の順に代替
-font_size = 11.0                 # ポイント
-tab_width = 4
-ambiguous_wide = true            # ①・○ などの曖昧幅文字を全角（2 桁）として数える（矩形選択の桁）
-detect_ebcdic = false            # 文字コードの自動判別に EBCDIC を含める
-
-[view]
-line_numbers = true
-show_whitespace = true           # 半角スペース・タブ・改行を記号で表示する
-max_row_bytes = 1048576          # これより長い行は複数の表示行に分けて表示する（バイト。既定 1 MiB）
-csv_max_row_bytes = 16777216     # 区切り文字モードではこれより短い行を分割せずに列を揃える（既定 16 MiB）
-csv_max_column_width = 1000      # 区切り文字モードの 1 列の幅の上限（桁）
-wheel_lines = 3
-
-[colors]
-background = "#FFFFFF"
-foreground = "#1E1E1E"
-whitespace = "#A8B4C8"           # 空白・タブ・改行の記号
-
-[colors.syntax]                  # トークンの色（書いたものだけ既定値を上書き。keyword.control がなければ keyword の色）
-comment = "#008000"
-keyword = "#0000FF"
-
-[filetype.cobol]                 # 拡張子ごとの設定
-extensions = ["cbl", "dat"]
-encoding = "IBM-939/fixed:80"    # 開くときの文字コード（EBCDIC は /nl・/lf・/fixed:<バイト数> でレコードの区切り方）
-syntax = "cobol"                 # ハイライトの定義（"none" で色を付けない）
-```
-
-### 同梱フォント
-
-既定のフォントとして [UDEV Gothic](https://github.com/yuru7/udev-gothic)（v2.2.0、Regular）を実行ファイルに埋め込んでいます。インストールは不要で、yyeditor のプロセス内でだけ使えるよう登録します（比較画面も同じフォントで表示します）。全角文字が半角のちょうど 2 倍の幅なので、矩形選択の桁がずれません。UDEV Gothic は SIL Open Font License 1.1 で配布されています（[crates/yy-win/fonts/LICENSE-UDEVGothic.txt](crates/yy-win/fonts/LICENSE-UDEVGothic.txt)）。
-
-### 同梱ライブラリ（プレビュー）
-
-プレビューのため、[Mermaid](https://github.com/mermaid-js/mermaid) と [KaTeX](https://github.com/KaTeX/KaTeX)（フォントを含む）、[d3](https://github.com/d3/d3) を実行ファイルに埋め込んでいます。Mermaid・KaTeX は MIT License、d3 は ISC License です（[crates/yy-preview/assets/](crates/yy-preview/assets/) の `LICENSE-*.txt`。版は `VERSIONS.txt`）。WebView2 の読み込み処理（WebView2LoaderStatic.lib）は Microsoft の WebView2 SDK のものを静的にリンクしています。
-
-## 保存の仕組み
-
-保存は、保存先と同じフォルダの一時ファイルに書き出して永続化してから置き換えます（途中で失敗しても元のファイルは残ります）。
-開いているファイル自体に上書き保存する場合、元のファイルは隠しファイル名（`.名前.yyorig-…`）に退避され、Undo 履歴が参照しなくなった時点（通常はファイルを閉じたとき）で削除されます。そのため保存後も Undo で保存前の内容に戻せます。
-
-保存（別名保存で改行コードを変える場合はその変換も）はバックグラウンドで行い、ステータスバーに進捗を表示します（Esc で中止でき、中止したときは元のファイルは変わりません）。保存中も編集でき、保存されるのは保存を始めたときの内容です（保存中に編集した分は未保存の変更として残ります）。保存中のタブを閉じる・終了するときは、保存が終わるまで待ってから閉じます（待っている間も進捗は表示し、Esc で中止できます）。
-
-### 区切り文字モード（CSV）の性能
-
-`csv-bench` での計測値（上と同じ環境。4 GB・4,430 万レコード、各レコードにフィールド内改行を含む CSV）:
-
-| 項目 | 時間 |
-|------|------|
-| 開いて最初の画面（先頭 1,000 行で列幅を決めて表示） | 0.6 ms |
-| レコードインデックスの作成（バックグラウンド） | 4.1 秒（1.05 GB/s） |
-| 中央へジャンプして 1 画面を表示 | 0.17 ms |
-
-列幅は先頭 1,000 行と表示中の行から決め、広がるだけで縮みません（1 列の上限は 60 桁。それより長いフィールドはその行だけ列がずれます）。
-
-### UTF-8 以外のファイルの読み込み
-
-文書は内部で UTF-8 として持つため、UTF-8 以外のファイルは開くときに変換します。32 MB 以下はその場でメモリに、それより大きいファイルはバックグラウンドで UTF-8 の一時ファイル（`%TEMP%\yyeditor-decode-….tmp`、閉じると削除）に変換してメモリマップします。Shift_JIS・EUC-JP 系は行単位で並列に変換します。
-参考値（上の計測と同じ環境、CP932 の日本語 0.69 GB）: 変換 5.8 秒（一時ファイルへの書き込みが律速）、変換後の全行数カウント 0.06 秒。
-
-## ライセンス
-
-yyeditor は GNU General Public License バージョン 3 またはそれ以降（GPL-3.0-or-later）で配布します。全文は [COPYING](COPYING) にあります。
-
-ただし、プレビューで使う Microsoft Edge WebView2 Loader（WebView2 SDK の `WebView2LoaderStatic.lib` / `WebView2Loader.dll`。Microsoft のライセンス）とリンクして頒布できるよう、GPL バージョン 3 第 7 条に基づく追加の許可を付けています（[COPYING.EXCEPTION](COPYING.EXCEPTION)）。このローダーのソースコードは、対応するソースに含める必要はありません。
-
-```
-yyeditor — 巨大ファイル対応の軽量テキストエディタ
-Copyright (C) 2026 Yuta Yukawa
-
-このプログラムはフリーソフトウェアです。フリーソフトウェア財団が公表した GNU 一般公衆利用許諾書の
-バージョン 3、または（任意で）それ以降のバージョンの条件の下で、再頒布や改変ができます。
-このプログラムは有用であることを願って頒布されますが、商品性や特定目的への適合性の黙示の保証も含め、
-いかなる保証もありません。詳しくは GNU 一般公衆利用許諾書をご覧ください。
-```
-
-実行ファイルに含めている第三者の素材は、それぞれのライセンスに従います（WebView2 Loader 以外は GPL-3.0 と両立するライセンスです）。
-
-| 素材 | ライセンス |
-|------|------------|
-| UDEV Gothic（既定のフォント） | SIL Open Font License 1.1（[crates/yy-win/fonts/LICENSE-UDEVGothic.txt](crates/yy-win/fonts/LICENSE-UDEVGothic.txt)） |
-| Mermaid・KaTeX（プレビュー） | MIT License（[crates/yy-preview/assets/](crates/yy-preview/assets/)） |
-| d3（プレビュー） | ISC License（[crates/yy-preview/assets/LICENSE-d3.txt](crates/yy-preview/assets/LICENSE-d3.txt)） |
-| EBCDIC の対応表（ICU の `.ucm` から生成） | Unicode License V3 |
-| Microsoft Edge WebView2 Loader（プレビュー。MSVC 版は静的にリンク） | Microsoft.Web.WebView2 SDK のライセンス（上記の追加の許可でリンクを認めています） |
-| 依存している Rust のクレート（組み込みの SSH の `russh`・`ring` を含む） | MIT / Apache-2.0 / ISC など（`cargo metadata` で確認できます） |
-
-## 既知の制限
-
-- プレビュー: 8 MiB を超える文書はプレビューしません。下付き・上付きは前後が空白などで区切られている場合だけです（`H~2~O` のような語の途中は不可）。HTML 文書は編集のたびに読み直します（スクロール位置は保ちます）。プレビューのスクロールはエディタに合わせるだけで、逆方向（プレビューをスクロールしてエディタを動かす）には対応していません。
-- 矩形選択の桁は、半角 1・全角 2 の等幅を前提に数えます。全角文字が半角のちょうど 2 倍の幅でないフォント（Consolas と日本語フォントの組み合わせなど）では、矩形が見た目上わずかにずれます。既定の UDEV Gothic（同梱）や MS ゴシック・BIZ UDゴシックなど、全角・半角の幅がそろったフォントの利用をおすすめします。
-- 矩形選択で一度に編集できるのは 100 万行までです（超える場合はメッセージを表示します）。
-- 矩形内の連番挿入・大文字小文字変換・並べ替え・検索、Ctrl+K Ctrl+D（出現箇所のスキップ）は未実装です。
-
-- 大きな UTF-8 以外のファイルは、変換が終わるまで編集・保存できません（先頭 1 MB を表示します）。
-- 改行コードは CRLF と LF に対応しています（CR のみの改行は行として扱いません）。
-- C1 制御文字（U+0080〜U+009F。CP932 の 0x80、EBCDIC のパック 10 進数の多くのバイトなど）は `<94>` のように Unicode の値で表示します（字形がないため）。U+0085（NEL、EBCDIC の改行）・U+2028・U+2029 は ␤ ¶ で表示します（そのまま描画すると行が分かれるため）。
-- CESU-8・CP5022x・eucJP-ms・EBCDIK は未対応です。JEF・KEIS・JIPS の対応表は同梱していません（外部の対応表で指定します）。
-- EBCDIC のパック 10 進数・バイナリ項目を含むレコードは、文字として読めないバイトを制御文字の記号や `\xNN` で表示します（内容は保たれますが、項目単位の表示・編集はできません）。
-- 区切り文字モード: 引用符はそのまま表示します（非表示にする切り替えは未実装）。見出し行の固定表示、並べ替え・フィルタ、列単位の検索は未実装です。
-- 区切り文字モード: 16 MiB（`csv_max_row_bytes`）を超える長い行は列を揃えずに表示します。また、1 列の幅は 1000 桁（`csv_max_column_width`）までで、それより長いフィールドはその行だけ後ろの列がずれます。
-- 2 KB を超える長い行は、表示中の横範囲だけを描画し、カーソル位置は等幅の桁（半角 1・全角 2・タブ）で計算します。全角が半角のちょうど 2 倍でないフォントでは、長い行のカーソル位置が文字とわずかにずれることがあります。
-- シンタックスハイライト: 別の言語の埋め込み（HTML 内の `<script>`・Markdown のコードブロックの言語）は色付けしません（範囲全体を 1 色にします）。太字・斜体は使わず色だけです。TextMate 文法などからの取り込み（提案書 10 章 4.3）と、ファイルごとの種類の手動指定の記憶は未実装です。定義は正規表現によるもので、構文木レベルの正確さはありません。
-- 別のアプリが書き込み中のファイル（出力中のログなど）は開けません。
-- 描画には `ID2D1HwndRenderTarget` を使っています（M2 の時点で IME のインライン表示も含め問題がないため、提案書 07 章のスワップチェーン方式への移行は必要になった時点で行います）。
+# yyeditor / yy Applications
+
+English | [日本語](README.ja.md)
+
+<img src="apps/yyeditor/res/yyeditor-256.png" alt="yyeditor icon" width="96">
+
+A collection of Windows applications written in Rust for text editing, terminal connections, file transfer, spreadsheet processing, shared-folder management, web browsing, and clipboard reuse. The applications include tools for working with huge files, Japanese character encodings, and mainframe data.
+
+This repository contains the following applications and their shared libraries.
+
+| Application | Purpose |
+| --- | --- |
+| **yyeditor** | A text editor for huge files, Japanese text, CSV, and binary data |
+| **yyterm** | A terminal for local shells, SSH sessions, and IBM 3270 connections |
+| **yysftp** | File and folder transfer over SFTP / SCP |
+| **yysheet** | A spreadsheet for large datasets, formulas, and COBOL fixed-length data |
+| **yyclip** | A tray application for clipboard history, text templates, and favorite files and folders |
+| **yyfilemanager** | Synchronization, search, duplicate detection, and version cleanup for local and shared folders |
+| **yybrowser** | A tabbed browser with its own proxy settings, ad blocking, and bookmarks |
+| **yy-agent** | A Linux helper for file operations on SSH hosts |
+
+For development prerequisites, builds, tests, and internal architecture, see [DEVELOPER.md](DEVELOPER.md).
+
+## yyeditor — Text Editor
+
+View and edit logs, source code, Japanese documents, CSV, and fixed-length records in one application. Huge files are opened using memory mapping, while tasks such as line counting run in the background.
+
+- **Editing**: Multiple document tabs, IME input, rectangular selections, multiple cursors, undo / redo, text transformations, and duplicate-line removal. Undo remains available after saving.
+- **Search**: Incremental search, regular expressions, replacement, selection of all matches, folder search (Grep), and navigation to results.
+- **Comparison**: Two open documents displayed side by side with aligned lines, highlighted differences, and synchronized scrolling.
+- **Encodings**: UTF-8 / UTF-16 / UTF-32, CP932, Shift_JIS, Shift_JIS-2004, EUC-JP, EUC-JIS-2004, ISO-2022-JP, and various EBCDIC encodings. Supports automatic detection, reopening with a specified encoding, and encoding, BOM, and line-ending conversion when saving.
+- **CSV / TSV**: Aligned columns, navigation between cells, column insertion and deletion, and delimiter conversion. Handles quoted fields and embedded line breaks.
+- **Binary and fixed-length data**: Hexadecimal display and editing, Unicode code-point editing, and fixed-length views with byte-position rulers.
+- **Code and document display**: Syntax highlighting for Rust, C / C++, Python, JavaScript / TypeScript, COBOL, JCL, and more; bracket matching and comment toggling. Markdown / HTML previews can display Mermaid diagrams, KaTeX formulas, and d3 visualizations.
+- **Workspaces**: Multiple root folders, file operations, recent files, and bookmarks. Git support includes changes and diffs, staging, commits, branch operations, fetch, pull, and push.
+- **Remote editing**: Open and save files on Linux SSH hosts, with confirmation when a file has changed externally. Remote workspaces and Git operations are also supported.
+
+EBCDIC support includes IBM-930 / 939 / 1390 / 1399, with newline-delimited and fixed-length records. External mapping tables can add vendor-specific Japanese encodings and user-defined characters. JEF, KEIS, and JIPS mapping tables are not bundled.
+
+See the [yyeditor help](crates/yy-win/help/help.md) (Japanese), or press F1 in the application, for detailed instructions.
+
+## yyterm — Terminal and 3270 Emulator
+
+Open local shells, SSH sessions, and 3270 terminals in separate tabs.
+
+- Local shells use Windows ConPTY. The default shell selection tries PowerShell 7, then Windows PowerShell, then Command Prompt.
+- Supports SSH connections, jump hosts, proxies, and local, remote, and dynamic port forwarding.
+- Supports full-width and combining characters, 256-color and 24-bit color, alternate screens, mouse input, bracketed paste, and IME input.
+- Provides scrollback, copy and paste, and clickable URLs and file paths. File links open the editor, and folders in SSH tabs can be opened in yysftp.
+- Shared workspaces let you open a terminal in a selected local or remote folder.
+
+**IBM 3270** support includes TN3270 / TN3270E, models 2–5, and Japanese CCSIDs 930 / 939 / 1390 / 1399. Connections can use direct TCP, TLS, or SSH. Features include custom key bindings, an on-screen keypad, Rhai macros and operation recording, IND$FILE GET / PUT, 3287 printer output, communication traces, and screen replay.
+
+## yysftp — File Transfer
+
+An SFTP / SCP client with a folder tree and file list for browsing SSH hosts.
+
+- Upload files and folders by dragging them from File Explorer, and download selected items.
+- Create folders, rename items, and delete remote files.
+- Manage transfer queues with progress and speed indicators, pause and resume, and automatic reconnection. Transfer state is recorded so transfers can resume after an application restart.
+- Write to temporary destination names and rename files after verification. When using the agent, transfers also verify the entire file with SHA-256.
+- View transfer logs in the application and in a log file.
+
+By default, transfers use the host's SFTP / SCP facilities without deploying yy-agent. Agent mode can be enabled in settings.
+
+## yysheet — Spreadsheet for Large Datasets
+
+A spreadsheet application that reads and writes CSV / TSV, its native `.yys` format, and fixed-length files defined by COBOL layouts. Data is stored by column and loaded as needed to handle large numbers of rows.
+
+- **Table editing**: Cell and formula-bar input, IME, multiple sheets, copy and paste, row and column insertion and deletion, undo / redo, fill handles, search and replace, and transposed paste.
+- **Data processing**: Filtering by multiple conditions, sorting by multiple keys, duplicate removal, and column types. Manually entered or pasted ranges can be converted to tables for filtering and sorting.
+- **Formulas**: Arithmetic, cell references, `SUM`, `COUNT`, `SUMIFS`, `COUNTIFS`, `XLOOKUP`, `ROW`, `AND`, `OR`, `IFS`, `POWER`, string functions, and more. Supports dynamic-array spills and dependency-based recalculation.
+- **Formatting**: Excel-compatible number, date, time, and Japanese-era formats, text colors, fills, bold and italic text, alignment, and borders.
+- **Delimited data**: Import with inferred encoding, delimiter, headers, and column types. Supports quoted fields and embedded line breaks, as well as delimiters based on control characters such as US / RS.
+- **Fixed-length data**: Display COBOL copybook fields as columns. Edit text, zoned decimal, packed decimal (COMP-3), binary numbers, and other field types, and export in MS932 / EBCDIC. Supports multiple layouts, layout catalogs, and COBOL MOVE-style conversions.
+- **Remote files**: Open and save spreadsheet data on SSH hosts through shared workspaces. Uses SFTP by default, with optional agent support.
+
+The native `.yys` format saves changes by appending modified data. The application implements a subset of Excel formulas and display formats; its supported file formats are `.yys`, delimited data, and fixed-length data.
+
+See the [yysheet help](crates/yy-win/help/sheet.md) (Japanese), or press F1 in the application, for instructions and the function reference.
+
+## yyclip — Clipboard History and Launcher
+
+A tray application that saves copied text for later reuse. It runs independently of the other yy applications.
+
+- Saves text up to 1 MiB per entry. History persists after the application exits.
+- Press and release Control twice within 500 milliseconds to open the picker, or click the tray icon. The first item is selected and ready for keyboard navigation when the picker opens.
+- Switch between Clipboard, Templates, and Favorites using arrow keys or Ctrl+Tab.
+- Press Enter or double-click a history entry or template to put it back on the clipboard.
+- Register, edit, and delete up to 20 multiline templates. Optional notes describe their purpose; only the template body is copied to the clipboard.
+- Register up to 20 favorite files and folders in total. Files open in their default application, and folders open in File Explorer.
+
+Clipboard content without text, such as images or file lists, is not saved. See the [yyclip README](apps/yyclip/README.md) (Japanese) for usage and storage locations.
+
+## yyfilemanager — Shared-Folder Synchronization, Search, and Cleanup
+
+Transfer and organize files in local folders and Windows network shares. It works with shares accessible through File Explorer, while yysftp handles file transfers over SSH.
+
+- **Synchronization**: One-way update or mirror synchronization from source to destination. Review the plan before execution; files also changed at the destination are treated as conflicts. Swap the direction to synchronize a share to a local folder.
+- **Resume and delta transfer**: Resume after disconnection or application exit, transfer only changed blocks of large files, verify transfers, and optionally copy access permissions.
+- **Search**: Combine names, regular expressions, extensions, sizes, dates, attributes, and content. Detects Japanese encodings and can search Office documents (docx / xlsx / pptx) and PDFs containing text.
+- **Indexes and saved searches**: Reuse file catalogs, hashes, and full-text indexes. Save search conditions, compact indexes, and limit background CPU and memory usage.
+- **Duplicate and version detection**: Find duplicates by content hashes and suggest the latest version using names and timestamps. Restrict candidates by extension or name regex, and exclude folders or files.
+- **Deletion and recovery**: Select items in a review list, then move local files to the Recycle Bin and shared files to quarantine folders. Restore quarantined files from operation records, and clean up files beyond the retention period.
+- **Scheduled synchronization**: Run saved jobs without a window using `--sync`, and register them with Windows Task Scheduler.
+
+Version detection is a heuristic. Review synchronization and deletion plans before execution. See the [yyfilemanager help](crates/yy-win/help/filemanager.md) (Japanese) for details.
+
+## yybrowser — Tabbed Browser with Configurable Connection Routes
+
+A Microsoft Edge WebView2 browser with connection settings independent of the OS. Profiles let you use corporate networks, SSH dynamic port forwarding, and testing proxies separately.
+
+- **Connection settings**: Choose OS settings, direct connections, HTTP / HTTPS / SOCKS proxies, or PAC. Rules can select different routes for individual domains.
+- **Profiles**: Separate proxy settings, cookies, caches, and login state. Open different profiles in separate windows.
+- **Testing connections**: Map hostnames to specific IP addresses and ports, and accept development certificates only for the configured host and certificate fingerprint.
+- **Ad blocking**: Block advertising and tracking requests using EasyList, EasyPrivacy, AdGuard Japanese filters, and other lists. Supports automatic updates, additional lists, site exceptions, and per-profile enable / disable settings.
+- **Bookmarks**: Add pages using the star button or Ctrl+D. Organize folders, edit and reorder entries, and import or export HTML compatible with other browsers. Bookmarks are shared across profiles.
+- **Browsing**: Tabs, reopening closed tabs, page search, zoom, printing, full-screen mode, developer tools, and downloads.
+
+See the [yybrowser help](crates/yy-win/help/browser.md) (Japanese) for usage and connection settings.
+
+## Integration and Requirements
+
+The GUI applications run on Windows. Local shells in yyterm require ConPTY from Windows 10 version 1809 or later. The yyeditor preview and yybrowser require the Microsoft Edge WebView2 runtime.
+
+yyeditor, yyterm, yysftp, and yysheet share settings and SSH connection information, and can share working folders through `*.yyworkspace` files. Place related executables in the same folder to enable actions such as opening a terminal from the editor. The default monospaced font, UDEV Gothic, is bundled.
+
+The SSH client is built in and does not invoke local `ssh.exe`. It supports public-key, password, and keyboard-interactive authentication, host-key verification, jump hosts, and HTTP / SOCKS proxies. Passwords and private-key passphrases can optionally be stored in Windows Credential Manager.
+
+yy-agent supports Linux x86_64 / aarch64. For remote editing, yyeditor deploys the matching binary from the `agents/` folder beside its executable. SSH shell sessions in yyterm work without an agent.
+
+Shared settings are primarily stored in `%APPDATA%\yyeditor\config.toml`. yyclip stores its history, templates, and favorites under `%APPDATA%\yyclip\`.
+
+yyfilemanager stores jobs, indexes, and operation records in `filemanager/` under the shared settings folder. yybrowser stores profiles in `browser.toml` in that folder, and per-profile browsing data under `%LOCALAPPDATA%\yyeditor\yybrowser\`.
+
+## Current Limitations
+
+- yyeditor downloads the entire remote file before opening it. Saving through `sudo` is not supported.
+- Large documents in encodings other than UTF-8 cannot be edited or saved until conversion completes.
+- yyeditor's CSV mode does not provide frozen headers, sorting, or filtering. Use yysheet for table processing.
+- yyeditor previews documents up to 8 MiB. HTML scripts and d3 code blocks are executed.
+- yyeditor's fixed-length view provides byte-level display and editing. Use yysheet for editing based on COBOL field types.
+- yyfilemanager does not merge changes through bidirectional synchronization. Content search does not cover image-only or encrypted PDFs.
+- yybrowser connection profiles apply per window. Some ad-blocking rules, including uBlock Origin-specific script injection, are not supported.
+
+## License
+
+Distributed under the [GNU General Public License v3 or later](COPYING) (GPL-3.0-or-later), with an [additional permission](COPYING.EXCEPTION) under GPL section 7 for linking and distributing the Microsoft Edge WebView2 Loader.
+
+Bundled third-party materials retain their own licenses.
+
+| Material | License / reference |
+| --- | --- |
+| UDEV Gothic | [SIL Open Font License 1.1](crates/yy-win/fonts/LICENSE-UDEVGothic.txt) |
+| Mermaid / KaTeX | MIT; licenses and versions are included in the [preview assets](crates/yy-preview/assets/) |
+| d3 | [ISC](crates/yy-preview/assets/LICENSE-d3.txt) |
+| EBCDIC conversion tables | Unicode License V3; generated from ICU mappings |
+| Microsoft Edge WebView2 Loader | Microsoft WebView2 SDK license; see the additional permission above |
+
+Ad blocking uses Brave's adblock crate (MPL-2.0). Refer to Cargo dependency metadata for the licenses of other dependencies.
