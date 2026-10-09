@@ -93,6 +93,8 @@ pub struct FileManagerConfig {
     pub search_max_mb: u64,
     /// 検索で使う目録がこれより古ければ走査し直す（分）
     pub index_max_age_min: u64,
+    /// 中身の検索で中身の索引（全文検索）を使い、読んだファイルを索引に足す
+    pub fulltext_index: bool,
     /// 除くファイル（名前のパターン。既定に足す）
     pub exclude: Vec<String>,
     /// 削除の候補にしないフォルダ
@@ -113,6 +115,7 @@ impl Default for FileManagerConfig {
             search_threads: 8,
             search_max_mb: 1024,
             index_max_age_min: 60,
+            fulltext_index: true,
             exclude: Vec::new(),
             protect: Vec::new(),
         }

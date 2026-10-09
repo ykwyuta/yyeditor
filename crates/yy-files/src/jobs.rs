@@ -138,6 +138,10 @@ impl Dirs {
     pub fn catalogs(&self) -> PathBuf {
         self.root.join("catalogs")
     }
+    /// 中身の索引（[`crate::fulltext`]）。
+    pub fn fulltext(&self) -> PathBuf {
+        self.root.join("fulltext")
+    }
     pub fn runs(&self) -> PathBuf {
         self.root.join("runs")
     }

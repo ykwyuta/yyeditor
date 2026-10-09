@@ -544,6 +544,10 @@ pub struct ContentStats {
     pub hits: u64,
     /// バイナリ・大きすぎる・読めないなどで飛ばした
     pub skipped: u64,
+    /// 中身の索引で候補から外した（読まなかった）
+    pub pruned: u64,
+    /// 読んで中身の索引に足した
+    pub indexed: u64,
 }
 
 /// 中身の検索の設定。
@@ -582,54 +586,152 @@ pub fn search_content(
     progress: &(dyn Fn(u64) -> bool + Sync),
     hit: &(dyn Fn(Hit) -> bool + Sync),
 ) -> io::Result<ContentStats> {
+    search_inner(cats, files, q, opts, None, progress, hit)
+}
+
+/// 中身の索引（[`crate::fulltext`]）を使って探す。`indexes` は `cats` と同じ並び。索引で候補から外れた
+/// ファイルは読まず、索引にない・変わったファイルは読んで索引に足す（保存は呼び出し側）。
+pub fn search_content_indexed(
+    cats: &[Catalog],
+    files: &[FileRef],
+    q: &yy_search::Query,
+    opts: &ContentOptions,
+    indexes: &mut [crate::fulltext::FtIndex],
+    progress: &(dyn Fn(u64) -> bool + Sync),
+    hit: &(dyn Fn(Hit) -> bool + Sync),
+) -> io::Result<ContentStats> {
+    search_inner(cats, files, q, opts, Some(indexes), progress, hit)
+}
+
+/// 中身を読む（Office・PDF は文字列を取り出す。種類の選択は見ない）。
+enum Loaded {
+    Text(yy_buffer::Snapshot),
+    Binary,
+    TooBig,
+}
+
+fn load_text(e: &FileEntry, path: &std::path::Path, max_size: u64) -> Loaded {
+    if e.meta.size > max_size {
+        return Loaded::TooBig;
+    }
+    let snap = if crate::office::is_office(e.name()) {
+        std::fs::File::open(path)
+            .and_then(|mut f| crate::office::extract_text(&mut f))
+            .ok()
+            .map(yy_buffer::Snapshot::from_bytes)
+    } else if crate::pdf::is_pdf(e.name()) {
+        std::fs::read(path)
+            .and_then(|d| crate::pdf::extract_text(&d))
+            .ok()
+            .map(yy_buffer::Snapshot::from_bytes)
+    } else {
+        yy_core::grep::load(path).ok().flatten()
+    };
+    snap.map_or(Loaded::Binary, Loaded::Text)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_inner(
+    cats: &[Catalog],
+    files: &[FileRef],
+    q: &yy_search::Query,
+    opts: &ContentOptions,
+    indexes: Option<&mut [crate::fulltext::FtIndex]>,
+    progress: &(dyn Fn(u64) -> bool + Sync),
+    hit: &(dyn Fn(Hit) -> bool + Sync),
+) -> io::Result<ContentStats> {
+    use crate::fulltext::{FtState, GramSet, query_grams};
     let searcher = yy_search::Searcher::new(q)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.0))?;
+    // 索引で絞る: (ファイル, 索引に足すか)
+    let qgrams = if q.regex {
+        None
+    } else {
+        query_grams(&q.pattern)
+    };
+    let mut pruned = 0u64;
+    let mut index_skipped = 0u64;
+    let work: Vec<(FileRef, bool)> = match indexes.as_deref() {
+        None => files.iter().map(|&r| (r, false)).collect(),
+        Some(ix) => files
+            .iter()
+            .filter_map(|&r| {
+                let e = &cats[r.root].files[r.index];
+                match ix[r.root].lookup(e) {
+                    Some((id, FtState::Text)) => {
+                        if qgrams.as_ref().is_none_or(|g| ix[r.root].has_all(id, g)) {
+                            Some((r, false))
+                        } else {
+                            pruned += 1;
+                            None
+                        }
+                    }
+                    Some((_, FtState::Binary)) => {
+                        index_skipped += 1;
+                        None
+                    }
+                    Some((_, FtState::TooBig(limit))) if opts.max_size <= limit => {
+                        index_skipped += 1;
+                        None
+                    }
+                    _ => Some((r, true)),
+                }
+            })
+            .collect(),
+    };
     let stop = AtomicBool::new(false);
-    let done = AtomicU64::new(0);
+    let done = AtomicU64::new(pruned + index_skipped);
     let matched = AtomicU64::new(0);
     let hits = AtomicU64::new(0);
-    let skipped = AtomicU64::new(0);
+    let skipped = AtomicU64::new(index_skipped);
+    let indexed = AtomicU64::new(0);
+    let new_entries: std::sync::Mutex<Vec<(FileRef, FtState, Vec<u16>)>> =
+        std::sync::Mutex::new(Vec::new());
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads.max(1))
         .build()
         .map_err(io::Error::other)?;
     pool.install(|| {
-        files.par_iter().for_each(|&r| {
+        work.par_iter().for_each(|&(r, add)| {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
             let e = &cats[r.root].files[r.index];
             let path = cats[r.root].path(e);
-            let snap = if e.meta.size > opts.max_size {
-                None
-            } else if crate::office::is_office(e.name()) {
-                if opts.office {
-                    std::fs::File::open(&path)
-                        .and_then(|mut f| crate::office::extract_text(&mut f))
-                        .ok()
-                        .map(yy_buffer::Snapshot::from_bytes)
-                } else {
-                    None
-                }
-            } else if crate::pdf::is_pdf(e.name()) {
-                if opts.pdf {
-                    std::fs::read(&path)
-                        .and_then(|d| crate::pdf::extract_text(&d))
-                        .ok()
-                        .map(yy_buffer::Snapshot::from_bytes)
-                } else {
-                    None
-                }
+            let office = crate::office::is_office(e.name());
+            let pdf = crate::pdf::is_pdf(e.name());
+            let wanted = (!office || opts.office) && (!pdf || opts.pdf);
+            // 索引に足さず、種類で探さないものは読まない
+            let loaded = if !add && !wanted {
+                Loaded::Binary
             } else {
-                yy_core::grep::load(&path).ok().flatten()
+                load_text(e, &path, opts.max_size)
             };
+            if add {
+                let (state, grams) = match &loaded {
+                    Loaded::Text(snap) => {
+                        let mut g = GramSet::default();
+                        for c in snap.chunks(0..snap.len()) {
+                            g.feed(c);
+                        }
+                        (FtState::Text, g.finish())
+                    }
+                    Loaded::Binary => (FtState::Binary, Vec::new()),
+                    Loaded::TooBig => (FtState::TooBig(opts.max_size), Vec::new()),
+                };
+                indexed.fetch_add(1, Ordering::Relaxed);
+                new_entries.lock().unwrap().push((r, state, grams));
+            }
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-            let Some(snap) = snap else {
-                skipped.fetch_add(1, Ordering::Relaxed);
-                if !progress(n) {
-                    stop.store(true, Ordering::Relaxed);
+            let snap = match loaded {
+                Loaded::Text(s) if wanted => s,
+                _ => {
+                    skipped.fetch_add(1, Ordering::Relaxed);
+                    if !progress(n) {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                    return;
                 }
-                return;
             };
             let mut count = 0u64;
             yy_core::grep::grep_snapshot(
@@ -659,11 +761,19 @@ pub fn search_content(
             }
         })
     });
+    // 読んだものは中止しても索引に足す
+    if let Some(ix) = indexes {
+        for (r, state, grams) in new_entries.into_inner().unwrap() {
+            ix[r.root].add(&cats[r.root].files[r.index], state, &grams);
+        }
+    }
     let stats = ContentStats {
         files: done.load(Ordering::Relaxed),
         matched_files: matched.load(Ordering::Relaxed),
         hits: hits.load(Ordering::Relaxed),
         skipped: skipped.load(Ordering::Relaxed),
+        pruned,
+        indexed: indexed.load(Ordering::Relaxed),
     };
     if stop.load(Ordering::Relaxed) {
         return Err(crate::cancelled());
@@ -880,5 +990,187 @@ mod tests {
         )
         .unwrap_err();
         assert!(crate::is_cancelled(&e));
+    }
+
+    #[test]
+    fn indexed_search_matches_plain_search_and_reads_less() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        let words = [
+            "税込", "金額", "見積", "合計", "Total", "請求", "納品", "単価",
+        ];
+        for i in 0..40usize {
+            let body: String = (0..6)
+                .map(|k| words[(i * 7 + k * 3) % words.len()])
+                .collect::<Vec<_>>()
+                .join(if i % 2 == 0 { " " } else { "、" });
+            std::fs::write(
+                root.join(format!("f{i:02}.txt")),
+                format!("{body}\n二行目 {i}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("bin.dat"), [0u8, 1, 0, 2]).unwrap();
+        let mut c =
+            crate::scan::scan(&crate::fs::Local, root, &Default::default(), &|_| true).unwrap();
+        let all = |c: &Catalog| -> Vec<FileRef> {
+            (0..c.files.len())
+                .map(|index| FileRef { root: 0, index })
+                .collect()
+        };
+        let run = |c: &Catalog, pat: &str, ix: Option<&mut [crate::fulltext::FtIndex]>| {
+            let q = yy_search::Query {
+                pattern: pat.into(),
+                regex: false,
+                case_sensitive: false,
+                whole_word: false,
+            };
+            let hits = std::sync::Mutex::new(Vec::new());
+            let cats = std::slice::from_ref(c);
+            let rec = |h: Hit| {
+                hits.lock()
+                    .unwrap()
+                    .push((c.files[h.file.index].rel.clone(), h.line));
+                true
+            };
+            let st = match ix {
+                Some(ix) => search_content_indexed(
+                    cats,
+                    &all(c),
+                    &q,
+                    &ContentOptions::default(),
+                    ix,
+                    &|_| true,
+                    &rec,
+                ),
+                None => search_content(
+                    cats,
+                    &all(c),
+                    &q,
+                    &ContentOptions::default(),
+                    &|_| true,
+                    &rec,
+                ),
+            }
+            .unwrap();
+            let mut h = hits.into_inner().unwrap();
+            h.sort();
+            (h, st)
+        };
+        let mut ix = vec![crate::fulltext::FtIndex::new(root)];
+        // 1 回目は全部読んで索引に足す
+        let (h1, st1) = run(&c, "税込", Some(&mut ix));
+        assert_eq!(h1, run(&c, "税込", None).0);
+        assert_eq!((st1.indexed, st1.pruned), (41, 0));
+        // 2 回目からは候補だけを読む。結果は索引なしと同じ
+        for pat in [
+            "税込",
+            "見積 合計",
+            "total",
+            "込金",
+            "二行目 3",
+            "存在しない語",
+        ] {
+            let (h, st) = run(&c, pat, Some(&mut ix));
+            assert_eq!(h, run(&c, pat, None).0, "{pat}");
+            assert_eq!(st.indexed, 0, "{pat}");
+            assert!(st.pruned > 0, "{pat}: {st:?}");
+            assert_eq!(st.files, 41, "{pat}");
+        }
+        // 1 文字・正規表現は索引を使わない（全部読む）が、結果は同じ
+        let (h, st) = run(&c, "税", Some(&mut ix));
+        assert_eq!(h, run(&c, "税", None).0);
+        assert_eq!(st.pruned, 0);
+        // 変わったファイルは読み直して足す
+        std::fs::write(root.join("f00.txt"), "新しい語 ユニーク").unwrap();
+        crate::fs::Fs::set_mtime(
+            &crate::fs::Local,
+            &root.join("f00.txt"),
+            1_900_000_000_000_000_000,
+        )
+        .unwrap();
+        c = crate::scan::scan(&crate::fs::Local, root, &Default::default(), &|_| true).unwrap();
+        let (h, st) = run(&c, "ユニーク", Some(&mut ix));
+        assert_eq!(h, [("f00.txt".to_owned(), 1)]);
+        assert_eq!(st.indexed, 1);
+        // 保存して読み直しても同じ
+        let p = d.path().join("ix.fti");
+        ix[0].retain_catalog(&c);
+        ix[0].save(&p).unwrap();
+        let mut back = vec![crate::fulltext::FtIndex::load(&p).unwrap()];
+        let (h, st) = run(&c, "見積", Some(&mut back));
+        assert_eq!(h, run(&c, "見積", None).0);
+        assert_eq!(st.indexed, 0);
+    }
+
+    #[test]
+    fn indexed_search_never_misses_on_random_texts() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        let alphabet: Vec<char> = "aAbB税込ｱｲ ß\nσΣ".chars().collect();
+        let mut seed = 12345u64;
+        let mut rnd = |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n
+        };
+        for i in 0..30 {
+            let len = 5 + rnd(40);
+            let t: String = (0..len).map(|_| alphabet[rnd(alphabet.len())]).collect();
+            std::fs::write(root.join(format!("r{i}.txt")), t).unwrap();
+        }
+        let c = crate::scan::scan(&crate::fs::Local, root, &Default::default(), &|_| true).unwrap();
+        let all: Vec<FileRef> = (0..c.files.len())
+            .map(|index| FileRef { root: 0, index })
+            .collect();
+        let mut ix = vec![crate::fulltext::FtIndex::new(root)];
+        let find = |pat: &str, cs: bool, ix: Option<&mut [crate::fulltext::FtIndex]>| {
+            let q = yy_search::Query {
+                pattern: pat.into(),
+                regex: false,
+                case_sensitive: cs,
+                whole_word: false,
+            };
+            let got = std::sync::Mutex::new(Vec::new());
+            let cats = std::slice::from_ref(&c);
+            let rec = |h: Hit| {
+                got.lock().unwrap().push((h.file.index, h.line));
+                true
+            };
+            match ix {
+                Some(ix) => search_content_indexed(
+                    cats,
+                    &all,
+                    &q,
+                    &ContentOptions::default(),
+                    ix,
+                    &|_| true,
+                    &rec,
+                ),
+                None => search_content(cats, &all, &q, &ContentOptions::default(), &|_| true, &rec),
+            }
+            .unwrap();
+            let mut v = got.into_inner().unwrap();
+            v.sort();
+            v
+        };
+        let _ = find("aa", false, Some(&mut ix)); // 索引を作る
+        for _ in 0..200 {
+            let len = 2 + rnd(2);
+            let pat: String = (0..len)
+                .map(|_| alphabet[rnd(alphabet.len())])
+                .filter(|c| *c != '\n')
+                .collect();
+            if pat.chars().count() < 2 {
+                continue;
+            }
+            let cs = rnd(2) == 0;
+            assert_eq!(
+                find(&pat, cs, Some(&mut ix)),
+                find(&pat, cs, None),
+                "{pat:?} cs={cs}"
+            );
+        }
     }
 }

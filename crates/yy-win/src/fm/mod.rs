@@ -1622,6 +1622,11 @@ fn cmd_search() {
         let index_dir = a.dirs.index();
         let threads = a.config.filemanager.search_threads.max(1);
         let sim = a.similar_options();
+        let fulltext_dir = a
+            .config
+            .filemanager
+            .fulltext_index
+            .then(|| a.dirs.fulltext());
         a.start("探しています", move |cx| {
             // 目録が古ければ、走査し直す前に古い目録で見つかったものを先に出す（名前・属性だけの検索）。
             // 前の目録がなければ、走査しながら見つかった順に出す
@@ -1715,17 +1720,49 @@ fn cmd_search() {
             };
             let hits = std::sync::Mutex::new(Vec::new());
             let total = found.len();
-            let r = yy_files::search::search_content(
-                &cats,
-                &found,
-                &content,
-                &copts,
-                &|n| cx.progress(&format!("中身を探しています… {n} / {total} 個")),
-                &|h| {
-                    hits.lock().unwrap().push((h.file, h.line, h.text));
-                    true
-                },
-            );
+            let progress = |n| cx.progress(&format!("中身を探しています… {n} / {total} 個"));
+            let rec = |h: yy_files::search::Hit| {
+                hits.lock().unwrap().push((h.file, h.line, h.text));
+                true
+            };
+            let r = match &fulltext_dir {
+                // 中身の索引で読むファイルを絞り、読んだものは索引に足す
+                Some(dir) => {
+                    let paths: Vec<PathBuf> = cats
+                        .iter()
+                        .map(|c| yy_files::fulltext::path_for(dir, &c.root))
+                        .collect();
+                    let mut ixs: Vec<yy_files::fulltext::FtIndex> = cats
+                        .iter()
+                        .zip(&paths)
+                        .map(|(c, p)| {
+                            yy_files::fulltext::FtIndex::load(p)
+                                .ok()
+                                .filter(|ix| ix.root == c.root)
+                                .unwrap_or_else(|| yy_files::fulltext::FtIndex::new(&c.root))
+                        })
+                        .collect();
+                    let r = yy_files::search::search_content_indexed(
+                        &cats, &found, &content, &copts, &mut ixs, &progress, &rec,
+                    );
+                    for ((ix, p), c) in ixs.iter_mut().zip(&paths).zip(&cats) {
+                        ix.retain_catalog(c);
+                        if let Err(e) = ix.save(p) {
+                            cx.send(Msg::Log(format!("中身の索引を保存できません: {e}")));
+                        }
+                    }
+                    if let Ok(st) = &r {
+                        cx.send(Msg::Log(format!(
+                            "中身の索引: {} 個を読まずに済みました・{} 個を索引に足しました",
+                            st.pruned, st.indexed
+                        )));
+                    }
+                    r
+                }
+                None => yy_files::search::search_content(
+                    &cats, &found, &content, &copts, &progress, &rec,
+                ),
+            };
             let mut rows = hits.into_inner().unwrap();
             rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
             match r {

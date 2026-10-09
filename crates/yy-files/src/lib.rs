@@ -10,12 +10,14 @@
 //! * [`similar`] … 似た名前のファイルと新しい版の判定
 //! * [`purge`] … 確かめてからの一括削除（隔離フォルダ・取り消し）
 //! * [`search`] … ファイルの検索（名前・属性・中身）
+//! * [`fulltext`] … 中身の索引（バイグラムの転置索引。中身の検索で読むファイルを絞る）
 //! * [`office`]・[`pdf`] … Office の文書・PDF の文字列の取り出し
 //! * [`jobs`] … 同期ジョブ・保存した検索・置き場所・画面なしでの実行
 
 pub mod catalogs;
 pub mod dupes;
 pub mod fs;
+pub mod fulltext;
 pub mod hash;
 pub mod index;
 pub mod jobs;
