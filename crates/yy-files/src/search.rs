@@ -437,6 +437,10 @@ pub struct FileFilter {
     pub exts: Vec<String>,
     /// 名前（フォルダを含まない）の正規表現（大文字・小文字は区別しない）
     pub name: Option<regex_automata::meta::Regex>,
+    /// 除くフォルダの名前の正規表現（途中のどのフォルダの名前に合っても除く）
+    pub exclude_dir: Option<regex_automata::meta::Regex>,
+    /// 除くファイルの名前の正規表現
+    pub exclude_name: Option<regex_automata::meta::Regex>,
 }
 
 impl FileFilter {
@@ -456,11 +460,36 @@ impl FileFilter {
             "" => None,
             r => Some(name_regex(r)?),
         };
-        Ok(FileFilter { exts, name })
+        Ok(FileFilter {
+            exts,
+            name,
+            exclude_dir: None,
+            exclude_name: None,
+        })
+    }
+
+    /// 除く条件（フォルダの名前・ファイルの名前の正規表現。空なら使わない）を足す。
+    pub fn with_excludes(
+        mut self,
+        dir_pattern: &str,
+        name_pattern: &str,
+    ) -> Result<FileFilter, String> {
+        let re = |p: &str, what: &str| -> Result<Option<regex_automata::meta::Regex>, String> {
+            match p.trim() {
+                "" => Ok(None),
+                r => name_regex(r).map(Some).map_err(|e| format!("{what}: {e}")),
+            }
+        };
+        self.exclude_dir = re(dir_pattern, "除くフォルダ")?;
+        self.exclude_name = re(name_pattern, "除くファイル名")?;
+        Ok(self)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.exts.is_empty() && self.name.is_none()
+        self.exts.is_empty()
+            && self.name.is_none()
+            && self.exclude_dir.is_none()
+            && self.exclude_name.is_none()
     }
 
     pub fn matches(&self, f: &FileEntry) -> bool {
@@ -474,7 +503,19 @@ impl FileFilter {
                 return false;
             }
         }
-        self.name.as_ref().is_none_or(|r| r.is_match(n))
+        if !self.name.as_ref().is_none_or(|r| r.is_match(n)) {
+            return false;
+        }
+        if self.exclude_name.as_ref().is_some_and(|r| r.is_match(n)) {
+            return false;
+        }
+        // 途中のフォルダの名前（ルートからの相対パスの各部分。ルートそのものは見ない）
+        if let Some(r) = &self.exclude_dir
+            && f.dir().split('/').any(|d| !d.is_empty() && r.is_match(d))
+        {
+            return false;
+        }
+        true
     }
 
     /// 目録から合わないファイルを除く（目録の並びはそのまま）。
@@ -1490,6 +1531,36 @@ mod tests {
         let mut x = vec![c.clone()];
         f.apply(&mut x);
         assert_eq!(rels(&x[0]), ["a/見積_v2.XLSX"]);
+        // 除く条件: フォルダの名前（どの階層でも）・ファイルの名前
+        let mut c2 = c.clone();
+        for rel in [
+            "old/x/見積_v3.xlsx",
+            "a/バックアップ/見積_v4.xlsx",
+            "a/~$見積.xlsx",
+        ] {
+            c2.files.push(entry(rel, 1, 0));
+        }
+        let f = FileFilter::parse("xlsx", "")
+            .unwrap()
+            .with_excludes("^(old|バックアップ)$", r"^~\$")
+            .unwrap();
+        let mut x = vec![c2.clone()];
+        f.apply(&mut x);
+        assert_eq!(rels(&x[0]), ["a/見積_v1.xlsx", "a/見積_v2.XLSX"]);
+        // 部分一致でも当たる（a を含むフォルダ名 = a・バックアップ以外…ここでは "ック" で除く）
+        let f = FileFilter::parse("", "")
+            .unwrap()
+            .with_excludes("ック", "")
+            .unwrap();
+        let mut x = vec![c2];
+        f.apply(&mut x);
+        assert!(!rels(&x[0]).iter().any(|r| r.contains("バックアップ")));
+        assert_eq!(x[0].files.len(), 7);
+        let e = FileFilter::parse("", "")
+            .unwrap()
+            .with_excludes("(", "")
+            .unwrap_err();
+        assert!(e.contains("除くフォルダ"), "{e}");
         assert!(FileFilter::parse("", "(").is_err());
         assert!(FileFilter::parse(" ; ", " ").unwrap().is_empty());
     }

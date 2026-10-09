@@ -84,12 +84,16 @@ const ID_SIM_FIND: u16 = 5302;
 const ID_SIM_TO_REVIEW: u16 = 5303;
 const ID_SIM_EXTS: u16 = 5304;
 const ID_SIM_REGEX: u16 = 5305;
+const ID_SIM_XDIR: u16 = 5306;
+const ID_SIM_XNAME: u16 = 5307;
 const ID_DUP_ROOTS: u16 = 5400;
 const ID_DUP_BROWSE: u16 = 5401;
 const ID_DUP_FIND: u16 = 5402;
 const ID_DUP_TO_REVIEW: u16 = 5403;
 const ID_DUP_EXTS: u16 = 5404;
 const ID_DUP_REGEX: u16 = 5405;
+const ID_DUP_XDIR: u16 = 5406;
+const ID_DUP_XNAME: u16 = 5407;
 // 削除の確認
 const ID_CHECK_ALL: u16 = 5500;
 const ID_UNCHECK_ALL: u16 = 5501;
@@ -250,9 +254,13 @@ struct Edits {
     sim_roots: HWND,
     sim_exts: HWND,
     sim_regex: HWND,
+    sim_xdir: HWND,
+    sim_xname: HWND,
     dup_roots: HWND,
     dup_exts: HWND,
     dup_regex: HWND,
+    dup_xdir: HWND,
+    dup_xname: HWND,
     review_info: HWND,
 }
 
@@ -699,6 +707,8 @@ fn create() -> Result<HWND> {
         e.sim_roots = edit(ID_SIM_ROOTS);
         e.sim_exts = edit(ID_SIM_EXTS);
         e.sim_regex = edit(ID_SIM_REGEX);
+        e.sim_xdir = edit(ID_SIM_XDIR);
+        e.sim_xname = edit(ID_SIM_XNAME);
         let sim_rows = vec![
             vec![
                 c(label("場所"), 50),
@@ -714,10 +724,18 @@ fn create() -> Result<HWND> {
                 c(label("名前の正規表現"), 110),
                 c(e.sim_regex, 0),
             ],
+            vec![
+                c(label("除くフォルダ名（正規表現）"), 170),
+                c(e.sim_xdir, 0),
+                c(label("除くファイル名（正規表現）"), 170),
+                c(e.sim_xname, 0),
+            ],
         ];
         e.dup_roots = edit(ID_DUP_ROOTS);
         e.dup_exts = edit(ID_DUP_EXTS);
         e.dup_regex = edit(ID_DUP_REGEX);
+        e.dup_xdir = edit(ID_DUP_XDIR);
+        e.dup_xname = edit(ID_DUP_XNAME);
         let dup_rows = vec![
             vec![
                 c(label("場所"), 50),
@@ -732,6 +750,12 @@ fn create() -> Result<HWND> {
                 c(e.dup_exts, 180),
                 c(label("名前の正規表現"), 110),
                 c(e.dup_regex, 0),
+            ],
+            vec![
+                c(label("除くフォルダ名（正規表現）"), 170),
+                c(e.dup_xdir, 0),
+                c(label("除くファイル名（正規表現）"), 170),
+                c(e.dup_xname, 0),
             ],
         ];
         e.review_info = label("");
@@ -2139,7 +2163,9 @@ fn cmd_similar() {
         let filter = match yy_files::search::FileFilter::parse(
             &text_of(a.edits.sim_exts),
             &text_of(a.edits.sim_regex),
-        ) {
+        )
+        .and_then(|f| f.with_excludes(&text_of(a.edits.sim_xdir), &text_of(a.edits.sim_xname)))
+        {
             Ok(f) => f,
             Err(e) => {
                 error_box(a.frame, &e);
@@ -2177,7 +2203,9 @@ fn cmd_dupes() {
         let filter = match yy_files::search::FileFilter::parse(
             &text_of(a.edits.dup_exts),
             &text_of(a.edits.dup_regex),
-        ) {
+        )
+        .and_then(|f| f.with_excludes(&text_of(a.edits.dup_xdir), &text_of(a.edits.dup_xname)))
+        {
             Ok(f) => f,
             Err(e) => {
                 error_box(a.frame, &e);
