@@ -4,6 +4,8 @@
 #[cfg(windows)]
 mod clipboard;
 #[cfg(windows)]
+mod favorites;
+#[cfg(windows)]
 mod history;
 #[cfg(windows)]
 mod templates;
@@ -11,6 +13,8 @@ mod templates;
 #[cfg(windows)]
 mod resident {
     use std::cell::RefCell;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::thread::JoinHandle;
@@ -22,6 +26,10 @@ mod resident {
     use windows::Win32::Graphics::Gdi::{
         CreateFontIndirectW, DeleteObject, GetMonitorInfoW, HFONT, HGDIOBJ, LOGFONTW,
         MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    };
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
+        CoInitializeEx, CoTaskMemFree, CoUninitialize,
     };
     use windows::Win32::System::DataExchange::{
         AddClipboardFormatListener, RemoveClipboardFormatListener,
@@ -37,15 +45,20 @@ mod resident {
         GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI, SystemParametersInfoForDpi,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetKeyState, SetFocus, VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_RCONTROL, VK_RETURN, VK_TAB,
+        GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LCONTROL, VK_LEFT, VK_RCONTROL,
+        VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
     };
     use windows::Win32::UI::Shell::{
-        NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+        ASSOCF_NONE, ASSOCSTR_EXECUTABLE, AssocQueryStringW, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS,
+        FileOpenDialog, IFileOpenDialog, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+        NOTIFYICONDATAW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH, Shell_NotifyIconW,
+        ShellExecuteExW,
     };
     use windows::Win32::UI::WindowsAndMessaging::*;
-    use windows::core::{Error, HRESULT, HSTRING, PCWSTR, Result, w};
+    use windows::core::{Error, HRESULT, HSTRING, PCWSTR, PWSTR, Result, w};
 
     use crate::clipboard;
+    use crate::favorites::{self, Favorite, Kind};
     use crate::history::{self, ControlSequence, Store};
     use crate::templates;
 
@@ -88,6 +101,7 @@ mod resident {
         taskbar_message: u32,
         store: Store,
         templates: templates::Store,
+        favorites: favorites::Store,
         menu_open: bool,
         popup_open: bool,
         register_open: bool,
@@ -107,6 +121,7 @@ mod resident {
         previous_focus: HWND,
         history_entries: Vec<(std::path::PathBuf, String)>,
         template_entries: Vec<(std::path::PathBuf, String)>,
+        favorite_entries: Vec<(std::path::PathBuf, Favorite)>,
     }
 
     pub(super) fn run() -> Result<()> {
@@ -125,6 +140,8 @@ mod resident {
                 ));
             };
             let template_dir = templates::default_dir()
+                .ok_or_else(|| Error::new(HRESULT(0x80004005u32 as i32), "APPDATA がありません"))?;
+            let favorite_dir = favorites::default_dir()
                 .ok_or_else(|| Error::new(HRESULT(0x80004005u32 as i32), "APPDATA がありません"))?;
             let instance = GetModuleHandleW(None)?.into();
             if !InitCommonControlsEx(&INITCOMMONCONTROLSEX {
@@ -172,6 +189,7 @@ mod resident {
                     taskbar_message: RegisterWindowMessageW(w!("TaskbarCreated")),
                     store: Store::new(dir),
                     templates: templates::Store::new(template_dir),
+                    favorites: favorites::Store::new(favorite_dir),
                     menu_open: false,
                     popup_open: false,
                     register_open: false,
@@ -191,6 +209,7 @@ mod resident {
                     previous_focus: HWND::default(),
                     history_entries: Vec::new(),
                     template_entries: Vec::new(),
+                    favorite_entries: Vec::new(),
                 });
             });
 
@@ -592,7 +611,10 @@ mod resident {
             };
             buttons.push(button);
         }
-        for (index, title) in ["クリップボード", "定型文"].iter().enumerate() {
+        for (index, title) in ["クリップボード", "定型文", "お気に入り"]
+            .iter()
+            .enumerate()
+        {
             let mut wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
             let item = TCITEMW {
                 mask: TCIF_TEXT,
@@ -862,7 +884,11 @@ mod resident {
                 return 0;
             }
             let index = unsafe { SendMessageW(tabs, TCM_GETCURSEL, None, None).0 };
-            if index == 1 { 1 } else { 0 }
+            match index {
+                1 => 1,
+                2 => 2,
+                _ => 0,
+            }
         })
     }
 
@@ -879,22 +905,29 @@ mod resident {
             let state = borrow.as_mut().unwrap();
             if tab == 0 {
                 state.history_entries = state.store.previews();
-            } else {
+            } else if tab == 1 {
                 state.template_entries = state.templates.entries();
-            }
-            let entries = if tab == 0 {
-                &state.history_entries
             } else {
-                &state.template_entries
-            };
-            (
-                state.list,
-                state.font_px,
-                entries
+                state.favorite_entries = state.favorites.entries();
+            }
+            let entries = match tab {
+                0 => state
+                    .history_entries
                     .iter()
                     .map(|(_, text)| history::label(text))
                     .collect::<Vec<_>>(),
-            )
+                1 => state
+                    .template_entries
+                    .iter()
+                    .map(|(_, text)| history::label(text))
+                    .collect::<Vec<_>>(),
+                _ => state
+                    .favorite_entries
+                    .iter()
+                    .map(|(_, favorite)| favorite.label())
+                    .collect::<Vec<_>>(),
+            };
+            (state.list, state.font_px, entries)
         });
         unsafe {
             SendMessageW(list, LB_RESETCONTENT, None, None);
@@ -1106,6 +1139,30 @@ mod resident {
         end_menu();
     }
 
+    fn switch_tab(tabs: HWND, list: HWND, offset: i32) {
+        let next = (active_tab() as i32 + offset).rem_euclid(3) as usize;
+        unsafe {
+            SendMessageW(tabs, TCM_SETCURSEL, Some(WPARAM(next)), None);
+        }
+        refresh_list();
+        unsafe {
+            let _ = SetFocus(Some(list));
+        }
+    }
+
+    fn move_selection(list: HWND, offset: i32) {
+        let count = unsafe { SendMessageW(list, LB_GETCOUNT, None, None).0 };
+        if count <= 0 {
+            return;
+        }
+        let current = selected_index().unwrap_or(0) as i32;
+        let next = (current + offset).clamp(0, count as i32 - 1);
+        unsafe {
+            SendMessageW(list, LB_SETCURSEL, Some(WPARAM(next as usize)), None);
+            let _ = SetFocus(Some(list));
+        }
+    }
+
     fn popup_key(hwnd: HWND, message: &MSG) -> bool {
         let (picker_open, register_open, list, tabs) = STATE.with(|cell| {
             let borrow = cell.borrow();
@@ -1134,15 +1191,27 @@ mod resident {
                 select_item(hwnd);
                 true
             }
+            v if v == VK_LEFT.0 && picker_open => {
+                switch_tab(tabs, list, -1);
+                true
+            }
+            v if v == VK_RIGHT.0 && picker_open => {
+                switch_tab(tabs, list, 1);
+                true
+            }
+            v if v == VK_UP.0 && picker_open => {
+                move_selection(list, -1);
+                true
+            }
+            v if v == VK_DOWN.0 && picker_open => {
+                move_selection(list, 1);
+                true
+            }
             v if v == VK_TAB.0
                 && picker_open
                 && unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0 =>
             {
-                let next = 1 - active_tab();
-                unsafe {
-                    SendMessageW(tabs, TCM_SETCURSEL, Some(WPARAM(next)), None);
-                }
-                refresh_list();
+                switch_tab(tabs, list, 1);
                 true
             }
             _ => false,
@@ -1160,16 +1229,37 @@ mod resident {
                     .history_entries
                     .get(index)
                     .and_then(|(path, _)| state.store.load(path).ok())
-            } else {
+            } else if tab == 1 {
                 state
                     .template_entries
                     .get(index)
                     .map(|(_, text)| text.clone())
+            } else {
+                None
             }
         })
     }
 
+    fn selected_favorite() -> Option<Favorite> {
+        let index = selected_index()?;
+        STATE.with(|cell| {
+            cell.borrow()
+                .as_ref()?
+                .favorite_entries
+                .get(index)
+                .map(|(_, favorite)| favorite.clone())
+        })
+    }
+
     fn select_item(hwnd: HWND) {
+        if active_tab() == 2 {
+            let Some(favorite) = selected_favorite() else {
+                return;
+            };
+            close_popup(hwnd);
+            open_favorite(hwnd, &favorite);
+            return;
+        }
         let Some(text) = selected_text() else {
             return;
         };
@@ -1185,6 +1275,194 @@ mod resident {
                     state.store.cancel_suppression();
                 }
             });
+        }
+    }
+
+    fn open_favorite(hwnd: HWND, favorite: &Favorite) {
+        let exists = match favorite.kind {
+            Kind::File => favorite.target.is_file(),
+            Kind::Folder => favorite.target.is_dir(),
+        };
+        if !exists {
+            popup_message(
+                hwnd,
+                "お気に入りのファイルまたはフォルダが見つかりません",
+                MB_ICONERROR | MB_OK,
+            );
+            return;
+        }
+        let wide: Vec<u16> = favorite
+            .target
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let excel = (favorite.kind == Kind::File)
+            .then(|| associated_excel(&favorite.target))
+            .flatten();
+        let arguments = excel.as_ref().map(|_| {
+            std::iter::once(b'"' as u16)
+                .chain(favorite.target.as_os_str().encode_wide())
+                .chain([b'"' as u16, 0])
+                .collect::<Vec<u16>>()
+        });
+        let Some(_apartment) = ComApartment::new() else {
+            popup_message(
+                hwnd,
+                "ファイルを開くための初期化に失敗しました",
+                MB_ICONERROR | MB_OK,
+            );
+            return;
+        };
+        let mut launch = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOASYNC,
+            hwnd: HWND::default(),
+            lpVerb: w!("open"),
+            lpFile: PCWSTR(excel.as_ref().map_or(wide.as_ptr(), |path| path.as_ptr())),
+            lpParameters: arguments
+                .as_ref()
+                .map_or(PCWSTR::null(), |args| PCWSTR(args.as_ptr())),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        if let Err(error) = unsafe { ShellExecuteExW(&mut launch) } {
+            popup_message(
+                hwnd,
+                &format!("お気に入りを開けませんでした: {error}"),
+                MB_ICONERROR | MB_OK,
+            );
+        }
+    }
+
+    fn associated_excel(target: &std::path::Path) -> Option<Vec<u16>> {
+        let extension = target.extension()?.to_str()?;
+        let association = HSTRING::from(format!(".{extension}"));
+        let mut length = 0u32;
+        unsafe {
+            let _ = AssocQueryStringW(
+                ASSOCF_NONE,
+                ASSOCSTR_EXECUTABLE,
+                &association,
+                w!("open"),
+                None,
+                &mut length,
+            );
+        }
+        if !(2..=32_768).contains(&length) {
+            return None;
+        }
+        let mut wide = vec![0u16; length as usize];
+        unsafe {
+            AssocQueryStringW(
+                ASSOCF_NONE,
+                ASSOCSTR_EXECUTABLE,
+                &association,
+                w!("open"),
+                Some(PWSTR(wide.as_mut_ptr())),
+                &mut length,
+            )
+            .ok()
+            .ok()?;
+        }
+        let end = wide.iter().position(|unit| *unit == 0)?;
+        let path = std::path::PathBuf::from(OsString::from_wide(&wide[..end]));
+        if !path.is_file()
+            || !path
+                .file_name()?
+                .to_string_lossy()
+                .eq_ignore_ascii_case("EXCEL.EXE")
+        {
+            return None;
+        }
+        wide.truncate(end + 1);
+        Some(wide)
+    }
+
+    struct ComApartment;
+
+    impl ComApartment {
+        fn new() -> Option<Self> {
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }
+                .ok()
+                .ok()?;
+            Some(Self)
+        }
+    }
+
+    impl Drop for ComApartment {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    fn pick_favorite(hwnd: HWND, kind: Kind) -> Option<Favorite> {
+        begin_menu()?;
+        let previous = unsafe { GetForegroundWindow() };
+        let mut point = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut point);
+            show_menu_host(hwnd, point);
+        }
+        let picked = (|| unsafe {
+            let _apartment = ComApartment::new()?;
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+            let mut options = dialog.GetOptions().ok()? | FOS_FORCEFILESYSTEM;
+            if kind == Kind::Folder {
+                options |= FOS_PICKFOLDERS;
+            }
+            dialog.SetOptions(options).ok()?;
+            dialog.Show(Some(hwnd)).ok()?;
+            let item = dialog.GetResult().ok()?;
+            let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let path = name.to_string().ok();
+            CoTaskMemFree(Some(name.0 as *const _));
+            path.map(|target| Favorite {
+                kind,
+                target: target.into(),
+            })
+        })();
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            if previous != hwnd && !previous.0.is_null() {
+                let _ = SetForegroundWindow(previous);
+            }
+        }
+        end_menu();
+        picked
+    }
+
+    fn register_favorite(hwnd: HWND, kind: Kind, slot: Option<&std::path::Path>) {
+        let Some(favorite) = pick_favorite(hwnd, kind) else {
+            return;
+        };
+        let result = STATE.with(|cell| {
+            let borrow = cell.borrow();
+            let store = &borrow.as_ref().unwrap().favorites;
+            if let Some(slot) = slot {
+                store.update(slot, &favorite)
+            } else {
+                store.add(&favorite).map(|_| ())
+            }
+        });
+        if let Err(error) = result {
+            popup_message(hwnd, &error.to_string(), MB_ICONERROR | MB_OK);
+        }
+    }
+
+    fn delete_favorite(hwnd: HWND, path: &std::path::Path) {
+        if popup_message(
+            hwnd,
+            "選択したお気に入りを削除しますか？",
+            MB_ICONQUESTION | MB_YESNO,
+        ) != IDYES.0
+        {
+            return;
+        }
+        let result = STATE.with(|cell| cell.borrow().as_ref().unwrap().favorites.remove(path));
+        if let Err(error) = result {
+            popup_message(hwnd, &error.to_string(), MB_ICONERROR | MB_OK);
         }
     }
 
@@ -1251,6 +1529,7 @@ mod resident {
             return;
         }
         let templates = STATE.with(|cell| cell.borrow().as_ref().unwrap().templates.entries());
+        let favorites = STATE.with(|cell| cell.borrow().as_ref().unwrap().favorites.entries());
         let mut selection = 0;
         unsafe {
             if let Ok(menu) = CreatePopupMenu() {
@@ -1274,6 +1553,35 @@ mod resident {
                     }
                     let _ = AppendMenuW(menu, MF_POPUP, edit_menu.0 as usize, w!("定型文を編集"));
                     let _ = AppendMenuW(menu, MF_POPUP, delete_menu.0 as usize, w!("定型文を削除"));
+                }
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+                let favorite_flags = if favorites.len() >= favorites::LIMIT {
+                    MF_STRING | MF_GRAYED
+                } else {
+                    MF_STRING
+                };
+                let _ = AppendMenuW(menu, favorite_flags, 6, w!("お気に入りファイルを登録..."));
+                let _ = AppendMenuW(menu, favorite_flags, 7, w!("お気に入りフォルダを登録..."));
+                if favorites.is_empty() {
+                    let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 8, w!("お気に入りを編集"));
+                    let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 9, w!("お気に入りを削除"));
+                } else if let (Ok(edit_menu), Ok(delete_menu)) =
+                    (CreatePopupMenu(), CreatePopupMenu())
+                {
+                    for (index, (_, favorite)) in favorites.iter().enumerate() {
+                        let label =
+                            HSTRING::from(history::label(&favorite.label()).replace('&', "&&"));
+                        let _ = AppendMenuW(edit_menu, MF_STRING, 300 + index, &label);
+                        let _ = AppendMenuW(delete_menu, MF_STRING, 400 + index, &label);
+                    }
+                    let _ =
+                        AppendMenuW(menu, MF_POPUP, edit_menu.0 as usize, w!("お気に入りを編集"));
+                    let _ = AppendMenuW(
+                        menu,
+                        MF_POPUP,
+                        delete_menu.0 as usize,
+                        w!("お気に入りを削除"),
+                    );
                 }
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
                 let _ = AppendMenuW(menu, MF_STRING, 3, w!("終了"));
@@ -1302,6 +1610,8 @@ mod resident {
         match selection {
             1 => show_history(hwnd),
             2 => show_register(hwnd, None),
+            6 => register_favorite(hwnd, Kind::File, None),
+            7 => register_favorite(hwnd, Kind::Folder, None),
             3 => {
                 let _ = unsafe { DestroyWindow(hwnd) };
             }
@@ -1313,6 +1623,16 @@ mod resident {
             200..=219 => {
                 if let Some((path, _)) = templates.get(selection as usize - 200) {
                     delete_item(hwnd, path);
+                }
+            }
+            300..=319 => {
+                if let Some((path, favorite)) = favorites.get(selection as usize - 300) {
+                    register_favorite(hwnd, favorite.kind, Some(path));
+                }
+            }
+            400..=419 => {
+                if let Some((path, _)) = favorites.get(selection as usize - 400) {
+                    delete_favorite(hwnd, path);
                 }
             }
             _ => {}
