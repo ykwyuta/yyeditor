@@ -713,3 +713,57 @@ fn delta_through_a_windows_share() {
     assert!(logs.iter().any(|l| l.contains("差分の送り方")), "{logs:?}");
     assert_eq!(std::fs::read(dst.join("big.bin")).unwrap(), body);
 }
+
+#[test]
+fn mirror_moves_to_the_chosen_trash_and_reads_old_journals() {
+    let d = tempfile::tempdir().unwrap();
+    let (src, dst) = (d.path().join("src"), d.path().join("dst"));
+    write(&src, "a.txt", b"a", T0);
+    write(&dst, "a.txt", b"a", T0);
+    write(&dst, "old/gone.txt", b"gone", T0);
+    let opts = SyncOptions {
+        mode: Mode::Mirror,
+        ..SyncOptions::default()
+    };
+    let p = plan(&cat(&src), &cat(&dst), None, &opts, &mut |_, _| Ok(false)).unwrap();
+    let mut run = Run::new(1, &p, opts.mode, "2026-10-09 1200");
+    assert_eq!(run.trash_root, dst);
+    let chosen = d.path().join("trash-here");
+    run.trash_root = chosen.clone();
+    let journal = d.path().join("1.run");
+    let mut st = SyncState::default();
+    run_once(&Local, &mut run, &journal, &opts, &mut st).unwrap();
+    assert!(!dst.join("old/gone.txt").exists());
+    assert!(!dst.join(crate::purge::TRASH_DIR).exists());
+    let moved = crate::purge::trash_path(
+        &chosen,
+        "2026-10-09-1200",
+        &format!("{}/old/gone.txt", crate::purge::root_label(&dst)),
+    );
+    assert_eq!(std::fs::read(&moved).unwrap(), b"gone");
+    assert_eq!(Run::load(&journal).unwrap().trash_root, chosen);
+    // 前の形のジャーナル（隔離フォルダの場所がない）は送り先に作る
+    #[derive(Serialize)]
+    struct V1<'a> {
+        id: u64,
+        src_root: &'a Path,
+        dst_root: &'a Path,
+        mode: Mode,
+        trash_stamp: &'a str,
+        conflict_stamp: &'a str,
+        items: &'a [RunItem],
+    }
+    let v1 = V1 {
+        id: 9,
+        src_root: &src,
+        dst_root: &dst,
+        mode: Mode::Mirror,
+        trash_stamp: "s",
+        conflict_stamp: "s",
+        items: &run.items,
+    };
+    std::fs::write(&journal, postcard::to_allocvec(&v1).unwrap()).unwrap();
+    let back = Run::load(&journal).unwrap();
+    assert_eq!((back.id, back.trash_root.as_path()), (9, dst.as_path()));
+    assert_eq!(back.items, run.items);
+}

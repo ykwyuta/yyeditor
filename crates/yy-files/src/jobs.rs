@@ -20,6 +20,9 @@ pub struct SyncJob {
     pub dst: PathBuf,
     #[serde(default)]
     pub options: SyncOptions,
+    /// ミラーで消すファイルの隔離フォルダを作る場所（保存するときに人が選ぶ。ないときは送り先）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trash_root: Option<PathBuf>,
 }
 
 /// ジョブの一覧（`jobs.toml`）。
@@ -240,6 +243,9 @@ pub fn run_job(
     let conflicts = plan.count(Action::Conflict);
     let id = dirs.next_run_id();
     let mut run = Run::new(id, &plan, job.options.mode, stamp);
+    if let Some(t) = &job.trash_root {
+        run.trash_root = t.clone();
+    }
     let journal = sync::journal_path(&dirs.runs(), id);
     let cancel = AtomicBool::new(false);
     let r = sync::execute(
@@ -284,6 +290,7 @@ mod tests {
             src: src.clone(),
             dst: d.path().join("share/案件A"),
             options: SyncOptions::default(),
+            trash_root: None,
         };
         let mut list = JobList::default();
         list.put(job.clone());

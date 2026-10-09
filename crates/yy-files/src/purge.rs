@@ -171,9 +171,68 @@ pub struct PurgeReport {
     pub bytes: u64,
 }
 
-/// 隔離フォルダの中の移す先。
-pub fn trash_path(root: &Path, stamp: &str, rel: &str) -> PathBuf {
-    crate::join(&root.join(TRASH_DIR).join(stamp), rel)
+/// 隔離フォルダの中の移す先（`base\.yyfm-trash\<日時>\<相対パス>`）。
+pub fn trash_path(base: &Path, stamp: &str, rel: &str) -> PathBuf {
+    crate::join(&base.join(TRASH_DIR).join(stamp), rel)
+}
+
+/// 人が選んだ場所に隔離フォルダを作るときの、元のルートを表すフォルダの名前（`\\nas01\share\案件A` →
+/// `nas01_share_案件A`）。いくつかのルートのファイルを 1 つの隔離フォルダに移しても重ならない。
+pub fn root_label(root: &Path) -> String {
+    let s: String = root
+        .to_string_lossy()
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c => c,
+        })
+        .collect();
+    let t = s.trim_matches(['_', '.', ' ']).to_owned();
+    if t.is_empty() { "root".into() } else { t }
+}
+
+/// 移す。同じボリュームなら名前の変更、別のボリューム（人が選んだ隔離フォルダの場所が別のドライブ・
+/// 共有）なら、写して大きさを確かめ、日時を合わせてから元を消す。`to` が既にあればエラー（ただし
+/// `into_trash` なら、前に途中まで写したもの（隔離フォルダの中なので自分のもの）として置き換える）。
+pub fn move_to(fs: &dyn Fs, from: &Path, to: &Path, into_trash: bool) -> io::Result<()> {
+    if let Some(p) = to.parent() {
+        fs.create_dir_all(p)?;
+    }
+    match fs.rename_new(from, to) {
+        Err(e) if is_cross_device(&e) => {
+            if fs.metadata(to).is_ok() {
+                if into_trash {
+                    fs.remove_file(to)?;
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("{} は既にあります", to.display()),
+                    ));
+                }
+            }
+            let m = fs.metadata(from)?;
+            fs.copy_file(from, to)?;
+            let got = fs.metadata(to)?;
+            if got.size != m.size {
+                let _ = fs.remove_file(to);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "隔離フォルダへ写した大きさが違います",
+                ));
+            }
+            fs.set_mtime(to, m.mtime)?;
+            if m.readonly {
+                fs.set_readonly(to, true)?;
+            }
+            fs.remove_file(from)
+        }
+        r => r,
+    }
+}
+
+/// 別のボリュームへの名前の変更のエラーか（Windows の ERROR_NOT_SAME_DEVICE (17) を含む）。
+fn is_cross_device(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::CrossesDevices || (cfg!(windows) && e.raw_os_error() == Some(17))
 }
 
 /// 消す前の確かめ。消してよければ `None`、だめならその理由。
@@ -218,11 +277,15 @@ pub struct PurgeHooks<'a> {
 }
 
 /// チェックしたものを消す（日時の印 `stamp` の隔離フォルダへ。消したものは記録 `log`（CSV）に書く）。
+/// 隔離フォルダは、`trash_base` が `None` ならそれぞれのルートの下（`<ルート>\.yyfm-trash\<日時>\…`）、
+/// 人が場所を選んだら `<選んだ場所>\.yyfm-trash\<日時>\<ルートの名前>\…` に作る。
 /// 全部にチェックの付いたグループ・守るフォルダ（`protect`）の中は消さない。
+#[allow(clippy::too_many_arguments)]
 pub fn execute(
     fs: &dyn Fs,
     review: &Review,
     stamp: &str,
+    trash_base: Option<&Path>,
     protect: &[PathBuf],
     log: &Path,
     hooks: PurgeHooks<'_>,
@@ -250,7 +313,7 @@ pub fn execute(
                 Err(e) => Outcome::Failed(e.to_string()),
                 Ok(None) => {
                     let how = dispose(c);
-                    match remove(fs, c, how, stamp, recycle) {
+                    match remove(fs, c, how, stamp, trash_base, recycle) {
                         Ok(moved) => {
                             rows.push(csv_row(&[
                                 how.name(),
@@ -306,6 +369,7 @@ fn remove(
     c: &Candidate,
     how: Disposal,
     stamp: &str,
+    trash_base: Option<&Path>,
     recycle: &dyn Fn(&Path) -> io::Result<()>,
 ) -> io::Result<Option<PathBuf>> {
     let path = c.path();
@@ -319,11 +383,11 @@ fn remove(
             Ok(None)
         }
         Disposal::Trash => {
-            let to = trash_path(&c.root, stamp, &c.rel);
-            if let Some(p) = to.parent() {
-                fs.create_dir_all(p)?;
-            }
-            fs.rename_new(&path, &to)?;
+            let to = match trash_base {
+                None => trash_path(&c.root, stamp, &c.rel),
+                Some(b) => trash_path(b, stamp, &format!("{}/{}", root_label(&c.root), c.rel)),
+            };
+            move_to(fs, &path, &to, true)?;
             Ok(Some(to))
         }
     }
@@ -423,12 +487,7 @@ pub fn undo(fs: &dyn Fs, log: &Path) -> io::Result<Vec<Restore>> {
                     out.push(Restore::Exists(orig));
                     continue;
                 }
-                let r = (|| {
-                    if let Some(p) = orig.parent() {
-                        fs.create_dir_all(p)?;
-                    }
-                    fs.rename_new(&from, &orig)
-                })();
+                let r = move_to(fs, &from, &orig, false);
                 out.push(match r {
                     Ok(()) => Restore::Restored(orig),
                     Err(e) => Restore::Failed(orig, e.to_string()),
@@ -600,6 +659,7 @@ mod tests {
             &Local,
             &review,
             "2026-10-08-1530",
+            None,
             &[root.join("keep")],
             &log,
             PurgeHooks {
@@ -659,6 +719,125 @@ mod tests {
         );
     }
 
+    /// 名前の変更が別のボリュームへはできない、をまねる。
+    struct OtherVolume;
+
+    impl Fs for OtherVolume {
+        fn read_dir(&self, p: &Path) -> io::Result<Vec<crate::fs::DirEntry>> {
+            Local.read_dir(p)
+        }
+        fn metadata(&self, p: &Path) -> io::Result<Meta> {
+            Local.metadata(p)
+        }
+        fn open_read(&self, p: &Path) -> io::Result<Box<dyn crate::fs::ReadFile>> {
+            Local.open_read(p)
+        }
+        fn open_write(&self, p: &Path, keep: u64) -> io::Result<Box<dyn crate::fs::WriteFile>> {
+            Local.open_write(p, keep)
+        }
+        fn rename_replace(&self, _: &Path, _: &Path) -> io::Result<()> {
+            Err(io::ErrorKind::CrossesDevices.into())
+        }
+        fn rename_new(&self, _: &Path, _: &Path) -> io::Result<()> {
+            Err(io::ErrorKind::CrossesDevices.into())
+        }
+        fn remove_file(&self, p: &Path) -> io::Result<()> {
+            Local.remove_file(p)
+        }
+        fn remove_dir(&self, p: &Path) -> io::Result<()> {
+            Local.remove_dir(p)
+        }
+        fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+            Local.create_dir_all(p)
+        }
+        fn set_mtime(&self, p: &Path, t: i64) -> io::Result<()> {
+            Local.set_mtime(p, t)
+        }
+        fn set_readonly(&self, p: &Path, r: bool) -> io::Result<()> {
+            Local.set_readonly(p, r)
+        }
+        fn copy_file(&self, a: &Path, b: &Path) -> io::Result<()> {
+            Local.copy_file(a, b)
+        }
+        fn open_patch(&self, p: &Path) -> io::Result<Box<dyn crate::fs::PatchFile>> {
+            Local.open_patch(p)
+        }
+    }
+
+    #[test]
+    fn moves_to_a_chosen_trash_on_another_volume() {
+        let d = tempfile::tempdir().unwrap();
+        let (r1, r2) = (d.path().join("share1"), d.path().join("share2"));
+        for (root, rel) in [
+            (&r1, "a/x_v1.txt"),
+            (&r1, "a/x_v2.txt"),
+            (&r2, "x_v1.txt"),
+            (&r2, "x_v2.txt"),
+        ] {
+            let p = crate::join(root, rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, rel).unwrap();
+        }
+        let review = Review {
+            items: vec![
+                cand(&r1, "a/x_v1.txt", 0, false),
+                cand(&r1, "a/x_v2.txt", 0, true),
+                cand(&r2, "x_v1.txt", 1, false),
+                cand(&r2, "x_v2.txt", 1, true),
+            ],
+        };
+        let chosen = d.path().join("elsewhere");
+        let log = d.path().join("log.csv");
+        let rep = execute(
+            &OtherVolume,
+            &review,
+            "2026-10-09-1000",
+            Some(&chosen),
+            &[],
+            &log,
+            PurgeHooks {
+                dispose: &|_| Disposal::Trash,
+                recycle: &|_| unreachable!(),
+                progress: &mut |_, _| true,
+            },
+        )
+        .unwrap();
+        assert_eq!(rep.removed, 2, "{:?}", rep.outcomes);
+        // ルートごとのフォルダに分けて、選んだ場所の隔離フォルダへ（写して元を消す）
+        let t1 = trash_path(
+            &chosen,
+            "2026-10-09-1000",
+            &format!("{}/a/x_v1.txt", root_label(&r1)),
+        );
+        let t2 = trash_path(
+            &chosen,
+            "2026-10-09-1000",
+            &format!("{}/x_v1.txt", root_label(&r2)),
+        );
+        assert_eq!(std::fs::read_to_string(&t1).unwrap(), "a/x_v1.txt");
+        assert_eq!(std::fs::read_to_string(&t2).unwrap(), "x_v1.txt");
+        assert!(!r1.join("a/x_v1.txt").exists() && !r2.join("x_v1.txt").exists());
+        assert_eq!(
+            Local.metadata(&t1).unwrap().mtime,
+            review.items[0].meta.mtime
+        );
+        // 戻すのも別のボリュームから
+        let back = undo(&OtherVolume, &log).unwrap();
+        assert!(
+            back.iter().all(|r| matches!(r, Restore::Restored(_))),
+            "{back:?}"
+        );
+        assert!(r1.join("a/x_v1.txt").exists() && !t1.exists());
+        assert_eq!(
+            expired_trash(&Local, &chosen, "2026-10-10").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            root_label(Path::new(r"\\nas01\share\案件A")),
+            "nas01_share_案件A"
+        );
+    }
+
     #[test]
     fn duplicate_must_still_match_its_keeper() {
         let d = tempfile::tempdir().unwrap();
@@ -682,6 +861,7 @@ mod tests {
             &Local,
             &review,
             "s",
+            None,
             &[],
             &root.join("log.csv"),
             PurgeHooks {

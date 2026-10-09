@@ -394,6 +394,8 @@ pub struct Run {
     pub mode: Mode,
     /// 削除（ミラー）で移す隔離フォルダの名前（日時。`.yyfm-trash\<この名前>`）
     pub trash_stamp: String,
+    /// 隔離フォルダを作る場所（人が選ぶ。既定は送り先。`<ここ>\.yyfm-trash\<日時>\…`）
+    pub trash_root: PathBuf,
     /// 「両方残す」で送り先に付ける名前の印（`名前 (衝突 <この印>).拡張子`）
     pub conflict_stamp: String,
     pub items: Vec<RunItem>,
@@ -408,6 +410,7 @@ impl Run {
             dst_root: plan.dst_root.clone(),
             mode,
             trash_stamp: stamp.replace([' ', ':'], "-"),
+            trash_root: plan.dst_root.clone(),
             conflict_stamp: stamp.to_owned(),
             items: plan
                 .items
@@ -423,7 +426,28 @@ impl Run {
 
     pub fn load(path: &Path) -> io::Result<Run> {
         let raw = std::fs::read(path)?;
-        postcard::from_bytes(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let bad = |e: postcard::Error| io::Error::new(io::ErrorKind::InvalidData, e);
+        if let Some(body) = raw.strip_prefix(RUN_MAGIC.as_slice()) {
+            return postcard::from_bytes(body).map_err(bad);
+        }
+        let v1: RunV1 = postcard::from_bytes(&raw).map_err(bad)?;
+        Ok(Run {
+            id: v1.id,
+            trash_root: v1.dst_root.clone(),
+            src_root: v1.src_root,
+            dst_root: v1.dst_root,
+            mode: v1.mode,
+            trash_stamp: v1.trash_stamp,
+            conflict_stamp: v1.conflict_stamp,
+            items: v1.items,
+        })
+    }
+
+    /// ジャーナルに書く形。
+    fn encode(&self) -> io::Result<Vec<u8>> {
+        let mut data = RUN_MAGIC.to_vec();
+        data.extend(postcard::to_allocvec(self).map_err(io::Error::other)?);
+        Ok(data)
     }
 
     /// 終わったか（すべて済み・失敗）。
@@ -444,6 +468,21 @@ impl Run {
         }
         c
     }
+}
+
+/// ジャーナルの印（前の形にはない）。
+const RUN_MAGIC: &[u8; 8] = b"YYFMRN02";
+
+/// 前の形の実行（隔離フォルダの場所がない。送り先に作る）。
+#[derive(Deserialize)]
+struct RunV1 {
+    id: u64,
+    src_root: PathBuf,
+    dst_root: PathBuf,
+    mode: Mode,
+    trash_stamp: String,
+    conflict_stamp: String,
+    items: Vec<RunItem>,
 }
 
 /// 実行の件数。
@@ -511,19 +550,13 @@ impl Exec<'_> {
             return Ok(());
         }
         *last = Instant::now();
-        crate::index::write_atomic(
-            self.journal,
-            &postcard::to_allocvec(&*run).map_err(io::Error::other)?,
-        )
+        crate::index::write_atomic(self.journal, &run.encode()?)
     }
 
     fn save_now(&self) -> io::Result<()> {
         let run = self.run.lock().unwrap();
         *self.last_save.lock().unwrap() = Instant::now();
-        crate::index::write_atomic(
-            self.journal,
-            &postcard::to_allocvec(&*run).map_err(io::Error::other)?,
-        )
+        crate::index::write_atomic(self.journal, &run.encode()?)
     }
 
     fn stopped(&self) -> bool {
@@ -605,10 +638,7 @@ pub fn execute(
     }
     // 落ちたとき（試験）はジャーナルを書けない
     if !abort.as_ref().is_some_and(is_crash) {
-        crate::index::write_atomic(
-            journal,
-            &postcard::to_allocvec(&*run).map_err(io::Error::other)?,
-        )?;
+        crate::index::write_atomic(journal, &run.encode()?)?;
     }
     if let Some(e) = abort {
         return Err(e);
@@ -685,7 +715,7 @@ pub fn conflict_name(rel: &str, stamp: &str) -> String {
 }
 
 fn attempt(ex: &Exec<'_>, i: usize) -> io::Result<()> {
-    let (item, state, run_dst, run_src, trash, cstamp) = {
+    let (item, state, run_dst, run_src, trash, trash_root, cstamp) = {
         let run = ex.run.lock().unwrap();
         let ri = &run.items[i];
         (
@@ -694,6 +724,7 @@ fn attempt(ex: &Exec<'_>, i: usize) -> io::Result<()> {
             run.dst_root.clone(),
             run.src_root.clone(),
             run.trash_stamp.clone(),
+            run.trash_root.clone(),
             run.conflict_stamp.clone(),
         )
     };
@@ -710,20 +741,18 @@ fn attempt(ex: &Exec<'_>, i: usize) -> io::Result<()> {
             ex.set_state(i, ItemState::Done)
         }
         Action::Delete => {
-            // 隔離フォルダへ移す（すぐには消さない）
-            let to = crate::join(
-                &run_dst.join(crate::purge::TRASH_DIR).join(&trash),
-                &item.dst_rel,
-            );
+            // 隔離フォルダへ移す（すぐには消さない）。送り先のほかの場所を選んだときは、送り先の
+            // ルートの名前のフォルダに分ける
+            let rel = if trash_root == run_dst {
+                item.dst_rel.clone()
+            } else {
+                format!("{}/{}", crate::purge::root_label(&run_dst), item.dst_rel)
+            };
+            let to = crate::purge::trash_path(&trash_root, &trash, &rel);
             match fs.metadata(&dst) {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
-                Ok(_) => {
-                    if let Some(p) = to.parent() {
-                        fs.create_dir_all(p)?;
-                    }
-                    fs.rename_new(&dst, &to)?;
-                }
+                Ok(_) => crate::purge::move_to(fs, &dst, &to, true)?,
             }
             ex.state_updates
                 .lock()

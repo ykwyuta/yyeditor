@@ -1277,6 +1277,34 @@ impl App {
     }
 }
 
+/// 隔離フォルダ（`.yyfm-trash`）を作る場所を人に選んでもらう（作業ごと）。`default` は「はい」で使う
+/// 場所の説明。`Some(None)` は既定の場所、`Some(Some(p))` は選んだ場所、`None` はやめる。
+fn choose_trash(frame: HWND, what: &str, default: &str) -> Option<Option<PathBuf>> {
+    let text = format!(
+        "{what}は、すぐには消さずに隔離フォルダ（{}）へ移します（元に戻せます）。\n\
+         隔離フォルダをどこに作りますか？\n\n\
+         はい: {default}に作る\n\
+         いいえ: 場所を選ぶ（別のドライブ・共有なら、写してから元を消します）\n\
+         キャンセル: やめる",
+        yy_files::purge::TRASH_DIR
+    );
+    let r = unsafe {
+        MessageBoxW(
+            Some(frame),
+            &HSTRING::from(text),
+            w!("yyfilemanager - 隔離フォルダの場所"),
+            MB_YESNOCANCEL | MB_ICONQUESTION,
+        )
+    };
+    if r == IDYES {
+        Some(None)
+    } else if r == IDNO {
+        crate::grepdlg::browse_folder(frame).map(Some)
+    } else {
+        None
+    }
+}
+
 fn is_combo(h: HWND) -> bool {
     let mut buf = [0u16; 16];
     let n = unsafe { GetClassNameW(h, &mut buf) } as usize;
@@ -1331,11 +1359,27 @@ fn save_job() {
             info_box(a.frame, "同期ジョブの名前を入力してください。");
             return;
         }
+        let options = a.sync_options();
+        let dst = PathBuf::from(text_of(a.edits.dst).trim());
+        // ミラーで消すファイルの隔離フォルダの場所は、ジョブを保存するときに選ぶ（定期実行で使う）
+        let trash_root = if options.mode == Mode::Mirror {
+            match choose_trash(
+                a.frame,
+                "このジョブのミラーで送り先から消すファイル",
+                &format!("送り先（{}）", dst.display()),
+            ) {
+                Some(t) => t,
+                None => return,
+            }
+        } else {
+            None
+        };
         let job = SyncJob {
             name: name.clone(),
             src: PathBuf::from(text_of(a.edits.src).trim()),
-            dst: PathBuf::from(text_of(a.edits.dst).trim()),
-            options: a.sync_options(),
+            dst,
+            options,
+            trash_root,
         };
         let new = a.jobs.get(&name).is_none();
         a.jobs.put(job);
@@ -1452,7 +1496,23 @@ fn cmd_run(resume: bool) {
             }
             let id = a.dirs.next_run_id();
             let opts = a.sync_options();
-            let run = Run::new(id, plan, opts.mode, &local_stamp());
+            let mut run = Run::new(id, plan, opts.mode, &local_stamp());
+            let deletes = plan.count(Action::Delete);
+            if deletes > 0 {
+                match choose_trash(
+                    a.frame,
+                    &format!("ミラーで送り先から消す {deletes} 件"),
+                    &format!("送り先（{}）", plan.dst_root.display()),
+                ) {
+                    Some(Some(t)) => run.trash_root = t,
+                    Some(None) => {}
+                    None => return,
+                }
+                a.log_line(&format!(
+                    "隔離フォルダの場所: {}",
+                    run.trash_root.join(yy_files::purge::TRASH_DIR).display()
+                ));
+            }
             (run, yy_files::sync::journal_path(&a.dirs.runs(), id))
         };
         // 一覧は実行の項目にする（何かするものだけ）
@@ -2060,13 +2120,35 @@ fn cmd_purge() {
             return;
         }
         let emptied = a.review.emptied_groups().len();
+        // 共有フォルダのファイルは隔離フォルダへ移す。その場所を選んでもらう
+        let shared = a
+            .review
+            .items
+            .iter()
+            .filter(|c| c.checked && !c.keep && is_network(&c.root))
+            .count();
+        let trash_base = if shared > 0 {
+            match choose_trash(
+                a.frame,
+                &format!("共有フォルダのファイル {shared} 件"),
+                "それぞれのファイルのある共有（同期・検索したフォルダ）",
+            ) {
+                Some(t) => t,
+                None => return,
+            }
+        } else {
+            None
+        };
+        let where_ = match &trash_base {
+            Some(b) => b.join(yy_files::purge::TRASH_DIR).display().to_string(),
+            None => format!("それぞれの共有の {}", yy_files::purge::TRASH_DIR),
+        };
         let text = format!(
             "チェックした {n} 件（{}）を削除します。\n\n\
              ・手元のドライブのファイルはごみ箱へ送ります。\n\
-             ・共有フォルダのファイルは、同じ共有の隔離フォルダ（{}）へ移します（{} 日後に消せます）。\n{}\n\
+             ・共有フォルダのファイルは、隔離フォルダ（{where_}）へ移します（{} 日後に消せます）。\n{}\n\
              よろしいですか？",
             yy_files::human_size(bytes),
-            yy_files::purge::TRASH_DIR,
             a.config.filemanager.trash_days,
             if emptied > 0 {
                 format!(
@@ -2087,12 +2169,16 @@ fn cmd_purge() {
         if r != IDOK {
             return;
         }
-        start_purge(a, None);
+        start_purge(a, None, trash_base);
     });
 }
 
 /// 削除を始める（`only` を渡したら、そのファイルだけを隔離フォルダを使わずにすぐに消す）。
-fn start_purge(a: &mut App, only: Option<std::collections::HashSet<PathBuf>>) {
+fn start_purge(
+    a: &mut App,
+    only: Option<std::collections::HashSet<PathBuf>>,
+    trash_base: Option<PathBuf>,
+) {
     let direct = only.is_some();
     let mut review = a.review.clone();
     if let Some(only) = &only {
@@ -2119,6 +2205,7 @@ fn start_purge(a: &mut App, only: Option<std::collections::HashSet<PathBuf>>) {
             &yy_files::Local,
             &review,
             &stamp,
+            trash_base.as_deref(),
             &protect,
             &log,
             yy_files::purge::PurgeHooks {
@@ -2490,7 +2577,7 @@ fn handle(m: Msg) {
                 };
                 if ok(&text) && ok("本当に消しますか？ 消したファイルは元に戻せません。")
                 {
-                    with(|a| start_purge(a, Some(no_trash)));
+                    with(|a| start_purge(a, Some(no_trash), None));
                 }
             }
         }
