@@ -491,6 +491,7 @@ mod tests {
     /// （Wine など）では本文をテキスト欄に表示する。
     #[test]
     fn opens_help_window_at_section() {
+        let _serial = crate::preview::testing::webview2_lock();
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();

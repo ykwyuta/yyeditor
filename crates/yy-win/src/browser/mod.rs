@@ -9,7 +9,10 @@
 
 mod adblock;
 mod bookmarkui;
+mod cookieui;
+mod downloads;
 mod filterdlg;
+mod historyui;
 mod proxydlg;
 
 use std::cell::{Cell, RefCell};
@@ -65,6 +68,7 @@ const ID_ZOOM_OUT: u16 = 6111;
 const ID_ZOOM_RESET: u16 = 6112;
 const ID_FULLSCREEN: u16 = 6113;
 const ID_DEVTOOLS: u16 = 6114;
+const ID_COOKIES: u16 = 6115;
 const ID_PROXY_SETTINGS: u16 = 6120;
 const ID_HELP: u16 = 6130;
 const ID_ABOUT: u16 = 6131;
@@ -75,6 +79,12 @@ const ID_AB_UPDATE: u16 = 6142;
 const ID_AB_LISTS: u16 = 6143;
 const ID_BM_ADD: u16 = 6150;
 const ID_BM_MANAGE: u16 = 6151;
+const ID_HISTORY: u16 = 6160;
+const ID_DOWNLOADS: u16 = 6161;
+const ID_CLEAR_DATA: u16 = 6162;
+/// 検索エンジンの候補（`ID_SE_BASE + 番号`）
+const ID_SE_BASE: u16 = 6170;
+const ID_SE_CUSTOM: u16 = 6189;
 /// メニューのブックマーク（`ID_BM_BASE + 番号`）
 const ID_BM_BASE: u16 = 7000;
 /// プロキシのプロファイルの切り替え（`ID_PROFILE_BASE + 番号`）
@@ -106,6 +116,8 @@ struct Tab {
     nav_url: String,
     /// 今のページの非表示の情報（汎用の規則を調べるときに使う）
     cosmetic: Option<yy_adblock::PageCosmetic>,
+    /// まだ履歴に書いていない今のページ（題名が後から変わるので、次の移動・閉じるときに書く）
+    pending_visit: Option<yy_browser::history::Visit>,
 }
 
 struct App {
@@ -128,6 +140,13 @@ struct App {
     adblock: Option<Arc<yy_adblock::AdBlocker>>,
     /// フィルタを更新中
     adblock_busy: bool,
+    /// 進行中のダウンロード
+    downloads: Vec<downloads::Download>,
+    next_download: u64,
+    /// 利用者が中止したダウンロード（失敗と見分ける）
+    cancelled: Vec<u64>,
+    /// 最後に履歴に書いた URL（再読み込みで同じものを続けて書かない）
+    last_visit: String,
     /// アドレスバーの左の表示（開発者用証明書を利用中・転送中）。当てはまらなければ隠す
     badge: HWND,
     badge_visible: bool,
@@ -162,6 +181,8 @@ thread_local! {
     static AB_MENU: Cell<isize> = const { Cell::new(0) };
     /// メニューバーの「ブックマーク」（開くときに中身を作る）
     static BM_MENU: Cell<isize> = const { Cell::new(0) };
+    /// 「検索エンジン」のサブメニュー（開くときに中身を作る）
+    static SE_MENU: Cell<isize> = const { Cell::new(0) };
 }
 
 /// 開発者用証明書を置くフォルダ（設定のフォルダの `browser-devcerts`）。
@@ -314,8 +335,12 @@ fn run_inner(args: Vec<String>) -> Result<()> {
             DispatchMessageW(&msg);
         }
     }
-    // WebView2 を先に閉じる
-    let tabs = with(|a| std::mem::take(&mut a.tabs)).unwrap_or_default();
+    // WebView2 を先に閉じる（まだ書いていない履歴は書く）
+    let tabs = with(|a| {
+        a.flush_visits();
+        std::mem::take(&mut a.tabs)
+    })
+    .unwrap_or_default();
     for t in tabs {
         if let Some(c) = t.controller {
             unsafe {
@@ -346,6 +371,10 @@ fn create_menu(profiles: &ProfileList, current: &str) -> Result<HMENU> {
         add(file, ID_FIND, "ページ内を検索(&F)...\tCtrl+F");
         add(file, ID_PRINT, "印刷(&P)...\tCtrl+P");
         let _ = AppendMenuW(file, MF_SEPARATOR, 0, None);
+        if let Ok(se) = CreatePopupMenu() {
+            SE_MENU.with(|c| c.set(se.0 as isize));
+            let _ = AppendMenuW(file, MF_POPUP, se.0 as usize, w!("検索エンジン(&E)"));
+        }
         add(file, ID_SETTINGS, "設定ファイルを開く(&S)");
         add(file, ID_EXIT, "終了(&X)");
         let view = CreatePopupMenu()?;
@@ -355,12 +384,22 @@ fn create_menu(profiles: &ProfileList, current: &str) -> Result<HMENU> {
         let _ = AppendMenuW(view, MF_SEPARATOR, 0, None);
         add(view, ID_FULLSCREEN, "全画面(&F)\tF11");
         add(view, ID_DEVTOOLS, "開発者ツール(&D)\tF12");
+        add(view, ID_COOKIES, "Cookie の編集(&K)...");
         let proxy = CreatePopupMenu()?;
         fill_proxy_menu(proxy, profiles, current);
         let ab = CreatePopupMenu()?;
         AB_MENU.with(|c| c.set(ab.0 as isize));
         let bm = CreatePopupMenu()?;
         BM_MENU.with(|c| c.set(bm.0 as isize));
+        let hist = CreatePopupMenu()?;
+        add(hist, ID_HISTORY, "閲覧履歴(&H)...\tCtrl+H");
+        add(hist, ID_DOWNLOADS, "ダウンロード(&D)...\tCtrl+J");
+        let _ = AppendMenuW(hist, MF_SEPARATOR, 0, None);
+        add(
+            hist,
+            ID_CLEAR_DATA,
+            "閲覧データの消去(&C)...\tCtrl+Shift+Del",
+        );
         let help = CreatePopupMenu()?;
         add(help, ID_HELP, "yybrowser ヘルプ(&H)\tF1");
         add(help, ID_ABOUT, "yybrowser について(&A)");
@@ -368,6 +407,7 @@ fn create_menu(profiles: &ProfileList, current: &str) -> Result<HMENU> {
             (file, "ファイル(&F)"),
             (view, "表示(&V)"),
             (bm, "ブックマーク(&B)"),
+            (hist, "履歴(&Y)"),
             (proxy, "プロキシ(&P)"),
             (ab, "広告ブロック(&A)"),
             (help, "ヘルプ(&H)"),
@@ -578,6 +618,10 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
             bookmarks: bookmarkui::load(),
             adblock: None,
             adblock_busy: false,
+            downloads: Vec::new(),
+            next_download: 0,
+            cancelled: Vec::new(),
+            last_visit: String::new(),
             badge,
             badge_visible: false,
             find_bar,
@@ -878,6 +922,31 @@ impl App {
         }
     }
 
+    /// 閲覧履歴のファイル（プロファイルのデータのフォルダ）。
+    fn history_path(&self) -> PathBuf {
+        data_folder(&self.profile).join("yybrowser-history.tsv")
+    }
+
+    /// タブのまだ書いていない履歴を書く。
+    fn flush_visit(&mut self, i: usize) {
+        let Some(v) = self.tabs.get_mut(i).and_then(|t| t.pending_visit.take()) else {
+            return;
+        };
+        if !yy_browser::history::worth_recording(&v.url) || v.url == self.last_visit {
+            return;
+        }
+        self.last_visit = v.url.clone();
+        let _ =
+            yy_browser::history::append(&self.history_path(), &v, yy_browser::history::MAX_VISITS);
+    }
+
+    /// すべてのタブのまだ書いていない履歴を書く。
+    fn flush_visits(&mut self) {
+        for i in 0..self.tabs.len() {
+            self.flush_visit(i);
+        }
+    }
+
     /// 広告ブロックのボタンの表示（切・止めないサイト・準備中・止めた数）。
     fn refresh_shield(&self) {
         let Some(t) = self.tabs.get(self.current) else {
@@ -1144,6 +1213,9 @@ fn add_events(
                     let title = take_string(|p| w.DocumentTitle(p));
                     with(|a| {
                         if let Some(i) = a.index_of(id) {
+                            if let Some(v) = a.tabs[i].pending_visit.as_mut() {
+                                v.title = title.clone();
+                            }
                             a.tabs[i].title = title;
                             a.refresh_tab_label(i);
                         }
@@ -1184,6 +1256,7 @@ fn add_events(
                 let uri = args.map(|a| take_string(|p| a.Uri(p))).unwrap_or_default();
                 with(|a| {
                     if let Some(i) = a.index_of(id) {
+                        a.flush_visit(i);
                         a.tabs[i].loading = true;
                         a.tabs[i].nav_url = uri;
                         a.tabs[i].blocked = 0;
@@ -1206,6 +1279,14 @@ fn add_events(
                 with(|a| {
                     if let Some(i) = a.index_of(id) {
                         a.tabs[i].loading = false;
+                        if ok.as_bool() {
+                            a.flush_visit(i);
+                            a.tabs[i].pending_visit = Some(yy_browser::history::Visit {
+                                time: yy_adblock::lists::now(),
+                                url: a.tabs[i].url.clone(),
+                                title: a.tabs[i].title.clone(),
+                            });
+                        }
                         a.refresh_tab_label(i);
                         if i == a.current {
                             if ok.as_bool() {
@@ -1278,6 +1359,18 @@ fn add_events(
                 &ServerCertificateErrorDetectedEventHandler::create(Box::new(move |_, args| {
                     if let Some(args) = args {
                         server_certificate_error(&args);
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            )?;
+        }
+        // ダウンロード（既定の吹き出しは出さず、保存先・進み具合はこちらで）
+        if let Ok(w4) = webview.cast::<ICoreWebView2_4>() {
+            w4.add_DownloadStarting(
+                &DownloadStartingEventHandler::create(Box::new(move |_, args| {
+                    if let (Some(args), Some(frame)) = (args, with(|a| a.frame)) {
+                        downloads::on_starting(frame, &args);
                     }
                     Ok(())
                 })),
@@ -1731,6 +1824,259 @@ fn shield_menu() {
     }
 }
 
+// ---- Cookie の編集（開発者用。19 章 4.5） ------------------------------------------------
+
+/// 表示中のページの Cookie を編集する。変えたら、読み直すかを尋ねる。
+fn edit_cookies() {
+    let Some((frame, url)) = with(|a| {
+        (
+            a.frame,
+            a.tabs
+                .get(a.current)
+                .map(|t| t.url.clone())
+                .unwrap_or_default(),
+        )
+    }) else {
+        return;
+    };
+    if yy_browser::rules::url_host_port(&url).is_none() {
+        info_box(
+            frame,
+            "Cookie を編集するには、http・https のページを開いてください。",
+        );
+        return;
+    }
+    let Some((webview, _)) = current_web() else {
+        return;
+    };
+    let manager = webview
+        .cast::<ICoreWebView2_2>()
+        .ok()
+        .and_then(|w| unsafe { w.CookieManager() }.ok());
+    let Some(manager) = manager else {
+        error_box(
+            frame,
+            "この WebView2 のランタイムでは Cookie を編集できません。",
+        );
+        return;
+    };
+    if cookieui::show(frame, manager, url) {
+        let reload = unsafe {
+            MessageBoxW(
+                Some(frame),
+                w!("Cookie を変えました。ページを読み直しますか？"),
+                w!("yybrowser"),
+                MB_YESNO | MB_ICONQUESTION,
+            )
+        } == IDYES;
+        if reload {
+            unsafe {
+                let _ = webview.Reload();
+            }
+        }
+    }
+}
+
+// ---- 履歴・閲覧データ・検索エンジン（19 章 4.2・4.4） ---------------------------------
+
+/// 閲覧履歴の画面。
+fn show_history() {
+    let Some((frame, path)) = with(|a| {
+        a.flush_visits();
+        (a.frame, a.history_path())
+    }) else {
+        return;
+    };
+    match historyui::show(frame, path) {
+        historyui::HistoryResult::Open(url, true) => new_tab(Some(&url)),
+        historyui::HistoryResult::Open(url, false) => open_in_current(&url),
+        historyui::HistoryResult::Clear => clear_data(),
+        historyui::HistoryResult::None => {}
+    }
+}
+
+/// 閲覧データの消去（このプロファイル）。
+fn clear_data() {
+    let Some(frame) = with(|a| {
+        a.flush_visits();
+        a.frame
+    }) else {
+        return;
+    };
+    let Some(req) = historyui::clear_dialog(frame) else {
+        return;
+    };
+    let now = yy_adblock::lists::now();
+    let since = req.within.map(|w| now.saturating_sub(w));
+    // yybrowser の履歴のファイル
+    let mut notes = Vec::new();
+    with(|a| {
+        if req.history {
+            let _ = yy_browser::history::remove_since::<yy_browser::history::Visit>(
+                &a.history_path(),
+                since,
+            );
+            a.last_visit.clear();
+            for t in &mut a.tabs {
+                t.pending_visit = None;
+            }
+        }
+        if req.downloads {
+            let _ = yy_browser::history::remove_since::<yy_browser::history::DownloadRecord>(
+                &downloads::log_path(a),
+                since,
+            );
+        }
+    });
+    // WebView2 のデータ（このプロファイルのデータのフォルダ）
+    let mut kinds = 0i32;
+    if req.history {
+        kinds |= COREWEBVIEW2_BROWSING_DATA_KINDS_BROWSING_HISTORY.0;
+    }
+    if req.downloads {
+        kinds |= COREWEBVIEW2_BROWSING_DATA_KINDS_DOWNLOAD_HISTORY.0;
+    }
+    if req.cache {
+        kinds |= COREWEBVIEW2_BROWSING_DATA_KINDS_DISK_CACHE.0
+            | COREWEBVIEW2_BROWSING_DATA_KINDS_CACHE_STORAGE.0;
+    }
+    if req.cookies {
+        kinds |= COREWEBVIEW2_BROWSING_DATA_KINDS_ALL_SITE.0;
+    }
+    if req.autofill {
+        kinds |= COREWEBVIEW2_BROWSING_DATA_KINDS_GENERAL_AUTOFILL.0
+            | COREWEBVIEW2_BROWSING_DATA_KINDS_PASSWORD_AUTOSAVE.0;
+    }
+    let profile = current_web().and_then(|(w, _)| {
+        let w13 = w.cast::<ICoreWebView2_13>().ok()?;
+        unsafe { w13.Profile() }
+            .ok()?
+            .cast::<ICoreWebView2Profile2>()
+            .ok()
+    });
+    match profile {
+        Some(p) if kinds != 0 => {
+            let handler =
+                ClearBrowsingDataCompletedHandler::create(Box::new(move |r: Result<()>| {
+                    with(|a| {
+                        a.set_status(if r.is_ok() {
+                            "閲覧データを消去しました"
+                        } else {
+                            "閲覧データの一部を消去できませんでした"
+                        })
+                    });
+                    Ok(())
+                }));
+            let kinds = COREWEBVIEW2_BROWSING_DATA_KINDS(kinds);
+            let r = unsafe {
+                match since {
+                    Some(s) => {
+                        p.ClearBrowsingDataInTimeRange(kinds, s as f64, now as f64 + 60.0, &handler)
+                    }
+                    None => p.ClearBrowsingData(kinds, &handler),
+                }
+            };
+            if r.is_err() {
+                notes.push("ブラウザのデータは消去できませんでした");
+            }
+        }
+        None if req.cache || req.cookies || req.autofill => {
+            notes.push("ページを開いてから消去すると、キャッシュ・Cookie なども消せます");
+        }
+        _ => {}
+    }
+    with(|a| {
+        a.set_status(&if notes.is_empty() {
+            "閲覧データを消去しています…".to_owned()
+        } else {
+            format!("履歴を消去しました（{}）", notes.join("・"))
+        })
+    });
+}
+
+/// 「検索エンジン」のサブメニューを作る（今のものに印）。
+fn fill_search_menu(m: HMENU) {
+    let current = with(|a| {
+        a.profiles
+            .effective_search_url(&a.config.browser.search_url)
+            .to_owned()
+    })
+    .unwrap_or_default();
+    unsafe {
+        while GetMenuItemCount(Some(m)) > 0 {
+            let _ = DeleteMenu(m, 0, MF_BYPOSITION);
+        }
+        for (i, e) in yy_browser::history::SEARCH_ENGINES.iter().enumerate() {
+            let flags = if e.url == current {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            };
+            let _ = AppendMenuW(m, flags, ID_SE_BASE as usize + i, &HSTRING::from(e.name));
+        }
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        let custom = yy_browser::history::search_engine_name(&current).is_none();
+        let label = if custom {
+            format!("その他（{current}）(&O)...")
+        } else {
+            "その他（URL を入れる）(&O)...".to_owned()
+        };
+        let _ = AppendMenuW(
+            m,
+            if custom {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            },
+            ID_SE_CUSTOM as usize,
+            &HSTRING::from(label.replace('&', "&&").replace("&&O)", "&O)")),
+        );
+    }
+}
+
+/// 検索の URL を変えて保存する。
+fn set_search_url(url: &str) {
+    let Some((frame, list)) = with(|a| {
+        a.profiles.search_url = url.to_owned();
+        (a.frame, a.profiles.clone())
+    }) else {
+        return;
+    };
+    match list.save(&profiles_path()) {
+        Ok(()) => {
+            let name = yy_browser::history::search_engine_name(url).unwrap_or(url);
+            with(|a| a.set_status(&format!("アドレスバーの検索: {name}")));
+        }
+        Err(e) => error_box(frame, &format!("保存できません: {e}")),
+    }
+}
+
+/// 候補にない検索エンジン（URL を入れる）。
+fn custom_search_engine() {
+    let Some((frame, current)) = with(|a| {
+        (
+            a.frame,
+            a.profiles
+                .effective_search_url(&a.config.browser.search_url)
+                .to_owned(),
+        )
+    }) else {
+        return;
+    };
+    let Some(url) = crate::goto::prompt_text(
+        frame,
+        "検索エンジン",
+        "検索の URL（検索語の場所に %s。例: https://example.com/search?q=%s）:",
+        &current,
+    ) else {
+        return;
+    };
+    match yy_browser::history::validate_search_url(&url) {
+        Ok(()) => set_search_url(url.trim()),
+        Err(e) => error_box(frame, &e),
+    }
+}
+
 // ---- ブックマーク（19 章 4.1） ---------------------------------------------------------
 
 /// 今のページをブックマークに足す（登録済みなら編集・削除）。
@@ -1873,6 +2219,7 @@ fn new_tab(url: Option<&str>) {
             blocked: 0,
             nav_url: String::new(),
             cosmetic: None,
+            pending_visit: None,
         };
         let i = a.tabs.len();
         a.tabs.push(t);
@@ -1926,6 +2273,7 @@ fn close_tab(i: usize) {
         if i >= a.tabs.len() {
             return None;
         }
+        a.flush_visit(i);
         let t = a.tabs.remove(i);
         if !t.url.is_empty() && t.url != "about:blank" {
             a.closed.push(t.url.clone());
@@ -1968,8 +2316,14 @@ fn close_tab(i: usize) {
 
 /// アドレスバーの内容を開く。
 fn go_address() {
-    let Some((text, search)) = with(|a| (text_of(a.address), a.config.browser.search_url.clone()))
-    else {
+    let Some((text, search)) = with(|a| {
+        (
+            text_of(a.address),
+            a.profiles
+                .effective_search_url(&a.config.browser.search_url)
+                .to_owned(),
+        )
+    }) else {
         return;
     };
     let Some(url) = yy_browser::input::to_url(&text, &search) else {
@@ -2314,6 +2668,8 @@ fn is_shortcut(vk: u16) -> bool {
             k,
             VK_T | VK_W
                 | VK_D
+                | VK_H
+                | VK_J
                 | VK_N
                 | VK_L
                 | VK_F
@@ -2327,7 +2683,8 @@ fn is_shortcut(vk: u16) -> bool {
                 | VK_0
                 | VK_NUMPAD0
         ) || (VK_1.0..=VK_9.0).contains(&vk)
-            || (k == VK_O && m & 2 != 0);
+            || (k == VK_O && m & 2 != 0)
+            || (k == VK_DELETE && m & 2 != 0);
     }
     if alt {
         return matches!(k, VK_LEFT | VK_RIGHT | VK_HOME | VK_D);
@@ -2347,6 +2704,9 @@ fn shortcut(vk: u16, mods: u8) -> bool {
         (true, _, VK_T) => command(ID_NEW_TAB),
         (true, _, VK_W) => command(ID_CLOSE_TAB),
         (true, _, VK_D) => command(ID_BM_ADD),
+        (true, _, VK_H) => command(ID_HISTORY),
+        (true, _, VK_J) => command(ID_DOWNLOADS),
+        (true, _, VK_DELETE) if shift => command(ID_CLEAR_DATA),
         (true, _, VK_O) if shift => command(ID_BM_MANAGE),
         (true, _, VK_N) => command(ID_NEW_WINDOW),
         (true, _, VK_L) => command_focus_address(),
@@ -2520,6 +2880,20 @@ fn command(id: u16) {
         ID_BADGE => show_badge_details(),
         ID_SHIELD => shield_menu(),
         ID_STAR | ID_BM_ADD => bookmark_page(),
+        ID_COOKIES => edit_cookies(),
+        ID_HISTORY => show_history(),
+        ID_DOWNLOADS => {
+            if let Some(f) = with(|a| a.frame) {
+                downloads::show(f);
+            }
+        }
+        ID_CLEAR_DATA => clear_data(),
+        ID_SE_CUSTOM => custom_search_engine(),
+        id if (ID_SE_BASE..ID_SE_BASE + yy_browser::history::SEARCH_ENGINES.len() as u16)
+            .contains(&id) =>
+        {
+            set_search_url(yy_browser::history::SEARCH_ENGINES[(id - ID_SE_BASE) as usize].url);
+        }
         ID_BM_MANAGE => manage_bookmarks(),
         id if (ID_BM_BASE..ID_BM_BASE + bookmarkui::MENU_MAX as u16).contains(&id) => {
             let url = with(|a| {
@@ -2698,6 +3072,21 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 }
             }
             with(|a| fill_adblock_menu(m, a));
+            LRESULT(0)
+        }
+        WM_INITMENUPOPUP if wparam.0 as isize == SE_MENU.with(|c| c.get()) => {
+            let m = HMENU(wparam.0 as *mut _);
+            fill_search_menu(m);
+            LRESULT(0)
+        }
+        downloads::WM_APP_DOWNLOAD_DONE => {
+            let f = unsafe { Box::from_raw(lparam.0 as *mut downloads::Finished) };
+            downloads::finished(*f);
+            LRESULT(0)
+        }
+        downloads::WM_APP_DOWNLOAD_ASK => {
+            let b = unsafe { Box::from_raw(lparam.0 as *mut downloads::Ask) };
+            downloads::ask(hwnd, *b);
             LRESULT(0)
         }
         WM_INITMENUPOPUP if wparam.0 as isize == BM_MENU.with(|c| c.get()) => {
@@ -2905,6 +3294,7 @@ mod tests {
     fn pages_go_through_the_profile_proxy_in_webview2() {
         use std::io::{Read, Write};
         use std::sync::{Arc, Mutex};
+        let _serial = crate::preview::testing::webview2_lock();
         let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -3040,6 +3430,7 @@ mod tests {
     fn rules_host_maps_and_dev_certificates_in_webview2() {
         use std::io::{Read, Write};
         use std::sync::{Arc, Mutex};
+        let _serial = crate::preview::testing::webview2_lock();
         let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -3232,6 +3623,7 @@ mod tests {
         use std::rc::Rc;
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
+        let _serial = crate::preview::testing::webview2_lock();
         let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -3454,6 +3846,457 @@ mod tests {
         assert!(
             !seen.iter().any(|p| p.starts_with("/ads/")),
             "広告の要求が届きました: {seen:?}"
+        );
+    }
+
+    /// ダウンロード: 既定の吹き出しを出さず（Handled）、決めた保存先（ResultFilePath）に保存できることを、
+    /// 本物の WebView2 で確かめる（`downloads::on_starting` と同じ呼び方）。同じ名前があれば番号を付ける。
+    #[test]
+    fn downloads_go_to_the_chosen_path_in_webview2() {
+        use std::io::{Read, Write};
+        use std::rc::Rc;
+        use std::time::Duration;
+        let _serial = crate::preview::testing::webview2_lock();
+        let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let b2 = body.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+                     Content-Disposition: attachment; filename=\"data.bin\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    b2.len()
+                );
+                let _ = stream.write_all(&b2);
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("yybrowser-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 同じ名前のファイルがあるので「data (1).bin」になる
+        std::fs::write(dir.join("data.bin"), b"old").unwrap();
+        let target = downloads::unique_path(&dir, "data.bin");
+        assert!(target.ends_with("data (1).bin"), "{}", target.display());
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("yybrowser download test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let Ok(create) = crate::preview::create_environment_fn() else {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        };
+        let options: ICoreWebView2EnvironmentOptions =
+            CoreWebView2EnvironmentOptions::default().into();
+        // 0: 待ち、2: ダウンロードが始まった
+        let started: Rc<std::cell::Cell<i32>> = Rc::default();
+        let failed: Rc<std::cell::Cell<bool>> = Rc::default();
+        let op: Rc<RefCell<Option<ICoreWebView2DownloadOperation>>> = Rc::default();
+        let url = format!("http://127.0.0.1:{port}/data.bin");
+        let (s1, f1, t1, u1, op1) = (
+            started.clone(),
+            failed.clone(),
+            target.clone(),
+            url.clone(),
+            op.clone(),
+        );
+        let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
+            move |res: Result<()>, env: Option<ICoreWebView2Environment>| {
+                let Some(env) = env.filter(|_| res.is_ok()) else {
+                    f1.set(true);
+                    return Ok(());
+                };
+                let (s1, f1, t1, u1, op1) =
+                    (s1.clone(), f1.clone(), t1.clone(), u1.clone(), op1.clone());
+                let on_controller = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
+                    move |res: Result<()>, c: Option<ICoreWebView2Controller>| {
+                        let Some(c) = c.filter(|_| res.is_ok()) else {
+                            f1.set(true);
+                            return Ok(());
+                        };
+                        let w = unsafe { c.CoreWebView2()? };
+                        let mut token = 0i64;
+                        let (t2, op2, s2) = (t1.clone(), op1.clone(), s1.clone());
+                        unsafe {
+                            w.cast::<ICoreWebView2_4>()?.add_DownloadStarting(
+                                &DownloadStartingEventHandler::create(Box::new(move |_, args| {
+                                    let Some(args) = args else { return Ok(()) };
+                                    args.SetHandled(true)?;
+                                    args.SetResultFilePath(&HSTRING::from(t2.as_os_str()))?;
+                                    // 操作は手放さない（本物でも一覧に持っている）
+                                    *op2.borrow_mut() = Some(args.DownloadOperation()?);
+                                    s2.set(2);
+                                    Ok(())
+                                })),
+                                &mut token,
+                            )?;
+                        }
+                        std::mem::forget(c);
+                        unsafe { w.Navigate(&HSTRING::from(u1.as_str()))? };
+                        Ok(())
+                    },
+                ));
+                unsafe {
+                    env.CreateCoreWebView2Controller(parent, &on_controller)?;
+                }
+                std::mem::forget(env);
+                Ok(())
+            },
+        ));
+        let folder = std::env::temp_dir().join(format!("yybrowser-dl-data-{}", std::process::id()));
+        let folder_w = HSTRING::from(folder.as_os_str());
+        let hr = unsafe {
+            create(
+                PCWSTR::null(),
+                PCWSTR(folder_w.as_ptr()),
+                options.as_raw(),
+                handler.as_raw(),
+            )
+        };
+        if hr.is_err() {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        }
+        // 操作の状態を見ながら待つ（終わり・止まり）
+        let dl = || {
+            let mut st = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+            let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
+            let mut got = 0i64;
+            if let Some(o) = op.borrow().as_ref() {
+                unsafe {
+                    let _ = o.State(&mut st);
+                    let _ = o.InterruptReason(&mut reason);
+                    let _ = o.BytesReceived(&mut got);
+                }
+            }
+            (st, reason.0, got)
+        };
+        crate::preview::testing::pump_until(Duration::from_secs(90), || {
+            failed.get()
+                || (started.get() == 2 && dl().0 != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS)
+        });
+        if failed.get() {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        }
+        assert_eq!(
+            started.get(),
+            2,
+            "ダウンロードが始まりません（DownloadStarting が来ない）"
+        );
+        let (st, reason, got) = dl();
+        assert_eq!(
+            st, COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED,
+            "ダウンロードが終わりません（理由 {reason}・{got} バイト）"
+        );
+        // 終わったと知らせてから、ファイルの名前が付くまで少し待つことがある
+        crate::preview::testing::pump_until(Duration::from_secs(10), || {
+            std::fs::metadata(&target).map(|m| m.len()).ok() == Some(body.len() as u64)
+        });
+        assert_eq!(std::fs::read(&target).unwrap(), body);
+        assert_eq!(std::fs::read(dir.join("data.bin")).unwrap(), b"old");
+        // 同じ内容のファイル（名前は違う）が前からあれば、ダウンロードしたものは破棄する（downloads::finished と同じ）
+        assert_eq!(
+            yy_browser::history::discard_if_duplicate(&target).unwrap(),
+            None
+        );
+        std::fs::write(dir.join("copy.bin"), &body).unwrap();
+        let dup = yy_browser::history::discard_if_duplicate(&target).unwrap();
+        assert_eq!(dup.as_deref(), Some(dir.join("copy.bin").as_path()));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn formats_local_times() {
+        let s = historyui::local_time(1_700_000_000);
+        assert!(s.starts_with("2023-11-1"), "{s}");
+        assert_eq!(s.len(), 16);
+    }
+
+    /// Cookie の編集: 本物と同じ `cookieui::apply`・`fields_of` で入れた Cookie が、取り直しても同じで、
+    /// ページ（document.cookie）とサーバーに届き、HttpOnly はページから見えず、消せることを確かめる。
+    #[test]
+    fn edits_cookies_in_webview2() {
+        use std::io::{Read, Write};
+        use std::rc::Rc;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+        use yy_browser::cookies::{CookieFields, SameSite};
+        let _serial = crate::preview::testing::webview2_lock();
+        let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let headers: Arc<Mutex<Vec<String>>> = Arc::default();
+        let h2 = headers.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(c) = text.lines().find_map(|l| {
+                    l.strip_prefix("Cookie: ")
+                        .or_else(|| l.strip_prefix("cookie: "))
+                }) {
+                    h2.lock().unwrap().push(c.to_owned());
+                }
+                let body = "<html><head><title>c</title></head><body>cookies</body></html>";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("yybrowser cookie test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let url = format!("http://127.0.0.1:{port}/");
+        let Ok(create) = crate::preview::create_environment_fn() else {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        };
+        let options: ICoreWebView2EnvironmentOptions =
+            CoreWebView2EnvironmentOptions::default().into();
+        let web: Rc<RefCell<Option<ICoreWebView2>>> = Rc::default();
+        let loads: Rc<std::cell::Cell<u32>> = Rc::default();
+        let failed: Rc<std::cell::Cell<bool>> = Rc::default();
+        let (w1, l1, f1, u1) = (web.clone(), loads.clone(), failed.clone(), url.clone());
+        let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
+            move |res: Result<()>, env: Option<ICoreWebView2Environment>| {
+                let Some(env) = env.filter(|_| res.is_ok()) else {
+                    f1.set(true);
+                    return Ok(());
+                };
+                let (w1, l1, f1, u1) = (w1.clone(), l1.clone(), f1.clone(), u1.clone());
+                let on_controller = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
+                    move |res: Result<()>, c: Option<ICoreWebView2Controller>| {
+                        let Some(c) = c.filter(|_| res.is_ok()) else {
+                            f1.set(true);
+                            return Ok(());
+                        };
+                        let w = unsafe { c.CoreWebView2()? };
+                        let mut token = 0i64;
+                        let l2 = l1.clone();
+                        unsafe {
+                            w.add_NavigationCompleted(
+                                &NavigationCompletedEventHandler::create(Box::new(move |_, _| {
+                                    l2.set(l2.get() + 1);
+                                    Ok(())
+                                })),
+                                &mut token,
+                            )?;
+                        }
+                        *w1.borrow_mut() = Some(w.clone());
+                        std::mem::forget(c);
+                        unsafe { w.Navigate(&HSTRING::from(u1.as_str()))? };
+                        Ok(())
+                    },
+                ));
+                unsafe {
+                    env.CreateCoreWebView2Controller(parent, &on_controller)?;
+                }
+                std::mem::forget(env);
+                Ok(())
+            },
+        ));
+        let folder = std::env::temp_dir().join(format!("yybrowser-cookie-{}", std::process::id()));
+        let folder_w = HSTRING::from(folder.as_os_str());
+        let hr = unsafe {
+            create(
+                PCWSTR::null(),
+                PCWSTR(folder_w.as_ptr()),
+                options.as_raw(),
+                handler.as_raw(),
+            )
+        };
+        if hr.is_err() {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        }
+        crate::preview::testing::pump_until(Duration::from_secs(60), || {
+            loads.get() > 0 || failed.get()
+        });
+        if failed.get() {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        }
+        let w = web.borrow().clone().expect("WebView2");
+        let manager = unsafe {
+            w.cast::<ICoreWebView2_2>()
+                .unwrap()
+                .CookieManager()
+                .unwrap()
+        };
+        let expires = (yy_adblock::lists::now() + 86_400 * 30) as f64;
+        let visible = CookieFields {
+            name: "visible".into(),
+            value: "v1".into(),
+            domain: "127.0.0.1".into(),
+            path: "/".into(),
+            expires: Some(expires),
+            http_only: false,
+            secure: false,
+            same_site: SameSite::Lax,
+        };
+        let secret = CookieFields {
+            name: "secret".into(),
+            value: "s2".into(),
+            http_only: true,
+            expires: None,
+            ..visible.clone()
+        };
+        cookieui::apply(&manager, &visible).unwrap();
+        cookieui::apply(&manager, &secret).unwrap();
+        // 取り直す
+        let get = || -> Vec<CookieFields> {
+            let out: Rc<RefCell<Option<Vec<CookieFields>>>> = Rc::default();
+            let o = out.clone();
+            let h = webview2_com::GetCookiesCompletedHandler::create(Box::new(move |_, list| {
+                let mut v = Vec::new();
+                if let Some(list) = list {
+                    let mut n = 0u32;
+                    unsafe {
+                        let _ = list.Count(&mut n);
+                        for i in 0..n {
+                            if let Ok(c) = list.GetValueAtIndex(i) {
+                                v.push(cookieui::fields_of(&c));
+                            }
+                        }
+                    }
+                }
+                *o.borrow_mut() = Some(v);
+                Ok(())
+            }));
+            unsafe {
+                let _ = manager.GetCookies(&HSTRING::from(url.as_str()), &h);
+            }
+            crate::preview::testing::pump_until(Duration::from_secs(10), || out.borrow().is_some());
+            let mut v = out.borrow_mut().take().unwrap_or_default();
+            v.sort_by(|a, b| a.name.cmp(&b.name));
+            v
+        };
+        let got = get();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].name, "secret");
+        assert!(got[0].http_only);
+        assert_eq!(got[0].expires, None);
+        assert_eq!(got[1].value, "v1");
+        assert!(
+            (got[1].expires.unwrap() - expires).abs() < 2.0,
+            "{:?}",
+            got[1].expires
+        );
+        // 読み直すとサーバーに両方届き、ページからは HttpOnly でないものだけ見える
+        unsafe {
+            w.Reload().unwrap();
+        }
+        crate::preview::testing::pump_until(Duration::from_secs(30), || loads.get() > 1);
+        let sent = headers.lock().unwrap().join(" | ");
+        assert!(
+            sent.contains("visible=v1") && sent.contains("secret=s2"),
+            "{sent}"
+        );
+        let js: Rc<RefCell<Option<String>>> = Rc::default();
+        let j = js.clone();
+        let h = ExecuteScriptCompletedHandler::create(Box::new(move |_, json| {
+            *j.borrow_mut() = Some(json);
+            Ok(())
+        }));
+        unsafe {
+            w.ExecuteScript(w!("document.cookie"), &h).unwrap();
+        }
+        crate::preview::testing::pump_until(Duration::from_secs(10), || js.borrow().is_some());
+        let doc = js.borrow().clone().unwrap_or_default();
+        assert!(
+            doc.contains("visible=v1") && !doc.contains("secret"),
+            "{doc}"
+        );
+        // 消す
+        let out: Rc<RefCell<Option<()>>> = Rc::default();
+        let o = out.clone();
+        let m2 = manager.clone();
+        let h = webview2_com::GetCookiesCompletedHandler::create(Box::new(move |_, list| {
+            if let Some(list) = list {
+                let mut n = 0u32;
+                unsafe {
+                    let _ = list.Count(&mut n);
+                    for i in 0..n {
+                        if let Ok(c) = list.GetValueAtIndex(i)
+                            && cookieui::fields_of(&c).name == "visible"
+                        {
+                            let _ = m2.DeleteCookie(&c);
+                        }
+                    }
+                }
+            }
+            *o.borrow_mut() = Some(());
+            Ok(())
+        }));
+        unsafe {
+            let _ = manager.GetCookies(&HSTRING::from(url.as_str()), &h);
+        }
+        crate::preview::testing::pump_until(Duration::from_secs(10), || out.borrow().is_some());
+        // 消すのは非同期に効くので、消えるまで待つ
+        let mut left = get();
+        for _ in 0..20 {
+            if left.len() == 1 {
+                break;
+            }
+            crate::preview::testing::pump_until(Duration::from_millis(250), || false);
+            left = get();
+        }
+        assert_eq!(
+            left.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["secret"]
         );
     }
 }

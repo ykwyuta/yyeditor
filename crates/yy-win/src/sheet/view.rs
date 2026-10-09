@@ -110,25 +110,22 @@ fn active_col() -> Option<u32> {
 
 /// 表示を計算し直してシートに入れる。`record` なら編集として扱う（Undo できる・変更あり）。
 fn set_view(sheet: usize, mut view: View, record: bool) {
-    let Some((table, ctx)) = with(|a| {
-        (
-            a.doc.book.sheets.get(sheet).map(|s| s.table.clone()),
-            a.ctx.clone(),
-        )
-    }) else {
+    let Some((sh, ctx)) = with(|a| (a.doc.book.sheets.get(sheet).cloned(), a.ctx.clone())) else {
         return;
     };
-    let Some(table) = table else {
+    let Some(sh) = sh else {
         return;
     };
+    let table = sh.table.clone();
     let rows = table.rows;
     let label = if view.is_empty() {
         "解除しています…"
     } else {
         "絞り込み・並べ替えをしています…"
     };
-    let t2 = table.clone();
     let Some(view) = run_bg(label, move || {
+        // 数式のセルは結果の値で
+        let t2 = sh.query_table(&ctx)?;
         query::apply(&ctx, &t2, &mut view)?;
         Ok(view)
     }) else {
@@ -219,8 +216,11 @@ pub(super) fn filter_column(col: Option<u32>) {
         .filter(|f| f.col != col)
         .cloned()
         .collect();
-    let t2 = table.clone();
+    let Some(sh) = with(|a| a.doc.book.sheets.get(sheet).cloned()).flatten() else {
+        return;
+    };
     let Some((counts, blanks, cut)) = run_bg("値の一覧を作っています…", move || {
+        let t2 = sh.query_table(&ctx)?;
         let mask = if others.is_empty() {
             None
         } else {
@@ -412,9 +412,13 @@ pub(super) fn commit_sort() {
     }
     let rows = table.rows;
     let t2 = table.clone();
+    let Some(sh) = with(|a| a.doc.book.sheets.get(sheet).cloned()).flatten() else {
+        return;
+    };
     let Some((new_table, new_view)) =
         run_bg("並べ替えを確定しています…", move || {
-            let order = query::sort(&ctx, &t2, &view.sort, None)?;
+            // 順番は数式の結果の値で決める
+            let order = query::sort(&ctx, &sh.query_table(&ctx)?, &view.sort, None)?;
             let nt = query::permute(&ctx, &t2, &order)?;
             let mut nv = View {
                 filters: view.filters.clone(),

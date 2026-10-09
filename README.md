@@ -113,9 +113,13 @@ A Microsoft Edge WebView2 browser with connection settings independent of the OS
 - **Connection settings**: Choose OS settings, direct connections, HTTP / HTTPS / SOCKS proxies, or PAC. Rules can select different routes for individual domains.
 - **Profiles**: Separate proxy settings, cookies, caches, and login state. Open different profiles in separate windows.
 - **Testing connections**: Map hostnames to specific IP addresses and ports, and accept development certificates only for the configured host and certificate fingerprint.
+- **Cookie editor** (for developers): View, add, edit, and delete the cookies sent to the current page, including HttpOnly cookies, with expiry, Secure, and SameSite settings.
 - **Ad blocking**: Block advertising and tracking requests using EasyList, EasyPrivacy, AdGuard Japanese filters, and other lists. Supports automatic updates, additional lists, site exceptions, and per-profile enable / disable settings.
 - **Bookmarks**: Add pages using the star button or Ctrl+D. Organize folders, edit and reorder entries, and import or export HTML compatible with other browsers. Bookmarks are shared across profiles.
-- **Browsing**: Tabs, reopening closed tabs, page search, zoom, printing, full-screen mode, developer tools, and downloads.
+- **Downloads**: Save to the Downloads folder or a chosen folder (or ask each time), with progress, pause / resume / cancel, and a download list (Ctrl+J). A download whose content already exists in the folder (same SHA-256) is discarded instead of being saved under another name.
+- **History**: Search and reopen visited pages (Ctrl+H), and clear browsing data by period and kind — history, download history, cache, cookies and site data, autofill (Ctrl+Shift+Del). History is kept per profile.
+- **Search engine**: Choose Bing, Google, Yahoo! JAPAN, DuckDuckGo, Brave Search, Startpage, or a custom URL for address-bar searches.
+- **Browsing**: Tabs, reopening closed tabs, page search, zoom, printing, full-screen mode, and developer tools.
 
 See the [yybrowser help](crates/yy-win/help/browser.md) (Japanese) for usage and connection settings.
 
