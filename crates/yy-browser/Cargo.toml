@@ -16,7 +16,6 @@ toml.workspace = true
 sha2.workspace = true
 rcgen = { workspace = true, optional = true }
 
-[dev-dependencies]
 tempfile.workspace = true
 
 [lints]

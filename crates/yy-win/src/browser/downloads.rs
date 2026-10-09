@@ -4,6 +4,25 @@
 //! WebView2 の既定のダウンロードの吹き出しは出さない（`DownloadStarting` で `Handled`）。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static DEDUP_WORKERS: AtomicUsize = AtomicUsize::new(0);
+struct DedupPermit;
+impl DedupPermit {
+    fn acquire() -> Option<Self> {
+        DEDUP_WORKERS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < 2).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+impl Drop for DedupPermit {
+    fn drop(&mut self) {
+        DEDUP_WORKERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::{BytesReceivedChangedEventHandler, StateChangedEventHandler};
@@ -33,6 +52,7 @@ pub(super) struct Download {
     /// 全体の大きさ（わからなければ 0 以下）
     pub total: i64,
     pub paused: bool,
+    history_path: PathBuf,
 }
 
 impl Download {
@@ -61,6 +81,7 @@ impl Download {
 pub(super) struct Ask {
     args: ICoreWebView2DownloadStartingEventArgs,
     deferral: ICoreWebView2Deferral,
+    generation: u64,
 }
 
 /// ダウンロードの履歴のファイル（プロファイルのデータのフォルダ）。
@@ -69,25 +90,64 @@ pub(super) fn log_path(a: &App) -> PathBuf {
 }
 
 /// 同じ名前のファイルがあれば「名前 (1).拡張子」のように空いている名前にする。
-pub(super) fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let p = dir.join(name);
-    if !p.exists() {
-        return p;
-    }
+pub(super) fn unique_path(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let active = with(|a| {
+        a.downloads
+            .iter()
+            .map(|d| PathBuf::from(&d.path))
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    choose_path(dir, name, |p| {
+        if active
+            .iter()
+            .any(|a| a.as_os_str().eq_ignore_ascii_case(p.as_os_str()))
+        {
+            return Ok(false);
+        }
+        match std::fs::symlink_metadata(p) {
+            Ok(_) => Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(e) => Err(e),
+        }
+    })
+}
+
+fn choose_path(
+    dir: &Path,
+    name: &str,
+    mut available: impl FnMut(&Path) -> std::io::Result<bool>,
+) -> std::io::Result<PathBuf> {
+    yy_remote::transfer::local_file_name(name.as_bytes())?;
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s.to_owned(), format!(".{e}")),
         _ => (name.to_owned(), String::new()),
     };
-    (1..10_000)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|p| !p.exists())
-        .unwrap_or(p)
+    for n in 0..10_000 {
+        let path = dir.join(if n == 0 {
+            name.to_owned()
+        } else {
+            format!("{stem} ({n}){ext}")
+        });
+        if available(&path)? {
+            return Ok(path);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "ダウンロードの空いている保存名がありません",
+    ))
 }
 
 /// `DownloadStarting`: 保存先を決めて始める（尋ねるなら後で）。
 pub(super) fn on_starting(frame: HWND, args: &ICoreWebView2DownloadStartingEventArgs) {
-    let Some((dir, ask)) = with(|a| (a.profiles.download_dir.clone(), a.profiles.download_ask))
-    else {
+    let Some((dir, ask, generation)) = with(|a| {
+        (
+            a.profiles.download_dir.clone(),
+            a.profiles.download_ask,
+            a.generation,
+        )
+    }) else {
         return;
     };
     unsafe {
@@ -113,28 +173,59 @@ pub(super) fn on_starting(frame: HWND, args: &ICoreWebView2DownloadStartingEvent
             let b = Box::new(Ask {
                 args: args.clone(),
                 deferral,
+                generation,
             });
+            let p = Box::into_raw(b);
             unsafe {
-                let _ = PostMessageW(
+                if PostMessageW(
                     Some(frame),
                     WM_APP_DOWNLOAD_ASK,
                     WPARAM(0),
-                    LPARAM(Box::into_raw(b) as isize),
-                );
+                    LPARAM(p as isize),
+                )
+                .is_err()
+                {
+                    let b = Box::from_raw(p);
+                    let _ = b.args.SetCancel(true);
+                    let _ = b.deferral.Complete();
+                }
             }
             return;
         }
+        unsafe {
+            let _ = args.SetCancel(true);
+        }
+        return;
     }
-    let _ = std::fs::create_dir_all(&folder);
-    let path = unique_path(&folder, &name);
+    let path = std::fs::create_dir_all(&folder).and_then(|_| unique_path(&folder, &name));
+    let Ok(path) = path else {
+        unsafe {
+            let _ = args.SetCancel(true);
+        }
+        with(|a| a.set_status("安全なダウンロード保存先を作成できませんでした"));
+        return;
+    };
     unsafe {
-        let _ = args.SetResultFilePath(&HSTRING::from(path.as_os_str()));
+        if args
+            .SetResultFilePath(&HSTRING::from(path.as_os_str()))
+            .is_err()
+        {
+            let _ = args.SetCancel(true);
+            return;
+        }
     }
     start(args, &path);
 }
 
 /// 保存先を尋ねる（[`WM_APP_DOWNLOAD_ASK`]）。
 pub(super) fn ask(frame: HWND, b: Ask) {
+    if !with(|a| a.generation == b.generation).unwrap_or(false) {
+        unsafe {
+            let _ = b.args.SetCancel(true);
+            let _ = b.deferral.Complete();
+        }
+        return;
+    }
     let suggested = PathBuf::from(take_string(|p| unsafe { b.args.ResultFilePath(p) }));
     let name = suggested
         .file_name()
@@ -165,8 +256,14 @@ pub(super) fn ask(frame: HWND, b: Ask) {
     unsafe {
         match &chosen {
             Some(p) => {
-                let _ = b.args.SetResultFilePath(&HSTRING::from(p.as_os_str()));
-                start(&b.args, p);
+                if b.args
+                    .SetResultFilePath(&HSTRING::from(p.as_os_str()))
+                    .is_ok()
+                {
+                    start(&b.args, p);
+                } else {
+                    let _ = b.args.SetCancel(true);
+                }
             }
             None => {
                 let _ = b.args.SetCancel(true);
@@ -197,6 +294,7 @@ fn start(args: &ICoreWebView2DownloadStartingEventArgs, path: &Path) {
             received: 0,
             total,
             paused: false,
+            history_path: log_path(a),
         });
         id
     }) else {
@@ -272,6 +370,14 @@ fn on_state(id: u64, st: COREWEBVIEW2_DOWNLOAD_STATE, path: String) {
             path: d.path.clone(),
         };
         if state == DownloadState::Completed {
+            let Some(permit) = DedupPermit::acquire() else {
+                let _ = history::append(&d.history_path, &rec, history::MAX_DOWNLOADS);
+                a.set_status(&format!(
+                    "ダウンロードしました: {}（重複の確認は混雑のため省略）",
+                    d.name()
+                ));
+                return;
+            };
             // 同じフォルダに同じ内容のファイルがあるかは別のスレッドで調べる（大きなファイルもあるので）
             a.set_status(&format!(
                 "ダウンロードしました。重複を調べています: {}",
@@ -279,8 +385,13 @@ fn on_state(id: u64, st: COREWEBVIEW2_DOWNLOAD_STATE, path: String) {
             ));
             let frame = a.frame.0 as isize;
             std::thread::spawn(move || {
+                let _permit = permit;
                 let dup = history::discard_if_duplicate(Path::new(&rec.path));
-                let b = Box::new(Finished { rec, dup });
+                let b = Box::new(Finished {
+                    rec,
+                    dup,
+                    history_path: d.history_path,
+                });
                 let p = Box::into_raw(b);
                 let ok = unsafe {
                     PostMessageW(
@@ -296,7 +407,7 @@ fn on_state(id: u64, st: COREWEBVIEW2_DOWNLOAD_STATE, path: String) {
             });
             return;
         }
-        let _ = history::append(&log_path(a), &rec, history::MAX_DOWNLOADS);
+        let _ = history::append(&d.history_path, &rec, history::MAX_DOWNLOADS);
         let msg = match state {
             DownloadState::Cancelled => format!("ダウンロードを中止しました: {}", d.name()),
             _ => format!("ダウンロードできませんでした: {}", d.name()),
@@ -311,13 +422,18 @@ pub(super) const WM_APP_DOWNLOAD_DONE: u32 = WM_APP + 126;
 /// 重複を調べ終わったダウンロード。
 pub(super) struct Finished {
     rec: DownloadRecord,
+    history_path: PathBuf,
     /// 同じ内容の、前からあるファイル（あれば新しいほうは消した）
     dup: std::io::Result<Option<PathBuf>>,
 }
 
 /// 重複を調べ終わった: 履歴に残して知らせる。
 pub(super) fn finished(f: Finished) {
-    let Finished { mut rec, dup } = f;
+    let Finished {
+        mut rec,
+        dup,
+        history_path,
+    } = f;
     let name = Path::new(&rec.path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -337,9 +453,11 @@ pub(super) fn finished(f: Finished) {
         Ok(None) => format!("ダウンロードしました: {name}（Ctrl+J でダウンロードの一覧）"),
         Err(e) => format!("ダウンロードしました: {name}（重複を調べられませんでした: {e}）"),
     };
+    let _ = history::append(&history_path, &rec, history::MAX_DOWNLOADS);
     with(|a| {
-        let _ = history::append(&log_path(a), &rec, history::MAX_DOWNLOADS);
-        a.set_status(&msg);
+        if log_path(a) == history_path {
+            a.set_status(&msg);
+        }
     });
 }
 
@@ -852,5 +970,55 @@ fn pick_folder(owner: HWND) -> Option<PathBuf> {
         let s = p.to_string().ok();
         CoTaskMemFree(Some(p.0 as *const _));
         s.map(PathBuf::from)
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    #[test]
+    fn delayed_completion_uses_its_original_history_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original/history.tsv");
+        let record = DownloadRecord {
+            time: 1,
+            state: DownloadState::Completed,
+            bytes: 1,
+            url: "https://private.example/file".into(),
+            path: "file.txt".into(),
+        };
+        finished(Finished {
+            rec: record.clone(),
+            dup: Ok(None),
+            history_path: original.clone(),
+        });
+        assert_eq!(history::load::<DownloadRecord>(&original), [record]);
+        assert!(!dir.path().join("other/history.tsv").exists());
+    }
+    #[test]
+    fn exhausted_or_invalid_download_names_fail_closed() {
+        let dir = Path::new("downloads");
+        let mut attempts = 0;
+        let err = choose_path(dir, "data.bin", |_| {
+            attempts += 1;
+            Ok(false)
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(attempts, 10_000);
+        for name in ["../x", "x:stream", "CON", "x.", "C:\\outside"] {
+            assert!(choose_path(dir, name, |_| Ok(true)).is_err());
+        }
+        assert_eq!(
+            choose_path(dir, "data.bin", |p| Ok(p.ends_with("data (2).bin"))).unwrap(),
+            dir.join("data (2).bin")
+        );
+        assert!(
+            choose_path(dir, "data.bin", |_| Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied"
+            )))
+            .is_err()
+        );
     }
 }

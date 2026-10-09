@@ -3,13 +3,16 @@
 //! 履歴はプロファイルのデータのフォルダに、1 行 1 件のタブ区切りのテキストで足していく（クッキーなどと
 //! 同じくプロファイルごとに分ける）。多くなったら古いものから捨てる。
 
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// 閲覧履歴に残す上限（これの 1.25 倍を超えたら古いものを捨てる）。
 pub const MAX_VISITS: usize = 20_000;
 /// ダウンロード履歴に残す上限。
 pub const MAX_DOWNLOADS: usize = 2_000;
+const MAX_RECORD_BYTES: usize = 16 * 1024;
+const MAX_HISTORY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LOADED_RECORDS: usize = MAX_VISITS + MAX_VISITS / 4;
 
 /// 1 行 1 件で保存できるもの。
 pub trait Record: Sized {
@@ -30,61 +33,134 @@ fn clean(s: &str) -> String {
         .collect()
 }
 
-fn to_line<T: Record>(r: &T) -> String {
-    let mut s = r
-        .to_fields()
+fn to_line<T: Record>(r: &T) -> Option<String> {
+    let fields = r.to_fields();
+    let size = fields
+        .iter()
+        .fold(0usize, |n, f| n.saturating_add(f.len()).saturating_add(1));
+    if size > MAX_RECORD_BYTES {
+        return None;
+    }
+    let mut s = fields
         .iter()
         .map(|f| clean(f))
         .collect::<Vec<_>>()
         .join("\t");
     s.push('\n');
-    s
+    Some(s)
 }
 
-/// 読む（古い順。読めない行は飛ばす。なければ空）。
+/// Read a bounded tail of the history; skip oversized or incomplete records.
 pub fn load<T: Record>(path: &Path) -> Vec<T> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let read = || -> io::Result<Vec<u8>> {
+        let mut file = std::fs::File::open(path)?;
+        let offset = file
+            .metadata()?
+            .len()
+            .saturating_sub(MAX_HISTORY_BYTES as u64);
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::new();
+        file.take(MAX_HISTORY_BYTES as u64)
+            .read_to_end(&mut bytes)?;
+        if offset != 0 {
+            let end = bytes
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(bytes.len(), |i| i + 1);
+            bytes.drain(..end);
+        }
+        Ok(bytes)
+    };
+    let Ok(bytes) = read() else {
         return Vec::new();
     };
-    text.lines()
-        .filter_map(|l| T::from_fields(&l.split('\t').collect::<Vec<_>>()))
-        .collect()
+    let mut records = std::collections::VecDeque::new();
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
+        if !line.ends_with(b"\n") || line.len() > MAX_RECORD_BYTES {
+            continue;
+        }
+        let Ok(line) = std::str::from_utf8(line) else {
+            continue;
+        };
+        if let Some(record) = T::from_fields(
+            &line
+                .trim_end_matches(['\r', '\n'])
+                .split('\t')
+                .collect::<Vec<_>>(),
+        ) {
+            if records.len() == MAX_LOADED_RECORDS {
+                records.pop_front();
+            }
+            records.push_back(record);
+        }
+    }
+    records.into_iter().collect()
 }
 
-/// 1 件足す。上限の 1.25 倍を超えたら、新しい `max` 件だけに書き直す。
+/// Append one bounded record, compacting by count and by total bytes.
 pub fn append<T: Record>(path: &Path, r: &T, max: usize) -> io::Result<()> {
+    let Some(line) = to_line(r) else {
+        return Ok(());
+    };
+    let max = max.min(MAX_LOADED_RECORDS);
+    if max == 0 {
+        return Ok(());
+    }
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
+    }
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if len.saturating_add(line.len() as u64) > MAX_HISTORY_BYTES as u64 {
+        let mut all: Vec<T> = load(path);
+        // Round-trip the bounded record without requiring T: Clone.
+        if let Some(record) =
+            T::from_fields(&line.trim_end_matches('\n').split('\t').collect::<Vec<_>>())
+        {
+            all.push(record);
+        }
+        return save(path, &all[all.len().saturating_sub(max)..]);
     }
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)?;
-    f.write_all(to_line(r).as_bytes())?;
+    f.write_all(line.as_bytes())?;
     drop(f);
-    // 書き直すかは大きさでおおまかに決める（毎回数えない）
-    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    if len > (max as u64) * 160 {
+    if len + line.len() as u64 > (max as u64) * 160 {
         let all: Vec<T> = load(path);
-        if all.len() > max + max / 4 {
+        if all.len() >= max + max / 4 {
             save(path, &all[all.len() - max..])?;
         }
     }
     Ok(())
 }
 
-/// すべて書き直す（一時ファイルから置き換える）。
+/// Atomically replace the bounded history using an exclusive temporary file.
 pub fn save<T: Record>(path: &Path, items: &[T]) -> io::Result<()> {
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d)?;
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let mut lines = Vec::new();
+    let mut size = 0;
+    for item in items.iter().rev().take(MAX_LOADED_RECORDS) {
+        let Some(line) = to_line(item) else {
+            continue;
+        };
+        if size + line.len() > MAX_HISTORY_BYTES {
+            break;
+        }
+        size += line.len();
+        lines.push(line);
     }
-    let tmp = path.with_extension("tmp");
-    let mut text = String::new();
-    for r in items {
-        text.push_str(&to_line(r));
+    let mut file = tempfile::NamedTempFile::new_in(dir)?;
+    for line in lines.iter().rev() {
+        file.write_all(line.as_bytes())?;
     }
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 /// 消す（なければ何もしない）。
@@ -265,11 +341,46 @@ fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
     Ok(h.finalize().into())
 }
 
+/// Identical bytes do not imply identical launch behavior or origin trust.
+fn same_download_metadata(a: &Path, b: &Path) -> bool {
+    let extension = |p: &Path| p.extension().map(|e| e.to_string_lossy().to_lowercase());
+    if extension(a) != extension(b) {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        fn zone(path: &Path) -> io::Result<Option<Vec<u8>>> {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(":Zone.Identifier");
+            let file = match std::fs::File::open(name) {
+                Ok(file) => file,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            let mut data = Vec::new();
+            file.take(64 * 1024 + 1).read_to_end(&mut data)?;
+            if data.len() > 64 * 1024 {
+                return Err(io::Error::other("Zone information too large"));
+            }
+            Ok(Some(data))
+        }
+        matches!((zone(a), zone(b)), (Ok(a), Ok(b)) if a == b)
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
 /// ダウンロードしたファイルと同じ内容（SHA-256 が同じ）のファイルが、同じフォルダ（サブフォルダは見ない）に
 /// 前からあれば、そのパス。大きさが同じものだけハッシュを比べる。ダウンロード途中のファイル
 /// （`.crdownload`・`.partial`・`.tmp`）は比べない。
 pub fn find_duplicate(new_file: &Path) -> io::Result<Option<std::path::PathBuf>> {
-    let len = std::fs::metadata(new_file)?.len();
+    let meta = std::fs::symlink_metadata(new_file)?;
+    if !meta.file_type().is_file() {
+        return Ok(None);
+    }
+    let len = meta.len();
     let Some(dir) = new_file.parent() else {
         return Ok(None);
     };
@@ -277,11 +388,16 @@ pub fn find_duplicate(new_file: &Path) -> io::Result<Option<std::path::PathBuf>>
     let mut mine: Option<[u8; 32]> = None;
     for entry in std::fs::read_dir(dir)? {
         let Ok(entry) = entry else { continue };
-        let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() || meta.len() != len {
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !meta.file_type().is_file() || meta.len() != len {
             continue;
         }
         let p = entry.path();
+        if !same_download_metadata(new_file, &p) {
+            continue;
+        }
         let lower = p.to_string_lossy().to_ascii_lowercase();
         if [".crdownload", ".partial", ".tmp"]
             .iter()
@@ -382,6 +498,75 @@ pub fn search_engine_name(url: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn security_duplicate_must_not_change_file_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.cmd");
+        let new = dir.path().join("notes.txt");
+        std::fs::write(&old, b"inert fixture").unwrap();
+        std::fs::write(&new, b"inert fixture").unwrap();
+        assert_eq!(discard_if_duplicate(&new).unwrap(), None);
+        assert!(new.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn security_duplicate_must_preserve_zone_information() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.docx");
+        let new = dir.path().join("new.docx");
+        std::fs::write(&old, b"inert fixture").unwrap();
+        std::fs::write(&new, b"inert fixture").unwrap();
+        std::fs::write(
+            format!("{}:Zone.Identifier", new.display()),
+            b"[ZoneTransfer]\r\nZoneId=3\r\n",
+        )
+        .unwrap();
+        assert_eq!(discard_if_duplicate(&new).unwrap(), None);
+        assert!(new.exists());
+    }
+
+    #[test]
+    fn security_history_rejects_oversized_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.tsv");
+        let record = Visit {
+            time: 1,
+            url: "https://example.com/".into(),
+            title: "x".repeat(1 << 20),
+        };
+        append(&path, &record, MAX_VISITS).unwrap();
+        assert!(std::fs::metadata(&path).map_or(true, |m| m.len() < 64 * 1024));
+    }
+
+    #[test]
+    fn security_history_bounds_existing_files_and_preserves_recent_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.tsv");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_HISTORY_BYTES as u64 + 1024).unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+        file.write_all(b"\n1\thttps://example.com/\tvalid\n")
+            .unwrap();
+        drop(file);
+        assert_eq!(load::<Visit>(&path).len(), 1);
+        let record = Visit {
+            time: 2,
+            url: "https://example.com/new".into(),
+            title: "日本語".into(),
+        };
+        append(&path, &record, MAX_VISITS).unwrap();
+        let records = load::<Visit>(&path);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records.last(), Some(&record));
+        assert!(std::fs::metadata(&path).unwrap().len() <= MAX_HISTORY_BYTES as u64);
+        // The old predictable temporary filename must not be truncated.
+        let sibling = path.with_extension("tmp");
+        std::fs::write(&sibling, b"keep").unwrap();
+        save(&path, &records).unwrap();
+        assert_eq!(std::fs::read(sibling).unwrap(), b"keep");
+    }
 
     #[test]
     fn records_and_searches_visits() {
