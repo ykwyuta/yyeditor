@@ -1,264 +1,44 @@
 //! プロキシのプロファイルの編集（19 章 3.2）。メモリ上のダイアログテンプレートから作る
 //! （[`crate::goto::Template`]）。
+//!
+//! 文字の入力はホスト名・ポートなどの最小限にし、種類や対象はプルダウンで選ぶ。ドメインごとのプロキシと
+//! ホストの転送は一覧にして、追加・編集は小さな画面（プルダウン + ホスト・ポート）で行う。説明は入力欄の
+//! 薄い字（キューバナー）に出し、見切れないようにする。
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Controls::{
-    BST_CHECKED, CheckDlgButton, EM_LINEFROMCHAR, IsDlgButtonChecked,
+    BST_CHECKED, BST_UNCHECKED, CheckDlgButton, EM_SETCUEBANNER, IsDlgButtonChecked,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::HSTRING;
-use yy_browser::rules::{format_hosts, format_rules, parse_hosts, parse_rules};
-use yy_browser::{ProfileList, ProxyMode, ProxyProfile};
+use yy_browser::form::{
+    Endpoint, PortChoice, ProxyKind, Target, describe_host_map, describe_rule, join_address,
+    join_pattern, rule_route, split_host_map, split_pattern,
+};
+use yy_browser::{HostMap, ProfileList, ProxyMode, ProxyProfile, ProxyRule};
 
 use crate::goto::{CLASS_BUTTON, CLASS_EDIT, CLASS_STATIC, Template};
 
+const CLASS_LISTBOX: u16 = 0x0083;
 const CLASS_COMBO: u16 = 0x0085;
-
-const ID_LIST: u16 = 100;
-const ID_NEW: u16 = 101;
-const ID_DELETE: u16 = 102;
-const ID_NAME: u16 = 103;
-const ID_MODE: u16 = 104;
-const ID_SERVER: u16 = 105;
-const ID_BYPASS: u16 = 106;
-const ID_PAC: u16 = 107;
-const ID_DEFAULT: u16 = 108;
-const ID_RULES: u16 = 109;
-const ID_HOSTS: u16 = 110;
-const ID_MAKE_CERT: u16 = 111;
-const ID_PIN_CERT: u16 = 112;
 const IDOK_: u16 = 1;
 const IDCANCEL_: u16 = 2;
+const NO_ID: u16 = 0xFFFF;
 
-struct State {
-    list: ProfileList,
-    /// 表示中のプロファイル（`list.profiles` の番号）
-    current: usize,
-    /// OK で閉じたときの結果
-    done: bool,
-    /// 読めなかった欄の理由（`store` で。OK のときに出す）
-    parse_error: Option<String>,
-}
+// ---- 共通 ---------------------------------------------------------------------------------
 
-/// プロファイルの一覧を編集する。OK なら編集後の一覧（確かめ済み）。
-pub(super) fn edit(owner: HWND, list: ProfileList) -> Option<ProfileList> {
-    let mut t = Template::dialog("プロキシの設定", 300, 334);
-    let label = |t: &mut Template, y: i16, text: &str| {
-        t.item(0, 7, y + 2, 60, 10, 0xFFFF, CLASS_STATIC, text);
-    };
-    label(&mut t, 7, "プロファイル");
-    t.item(
-        (WS_TABSTOP | WS_VSCROLL).0 | CBS_DROPDOWNLIST as u32,
-        70,
-        7,
-        120,
-        120,
-        ID_LIST,
-        CLASS_COMBO,
-        "",
-    );
-    t.item(
-        WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
-        196,
-        6,
-        46,
-        14,
-        ID_NEW,
-        CLASS_BUTTON,
-        "新規",
-    );
-    t.item(
-        WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
-        246,
-        6,
-        46,
-        14,
-        ID_DELETE,
-        CLASS_BUTTON,
-        "削除",
-    );
-    label(&mut t, 30, "名前");
-    t.item(
-        (WS_BORDER | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32,
-        70,
-        30,
-        222,
-        13,
-        ID_NAME,
-        CLASS_EDIT,
-        "",
-    );
-    label(&mut t, 50, "やり方");
-    t.item(
-        (WS_TABSTOP | WS_VSCROLL).0 | CBS_DROPDOWNLIST as u32,
-        70,
-        50,
-        120,
-        100,
-        ID_MODE,
-        CLASS_COMBO,
-        "",
-    );
-    label(&mut t, 72, "プロキシ");
-    t.item(
-        (WS_BORDER | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32,
-        70,
-        72,
-        222,
-        13,
-        ID_SERVER,
-        CLASS_EDIT,
-        "",
-    );
-    t.item(
-        0,
-        70,
-        87,
-        222,
-        10,
-        0xFFFF,
-        CLASS_STATIC,
-        "例: 127.0.0.1:8888・socks5://127.0.0.1:1080・http=h:p;https=h:p",
-    );
-    label(&mut t, 102, "除くホスト");
-    t.item(
-        (WS_BORDER | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32,
-        70,
-        102,
-        222,
-        13,
-        ID_BYPASS,
-        CLASS_EDIT,
-        "",
-    );
-    t.item(
-        0,
-        70,
-        117,
-        222,
-        10,
-        0xFFFF,
-        CLASS_STATIC,
-        "; 区切り。例: <local>;*.example.co.jp;192.168.0.0/16",
-    );
-    label(&mut t, 132, "PAC の URL");
-    t.item(
-        (WS_BORDER | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32,
-        70,
-        132,
-        222,
-        13,
-        ID_PAC,
-        CLASS_EDIT,
-        "",
-    );
-    let multi = (WS_BORDER | WS_TABSTOP | WS_VSCROLL).0
-        | (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32;
-    label(&mut t, 152, "ドメインごと");
-    t.item(multi, 70, 152, 222, 42, ID_RULES, CLASS_EDIT, "");
-    t.item(
-        0,
-        70,
-        196,
-        222,
-        18,
-        0xFFFF,
-        CLASS_STATIC,
-        "1 行に 1 つ。上から順に当てはめる（「使わない」「指定」のとき）。\n例: *.corp.example.jp = 10.0.0.1:8080 ／ example.org = direct",
-    );
-    label(&mut t, 218, "ホストの転送");
-    t.item(multi, 70, 218, 222, 42, ID_HOSTS, CLASS_EDIT, "");
-    t.item(
-        0,
-        70,
-        262,
-        222,
-        18,
-        0xFFFF,
-        CLASS_STATIC,
-        "例: www.example.com = 127.0.0.1:8443（https://www.example.com/ を 127.0.0.1:8443 へ）。\ncert=指紋 で開発者用証明書を受け入れる",
-    );
-    t.item(
-        WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
-        70,
-        282,
-        110,
-        14,
-        ID_MAKE_CERT,
-        CLASS_BUTTON,
-        "開発者用証明書を作る…",
-    );
-    t.item(
-        WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
-        184,
-        282,
-        108,
-        14,
-        ID_PIN_CERT,
-        CLASS_BUTTON,
-        "証明書ファイルを登録…",
-    );
-    t.item(
-        WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32,
-        70,
-        300,
-        222,
-        12,
-        ID_DEFAULT,
-        CLASS_BUTTON,
-        "起動するときにこのプロファイルを使う",
-    );
-    t.item(
-        WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32,
-        188,
-        314,
-        50,
-        14,
-        IDOK_,
-        CLASS_BUTTON,
-        "保存",
-    );
-    t.item(
-        WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
-        242,
-        314,
-        50,
-        14,
-        IDCANCEL_,
-        CLASS_BUTTON,
-        "キャンセル",
-    );
-    let aligned = t.aligned();
-    let current = list
-        .profiles
-        .iter()
-        .position(|p| p.name == list.default)
-        .unwrap_or(0);
-    let mut state = State {
-        list,
-        current,
-        done: false,
-        parse_error: None,
-    };
-    unsafe {
-        DialogBoxIndirectParamW(
-            None,
-            aligned.as_ptr() as *const DLGTEMPLATE,
-            Some(owner),
-            Some(dialog_proc),
-            LPARAM(&mut state as *mut State as isize),
-        );
-    }
-    state.done.then_some(state.list)
+fn item(dlg: HWND, id: u16) -> HWND {
+    unsafe { GetDlgItem(Some(dlg), id as i32).unwrap_or_default() }
 }
 
 fn get_text(dlg: HWND, id: u16) -> String {
     unsafe {
-        let h = GetDlgItem(Some(dlg), id as i32).unwrap_or_default();
+        let h = item(dlg, id);
         let n = GetWindowTextLengthW(h);
         let mut buf = vec![0u16; n as usize + 1];
         let got = GetWindowTextW(h, &mut buf) as usize;
-        String::from_utf16_lossy(&buf[..got])
+        String::from_utf16_lossy(&buf[..got]).trim().to_owned()
     }
 }
 
@@ -268,32 +48,338 @@ fn set_text(dlg: HWND, id: u16, s: &str) {
     }
 }
 
-fn combo_sel(dlg: HWND, id: u16) -> isize {
-    unsafe { SendDlgItemMessageW(dlg, id as i32, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 }
+fn cue(dlg: HWND, id: u16, s: &str) {
+    let s = HSTRING::from(s);
+    unsafe {
+        SendMessageW(
+            item(dlg, id),
+            EM_SETCUEBANNER,
+            Some(WPARAM(1)),
+            Some(LPARAM(s.as_ptr() as isize)),
+        );
+    }
 }
 
-/// 一覧の組み合わせボックスを作り直す。
-fn fill_list(dlg: HWND, st: &State) {
+fn enable(dlg: HWND, id: u16, on: bool) {
     unsafe {
-        SendDlgItemMessageW(dlg, ID_LIST as i32, CB_RESETCONTENT, WPARAM(0), LPARAM(0));
-        for p in &st.list.profiles {
-            let s = HSTRING::from(p.name.as_str());
+        let _ = EnableWindow(item(dlg, id), on);
+    }
+}
+
+fn checked(dlg: HWND, id: u16) -> bool {
+    unsafe { IsDlgButtonChecked(dlg, id as i32) == BST_CHECKED.0 }
+}
+
+fn set_check(dlg: HWND, id: u16, on: bool) {
+    unsafe {
+        let _ = CheckDlgButton(dlg, id as i32, if on { BST_CHECKED } else { BST_UNCHECKED });
+    }
+}
+
+fn combo_fill(dlg: HWND, id: u16, items: &[&str], sel: usize) {
+    unsafe {
+        SendDlgItemMessageW(dlg, id as i32, CB_RESETCONTENT, WPARAM(0), LPARAM(0));
+        for s in items {
+            let s = HSTRING::from(*s);
             SendDlgItemMessageW(
                 dlg,
-                ID_LIST as i32,
+                id as i32,
                 CB_ADDSTRING,
                 WPARAM(0),
                 LPARAM(s.as_ptr() as isize),
             );
         }
-        SendDlgItemMessageW(
-            dlg,
-            ID_LIST as i32,
-            CB_SETCURSEL,
-            WPARAM(st.current),
-            LPARAM(0),
+        SendDlgItemMessageW(dlg, id as i32, CB_SETCURSEL, WPARAM(sel), LPARAM(0));
+    }
+}
+
+fn combo_sel(dlg: HWND, id: u16) -> usize {
+    unsafe {
+        SendDlgItemMessageW(dlg, id as i32, CB_GETCURSEL, WPARAM(0), LPARAM(0))
+            .0
+            .max(0) as usize
+    }
+}
+
+fn combo_set(dlg: HWND, id: u16, sel: usize) {
+    unsafe {
+        SendDlgItemMessageW(dlg, id as i32, CB_SETCURSEL, WPARAM(sel), LPARAM(0));
+    }
+}
+
+fn list_fill(dlg: HWND, id: u16, items: &[String], sel: Option<usize>) {
+    unsafe {
+        SendDlgItemMessageW(dlg, id as i32, LB_RESETCONTENT, WPARAM(0), LPARAM(0));
+        for s in items {
+            let s = HSTRING::from(s.as_str());
+            SendDlgItemMessageW(
+                dlg,
+                id as i32,
+                LB_ADDSTRING,
+                WPARAM(0),
+                LPARAM(s.as_ptr() as isize),
+            );
+        }
+        if let Some(i) = sel.filter(|i| *i < items.len()) {
+            SendDlgItemMessageW(dlg, id as i32, LB_SETCURSEL, WPARAM(i), LPARAM(0));
+        }
+    }
+}
+
+fn list_sel(dlg: HWND, id: u16) -> Option<usize> {
+    let i = unsafe { SendDlgItemMessageW(dlg, id as i32, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0 };
+    (i >= 0).then_some(i as usize)
+}
+
+fn focus(dlg: HWND, id: u16) {
+    unsafe {
+        let _ = SetFocus(Some(item(dlg, id)));
+    }
+}
+
+/// ポートの欄を読む（空なら `None`、だめなら理由）。
+fn read_port(dlg: HWND, id: u16) -> Result<Option<u16>, String> {
+    let s = get_text(dlg, id);
+    if s.is_empty() {
+        return Ok(None);
+    }
+    match s.parse::<u16>() {
+        Ok(n) if n > 0 => Ok(Some(n)),
+        _ => Err(format!("ポート「{s}」は 1〜65535 の数で入れてください")),
+    }
+}
+
+/// テンプレートに部品を足す小さな道具。
+struct T(Template);
+
+impl T {
+    fn label(&mut self, x: i16, y: i16, w: i16, text: &str) {
+        self.0.item(0, x, y + 2, w, 10, NO_ID, CLASS_STATIC, text);
+    }
+    fn edit(&mut self, x: i16, y: i16, w: i16, id: u16, extra: u32) {
+        self.0.item(
+            (WS_BORDER | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32 | extra,
+            x,
+            y,
+            w,
+            13,
+            id,
+            CLASS_EDIT,
+            "",
         );
     }
+    fn combo(&mut self, x: i16, y: i16, w: i16, id: u16) {
+        self.0.item(
+            (WS_TABSTOP | WS_VSCROLL).0 | CBS_DROPDOWNLIST as u32,
+            x,
+            y,
+            w,
+            140,
+            id,
+            CLASS_COMBO,
+            "",
+        );
+    }
+    fn button(&mut self, x: i16, y: i16, w: i16, id: u16, text: &str) {
+        self.0.item(
+            WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
+            x,
+            y,
+            w,
+            14,
+            id,
+            CLASS_BUTTON,
+            text,
+        );
+    }
+    fn check(&mut self, x: i16, y: i16, w: i16, id: u16, text: &str) {
+        self.0.item(
+            WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32,
+            x,
+            y,
+            w,
+            12,
+            id,
+            CLASS_BUTTON,
+            text,
+        );
+    }
+    fn group(&mut self, x: i16, y: i16, w: i16, h: i16, id: u16, text: &str) {
+        self.0
+            .item(BS_GROUPBOX as u32, x, y, w, h, id, CLASS_BUTTON, text);
+    }
+    fn list(&mut self, x: i16, y: i16, w: i16, h: i16, id: u16) {
+        self.0.item(
+            (WS_BORDER | WS_TABSTOP | WS_VSCROLL).0 | (LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32,
+            x,
+            y,
+            w,
+            h,
+            id,
+            CLASS_LISTBOX,
+            "",
+        );
+    }
+    fn ok_cancel(&mut self, right: i16, y: i16, ok: &str) {
+        self.0.item(
+            WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32,
+            right - 104,
+            y,
+            50,
+            14,
+            IDOK_,
+            CLASS_BUTTON,
+            ok,
+        );
+        self.button(right - 50, y, 50, IDCANCEL_, "キャンセル");
+    }
+}
+
+/// モーダルのダイアログを出す（`state` は `GWLP_USERDATA` で渡す）。
+fn run<S>(owner: HWND, t: T, proc_: DLGPROC, state: &mut S) {
+    let aligned = t.0.aligned();
+    unsafe {
+        DialogBoxIndirectParamW(
+            None,
+            aligned.as_ptr() as *const DLGTEMPLATE,
+            Some(owner),
+            proc_,
+            LPARAM(state as *mut S as isize),
+        );
+    }
+}
+
+/// ダイアログの状態（`GWLP_USERDATA`）。
+fn state_of<'a, S>(dlg: HWND) -> &'a mut S {
+    unsafe { &mut *(GetWindowLongPtrW(dlg, GWLP_USERDATA) as *mut S) }
+}
+
+const KIND_ADVANCED: usize = 4;
+
+/// 種類のプルダウンの項目（プロキシの種類 + 「詳しい指定」）。
+fn kind_items(advanced: bool) -> Vec<&'static str> {
+    let mut v: Vec<&str> = ProxyKind::ALL.iter().map(|k| k.label()).collect();
+    if advanced {
+        v.push("詳しい指定");
+    }
+    v
+}
+
+// ---- プロファイルの一覧（メインの画面） -----------------------------------------------------
+
+const ID_PROFILE: u16 = 100;
+const ID_NEW: u16 = 101;
+const ID_COPY: u16 = 102;
+const ID_DELETE: u16 = 103;
+const ID_NAME: u16 = 104;
+const ID_MODE: u16 = 105;
+const ID_KIND: u16 = 106;
+const ID_HOST: u16 = 107;
+const ID_PORT: u16 = 108;
+const ID_LOCAL: u16 = 110;
+const ID_BYPASS: u16 = 111;
+const ID_PAC: u16 = 112;
+const ID_RULES_GROUP: u16 = 119;
+const ID_RULES: u16 = 120;
+const ID_RULE_ADD: u16 = 121;
+const ID_RULE_EDIT: u16 = 122;
+const ID_RULE_DEL: u16 = 123;
+const ID_RULE_UP: u16 = 124;
+const ID_RULE_DOWN: u16 = 125;
+const ID_HOSTS: u16 = 130;
+const ID_HOST_ADD: u16 = 131;
+const ID_HOST_EDIT: u16 = 132;
+const ID_HOST_DEL: u16 = 133;
+const ID_ADBLOCK: u16 = 140;
+const ID_DEFAULT: u16 = 141;
+
+struct State {
+    list: ProfileList,
+    /// 表示中のプロファイル（`list.profiles` の番号）
+    current: usize,
+    /// OK で閉じたときの結果
+    done: bool,
+}
+
+/// プロファイルの一覧を編集する。OK なら編集後の一覧（確かめ済み）。
+pub(super) fn edit(owner: HWND, list: ProfileList) -> Option<ProfileList> {
+    let mut t = T(Template::dialog("プロキシの設定", 400, 368));
+    // プロファイル
+    t.label(7, 7, 60, "プロファイル");
+    t.combo(70, 7, 166, ID_PROFILE);
+    t.button(242, 6, 46, ID_NEW, "新規");
+    t.button(292, 6, 46, ID_COPY, "複製");
+    t.button(342, 6, 51, ID_DELETE, "削除");
+    t.label(7, 26, 60, "名前");
+    t.edit(70, 26, 323, ID_NAME, 0);
+    // ふだんの経路
+    t.group(7, 44, 386, 104, NO_ID, "ふだんの経路");
+    t.label(15, 58, 52, "やり方");
+    t.combo(70, 58, 166, ID_MODE);
+    t.label(15, 76, 52, "プロキシ");
+    t.combo(70, 76, 66, ID_KIND);
+    t.edit(140, 76, 180, ID_HOST, 0);
+    t.label(323, 76, 6, ":");
+    t.edit(331, 76, 54, ID_PORT, ES_NUMBER as u32);
+    t.check(
+        70,
+        93,
+        315,
+        ID_LOCAL,
+        "ドットのない名前（社内のサーバーなど）は直接",
+    );
+    t.label(15, 108, 52, "直接にする");
+    t.edit(70, 108, 315, ID_BYPASS, 0);
+    t.label(15, 127, 52, "PAC の URL");
+    t.edit(70, 127, 315, ID_PAC, 0);
+    // ドメインごと
+    t.group(7, 154, 386, 92, ID_RULES_GROUP, "");
+    t.list(15, 168, 300, 70, ID_RULES);
+    t.button(322, 168, 63, ID_RULE_ADD, "追加...");
+    t.button(322, 183, 63, ID_RULE_EDIT, "編集...");
+    t.button(322, 198, 63, ID_RULE_DEL, "削除");
+    t.button(322, 213, 30, ID_RULE_UP, "↑");
+    t.button(355, 213, 30, ID_RULE_DOWN, "↓");
+    // ホストの転送
+    t.group(
+        7,
+        252,
+        386,
+        70,
+        NO_ID,
+        "ホストの転送（hosts の書き換えと同じ。このプロファイルだけ）",
+    );
+    t.list(15, 266, 300, 48, ID_HOSTS);
+    t.button(322, 266, 63, ID_HOST_ADD, "追加...");
+    t.button(322, 281, 63, ID_HOST_EDIT, "編集...");
+    t.button(322, 296, 63, ID_HOST_DEL, "削除");
+    t.check(7, 330, 150, ID_ADBLOCK, "広告ブロックを使う");
+    t.check(
+        170,
+        330,
+        223,
+        ID_DEFAULT,
+        "起動するときにこのプロファイルを使う",
+    );
+    t.ok_cancel(393, 348, "保存");
+    let current = list
+        .profiles
+        .iter()
+        .position(|p| p.name == list.default)
+        .unwrap_or(0);
+    let mut state = State {
+        list,
+        current,
+        done: false,
+    };
+    run(owner, t, Some(main_proc), &mut state);
+    state.done.then_some(state.list)
+}
+
+/// プロファイルの組み合わせボックスを作り直す。
+fn fill_profiles(dlg: HWND, st: &State) {
+    let names: Vec<&str> = st.list.profiles.iter().map(|p| p.name.as_str()).collect();
+    combo_fill(dlg, ID_PROFILE, &names, st.current);
 }
 
 /// 表示中のプロファイルを欄に出す。
@@ -302,76 +388,162 @@ fn show(dlg: HWND, st: &State) {
         return;
     };
     set_text(dlg, ID_NAME, &p.name);
-    set_text(dlg, ID_SERVER, &p.server);
-    set_text(dlg, ID_BYPASS, &p.bypass);
-    set_text(dlg, ID_PAC, &p.pac_url);
-    set_text(dlg, ID_RULES, &format_rules(&p.rules));
-    set_text(dlg, ID_HOSTS, &format_hosts(&p.hosts));
     let mode = ProxyMode::ALL
         .iter()
         .position(|m| *m == p.mode)
         .unwrap_or(0);
-    unsafe {
-        SendDlgItemMessageW(dlg, ID_MODE as i32, CB_SETCURSEL, WPARAM(mode), LPARAM(0));
-        let _ = CheckDlgButton(
-            dlg,
-            ID_DEFAULT as i32,
-            if st.list.default == p.name {
-                BST_CHECKED
-            } else {
-                windows::Win32::UI::Controls::DLG_BUTTON_CHECK_STATE(0)
-            },
-        );
+    combo_set(dlg, ID_MODE, mode);
+    // プロキシ: 種類・ホスト・ポート（読めない書き方は「詳しい指定」）
+    match Endpoint::parse(&p.server) {
+        Some(e) => {
+            combo_fill(
+                dlg,
+                ID_KIND,
+                &kind_items(false),
+                ProxyKind::ALL
+                    .iter()
+                    .position(|k| *k == e.kind)
+                    .unwrap_or(0),
+            );
+            set_text(dlg, ID_HOST, &e.host);
+            set_text(dlg, ID_PORT, &e.port.to_string());
+        }
+        None if p.server.trim().is_empty() => {
+            combo_fill(dlg, ID_KIND, &kind_items(false), 0);
+            set_text(dlg, ID_HOST, "");
+            set_text(dlg, ID_PORT, "");
+        }
+        None => {
+            combo_fill(dlg, ID_KIND, &kind_items(true), KIND_ADVANCED);
+            set_text(dlg, ID_HOST, &p.server);
+            set_text(dlg, ID_PORT, "");
+        }
     }
-    enable_fields(dlg, p.mode);
+    let parts: Vec<&str> = p
+        .bypass
+        .split([';', ',', '\n'])
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .collect();
+    set_check(dlg, ID_LOCAL, parts.contains(&"<local>"));
+    let others: Vec<&str> = parts.into_iter().filter(|b| *b != "<local>").collect();
+    set_text(dlg, ID_BYPASS, &others.join("; "));
+    set_text(dlg, ID_PAC, &p.pac_url);
+    set_check(dlg, ID_ADBLOCK, !p.adblock_off);
+    set_check(dlg, ID_DEFAULT, st.list.default == p.name);
+    fill_rules(dlg, p, None);
+    fill_hosts(dlg, p, None);
+    enable_fields(dlg);
+}
+
+fn fill_rules(dlg: HWND, p: &ProxyProfile, sel: Option<usize>) {
+    let items: Vec<String> = p.rules.iter().map(describe_rule).collect();
+    list_fill(dlg, ID_RULES, &items, sel);
+}
+
+fn fill_hosts(dlg: HWND, p: &ProxyProfile, sel: Option<usize>) {
+    let items: Vec<String> = p.hosts.iter().map(describe_host_map).collect();
+    list_fill(dlg, ID_HOSTS, &items, sel);
 }
 
 /// やり方に合わせて欄を使える・使えないにする。
-fn enable_fields(dlg: HWND, mode: ProxyMode) {
-    unsafe {
-        for (id, on) in [
-            (ID_SERVER, mode == ProxyMode::Manual),
-            (ID_BYPASS, mode == ProxyMode::Manual),
-            (ID_PAC, mode == ProxyMode::Pac),
-        ] {
-            if let Ok(h) = GetDlgItem(Some(dlg), id as i32) {
-                let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(h, on);
-            }
-        }
+fn enable_fields(dlg: HWND) {
+    let mode = ProxyMode::ALL
+        .get(combo_sel(dlg, ID_MODE))
+        .copied()
+        .unwrap_or_default();
+    let manual = mode == ProxyMode::Manual;
+    let advanced = combo_sel(dlg, ID_KIND) == KIND_ADVANCED;
+    enable(dlg, ID_KIND, manual);
+    enable(dlg, ID_HOST, manual);
+    enable(dlg, ID_PORT, manual && !advanced);
+    enable(dlg, ID_LOCAL, manual);
+    enable(dlg, ID_BYPASS, manual);
+    enable(dlg, ID_PAC, mode == ProxyMode::Pac);
+    let rules_ok = matches!(mode, ProxyMode::Direct | ProxyMode::Manual);
+    for id in [
+        ID_RULES,
+        ID_RULE_ADD,
+        ID_RULE_EDIT,
+        ID_RULE_DEL,
+        ID_RULE_UP,
+        ID_RULE_DOWN,
+    ] {
+        enable(dlg, id, rules_ok);
     }
+    set_text(
+        dlg,
+        ID_RULES_GROUP,
+        if rules_ok {
+            "ドメインごとのプロキシ（上から順に当てはめる）"
+        } else {
+            "ドメインごとのプロキシ（やり方が「使わない」「指定」のときだけ）"
+        },
+    );
 }
 
 /// 欄の内容を表示中のプロファイルに書き戻す（確かめはしない）。
 fn store(dlg: HWND, st: &mut State) {
-    let mode_i = combo_sel(dlg, ID_MODE).max(0) as usize;
-    let checked = unsafe { IsDlgButtonChecked(dlg, ID_DEFAULT as i32) } == BST_CHECKED.0;
+    let mode = ProxyMode::ALL
+        .get(combo_sel(dlg, ID_MODE))
+        .copied()
+        .unwrap_or_default();
+    let kind = combo_sel(dlg, ID_KIND);
+    let host = get_text(dlg, ID_HOST);
+    let port = get_text(dlg, ID_PORT);
+    let local = checked(dlg, ID_LOCAL);
+    let others = get_text(dlg, ID_BYPASS);
+    let pac = get_text(dlg, ID_PAC);
+    let name = get_text(dlg, ID_NAME);
+    let adblock = checked(dlg, ID_ADBLOCK);
+    let is_default = checked(dlg, ID_DEFAULT);
     let Some(p) = st.list.profiles.get_mut(st.current) else {
         return;
     };
     let old_name = p.name.clone();
-    p.name = get_text(dlg, ID_NAME).trim().to_owned();
-    p.mode = ProxyMode::ALL.get(mode_i).copied().unwrap_or_default();
-    p.server = get_text(dlg, ID_SERVER).trim().to_owned();
-    p.bypass = get_text(dlg, ID_BYPASS).trim().to_owned();
-    p.pac_url = get_text(dlg, ID_PAC).trim().to_owned();
-    st.parse_error = None;
-    match parse_rules(&get_text(dlg, ID_RULES)) {
-        Ok(r) => p.rules = r,
-        Err(e) => st.parse_error = Some(format!("「{}」のドメインごとのプロキシ: {e}", p.name)),
-    }
-    match parse_hosts(&get_text(dlg, ID_HOSTS)) {
-        Ok(h) => p.hosts = h,
-        Err(e) => {
-            st.parse_error
-                .get_or_insert(format!("「{}」のホストの転送: {e}", p.name));
+    p.name = name;
+    p.mode = mode;
+    p.server = if kind == KIND_ADVANCED {
+        host
+    } else if host.is_empty() {
+        String::new()
+    } else {
+        let k = ProxyKind::ALL.get(kind).copied().unwrap_or(ProxyKind::Http);
+        match port.parse::<u16>() {
+            Ok(n) if n > 0 => Endpoint {
+                kind: k,
+                host,
+                port: n,
+            }
+            .to_spec(),
+            // 空ならよく使うポート。数でなければそのまま（確かめで理由を出す）
+            _ if port.is_empty() => Endpoint {
+                kind: k,
+                host,
+                port: k.default_port(),
+            }
+            .to_spec(),
+            _ => format!("{host}:{port}"),
         }
+    };
+    let mut bypass: Vec<String> = Vec::new();
+    if local {
+        bypass.push("<local>".into());
     }
-    if checked || st.list.default == old_name {
-        st.list.default = if checked {
-            p.name.clone()
-        } else {
-            String::new()
-        };
+    bypass.extend(
+        others
+            .split([';', ',', ' '])
+            .map(str::trim)
+            .filter(|b| !b.is_empty() && *b != "<local>")
+            .map(str::to_owned),
+    );
+    p.bypass = bypass.join(";");
+    p.pac_url = pac;
+    p.adblock_off = !adblock;
+    if is_default {
+        st.list.default = p.name.clone();
+    } else if st.list.default == old_name {
+        st.list.default = String::new();
     }
 }
 
@@ -396,242 +568,602 @@ fn check_all(st: &mut State) -> Result<(), String> {
     Ok(())
 }
 
-extern "system" fn dialog_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
-    unsafe {
-        match msg {
-            WM_INITDIALOG => {
-                SetWindowLongPtrW(dlg, GWLP_USERDATA, lparam.0);
-                let st = &*(lparam.0 as *const State);
-                for m in ProxyMode::ALL {
-                    let s = HSTRING::from(m.label());
-                    SendDlgItemMessageW(
-                        dlg,
-                        ID_MODE as i32,
-                        CB_ADDSTRING,
-                        WPARAM(0),
-                        LPARAM(s.as_ptr() as isize),
-                    );
+fn unique_name(list: &ProfileList, base: &str) -> String {
+    let mut n = 1;
+    loop {
+        let cand = if n == 1 && !base.starts_with("新しい") {
+            format!("{base} のコピー")
+        } else {
+            format!("{base} {n}")
+        };
+        if list.get(&cand).is_none() {
+            return cand;
+        }
+        n += 1;
+    }
+}
+
+extern "system" fn main_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
+    match msg {
+        WM_INITDIALOG => {
+            unsafe { SetWindowLongPtrW(dlg, GWLP_USERDATA, lparam.0) };
+            let st = state_of::<State>(dlg);
+            let modes: Vec<&str> = ProxyMode::ALL.iter().map(|m| m.label()).collect();
+            combo_fill(dlg, ID_MODE, &modes, 0);
+            cue(dlg, ID_HOST, "ホスト名か IP アドレス");
+            cue(dlg, ID_PORT, "ポート");
+            cue(dlg, ID_BYPASS, "例: *.example.co.jp; 192.168.0.0/16");
+            cue(dlg, ID_PAC, "例: http://wpad.example.jp/proxy.pac");
+            fill_profiles(dlg, st);
+            show(dlg, st);
+            1
+        }
+        WM_COMMAND => {
+            let st = state_of::<State>(dlg);
+            let id = (wparam.0 & 0xffff) as u16;
+            let code = ((wparam.0 >> 16) & 0xffff) as u32;
+            match id {
+                ID_PROFILE if code == CBN_SELCHANGE => {
+                    store(dlg, st);
+                    st.current = combo_sel(dlg, ID_PROFILE);
+                    fill_profiles(dlg, st);
+                    show(dlg, st);
                 }
-                fill_list(dlg, st);
-                show(dlg, st);
-                1
-            }
-            WM_COMMAND => {
-                let st = &mut *(GetWindowLongPtrW(dlg, GWLP_USERDATA) as *mut State);
-                let id = (wparam.0 & 0xffff) as u16;
-                let code = ((wparam.0 >> 16) & 0xffff) as u32;
-                match id {
-                    ID_LIST if code == CBN_SELCHANGE => {
-                        store(dlg, st);
-                        if let Some(e) = st.parse_error.take() {
-                            fill_list(dlg, st);
-                            crate::util::error_box(
-                                dlg,
-                                &format!("{e}\n（この欄は前の内容のままです）"),
-                            );
-                        }
-                        let sel = combo_sel(dlg, ID_LIST);
-                        if sel >= 0 {
-                            st.current = sel as usize;
-                        }
-                        fill_list(dlg, st);
-                        show(dlg, st);
-                    }
-                    ID_MODE if code == CBN_SELCHANGE => {
-                        let m = ProxyMode::ALL
-                            .get(combo_sel(dlg, ID_MODE).max(0) as usize)
-                            .copied()
-                            .unwrap_or_default();
-                        enable_fields(dlg, m);
-                    }
-                    ID_NEW => {
-                        store(dlg, st);
-                        let mut n = 1;
-                        let name = loop {
-                            let cand = format!("新しいプロファイル {n}");
-                            if st.list.get(&cand).is_none() {
-                                break cand;
-                            }
-                            n += 1;
-                        };
-                        st.list.profiles.push(ProxyProfile {
-                            name,
+                ID_MODE | ID_KIND if code == CBN_SELCHANGE => enable_fields(dlg),
+                ID_NEW | ID_COPY => {
+                    store(dlg, st);
+                    let p = if id == ID_COPY {
+                        let mut p = st.list.profiles[st.current].clone();
+                        p.name = unique_name(&st.list, &p.name);
+                        p
+                    } else {
+                        ProxyProfile {
+                            name: unique_name(&st.list, "新しいプロファイル"),
                             mode: ProxyMode::Manual,
                             server: "127.0.0.1:8080".into(),
+                            bypass: "<local>".into(),
                             ..ProxyProfile::default()
-                        });
-                        st.current = st.list.profiles.len() - 1;
-                        fill_list(dlg, st);
+                        }
+                    };
+                    st.list.profiles.push(p);
+                    st.current = st.list.profiles.len() - 1;
+                    fill_profiles(dlg, st);
+                    show(dlg, st);
+                    focus(dlg, ID_NAME);
+                }
+                ID_DELETE => {
+                    if st.list.profiles.len() <= 1 {
+                        crate::util::info_box(dlg, "最後のプロファイルは消せません。");
+                    } else {
+                        let name = st.list.profiles[st.current].name.clone();
+                        let _ = st.list.remove(&name);
+                        st.current = st.current.min(st.list.profiles.len() - 1);
+                        fill_profiles(dlg, st);
                         show(dlg, st);
-                        if let Ok(h) = GetDlgItem(Some(dlg), ID_NAME as i32) {
-                            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(h));
-                        }
                     }
-                    ID_DELETE => {
-                        if st.list.profiles.len() <= 1 {
-                            crate::util::info_box(dlg, "最後のプロファイルは消せません。");
+                }
+                ID_RULE_ADD => {
+                    if let Some(r) = edit_rule(dlg, None) {
+                        let p = &mut st.list.profiles[st.current];
+                        p.rules.push(r);
+                        fill_rules(dlg, p, Some(p.rules.len() - 1));
+                    }
+                }
+                ID_RULE_EDIT => edit_selected_rule(dlg, st),
+                ID_RULES if code == LBN_DBLCLK => edit_selected_rule(dlg, st),
+                ID_RULE_DEL => {
+                    if let Some(i) = list_sel(dlg, ID_RULES) {
+                        let p = &mut st.list.profiles[st.current];
+                        p.rules.remove(i);
+                        fill_rules(dlg, p, Some(i.min(p.rules.len().saturating_sub(1))));
+                    }
+                }
+                ID_RULE_UP | ID_RULE_DOWN => {
+                    if let Some(i) = list_sel(dlg, ID_RULES) {
+                        let p = &mut st.list.profiles[st.current];
+                        let j = if id == ID_RULE_UP {
+                            i.checked_sub(1)
                         } else {
-                            let name = st.list.profiles[st.current].name.clone();
-                            let _ = st.list.remove(&name);
-                            st.current = st.current.min(st.list.profiles.len() - 1);
-                            fill_list(dlg, st);
-                            show(dlg, st);
+                            Some(i + 1)
+                        };
+                        if let Some(j) = j.filter(|j| *j < p.rules.len()) {
+                            p.rules.swap(i, j);
+                            fill_rules(dlg, p, Some(j));
                         }
                     }
-                    ID_MAKE_CERT => make_cert(dlg),
-                    ID_PIN_CERT => pin_cert(dlg),
-                    IDOK_ => {
-                        store(dlg, st);
-                        if let Some(e) = st.parse_error.take() {
-                            crate::util::error_box(dlg, &e);
-                            return 1;
-                        }
-                        match check_all(st) {
-                            Ok(()) => {
-                                st.done = true;
+                }
+                ID_HOST_ADD => {
+                    if let Some(m) = edit_host(dlg, None) {
+                        let p = &mut st.list.profiles[st.current];
+                        p.hosts.push(m);
+                        fill_hosts(dlg, p, Some(p.hosts.len() - 1));
+                    }
+                }
+                ID_HOST_EDIT => edit_selected_host(dlg, st),
+                ID_HOSTS if code == LBN_DBLCLK => edit_selected_host(dlg, st),
+                ID_HOST_DEL => {
+                    if let Some(i) = list_sel(dlg, ID_HOSTS) {
+                        let p = &mut st.list.profiles[st.current];
+                        p.hosts.remove(i);
+                        fill_hosts(dlg, p, Some(i.min(p.hosts.len().saturating_sub(1))));
+                    }
+                }
+                IDOK_ => {
+                    store(dlg, st);
+                    match check_all(st) {
+                        Ok(()) => {
+                            st.done = true;
+                            unsafe {
                                 let _ = EndDialog(dlg, IDOK_ as isize);
                             }
-                            Err(e) => {
-                                fill_list(dlg, st);
-                                show(dlg, st);
-                                crate::util::error_box(dlg, &e);
-                            }
+                        }
+                        Err(e) => {
+                            fill_profiles(dlg, st);
+                            show(dlg, st);
+                            crate::util::error_box(dlg, &e);
                         }
                     }
-                    IDCANCEL_ => {
-                        let _ = EndDialog(dlg, IDCANCEL_ as isize);
-                    }
-                    _ => {}
                 }
-                1
+                IDCANCEL_ => unsafe {
+                    let _ = EndDialog(dlg, IDCANCEL_ as isize);
+                },
+                _ => {}
             }
-            _ => 0,
+            1
         }
+        _ => 0,
     }
 }
 
-/// 転送の欄の、カーソルのある行（番号と内容）。
-fn caret_line(dlg: HWND) -> (usize, Vec<String>) {
-    let text = get_text(dlg, ID_HOSTS);
-    let lines: Vec<String> = text.lines().map(str::to_owned).collect();
-    let n = unsafe {
-        SendDlgItemMessageW(
-            dlg,
-            ID_HOSTS as i32,
-            EM_LINEFROMCHAR,
-            WPARAM(usize::MAX),
-            LPARAM(0),
-        )
-        .0
+fn edit_selected_rule(dlg: HWND, st: &mut State) {
+    let Some(i) = list_sel(dlg, ID_RULES) else {
+        return;
+    };
+    let old = st.list.profiles[st.current].rules[i].clone();
+    if let Some(r) = edit_rule(dlg, Some(old)) {
+        let p = &mut st.list.profiles[st.current];
+        p.rules[i] = r;
+        fill_rules(dlg, p, Some(i));
     }
-    .max(0) as usize;
-    (n, lines)
 }
 
-/// 転送の欄のカーソルの行を読む（だめなら理由を出して `None`）。
-fn caret_mapping(dlg: HWND) -> Option<(usize, Vec<String>, yy_browser::HostMap)> {
-    let (n, lines) = caret_line(dlg);
-    let line = lines.get(n).cloned().unwrap_or_default();
-    match parse_hosts(&line) {
-        Ok(mut v) if v.len() == 1 => Some((n, lines, v.remove(0))),
-        Ok(_) => {
+fn edit_selected_host(dlg: HWND, st: &mut State) {
+    let Some(i) = list_sel(dlg, ID_HOSTS) else {
+        return;
+    };
+    let old = st.list.profiles[st.current].hosts[i].clone();
+    if let Some(m) = edit_host(dlg, Some(old)) {
+        let p = &mut st.list.profiles[st.current];
+        p.hosts[i] = m;
+        fill_hosts(dlg, p, Some(i));
+    }
+}
+
+// ---- ドメインごとのプロキシ（1 つ） ---------------------------------------------------------
+
+const R_TARGET: u16 = 200;
+const R_VALUE: u16 = 201;
+const R_ROUTE: u16 = 202;
+const R_HOST: u16 = 203;
+const R_PORT: u16 = 204;
+
+struct RuleState {
+    rule: Option<ProxyRule>,
+    result: Option<ProxyRule>,
+}
+
+/// 規則を 1 つ足す・直す。
+fn edit_rule(owner: HWND, rule: Option<ProxyRule>) -> Option<ProxyRule> {
+    let mut t = T(Template::dialog("ドメインごとのプロキシ", 300, 116));
+    t.label(7, 7, 50, "対象");
+    t.combo(60, 7, 233, R_TARGET);
+    t.label(7, 25, 50, "ドメイン");
+    t.edit(60, 25, 233, R_VALUE, 0);
+    t.label(7, 47, 50, "経路");
+    t.combo(60, 47, 80, R_ROUTE);
+    t.label(7, 65, 50, "プロキシ");
+    t.edit(60, 65, 160, R_HOST, 0);
+    t.label(223, 65, 6, ":");
+    t.edit(231, 65, 62, R_PORT, ES_NUMBER as u32);
+    t.ok_cancel(293, 95, "OK");
+    let mut st = RuleState { rule, result: None };
+    run(owner, t, Some(rule_proc), &mut st);
+    st.result
+}
+
+fn rule_enable(dlg: HWND) {
+    let proxy = combo_sel(dlg, R_ROUTE) > 0;
+    enable(dlg, R_HOST, proxy);
+    enable(dlg, R_PORT, proxy);
+    let t = Target::ALL
+        .get(combo_sel(dlg, R_TARGET))
+        .copied()
+        .unwrap_or(Target::DomainAndSubdomains);
+    cue(dlg, R_VALUE, t.example());
+}
+
+extern "system" fn rule_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
+    match msg {
+        WM_INITDIALOG => {
+            unsafe { SetWindowLongPtrW(dlg, GWLP_USERDATA, lparam.0) };
+            let st = state_of::<RuleState>(dlg);
+            let targets: Vec<&str> = Target::ALL.iter().map(|t| t.label()).collect();
+            let mut routes = vec!["直接"];
+            routes.extend(ProxyKind::ALL.iter().map(|k| k.label()));
+            let (target, value, route, host, port) = match &st.rule {
+                Some(r) => {
+                    let (t, v) = split_pattern(&r.pattern);
+                    let e = rule_route(r);
+                    let route = e
+                        .as_ref()
+                        .and_then(|e| ProxyKind::ALL.iter().position(|k| *k == e.kind))
+                        .map_or(0, |i| i + 1);
+                    (
+                        Target::ALL.iter().position(|x| *x == t).unwrap_or(0),
+                        v,
+                        route,
+                        e.as_ref().map(|e| e.host.clone()).unwrap_or_default(),
+                        e.map(|e| e.port.to_string()).unwrap_or_default(),
+                    )
+                }
+                None => (0, String::new(), 1, String::new(), String::new()),
+            };
+            combo_fill(dlg, R_TARGET, &targets, target);
+            combo_fill(dlg, R_ROUTE, &routes, route);
+            set_text(dlg, R_VALUE, &value);
+            set_text(dlg, R_HOST, &host);
+            set_text(dlg, R_PORT, &port);
+            cue(dlg, R_HOST, "ホスト名か IP アドレス");
+            cue(dlg, R_PORT, "ポート");
+            rule_enable(dlg);
+            focus(dlg, R_VALUE);
+            0
+        }
+        WM_COMMAND => {
+            let st = state_of::<RuleState>(dlg);
+            let id = (wparam.0 & 0xffff) as u16;
+            let code = ((wparam.0 >> 16) & 0xffff) as u32;
+            match id {
+                R_TARGET | R_ROUTE if code == CBN_SELCHANGE => rule_enable(dlg),
+                IDOK_ => {
+                    let target = Target::ALL[combo_sel(dlg, R_TARGET).min(Target::ALL.len() - 1)];
+                    let value = get_text(dlg, R_VALUE);
+                    if value.is_empty() {
+                        crate::util::error_box(dlg, "対象のドメイン（か範囲）を入れてください。");
+                        focus(dlg, R_VALUE);
+                        return 1;
+                    }
+                    let route = combo_sel(dlg, R_ROUTE);
+                    let proxy = if route == 0 {
+                        "direct".to_owned()
+                    } else {
+                        let kind = ProxyKind::ALL[(route - 1).min(ProxyKind::ALL.len() - 1)];
+                        let host = get_text(dlg, R_HOST);
+                        if host.is_empty() {
+                            crate::util::error_box(
+                                dlg,
+                                "プロキシのホスト名か IP アドレスを入れてください。",
+                            );
+                            focus(dlg, R_HOST);
+                            return 1;
+                        }
+                        let port = match read_port(dlg, R_PORT) {
+                            Ok(p) => p.unwrap_or(kind.default_port()),
+                            Err(e) => {
+                                crate::util::error_box(dlg, &e);
+                                focus(dlg, R_PORT);
+                                return 1;
+                            }
+                        };
+                        Endpoint { kind, host, port }.to_spec()
+                    };
+                    let r = ProxyRule {
+                        pattern: join_pattern(target, &value),
+                        proxy,
+                    };
+                    match r.validate() {
+                        Ok(()) => {
+                            st.result = Some(r);
+                            unsafe {
+                                let _ = EndDialog(dlg, IDOK_ as isize);
+                            }
+                        }
+                        Err(e) => crate::util::error_box(dlg, &e),
+                    }
+                }
+                IDCANCEL_ => unsafe {
+                    let _ = EndDialog(dlg, IDCANCEL_ as isize);
+                },
+                _ => {}
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
+// ---- ホストの転送（1 つ） -------------------------------------------------------------------
+
+const H_HOST: u16 = 300;
+const H_PORTSEL: u16 = 301;
+const H_PORT: u16 = 302;
+const H_DEST: u16 = 303;
+const H_DPORT: u16 = 304;
+const H_CERT: u16 = 305;
+const H_FP: u16 = 306;
+
+/// 開発者用証明書のプルダウン。
+const CERT_NONE: usize = 0;
+const CERT_KEEP: usize = 1;
+const CERT_NEW: usize = 2;
+const CERT_FILE: usize = 3;
+
+struct HostState {
+    map: Option<HostMap>,
+    /// 今の指紋（登録済み・ファイルから読んだもの）
+    pinned: String,
+    result: Option<HostMap>,
+}
+
+/// 転送を 1 つ足す・直す。
+fn edit_host(owner: HWND, map: Option<HostMap>) -> Option<HostMap> {
+    let mut t = T(Template::dialog("ホストの転送", 320, 154));
+    t.label(7, 7, 62, "ホスト");
+    t.edit(72, 7, 241, H_HOST, 0);
+    t.label(7, 25, 62, "対象のポート");
+    t.combo(72, 25, 100, H_PORTSEL);
+    t.edit(176, 25, 60, H_PORT, ES_NUMBER as u32);
+    t.label(7, 43, 62, "転送先");
+    t.edit(72, 43, 150, H_DEST, 0);
+    t.label(225, 43, 6, ":");
+    t.edit(233, 43, 80, H_DPORT, ES_NUMBER as u32);
+    t.label(7, 65, 64, "開発者用証明書");
+    t.combo(72, 65, 241, H_CERT);
+    // 指紋は長い（95 文字）ので 2 行で見せる
+    t.0.item(
+        WS_BORDER.0 | (ES_MULTILINE | ES_READONLY) as u32,
+        72,
+        83,
+        241,
+        20,
+        H_FP,
+        CLASS_EDIT,
+        "",
+    );
+    t.label(
+        72,
+        106,
+        241,
+        "https のページで、この証明書のときだけエラーを許します",
+    );
+    t.ok_cancel(313, 133, "OK");
+    let pinned = map.as_ref().and_then(|m| m.pinned()).unwrap_or_default();
+    let mut st = HostState {
+        map,
+        pinned,
+        result: None,
+    };
+    run(owner, t, Some(host_proc), &mut st);
+    st.result
+}
+
+fn cert_items(st: &HostState) -> Vec<String> {
+    vec![
+        "使わない".into(),
+        if st.pinned.is_empty() {
+            "登録済みのもの（なし）".into()
+        } else {
+            "登録済みのものを使う".into()
+        },
+        "新しく作る（自己署名）".into(),
+        "証明書ファイルから登録...".into(),
+    ]
+}
+
+fn host_refresh(dlg: HWND, st: &HostState, sel: usize) {
+    let items = cert_items(st);
+    let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+    combo_fill(dlg, H_CERT, &refs, sel);
+    host_show_fp(dlg, st);
+}
+
+fn host_show_fp(dlg: HWND, st: &HostState) {
+    let s = match combo_sel(dlg, H_CERT) {
+        CERT_KEEP => {
+            if st.pinned.is_empty() {
+                String::new()
+            } else {
+                format!("SHA-256 {}", st.pinned)
+            }
+        }
+        CERT_NEW => "保存するときに作ります（証明書と秘密鍵を書き出します）".into(),
+        _ => String::new(),
+    };
+    set_text(dlg, H_FP, &s);
+    let other = PortChoice::ALL.get(combo_sel(dlg, H_PORTSEL)).copied() == Some(PortChoice::Other);
+    enable(dlg, H_PORT, other);
+}
+
+extern "system" fn host_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
+    match msg {
+        WM_INITDIALOG => {
+            unsafe { SetWindowLongPtrW(dlg, GWLP_USERDATA, lparam.0) };
+            let st = state_of::<HostState>(dlg);
+            let ports: Vec<&str> = PortChoice::ALL.iter().map(|p| p.label()).collect();
+            let (host, port, dest, dport) = match &st.map {
+                Some(m) => split_host_map(m),
+                None => (String::new(), None, "127.0.0.1".into(), None),
+            };
+            let choice = PortChoice::of(port);
+            combo_fill(
+                dlg,
+                H_PORTSEL,
+                &ports,
+                PortChoice::ALL
+                    .iter()
+                    .position(|p| *p == choice)
+                    .unwrap_or(0),
+            );
+            set_text(dlg, H_HOST, &host);
+            set_text(
+                dlg,
+                H_PORT,
+                &if choice == PortChoice::Other {
+                    port.map(|p| p.to_string()).unwrap_or_default()
+                } else {
+                    String::new()
+                },
+            );
+            set_text(dlg, H_DEST, &dest);
+            set_text(
+                dlg,
+                H_DPORT,
+                &dport.map(|p| p.to_string()).unwrap_or_default(),
+            );
+            cue(dlg, H_HOST, "例: www.example.com");
+            cue(dlg, H_PORT, "ポート");
+            cue(dlg, H_DEST, "IP アドレス（例: 127.0.0.1）");
+            cue(dlg, H_DPORT, "元のまま");
+            let sel = if st.pinned.is_empty() {
+                CERT_NONE
+            } else {
+                CERT_KEEP
+            };
+            host_refresh(dlg, st, sel);
+            focus(dlg, H_HOST);
+            0
+        }
+        WM_COMMAND => {
+            let st = state_of::<HostState>(dlg);
+            let id = (wparam.0 & 0xffff) as u16;
+            let code = ((wparam.0 >> 16) & 0xffff) as u32;
+            match id {
+                H_PORTSEL if code == CBN_SELCHANGE => host_show_fp(dlg, st),
+                H_CERT if code == CBN_SELCHANGE => match combo_sel(dlg, H_CERT) {
+                    CERT_KEEP if st.pinned.is_empty() => host_refresh(dlg, st, CERT_NONE),
+                    CERT_NEW if super::DEV_CERT.with(|d| d.get()).is_none() => {
+                        crate::util::error_box(
+                            dlg,
+                            "このビルドの yybrowser では証明書を作れません。",
+                        );
+                        host_refresh(dlg, st, CERT_NONE);
+                    }
+                    CERT_FILE => {
+                        if let Some(fp) = pick_cert_file(dlg) {
+                            st.pinned = fp;
+                            host_refresh(dlg, st, CERT_KEEP);
+                        } else {
+                            let sel = if st.pinned.is_empty() {
+                                CERT_NONE
+                            } else {
+                                CERT_KEEP
+                            };
+                            host_refresh(dlg, st, sel);
+                        }
+                    }
+                    _ => host_show_fp(dlg, st),
+                },
+                IDOK_ => {
+                    if let Some(m) = build_host_map(dlg, st) {
+                        st.result = Some(m);
+                        unsafe {
+                            let _ = EndDialog(dlg, IDOK_ as isize);
+                        }
+                    }
+                }
+                IDCANCEL_ => unsafe {
+                    let _ = EndDialog(dlg, IDCANCEL_ as isize);
+                },
+                _ => {}
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
+/// 欄から転送を作る（だめなら理由を出して `None`）。「新しく作る」なら証明書を作って書き出す。
+fn build_host_map(dlg: HWND, st: &mut HostState) -> Option<HostMap> {
+    let fail = |e: &str, id: u16| {
+        crate::util::error_box(dlg, e);
+        focus(dlg, id);
+        None
+    };
+    let host = get_text(dlg, H_HOST);
+    if host.is_empty() {
+        return fail(
+            "転送するホスト（例: www.example.com）を入れてください。",
+            H_HOST,
+        );
+    }
+    let choice = PortChoice::ALL[combo_sel(dlg, H_PORTSEL).min(PortChoice::ALL.len() - 1)];
+    let other = match read_port(dlg, H_PORT) {
+        Ok(p) => p,
+        Err(e) => return fail(&e, H_PORT),
+    };
+    if choice == PortChoice::Other && other.is_none() {
+        return fail("対象のポートを入れてください。", H_PORT);
+    }
+    let dest = get_text(dlg, H_DEST);
+    if dest.is_empty() {
+        return fail(
+            "転送先の IP アドレス（例: 127.0.0.1）を入れてください。",
+            H_DEST,
+        );
+    }
+    let dport = match read_port(dlg, H_DPORT) {
+        Ok(p) => p,
+        Err(e) => return fail(&e, H_DPORT),
+    };
+    let mut m = HostMap {
+        host: join_address(&host, choice.port(other)),
+        address: join_address(&dest, dport),
+        cert_sha256: String::new(),
+    };
+    if let Err(e) = m.validate() {
+        return fail(&e, H_HOST);
+    }
+    match combo_sel(dlg, H_CERT) {
+        CERT_KEEP => m.cert_sha256 = st.pinned.clone(),
+        CERT_NEW => {
+            let generate = super::DEV_CERT.with(|d| d.get())?;
+            let cert = match generate(&m.host) {
+                Ok(c) => c,
+                Err(e) => return fail(&format!("証明書を作れません: {e}"), H_CERT),
+            };
+            let dir = super::dev_cert_dir();
+            let (crt, key) = match yy_browser::rules::write_dev_cert(&dir, &m.host, &cert) {
+                Ok(v) => v,
+                Err(e) => {
+                    return fail(
+                        &format!("証明書を保存できません: {}: {e}", dir.display()),
+                        H_CERT,
+                    );
+                }
+            };
+            m.cert_sha256 = cert.sha256.clone();
             crate::util::info_box(
                 dlg,
-                "「ホストの転送」の欄で、証明書を使う行（例: www.example.com = 127.0.0.1:8443）に\
-                 カーソルを置いてから押してください。",
+                &format!(
+                    "{host} の開発者用証明書を作りました。\n\n証明書: {}\n秘密鍵: {}\n\n\
+                     転送先（{}）のサーバーに、この証明書と秘密鍵を設定してください。\n\
+                     yybrowser は、サーバーがこの証明書を出したときだけ証明書のエラーを許し、\
+                     アドレスバーに「開発者用証明書を利用中」と出します。\n\
+                     OS の証明書ストアには入れません。",
+                    crt.display(),
+                    key.display(),
+                    m.address
+                ),
             );
-            None
         }
-        Err(e) => {
-            crate::util::error_box(dlg, &e);
-            None
-        }
+        _ => {}
     }
+    Some(m)
 }
 
-/// カーソルの行に指紋を書き込む。
-fn set_pin(dlg: HWND, n: usize, mut lines: Vec<String>, mut m: yy_browser::HostMap, fp: String) {
-    m.cert_sha256 = fp;
-    let formatted = format_hosts(std::slice::from_ref(&m));
-    if n < lines.len() {
-        lines[n] = formatted;
-    } else {
-        lines.push(formatted);
-    }
-    set_text(dlg, ID_HOSTS, &lines.join("\r\n"));
-}
-
-/// 開発者用証明書を作り（自己署名）、カーソルの行に指紋を書き込む。
-fn make_cert(dlg: HWND) {
-    let Some(generate) = super::DEV_CERT.with(|d| d.get()) else {
-        crate::util::error_box(
-            dlg,
-            "このビルドの yybrowser では開発者用証明書を作れません。",
-        );
-        return;
-    };
-    let Some((n, lines, m)) = caret_mapping(dlg) else {
-        return;
-    };
-    if !m.cert_sha256.is_empty() {
-        let ok = unsafe {
-            MessageBoxW(
-                Some(dlg),
-                &HSTRING::from(format!(
-                    "{} にはもう開発者用証明書（{}）が登録されています。作り直しますか？\n\
-                     （転送先のサーバーの証明書も入れ替える必要があります）",
-                    m.host, m.cert_sha256
-                )),
-                windows::core::w!("yybrowser"),
-                MB_OKCANCEL | MB_ICONQUESTION,
-            )
-        } == IDOK;
-        if !ok {
-            return;
-        }
-    }
-    let cert = match generate(&m.host) {
-        Ok(c) => c,
-        Err(e) => {
-            crate::util::error_box(dlg, &format!("証明書を作れません: {e}"));
-            return;
-        }
-    };
-    let dir = super::dev_cert_dir();
-    let (crt, key) = match yy_browser::rules::write_dev_cert(&dir, &m.host, &cert) {
-        Ok(v) => v,
-        Err(e) => {
-            crate::util::error_box(
-                dlg,
-                &format!("証明書を保存できません: {}: {e}", dir.display()),
-            );
-            return;
-        }
-    };
-    let host = m.host.clone();
-    let address = m.address.clone();
-    set_pin(dlg, n, lines, m, cert.sha256.clone());
-    crate::util::info_box(
-        dlg,
-        &format!(
-            "{host} の開発者用証明書を作りました。\n\n証明書: {}\n秘密鍵: {}\nSHA-256: {}\n\n\
-             転送先（{address}）のサーバーに、この証明書と秘密鍵を設定してください。\n\
-             yybrowser は、サーバーがこの証明書を出したときだけ証明書のエラーを許し、アドレスバーに\
-             「開発者用証明書を利用中」と表示します。OS の証明書ストアには入れません。\n\
-             （保存すると有効になります）",
-            crt.display(),
-            key.display(),
-            cert.sha256
-        ),
-    );
-}
-
-/// 既にある証明書のファイル（PEM・DER）の指紋を、カーソルの行に登録する。
-fn pin_cert(dlg: HWND) {
-    let Some((n, lines, m)) = caret_mapping(dlg) else {
-        return;
-    };
-    let Some(path) = crate::fm::pick_file(
+/// 証明書のファイル（PEM・DER）を選んで指紋を返す。
+fn pick_cert_file(dlg: HWND) -> Option<String> {
+    let path = crate::fm::pick_file(
         dlg,
         (
             "証明書 (*.crt;*.pem;*.cer;*.der)",
@@ -639,26 +1171,15 @@ fn pin_cert(dlg: HWND) {
         ),
         Some(&super::dev_cert_dir()),
         None,
-    ) else {
-        return;
-    };
+    )?;
     let fp = std::fs::read(&path)
         .ok()
         .and_then(|b| yy_browser::rules::cert_fingerprint(&b));
-    match fp {
-        Some(fp) => {
-            set_pin(dlg, n, lines, m, fp.clone());
-            crate::util::info_box(
-                dlg,
-                &format!(
-                    "{} を登録しました。\nSHA-256: {fp}\n（保存すると有効になります）",
-                    path.display()
-                ),
-            );
-        }
-        None => crate::util::error_box(
+    if fp.is_none() {
+        crate::util::error_box(
             dlg,
             &format!("{} は証明書（PEM・DER）として読めません。", path.display()),
-        ),
+        );
     }
+    fp
 }
