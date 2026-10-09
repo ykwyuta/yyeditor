@@ -738,6 +738,55 @@ impl Sheet {
         );
     }
 
+    /// 絞り込み・並べ替えに使う表（15 章 9）。表のデータのセルに数式があれば、その結果の値に置き換えた
+    /// 写し（列は必要なものだけ写す）。数式がなければ表そのもの。
+    pub fn query_table(&self, ctx: &Context) -> io::Result<Table> {
+        let t = &self.table;
+        if t.columns.is_empty() || self.formulas.is_empty() {
+            return Ok(t.clone());
+        }
+        let header = t.header as u64;
+        // 表のデータの行（絞り込みをしないときの格子の行）
+        let (first, end) = (header, header + t.rows);
+        let mut cols: Option<Vec<Column>> = None;
+        let mut touched: Vec<u32> = Vec::new();
+        let mut put = |c: u32, r: u64, v: Value| -> io::Result<()> {
+            let cols = cols.get_or_insert_with(|| (*t.columns).clone());
+            if !touched.contains(&c) {
+                touched.push(c);
+            }
+            cols[c as usize].set(ctx, r - first, v)
+        };
+        for c in 0..t.cols() {
+            for (&(_, r), v) in self.formulas.results.range((c, first)..(c, end)) {
+                put(c, r, v.clone())?;
+            }
+        }
+        for sh in self.formulas.shared.iter() {
+            let Some(res) = &sh.results else {
+                continue;
+            };
+            if sh.col >= t.cols() {
+                continue;
+            }
+            let (a, b) = (sh.r0.max(first), sh.r1.min(end.saturating_sub(1)));
+            for r in a..=b {
+                put(sh.col, r, res.get(ctx, r - sh.r0)?)?;
+            }
+        }
+        let Some(mut cols) = cols else {
+            return Ok(t.clone());
+        };
+        for c in touched {
+            cols[c as usize].flush(ctx)?;
+        }
+        Ok(Table {
+            columns: Arc::new(cols),
+            rows: t.rows,
+            header: t.header,
+        })
+    }
+
     /// 表の外の自由なセル（手で入れた・貼り付けたデータ）を表に取り込む（15 章 9。絞り込み・並べ替えは
     /// 表の列に対して行うため）。取り込んだら `true`。
     ///
@@ -1117,6 +1166,64 @@ mod tests {
         e.set(&ctx, 3, 0, Value::text("x")).unwrap();
         e.set(&ctx, 4, 0, Value::text("y")).unwrap();
         assert!(!e.absorb_free_cells(&ctx, 0).unwrap());
+    }
+
+    /// 数式のセルは、絞り込み・並べ替えで結果の値として扱う（個別の式も共有式も）。
+    #[test]
+    fn queries_use_formula_results() {
+        use crate::query::{Cmp, ColFilter, Cond};
+        let ctx = Context::for_tests();
+        let mut s = Sheet::new("S");
+        s.set(&ctx, 0, 0, Value::text("数")).unwrap();
+        s.set(&ctx, 0, 1, Value::text("倍")).unwrap();
+        s.set(&ctx, 0, 2, Value::text("足す")).unwrap();
+        for r in 1..=4u64 {
+            s.set(&ctx, r, 0, Value::Number(r as f64)).unwrap();
+            s.set_formula(&ctx, r, 1, &format!("=A{}*10", r + 1))
+                .unwrap();
+        }
+        // C 列は共有式（C2:C5 = A+100）
+        s.formulas.add_shared(crate::shared::Shared {
+            col: 2,
+            r0: 1,
+            r1: 4,
+            formula: Formula::parse("=A2+100").unwrap(),
+            results: None,
+        });
+        assert!(s.absorb_free_cells(&ctx, 2).unwrap());
+        let mut book = Workbook {
+            sheets: vec![s],
+            date_system: DateSystem::D1900,
+        };
+        crate::formula::recalc(&mut book, &ctx);
+        let s = &book.sheets[0];
+        assert_eq!(s.get(&ctx, 3, 1).unwrap(), Value::Number(30.0));
+        assert_eq!(s.get(&ctx, 3, 2).unwrap(), Value::Number(103.0));
+        // 表そのものの列は空（式は表の外に持つ）
+        assert_eq!(s.table.columns[1].get(&ctx, 2).unwrap(), Value::Empty);
+        let q = s.query_table(&ctx).unwrap();
+        assert_eq!(q.columns[1].get(&ctx, 2).unwrap(), Value::Number(30.0));
+        assert_eq!(q.columns[2].get(&ctx, 3).unwrap(), Value::Number(104.0));
+        let gt = |col: u32, value: f64| ColFilter {
+            col,
+            cond: Cond::Number { op: Cmp::Gt, value },
+        };
+        let (_, counts) = crate::query::filter(&ctx, &q, &[gt(1, 25.0)]).unwrap();
+        assert_eq!(counts, [2]);
+        let (_, counts) = crate::query::filter(&ctx, &q, &[gt(2, 101.5)]).unwrap();
+        assert_eq!(counts, [3]);
+        // 並べ替えも結果の値で（降順なら 4 行目が先）
+        let order = crate::query::sort(
+            &ctx,
+            &q,
+            &[crate::query::SortKey { col: 1, desc: true }],
+            None,
+        )
+        .unwrap();
+        assert_eq!(order[0], 3);
+        // 数式がなければ表そのもの
+        let plain = Sheet::new("P");
+        assert_eq!(plain.query_table(&ctx).unwrap().cols(), 0);
     }
 
     #[test]
