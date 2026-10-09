@@ -35,7 +35,7 @@ mod resident {
         AddClipboardFormatListener, RemoveClipboardFormatListener,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
+    use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
     use windows::Win32::UI::Controls::{
         EM_SETLIMITTEXT, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, NMHDR,
         TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW, TCM_SETCURSEL,
@@ -45,8 +45,8 @@ mod resident {
         GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI, SystemParametersInfoForDpi,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LCONTROL, VK_LEFT, VK_RCONTROL,
-        VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
+        GetKeyState, SetActiveWindow, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LCONTROL,
+        VK_LEFT, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
     };
     use windows::Win32::UI::Shell::{
         ASSOCF_NONE, ASSOCSTR_EXECUTABLE, AssocQueryStringW, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS,
@@ -74,10 +74,11 @@ mod resident {
     const ID_EDIT: usize = 103;
     const ID_SAVE: usize = 104;
     const ID_CANCEL: usize = 105;
+    const ID_MEMO: usize = 106;
     const POPUP_WIDTH: i32 = 460;
     const POPUP_HEIGHT: i32 = 340;
     const EDITOR_WIDTH: i32 = 500;
-    const EDITOR_HEIGHT: i32 = 330;
+    const EDITOR_HEIGHT: i32 = 400;
     static MENU_OPEN: AtomicBool = AtomicBool::new(false);
     static PICKER_OPEN: AtomicBool = AtomicBool::new(false);
     static MENU_EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -111,6 +112,8 @@ mod resident {
         list: HWND,
         edit_label: HWND,
         edit: HWND,
+        memo_label: HWND,
+        memo: HWND,
         save_button: HWND,
         cancel_button: HWND,
         ui_font: HFONT,
@@ -120,7 +123,7 @@ mod resident {
         editing_path: Option<std::path::PathBuf>,
         previous_focus: HWND,
         history_entries: Vec<(std::path::PathBuf, String)>,
-        template_entries: Vec<(std::path::PathBuf, String)>,
+        template_entries: Vec<templates::Template>,
         favorite_entries: Vec<(std::path::PathBuf, Favorite)>,
     }
 
@@ -199,6 +202,8 @@ mod resident {
                     list: HWND::default(),
                     edit_label: HWND::default(),
                     edit: HWND::default(),
+                    memo_label: HWND::default(),
+                    memo: HWND::default(),
                     save_button: HWND::default(),
                     cancel_button: HWND::default(),
                     ui_font: HFONT::default(),
@@ -376,6 +381,34 @@ mod resident {
     }
 
     /// 非表示の通知用ウィンドウをメニューの間だけ 1px 表示し、キー入力を受けられるようにする。
+    /// `hwnd` を前面にして `focus` にキーボードのフォーカスを移す。常駐アプリがキーボードのフックの知らせで
+    /// 前面になろうとすると、Windows の「前面を奪わせない」制限で `SetForegroundWindow` が断られ、フォーカスが
+    /// 移らない（矢印キーが前のアプリへ行く）ことがある。今の前面のウィンドウのスレッドと一時的に入力を
+    /// 結び付けてから前面にする。
+    fn bring_to_front(hwnd: HWND, focus: Option<HWND>) {
+        unsafe {
+            let me = GetCurrentThreadId();
+            let fg = GetForegroundWindow();
+            let fg_thread = if fg.0.is_null() {
+                0
+            } else {
+                GetWindowThreadProcessId(fg, None)
+            };
+            let attached = fg_thread != 0
+                && fg_thread != me
+                && AttachThreadInput(me, fg_thread, true).as_bool();
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetActiveWindow(hwnd);
+            if let Some(f) = focus {
+                let _ = SetFocus(Some(f));
+            }
+            if attached {
+                let _ = AttachThreadInput(me, fg_thread, false);
+            }
+        }
+    }
+
     unsafe fn show_menu_host(hwnd: HWND, point: POINT) {
         let _ = unsafe {
             SetWindowPos(
@@ -388,7 +421,7 @@ mod resident {
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
             )
         };
-        let _ = unsafe { SetForegroundWindow(hwnd) };
+        bring_to_front(hwnd, None);
     }
 
     unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -545,6 +578,46 @@ mod resident {
                 None,
             )?
         };
+        let memo_label = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("メモ（何に使う定型文か。一覧に出ます）"),
+                WS_CHILD,
+                16,
+                16,
+                468,
+                22,
+                Some(hwnd),
+                Some(HMENU(110usize as *mut _)),
+                Some(instance),
+                None,
+            )?
+        };
+        let memo = unsafe {
+            CreateWindowExW(
+                WS_EX_CLIENTEDGE,
+                w!("EDIT"),
+                PCWSTR::null(),
+                WS_CHILD | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                16,
+                40,
+                468,
+                26,
+                Some(hwnd),
+                Some(HMENU(ID_MEMO as *mut _)),
+                Some(instance),
+                None,
+            )?
+        };
+        unsafe {
+            SendMessageW(
+                memo,
+                EM_SETLIMITTEXT,
+                Some(WPARAM(templates::MEMO_LIMIT)),
+                None,
+            );
+        }
         let edit_label = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -637,6 +710,8 @@ mod resident {
             state.list = list;
             state.edit_label = edit_label;
             state.edit = edit;
+            state.memo_label = memo_label;
+            state.memo = memo;
             state.save_button = buttons[0];
             state.cancel_button = buttons[1];
         });
@@ -701,6 +776,8 @@ mod resident {
             let controls = [
                 state.tabs,
                 state.list,
+                state.memo_label,
+                state.memo,
                 state.edit_label,
                 state.edit,
                 state.save_button,
@@ -743,6 +820,8 @@ mod resident {
     }
 
     struct EditorLayout {
+        memo_label: BoxRect,
+        memo: BoxRect,
         label: BoxRect,
         edit: BoxRect,
         save: BoxRect,
@@ -762,11 +841,25 @@ mod resident {
             save_w = available / 2;
             cancel_w = available - save_w;
         }
-        let edit_y = pad + label_h + gap;
+        let memo_h = scaled(28, scale).max(font_px + scaled(12, scale));
+        let label_y = pad + label_h + memo_h + gap;
+        let edit_y = label_y + label_h + gap;
         EditorLayout {
-            label: BoxRect {
+            memo_label: BoxRect {
                 x: pad,
                 y: pad,
+                w: (width - 2 * pad).max(1),
+                h: label_h,
+            },
+            memo: BoxRect {
+                x: pad,
+                y: pad + label_h,
+                w: (width - 2 * pad).max(1),
+                h: memo_h,
+            },
+            label: BoxRect {
+                x: pad,
+                y: label_y,
                 w: (width - 2 * pad).max(1),
                 h: label_h,
             },
@@ -815,21 +908,25 @@ mod resident {
         if width <= 0 || height <= 0 {
             return;
         }
-        let Some((tabs, list, label, edit, save, cancel, scale, font_px)) = STATE.with(|cell| {
-            let borrow = cell.borrow();
-            borrow.as_ref().map(|state| {
-                (
-                    state.tabs,
-                    state.list,
-                    state.edit_label,
-                    state.edit,
-                    state.save_button,
-                    state.cancel_button,
-                    state.ui_scale,
-                    state.font_px,
-                )
+        let Some((tabs, list, label, edit, save, cancel, scale, font_px, memo_label, memo)) = STATE
+            .with(|cell| {
+                let borrow = cell.borrow();
+                borrow.as_ref().map(|state| {
+                    (
+                        state.tabs,
+                        state.list,
+                        state.edit_label,
+                        state.edit,
+                        state.save_button,
+                        state.cancel_button,
+                        state.ui_scale,
+                        state.font_px,
+                        state.memo_label,
+                        state.memo,
+                    )
+                })
             })
-        }) else {
+        else {
             return;
         };
         if tabs.0.is_null() {
@@ -868,6 +965,8 @@ mod resident {
             },
         );
         let editor = editor_layout(width, height, scale, font_px);
+        move_control(memo_label, editor.memo_label);
+        move_control(memo, editor.memo);
         move_control(label, editor.label);
         move_control(edit, editor.edit);
         move_control(save, editor.save);
@@ -919,7 +1018,7 @@ mod resident {
                 1 => state
                     .template_entries
                     .iter()
-                    .map(|(_, text)| history::label(text))
+                    .map(templates::Template::label)
                     .collect::<Vec<_>>(),
                 _ => state
                     .favorite_entries
@@ -968,7 +1067,7 @@ mod resident {
             state.previous_focus = previous;
         });
         PICKER_OPEN.store(true, Ordering::SeqCst);
-        let (tabs, list, label, edit, save, cancel) = STATE.with(|cell| {
+        let (tabs, list, label, edit, save, cancel, memo_label, memo) = STATE.with(|cell| {
             let borrow = cell.borrow();
             let state = borrow.as_ref().unwrap();
             (
@@ -978,11 +1077,13 @@ mod resident {
                 state.edit,
                 state.save_button,
                 state.cancel_button,
+                state.memo_label,
+                state.memo,
             )
         });
         unsafe {
             SendMessageW(tabs, TCM_SETCURSEL, Some(WPARAM(0)), None);
-            for control in [label, edit, save, cancel] {
+            for control in [label, edit, save, cancel, memo_label, memo] {
                 let _ = ShowWindow(control, SW_HIDE);
             }
             for control in [tabs, list] {
@@ -1002,9 +1103,21 @@ mod resident {
         refresh_list();
         unsafe {
             show_at_cursor(hwnd, POPUP_WIDTH, POPUP_HEIGHT);
-            let _ = SetForegroundWindow(hwnd);
-            let _ = SetFocus(Some(list));
         }
+        // 一番上の項目を選んだ状態で、一覧にキーボードのフォーカスを移す（そのまま矢印キーで動かせる）
+        focus_list_top(hwnd, list);
+    }
+
+    /// 一覧の一番上の項目を選び、ウィンドウを前面にして一覧にフォーカスを移す。
+    fn focus_list_top(hwnd: HWND, list: HWND) {
+        unsafe {
+            if SendMessageW(list, LB_GETCOUNT, None, None).0 > 0 {
+                SendMessageW(list, LB_SETCURSEL, Some(WPARAM(0)), None);
+                SendMessageW(list, LB_SETCARETINDEX, Some(WPARAM(0)), Some(LPARAM(0)));
+                SendMessageW(list, LB_SETTOPINDEX, Some(WPARAM(0)), None);
+            }
+        }
+        bring_to_front(hwnd, Some(list));
     }
 
     unsafe fn show_at_cursor(hwnd: HWND, width: i32, height: i32) {
@@ -1073,17 +1186,17 @@ mod resident {
         layout_controls(hwnd);
     }
 
-    fn show_register(hwnd: HWND, entry: Option<(std::path::PathBuf, String)>) {
+    fn show_register(hwnd: HWND, entry: Option<templates::Template>) {
         if begin_menu().is_none() {
             return;
         }
         let previous = unsafe { GetForegroundWindow() };
-        let (tabs, list, label, edit, save, cancel) = STATE.with(|cell| {
+        let (tabs, list, label, edit, save, cancel, memo_label, memo) = STATE.with(|cell| {
             let mut borrow = cell.borrow_mut();
             let state = borrow.as_mut().unwrap();
             state.register_open = true;
             state.previous_focus = previous;
-            state.editing_path = entry.as_ref().map(|(path, _)| path.clone());
+            state.editing_path = entry.as_ref().map(|t| t.path.clone());
             (
                 state.tabs,
                 state.list,
@@ -1091,13 +1204,15 @@ mod resident {
                 state.edit,
                 state.save_button,
                 state.cancel_button,
+                state.memo_label,
+                state.memo,
             )
         });
         unsafe {
             for control in [tabs, list] {
                 let _ = ShowWindow(control, SW_HIDE);
             }
-            for control in [label, edit, save, cancel] {
+            for control in [memo_label, memo, label, edit, save, cancel] {
                 let _ = ShowWindow(control, SW_SHOW);
             }
             let title = if entry.is_some() {
@@ -1106,12 +1221,14 @@ mod resident {
                 w!("定型文を登録（1 MiB まで）")
             };
             let _ = SetWindowTextW(label, title);
-            let value = entry.map_or_else(String::new, |(_, text)| text);
+            let (value, memo_text) =
+                entry.map_or_else(|| (String::new(), String::new()), |t| (t.text, t.memo));
             let _ = SetWindowTextW(edit, &HSTRING::from(value));
+            let _ = SetWindowTextW(memo, &HSTRING::from(memo_text));
             show_at_cursor(hwnd, EDITOR_WIDTH, EDITOR_HEIGHT);
-            let _ = SetForegroundWindow(hwnd);
-            let _ = SetFocus(Some(edit));
         }
+        // メモの欄から入力する（Tab で内容の欄へ）
+        bring_to_front(hwnd, Some(memo));
     }
 
     fn close_popup(hwnd: HWND) {
@@ -1230,10 +1347,7 @@ mod resident {
                     .get(index)
                     .and_then(|(path, _)| state.store.load(path).ok())
             } else if tab == 1 {
-                state
-                    .template_entries
-                    .get(index)
-                    .map(|(_, text)| text.clone())
+                state.template_entries.get(index).map(|t| t.text.clone())
             } else {
                 None
             }
@@ -1483,22 +1597,26 @@ mod resident {
         if !register_open {
             return;
         }
-        let (edit, editing_path) = STATE.with(|cell| {
+        let (edit, memo, editing_path) = STATE.with(|cell| {
             let borrow = cell.borrow();
             let state = borrow.as_ref().unwrap();
-            (state.edit, state.editing_path.clone())
+            (state.edit, state.memo, state.editing_path.clone())
         });
-        let length = unsafe { GetWindowTextLengthW(edit) };
-        let mut buffer = vec![0u16; length as usize + 1];
-        let copied = unsafe { GetWindowTextW(edit, &mut buffer) } as usize;
-        let text = String::from_utf16_lossy(&buffer[..copied]);
+        let read = |h: HWND| {
+            let length = unsafe { GetWindowTextLengthW(h) };
+            let mut buffer = vec![0u16; length as usize + 1];
+            let copied = unsafe { GetWindowTextW(h, &mut buffer) } as usize;
+            String::from_utf16_lossy(&buffer[..copied])
+        };
+        let text = read(edit);
+        let memo_text = read(memo);
         let result = STATE.with(|cell| {
             let borrow = cell.borrow();
             let store = &borrow.as_ref().unwrap().templates;
             if let Some(path) = editing_path {
-                store.update(&path, &text).map(|()| path)
+                store.update(&path, &text, &memo_text).map(|()| path)
             } else {
-                store.add(&text)
+                store.add(&text, &memo_text)
             }
         });
         match result {
@@ -1546,8 +1664,8 @@ mod resident {
                 } else if let (Ok(edit_menu), Ok(delete_menu)) =
                     (CreatePopupMenu(), CreatePopupMenu())
                 {
-                    for (index, (_, body)) in templates.iter().enumerate() {
-                        let label = HSTRING::from(history::label(body).replace('&', "&&"));
+                    for (index, t) in templates.iter().enumerate() {
+                        let label = HSTRING::from(t.label().replace('&', "&&"));
                         let _ = AppendMenuW(edit_menu, MF_STRING, 100 + index, &label);
                         let _ = AppendMenuW(delete_menu, MF_STRING, 200 + index, &label);
                     }
@@ -1621,8 +1739,8 @@ mod resident {
                 }
             }
             200..=219 => {
-                if let Some((path, _)) = templates.get(selection as usize - 200) {
-                    delete_item(hwnd, path);
+                if let Some(t) = templates.get(selection as usize - 200) {
+                    delete_item(hwnd, &t.path);
                 }
             }
             300..=319 => {
@@ -1833,6 +1951,9 @@ mod resident {
                 let height = scaled(EDITOR_HEIGHT, scale).min(work_height);
                 let layout = editor_layout(width, height, scale, font_px);
                 assert!(layout.label.h > font_px);
+                assert!(layout.memo.y >= layout.memo_label.y + layout.memo_label.h);
+                assert!(layout.memo.h > font_px);
+                assert!(layout.label.y >= layout.memo.y + layout.memo.h);
                 assert!(layout.edit.y >= layout.label.y + layout.label.h);
                 assert!(layout.edit.y + layout.edit.h < layout.save.y);
                 assert!(layout.save.y + layout.save.h <= height);
