@@ -4285,7 +4285,15 @@ mod tests {
             let _ = manager.GetCookies(&HSTRING::from(url.as_str()), &h);
         }
         crate::preview::testing::pump_until(Duration::from_secs(10), || out.borrow().is_some());
-        let left = get();
+        // 消すのは非同期に効くので、消えるまで待つ
+        let mut left = get();
+        for _ in 0..20 {
+            if left.len() == 1 {
+                break;
+            }
+            crate::preview::testing::pump_until(Duration::from_millis(250), || false);
+            left = get();
+        }
         assert_eq!(
             left.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             ["secret"]

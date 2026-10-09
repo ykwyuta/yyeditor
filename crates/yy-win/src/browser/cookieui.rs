@@ -199,6 +199,16 @@ pub(super) fn show(owner: HWND, manager: ICoreWebView2CookieManager, uri: String
     st.changed
 }
 
+/// 変えた後に一覧を取り直す（入れる・消すのは非同期に効くので、少し後にもう一度取り直す）。
+fn reload_after_change(dlg: HWND, st: &ListState) {
+    reload(dlg, st);
+    unsafe {
+        SetTimer(Some(dlg), RELOAD_TIMER, 400, None);
+    }
+}
+
+const RELOAD_TIMER: usize = 1;
+
 /// Cookie を取り直して一覧に出す（取れたら非同期で出す）。
 fn reload(dlg: HWND, st: &ListState) {
     let cookies = st.cookies.clone();
@@ -283,6 +293,12 @@ extern "system" fn list_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 reload(dlg, st);
                 1
             }
+            WM_TIMER if wparam.0 == RELOAD_TIMER => {
+                let _ = KillTimer(Some(dlg), RELOAD_TIMER);
+                let st = &*(GetWindowLongPtrW(dlg, GWLP_USERDATA) as *const ListState);
+                reload(dlg, st);
+                0
+            }
             WM_COMMAND => {
                 let st = &mut *(GetWindowLongPtrW(dlg, GWLP_USERDATA) as *mut ListState);
                 let id = (wparam.0 & 0xffff) as u16;
@@ -306,7 +322,7 @@ extern "system" fn list_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                     &format!("入れられません: {}", e.message()),
                                 ),
                             }
-                            reload(dlg, st);
+                            reload_after_change(dlg, st);
                         }
                     }
                     L_EDIT => edit_selected(dlg, st),
@@ -315,7 +331,7 @@ extern "system" fn list_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         if let Some(c) = selected(dlg, st) {
                             let _ = st.manager.DeleteCookie(&c);
                             st.changed = true;
-                            reload(dlg, st);
+                            reload_after_change(dlg, st);
                         }
                     }
                     L_DELETE_ALL => {
@@ -333,7 +349,7 @@ extern "system" fn list_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                 let _ = st.manager.DeleteCookie(c);
                             }
                             st.changed = true;
-                            reload(dlg, st);
+                            reload_after_change(dlg, st);
                         }
                     }
                     L_RELOAD => reload(dlg, st),
@@ -370,7 +386,7 @@ fn edit_selected(dlg: HWND, st: &mut ListState) {
         }
         Err(e) => crate::util::error_box(dlg, &format!("入れられません: {}", e.message())),
     }
-    reload(dlg, st);
+    reload_after_change(dlg, st);
 }
 
 // ---- 1 つの編集 ----------------------------------------------------------------------------
