@@ -325,6 +325,7 @@ apps/yyterm/   ターミナルの実行ファイル（yy-win の term モジュ�
 apps/yysftp/   ファイル転送の実行ファイル（yy-win の sftp モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yysheet/  スプレッドシートの実行ファイル（yy-win の sheet モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yyfilemanager/  ファイル管理の実行ファイル（yy-win の fm モジュール。ビルドスクリプトは yyeditor と共通）
+apps/yyclip/   クリップボードの履歴の常駐アプリ（お気に入りのランチャー。詳しくは apps/yyclip/README.md）
 apps/yy-agent/ SSH 接続先に置くエージェント（Linux 用、musl で静的リンク）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
@@ -340,11 +341,12 @@ tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の�
 Windows（MSVC）:
 
 ```sh
-cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager
+cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip
 target\release\yyeditor.exe [開くファイル]
 target\release\yyterm.exe [フォルダ | ssh://接続先/パス | ユーザー@ホスト]
 target\release\yysftp.exe [ssh://接続先/パス | ユーザー@ホスト:/パス | ユーザー@ホスト]
 target\release\yyfilemanager.exe [--sync 同期ジョブの名前]
+target\release\yyclip.exe
 ```
 
 リモート編集のエージェント（Linux 用。exe と同じフォルダの `agents\yy-agent-<x86_64|aarch64>-linux` に置く）:
