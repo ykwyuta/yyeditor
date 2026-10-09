@@ -9,6 +9,7 @@
 
 mod adblock;
 mod bookmarkui;
+mod cookieui;
 mod downloads;
 mod filterdlg;
 mod historyui;
@@ -67,6 +68,7 @@ const ID_ZOOM_OUT: u16 = 6111;
 const ID_ZOOM_RESET: u16 = 6112;
 const ID_FULLSCREEN: u16 = 6113;
 const ID_DEVTOOLS: u16 = 6114;
+const ID_COOKIES: u16 = 6115;
 const ID_PROXY_SETTINGS: u16 = 6120;
 const ID_HELP: u16 = 6130;
 const ID_ABOUT: u16 = 6131;
@@ -382,6 +384,7 @@ fn create_menu(profiles: &ProfileList, current: &str) -> Result<HMENU> {
         let _ = AppendMenuW(view, MF_SEPARATOR, 0, None);
         add(view, ID_FULLSCREEN, "全画面(&F)\tF11");
         add(view, ID_DEVTOOLS, "開発者ツール(&D)\tF12");
+        add(view, ID_COOKIES, "Cookie の編集(&K)...");
         let proxy = CreatePopupMenu()?;
         fill_proxy_menu(proxy, profiles, current);
         let ab = CreatePopupMenu()?;
@@ -1821,6 +1824,59 @@ fn shield_menu() {
     }
 }
 
+// ---- Cookie の編集（開発者用。19 章 4.5） ------------------------------------------------
+
+/// 表示中のページの Cookie を編集する。変えたら、読み直すかを尋ねる。
+fn edit_cookies() {
+    let Some((frame, url)) = with(|a| {
+        (
+            a.frame,
+            a.tabs
+                .get(a.current)
+                .map(|t| t.url.clone())
+                .unwrap_or_default(),
+        )
+    }) else {
+        return;
+    };
+    if yy_browser::rules::url_host_port(&url).is_none() {
+        info_box(
+            frame,
+            "Cookie を編集するには、http・https のページを開いてください。",
+        );
+        return;
+    }
+    let Some((webview, _)) = current_web() else {
+        return;
+    };
+    let manager = webview
+        .cast::<ICoreWebView2_2>()
+        .ok()
+        .and_then(|w| unsafe { w.CookieManager() }.ok());
+    let Some(manager) = manager else {
+        error_box(
+            frame,
+            "この WebView2 のランタイムでは Cookie を編集できません。",
+        );
+        return;
+    };
+    if cookieui::show(frame, manager, url) {
+        let reload = unsafe {
+            MessageBoxW(
+                Some(frame),
+                w!("Cookie を変えました。ページを読み直しますか？"),
+                w!("yybrowser"),
+                MB_YESNO | MB_ICONQUESTION,
+            )
+        } == IDYES;
+        if reload {
+            unsafe {
+                let _ = webview.Reload();
+            }
+        }
+    }
+}
+
 // ---- 履歴・閲覧データ・検索エンジン（19 章 4.2・4.4） ---------------------------------
 
 /// 閲覧履歴の画面。
@@ -2824,6 +2880,7 @@ fn command(id: u16) {
         ID_BADGE => show_badge_details(),
         ID_SHIELD => shield_menu(),
         ID_STAR | ID_BM_ADD => bookmark_page(),
+        ID_COOKIES => edit_cookies(),
         ID_HISTORY => show_history(),
         ID_DOWNLOADS => {
             if let Some(f) = with(|a| a.frame) {
@@ -3980,5 +4037,258 @@ mod tests {
         let s = historyui::local_time(1_700_000_000);
         assert!(s.starts_with("2023-11-1"), "{s}");
         assert_eq!(s.len(), 16);
+    }
+
+    /// Cookie の編集: 本物と同じ `cookieui::apply`・`fields_of` で入れた Cookie が、取り直しても同じで、
+    /// ページ（document.cookie）とサーバーに届き、HttpOnly はページから見えず、消せることを確かめる。
+    #[test]
+    fn edits_cookies_in_webview2() {
+        use std::io::{Read, Write};
+        use std::rc::Rc;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+        use yy_browser::cookies::{CookieFields, SameSite};
+        let _serial = crate::preview::testing::webview2_lock();
+        let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let headers: Arc<Mutex<Vec<String>>> = Arc::default();
+        let h2 = headers.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(c) = text.lines().find_map(|l| {
+                    l.strip_prefix("Cookie: ")
+                        .or_else(|| l.strip_prefix("cookie: "))
+                }) {
+                    h2.lock().unwrap().push(c.to_owned());
+                }
+                let body = "<html><head><title>c</title></head><body>cookies</body></html>";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("yybrowser cookie test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let url = format!("http://127.0.0.1:{port}/");
+        let Ok(create) = crate::preview::create_environment_fn() else {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        };
+        let options: ICoreWebView2EnvironmentOptions =
+            CoreWebView2EnvironmentOptions::default().into();
+        let web: Rc<RefCell<Option<ICoreWebView2>>> = Rc::default();
+        let loads: Rc<std::cell::Cell<u32>> = Rc::default();
+        let failed: Rc<std::cell::Cell<bool>> = Rc::default();
+        let (w1, l1, f1, u1) = (web.clone(), loads.clone(), failed.clone(), url.clone());
+        let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
+            move |res: Result<()>, env: Option<ICoreWebView2Environment>| {
+                let Some(env) = env.filter(|_| res.is_ok()) else {
+                    f1.set(true);
+                    return Ok(());
+                };
+                let (w1, l1, f1, u1) = (w1.clone(), l1.clone(), f1.clone(), u1.clone());
+                let on_controller = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
+                    move |res: Result<()>, c: Option<ICoreWebView2Controller>| {
+                        let Some(c) = c.filter(|_| res.is_ok()) else {
+                            f1.set(true);
+                            return Ok(());
+                        };
+                        let w = unsafe { c.CoreWebView2()? };
+                        let mut token = 0i64;
+                        let l2 = l1.clone();
+                        unsafe {
+                            w.add_NavigationCompleted(
+                                &NavigationCompletedEventHandler::create(Box::new(move |_, _| {
+                                    l2.set(l2.get() + 1);
+                                    Ok(())
+                                })),
+                                &mut token,
+                            )?;
+                        }
+                        *w1.borrow_mut() = Some(w.clone());
+                        std::mem::forget(c);
+                        unsafe { w.Navigate(&HSTRING::from(u1.as_str()))? };
+                        Ok(())
+                    },
+                ));
+                unsafe {
+                    env.CreateCoreWebView2Controller(parent, &on_controller)?;
+                }
+                std::mem::forget(env);
+                Ok(())
+            },
+        ));
+        let folder = std::env::temp_dir().join(format!("yybrowser-cookie-{}", std::process::id()));
+        let folder_w = HSTRING::from(folder.as_os_str());
+        let hr = unsafe {
+            create(
+                PCWSTR::null(),
+                PCWSTR(folder_w.as_ptr()),
+                options.as_raw(),
+                handler.as_raw(),
+            )
+        };
+        if hr.is_err() {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        }
+        crate::preview::testing::pump_until(Duration::from_secs(60), || {
+            loads.get() > 0 || failed.get()
+        });
+        if failed.get() {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        }
+        let w = web.borrow().clone().expect("WebView2");
+        let manager = unsafe {
+            w.cast::<ICoreWebView2_2>()
+                .unwrap()
+                .CookieManager()
+                .unwrap()
+        };
+        let expires = (yy_adblock::lists::now() + 86_400 * 30) as f64;
+        let visible = CookieFields {
+            name: "visible".into(),
+            value: "v1".into(),
+            domain: "127.0.0.1".into(),
+            path: "/".into(),
+            expires: Some(expires),
+            http_only: false,
+            secure: false,
+            same_site: SameSite::Lax,
+        };
+        let secret = CookieFields {
+            name: "secret".into(),
+            value: "s2".into(),
+            http_only: true,
+            expires: None,
+            ..visible.clone()
+        };
+        cookieui::apply(&manager, &visible).unwrap();
+        cookieui::apply(&manager, &secret).unwrap();
+        // 取り直す
+        let get = || -> Vec<CookieFields> {
+            let out: Rc<RefCell<Option<Vec<CookieFields>>>> = Rc::default();
+            let o = out.clone();
+            let h = webview2_com::GetCookiesCompletedHandler::create(Box::new(move |_, list| {
+                let mut v = Vec::new();
+                if let Some(list) = list {
+                    let mut n = 0u32;
+                    unsafe {
+                        let _ = list.Count(&mut n);
+                        for i in 0..n {
+                            if let Ok(c) = list.GetValueAtIndex(i) {
+                                v.push(cookieui::fields_of(&c));
+                            }
+                        }
+                    }
+                }
+                *o.borrow_mut() = Some(v);
+                Ok(())
+            }));
+            unsafe {
+                let _ = manager.GetCookies(&HSTRING::from(url.as_str()), &h);
+            }
+            crate::preview::testing::pump_until(Duration::from_secs(10), || out.borrow().is_some());
+            let mut v = out.borrow_mut().take().unwrap_or_default();
+            v.sort_by(|a, b| a.name.cmp(&b.name));
+            v
+        };
+        let got = get();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].name, "secret");
+        assert!(got[0].http_only);
+        assert_eq!(got[0].expires, None);
+        assert_eq!(got[1].value, "v1");
+        assert!(
+            (got[1].expires.unwrap() - expires).abs() < 2.0,
+            "{:?}",
+            got[1].expires
+        );
+        // 読み直すとサーバーに両方届き、ページからは HttpOnly でないものだけ見える
+        unsafe {
+            w.Reload().unwrap();
+        }
+        crate::preview::testing::pump_until(Duration::from_secs(30), || loads.get() > 1);
+        let sent = headers.lock().unwrap().join(" | ");
+        assert!(
+            sent.contains("visible=v1") && sent.contains("secret=s2"),
+            "{sent}"
+        );
+        let js: Rc<RefCell<Option<String>>> = Rc::default();
+        let j = js.clone();
+        let h = ExecuteScriptCompletedHandler::create(Box::new(move |_, json| {
+            *j.borrow_mut() = Some(json);
+            Ok(())
+        }));
+        unsafe {
+            w.ExecuteScript(w!("document.cookie"), &h).unwrap();
+        }
+        crate::preview::testing::pump_until(Duration::from_secs(10), || js.borrow().is_some());
+        let doc = js.borrow().clone().unwrap_or_default();
+        assert!(
+            doc.contains("visible=v1") && !doc.contains("secret"),
+            "{doc}"
+        );
+        // 消す
+        let out: Rc<RefCell<Option<()>>> = Rc::default();
+        let o = out.clone();
+        let m2 = manager.clone();
+        let h = webview2_com::GetCookiesCompletedHandler::create(Box::new(move |_, list| {
+            if let Some(list) = list {
+                let mut n = 0u32;
+                unsafe {
+                    let _ = list.Count(&mut n);
+                    for i in 0..n {
+                        if let Ok(c) = list.GetValueAtIndex(i)
+                            && cookieui::fields_of(&c).name == "visible"
+                        {
+                            let _ = m2.DeleteCookie(&c);
+                        }
+                    }
+                }
+            }
+            *o.borrow_mut() = Some(());
+            Ok(())
+        }));
+        unsafe {
+            let _ = manager.GetCookies(&HSTRING::from(url.as_str()), &h);
+        }
+        crate::preview::testing::pump_until(Duration::from_secs(10), || out.borrow().is_some());
+        let left = get();
+        assert_eq!(
+            left.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["secret"]
+        );
     }
 }

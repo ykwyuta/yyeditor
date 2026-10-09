@@ -170,6 +170,16 @@ WebView2 の環境を作るときに、Chromium の起動引数（`CoreWebView2E
 - ファイル > 検索エンジン: Bing・Google・Yahoo! JAPAN・DuckDuckGo・Brave Search・Startpage と、その他（`%s` を
   含む URL）。`browser.toml` の `search_url` に保存し、なければ設定ファイルの `[browser] search_url`。
 
+### 4.5 Cookie の編集（開発者用。2026-10-09 追加）
+
+- 表示 > Cookie の編集: `ICoreWebView2_2::CookieManager` の `GetCookies(今のページの URL)` で一覧（HttpOnly も含む）。
+  追加・編集は `CreateCookie` と期限・HttpOnly・Secure・SameSite を設定して `AddOrUpdateCookie`、名前・ドメイン・
+  パスを変えたら前のものは `DeleteCookie`。削除・すべて削除・読み直し。閉じるときに変えていればページを読み直すか
+  尋ねる。
+- 入力の確かめ（名前・値に使えない文字、ドメイン、パス、SameSite=None なら Secure）と期限の日時の読み書きは
+  `yy-browser::cookies`（Linux で試験）。Windows の CI で、入れた Cookie が取り直しても同じで、サーバーとページに
+  届き、HttpOnly がページから見えず、消せることを本物の WebView2 で確かめる。
+
 ## 5. 設定
 
 ```toml
