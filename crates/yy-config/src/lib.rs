@@ -95,6 +95,9 @@ pub struct FileManagerConfig {
     pub index_max_age_min: u64,
     /// 中身の検索で中身の索引（全文検索）を使い、読んだファイルを索引に足す
     pub fulltext_index: bool,
+    /// 中身を探す・中身の索引を作るファイルの名前のパターン（これに合わないファイルの中身は読まない。
+    /// 空なら既定の一覧）
+    pub content_patterns: Vec<String>,
     /// 除くファイル（名前のパターン。既定に足す）
     pub exclude: Vec<String>,
     /// 削除の候補にしないフォルダ
@@ -116,6 +119,13 @@ impl Default for FileManagerConfig {
             search_max_mb: 1024,
             index_max_age_min: 60,
             fulltext_index: true,
+            content_patterns: [
+                "*.txt", "*.csv", "*.tsv", "*.log", "*.md", "*.json", "*.xml", "*.html", "*.htm",
+                "*.ini", "*.yml", "*.yaml", "*.toml", "*.sql", "*.bat", "*.ps1", "*.cbl", "*.cob",
+                "*.cpy", "*.jcl", "*.docx", "*.xlsx", "*.pptx", "*.pdf",
+            ]
+            .map(String::from)
+            .to_vec(),
             exclude: Vec::new(),
             protect: Vec::new(),
         }

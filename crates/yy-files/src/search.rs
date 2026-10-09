@@ -544,6 +544,8 @@ pub struct ContentStats {
     pub hits: u64,
     /// バイナリ・大きすぎる・読めないなどで飛ばした
     pub skipped: u64,
+    /// 中身を探すファイルのパターンに合わないので読まなかった
+    pub excluded: u64,
     /// 中身の索引で候補から外した（読まなかった）
     pub pruned: u64,
     /// 読んで中身の索引に足した
@@ -557,6 +559,8 @@ pub struct ContentOptions {
     pub office: bool,
     /// PDF の中も探す
     pub pdf: bool,
+    /// 中身を探す・索引に足すファイルの名前のパターン（空ならすべて）
+    pub patterns: crate::pattern::Patterns,
     /// これより大きなファイルは飛ばす
     pub max_size: u64,
     /// 並列に読むファイルの数
@@ -570,6 +574,7 @@ impl Default for ContentOptions {
         ContentOptions {
             office: true,
             pdf: true,
+            patterns: crate::pattern::Patterns::new(crate::pattern::DEFAULT_CONTENT_PATTERNS),
             max_size: 1 << 30,
             threads: 8,
             max_hits_per_file: 1000,
@@ -651,9 +656,18 @@ fn search_inner(
     };
     let mut pruned = 0u64;
     let mut index_skipped = 0u64;
+    // 名指ししたパターンに合わないファイルは読まない（索引にも足さない）
+    let named: Vec<FileRef> = files
+        .iter()
+        .copied()
+        .filter(|r| {
+            opts.patterns.is_empty() || opts.patterns.matches(cats[r.root].files[r.index].name())
+        })
+        .collect();
+    let excluded = (files.len() - named.len()) as u64;
     let work: Vec<(FileRef, bool)> = match indexes.as_deref() {
-        None => files.iter().map(|&r| (r, false)).collect(),
-        Some(ix) => files
+        None => named.iter().map(|&r| (r, false)).collect(),
+        Some(ix) => named
             .iter()
             .filter_map(|&r| {
                 let e = &cats[r.root].files[r.index];
@@ -772,6 +786,7 @@ fn search_inner(
         matched_files: matched.load(Ordering::Relaxed),
         hits: hits.load(Ordering::Relaxed),
         skipped: skipped.load(Ordering::Relaxed),
+        excluded,
         pruned,
         indexed: indexed.load(Ordering::Relaxed),
     };
@@ -963,7 +978,28 @@ mod tests {
                 ("請求.pdf".to_owned(), 1, "税込".to_owned()),
             ]
         );
-        assert_eq!((st.files, st.matched_files, st.skipped), (5, 4, 1));
+        // bin.dat は中身を探すパターンに合わないので読まない
+        assert_eq!(
+            (st.files, st.matched_files, st.skipped, st.excluded),
+            (4, 4, 0, 1)
+        );
+        // パターンを絞ると、合うものだけを読む
+        let only_csv = search_content(
+            std::slice::from_ref(&c),
+            &all,
+            &q,
+            &ContentOptions {
+                patterns: crate::pattern::Patterns::new(&["*.csv"]),
+                ..ContentOptions::default()
+            },
+            &|_| true,
+            &|_| true,
+        )
+        .unwrap();
+        assert_eq!(
+            (only_csv.files, only_csv.matched_files, only_csv.excluded),
+            (1, 1, 4)
+        );
         // Office を探さない
         let st = search_content(
             std::slice::from_ref(&c),
@@ -1061,7 +1097,8 @@ mod tests {
         // 1 回目は全部読んで索引に足す
         let (h1, st1) = run(&c, "税込", Some(&mut ix));
         assert_eq!(h1, run(&c, "税込", None).0);
-        assert_eq!((st1.indexed, st1.pruned), (41, 0));
+        // bin.dat はパターンに合わないので索引に足さない
+        assert_eq!((st1.indexed, st1.pruned, st1.excluded), (40, 0, 1));
         // 2 回目からは候補だけを読む。結果は索引なしと同じ
         for pat in [
             "税込",
@@ -1075,7 +1112,7 @@ mod tests {
             assert_eq!(h, run(&c, pat, None).0, "{pat}");
             assert_eq!(st.indexed, 0, "{pat}");
             assert!(st.pruned > 0, "{pat}: {st:?}");
-            assert_eq!(st.files, 41, "{pat}");
+            assert_eq!(st.files + st.excluded, 41, "{pat}");
         }
         // 1 文字・正規表現は索引を使わない（全部読む）が、結果は同じ
         let (h, st) = run(&c, "税", Some(&mut ix));

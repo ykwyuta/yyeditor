@@ -103,6 +103,7 @@ const ID_OPEN_LOGS: u16 = 5722;
 const ID_CRASH_LOGS: u16 = 5723;
 const ID_SETTINGS: u16 = 5724;
 const ID_EXPIRE_TRASH: u16 = 5725;
+const ID_VACUUM: u16 = 5726;
 // 一覧の右クリック
 const CM_OPEN: u32 = 1;
 const CM_LOCATE: u32 = 2;
@@ -438,6 +439,7 @@ fn create_menu() -> Result<HMENU> {
         }
         let tidy = CreatePopupMenu()?;
         add(tidy, ID_EXPIRE_TRASH, "隔離フォルダの古いものを消す(&T)...");
+        add(tidy, ID_VACUUM, "中身の索引のバキューム(&V)...");
         let help = CreatePopupMenu()?;
         add(help, ID_HELP, "yyfilemanager ヘルプ(&H)\tF1");
         let _ = AppendMenuW(help, MF_SEPARATOR, 0, None);
@@ -1248,6 +1250,16 @@ impl App {
         }
     }
 
+    /// 中身を探す・中身の索引を作るファイルのパターン（設定。空なら既定の一覧）。
+    fn content_patterns(&self) -> yy_files::pattern::Patterns {
+        let p = &self.config.filemanager.content_patterns;
+        if p.is_empty() {
+            yy_files::pattern::Patterns::new(yy_files::pattern::DEFAULT_CONTENT_PATTERNS)
+        } else {
+            yy_files::pattern::Patterns::new(p)
+        }
+    }
+
     fn similar_options(&self) -> yy_files::similar::SimilarOptions {
         yy_files::similar::SimilarOptions {
             threshold: self.config.filemanager.similar_threshold,
@@ -1612,6 +1624,7 @@ fn cmd_search() {
         let copts = yy_files::search::ContentOptions {
             office,
             pdf: office,
+            patterns: a.content_patterns(),
             max_size: a.config.filemanager.search_max_mb << 20,
             threads: a.config.filemanager.search_threads.max(1),
             ..yy_files::search::ContentOptions::default()
@@ -1753,8 +1766,8 @@ fn cmd_search() {
                     }
                     if let Ok(st) = &r {
                         cx.send(Msg::Log(format!(
-                            "中身の索引: {} 個を読まずに済みました・{} 個を索引に足しました",
-                            st.pruned, st.indexed
+                            "中身の索引: {} 個を読まずに済みました・{} 個を索引に足しました（パターンに合わず読まなかったもの {} 個）",
+                            st.pruned, st.indexed, st.excluded
                         )));
                     }
                     r
@@ -1908,6 +1921,77 @@ fn find_related(row: usize, versions: bool) {
                 },
             );
         }
+    });
+}
+
+/// 中身の索引のバキューム: 対象のパターンに合わなくなった・消えた・変わったファイルの記録を除いて
+/// 詰め直す。場所がなくなった索引は消す。
+fn vacuum_fulltext() {
+    with(|a| {
+        let dir = a.dirs.fulltext();
+        let keep = a.content_patterns();
+        let text = format!(
+            "中身の索引（{}）をバキュームします。\n\n\
+             ・中身を探すパターンに合わなくなったファイル、消えたファイル、変わったファイルの記録を除きます。\n\
+             ・場所（フォルダ）がなくなった索引は消します。\n\
+             ・ファイルがあるかを確かめるので、共有フォルダでは時間がかかることがあります。\n\n\
+             よろしいですか？",
+            dir.display()
+        );
+        let ok = unsafe {
+            MessageBoxW(
+                Some(a.frame),
+                &HSTRING::from(text),
+                w!("yyfilemanager"),
+                MB_OKCANCEL | MB_ICONQUESTION,
+            )
+        } == IDOK;
+        if !ok {
+            return;
+        }
+        a.start("中身の索引をバキュームしています", move |cx| {
+            let r = yy_files::fulltext::vacuum_dir(&yy_files::Local, &dir, &keep, &|p| {
+                cx.progress(&format!("{} をバキュームしています…", p.display()))
+            });
+            match r {
+                Ok(reps) => {
+                    let (mut before, mut after, mut removed) = (0u64, 0u64, 0usize);
+                    for rep in &reps {
+                        before += rep.bytes_before;
+                        after += rep.bytes_after;
+                        removed += rep.stats.dead;
+                        cx.send(Msg::Log(if rep.deleted {
+                            format!(
+                                "中身の索引を消しました（場所がない・読めない）: {} {}",
+                                rep.root.display(),
+                                rep.file.display()
+                            )
+                        } else {
+                            format!(
+                                "中身の索引: {}: 対象外 {}・消えた {}・変わった {} を除き、{} 件を残しました（{} → {}）",
+                                rep.root.display(),
+                                rep.stats.unnamed,
+                                rep.stats.gone,
+                                rep.stats.stale,
+                                rep.stats.kept,
+                                yy_files::human_size(rep.bytes_before),
+                                yy_files::human_size(rep.bytes_after)
+                            )
+                        }));
+                    }
+                    cx.send(Msg::Done(format!(
+                        "中身の索引をバキュームしました: {} 個の索引から {removed} 件の記録を除きました（{} → {}）",
+                        reps.len(),
+                        yy_files::human_size(before),
+                        yy_files::human_size(after)
+                    )));
+                }
+                Err(e) => cx.send(Msg::Done(format!(
+                    "中身の索引のバキュームを中断しました: {}",
+                    work::describe(&e)
+                ))),
+            }
+        });
     });
 }
 
@@ -3087,6 +3171,7 @@ fn command(id: u16, code: u32) {
         ID_SAVED_SAVE => save_search(),
         ID_SAVED_DELETE => delete_search(),
         ID_EXPIRE_TRASH => expire_trash(),
+        ID_VACUUM => vacuum_fulltext(),
         ID_SRC_BROWSE => {
             if let Some(h) = with(|a| a.edits.src) {
                 browse_into(h, false);

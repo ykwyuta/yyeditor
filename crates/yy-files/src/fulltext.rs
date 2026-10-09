@@ -320,6 +320,54 @@ impl FtIndex {
         self.by_rel.insert(e.rel.clone(), id);
     }
 
+    /// バキューム: 対象外になった（`keep` に合わない）・消えた・変わったファイルの記録を除き、番号を
+    /// 詰め直す（中身は読み直さない）。共有フォルダに届かないなど、消えたか分からないものは残す。
+    pub fn vacuum(
+        &mut self,
+        fs: &dyn crate::fs::Fs,
+        keep: &crate::pattern::Patterns,
+        cancel: &dyn Fn() -> bool,
+    ) -> io::Result<VacuumStats> {
+        let mut st = VacuumStats::default();
+        let ids: Vec<(String, u32)> = self.by_rel.iter().map(|(r, &i)| (r.clone(), i)).collect();
+        for (rel, id) in ids {
+            if cancel() {
+                return Err(crate::cancelled());
+            }
+            let f = &self.files[id as usize];
+            let name = rel.rsplit('/').next().unwrap_or(&rel);
+            let drop = if !keep.is_empty() && !keep.matches(name) {
+                st.unnamed += 1;
+                true
+            } else {
+                match fs.metadata(&crate::join(&self.root, &rel)) {
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        st.gone += 1;
+                        true
+                    }
+                    Err(_) => false,
+                    Ok(m) if m.size != f.size || m.mtime != f.mtime => {
+                        st.stale += 1;
+                        true
+                    }
+                    Ok(_) => false,
+                }
+            };
+            if drop {
+                self.files[id as usize].state = FtState::Dead;
+                self.by_rel.remove(&rel);
+            }
+        }
+        st.dead = self
+            .files
+            .iter()
+            .filter(|f| f.state == FtState::Dead)
+            .count();
+        self.compact();
+        st.kept = self.files.len();
+        Ok(st)
+    }
+
     /// 目録にないファイルの記録を消したにする。
     pub fn retain_catalog(&mut self, cat: &Catalog) {
         let keep: std::collections::HashSet<&str> =
@@ -336,6 +384,104 @@ impl FtIndex {
             }
         }
     }
+}
+
+/// バキュームで除いた数。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VacuumStats {
+    /// 対象のパターンに合わなくなった
+    pub unnamed: usize,
+    /// ファイルが消えた
+    pub gone: usize,
+    /// ファイルが変わった（前の記録）
+    pub stale: usize,
+    /// 詰め直しで除いた記録の数（上の 3 つと、前から消したにしてあったもの）
+    pub dead: usize,
+    /// 残った記録
+    pub kept: usize,
+}
+
+/// 1 つの索引のファイルのバキュームの結果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VacuumReport {
+    pub file: PathBuf,
+    pub root: PathBuf,
+    /// 場所（ルート）がなくなったので索引のファイルごと消した
+    pub deleted: bool,
+    pub stats: VacuumStats,
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+}
+
+/// 置き場所の索引をすべてバキュームする。場所（ルート）がなくなった索引はファイルごと消し、読めない索引も
+/// 消す（次の検索で作り直す）。
+pub fn vacuum_dir(
+    fs: &dyn crate::fs::Fs,
+    dir: &Path,
+    keep: &crate::pattern::Patterns,
+    progress: &dyn Fn(&Path) -> bool,
+) -> io::Result<Vec<VacuumReport>> {
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e),
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "fti"))
+        .collect();
+    paths.sort();
+    for p in paths {
+        if !progress(&p) {
+            return Err(crate::cancelled());
+        }
+        let before = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        let mut ix = match FtIndex::load(&p) {
+            Ok(ix) => ix,
+            Err(_) => {
+                std::fs::remove_file(&p)?;
+                out.push(VacuumReport {
+                    file: p,
+                    root: PathBuf::new(),
+                    deleted: true,
+                    stats: VacuumStats::default(),
+                    bytes_before: before,
+                    bytes_after: 0,
+                });
+                continue;
+            }
+        };
+        let root = ix.root.clone();
+        if matches!(fs.metadata(&root), Err(e) if e.kind() == io::ErrorKind::NotFound) {
+            std::fs::remove_file(&p)?;
+            out.push(VacuumReport {
+                file: p,
+                root,
+                deleted: true,
+                stats: VacuumStats {
+                    dead: ix.files.len(),
+                    ..VacuumStats::default()
+                },
+                bytes_before: before,
+                bytes_after: 0,
+            });
+            continue;
+        }
+        let stats = ix.vacuum(fs, keep, &|| !progress(&p))?;
+        ix.save(&p)?;
+        let after = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        out.push(VacuumReport {
+            file: p,
+            root,
+            deleted: false,
+            stats,
+            bytes_before: before,
+            bytes_after: after,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -416,5 +562,56 @@ mod tests {
         assert!(!back.has_all(id, &query_grams("税込").unwrap()));
         std::fs::write(&p, b"broken").unwrap();
         assert!(FtIndex::load(&p).is_err());
+    }
+
+    #[test]
+    fn vacuums_unnamed_gone_and_stale_entries() {
+        use crate::fs::{Fs, Local};
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("share");
+        std::fs::create_dir_all(&root).unwrap();
+        let mk = |rel: &str, body: &str| {
+            std::fs::write(root.join(rel), body).unwrap();
+            let m = Local.metadata(&root.join(rel)).unwrap();
+            FileEntry {
+                rel: rel.into(),
+                meta: m,
+            }
+        };
+        let keep_txt = mk("keep.txt", "税込");
+        let gone = mk("gone.txt", "税抜");
+        let changed = mk("changed.txt", "a");
+        let image = mk("photo.jpg", "x");
+        let mut ix = FtIndex::new(&root);
+        for e in [&keep_txt, &gone, &changed, &image] {
+            ix.add(e, FtState::Text, &grams("税込"));
+        }
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+        std::fs::write(root.join("changed.txt"), "changed!").unwrap();
+        let store = d.path().join("fulltext");
+        let p = path_for(&store, &root);
+        ix.save(&p).unwrap();
+        // もう 1 つ: 場所がなくなった索引
+        let lost = d.path().join("lost");
+        let mut ix2 = FtIndex::new(&lost);
+        ix2.add(&entry("a.txt", 1, 1), FtState::Text, &grams("ab"));
+        ix2.save(&path_for(&store, &lost)).unwrap();
+        let pats = crate::pattern::Patterns::new(&["*.txt"]);
+        let reps = vacuum_dir(&Local, &store, &pats, &|_| true).unwrap();
+        assert_eq!(reps.len(), 2);
+        let r = reps.iter().find(|r| r.root == root).unwrap();
+        assert!(!r.deleted);
+        assert_eq!(
+            (r.stats.unnamed, r.stats.gone, r.stats.stale, r.stats.kept),
+            (1, 1, 1, 1),
+            "{:?}",
+            r.stats
+        );
+        assert!(r.bytes_after <= r.bytes_before);
+        let back = FtIndex::load(&p).unwrap();
+        assert_eq!(back.len(), 1);
+        assert!(back.lookup(&keep_txt).is_some());
+        assert!(reps.iter().any(|r| r.root == lost && r.deleted));
+        assert!(!path_for(&store, &lost).exists());
     }
 }

@@ -19,6 +19,13 @@ pub const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
     crate::purge::TRASH_DIR,
 ];
 
+/// 中身を探す・中身の索引を作るファイルの既定（名前のパターン）。これに合わないファイルの中身は読まない。
+pub const DEFAULT_CONTENT_PATTERNS: &[&str] = &[
+    "*.txt", "*.csv", "*.tsv", "*.log", "*.md", "*.json", "*.xml", "*.html", "*.htm", "*.ini",
+    "*.yml", "*.yaml", "*.toml", "*.sql", "*.bat", "*.ps1", "*.cbl", "*.cob", "*.cpy", "*.jcl",
+    "*.docx", "*.xlsx", "*.pptx", "*.pdf",
+];
+
 /// 名前のパターンの集まり。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Patterns(Vec<String>);
