@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# BLAKE3 を C・アセンブリなしで作る（Linux から Windows 向けに型検査するとき。ml64.exe がないため）
+blake3-pure = ["blake3/pure"]
+
 [dependencies]
 blake3.workspace = true
 miniz_oxide.workspace = true

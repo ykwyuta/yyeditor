@@ -140,4 +140,5 @@ jobs:
           rustup target add x86_64-pc-windows-msvc
           # 組み込みの SSH と 3270 の TLS（ring）は C のビルドに Windows SDK が要るので、ここでは外して確かめる
           # （SSH・TLS を含むビルドは Windows のジョブで行う）
-          cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager --no-default-features --target x86_64-pc-windows-msvc
+          # BLAKE3 のアセンブリ（ml64.exe）もないので、純粋な Rust の実装にする
+          cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager --no-default-features --features yy-files/blake3-pure --target x86_64-pc-windows-msvc
