@@ -23,10 +23,15 @@ yy-buffer.workspace = true
 yy-core.workspace = true
 yy-search.workspace = true
 
-# ACL を写す（同期の copy_acl）
+# ACL を写す（同期の copy_acl）・裏の処理の優先度を下げる
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
-features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"]
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+]
 
 [dev-dependencies]
 yy-encoding.workspace = true

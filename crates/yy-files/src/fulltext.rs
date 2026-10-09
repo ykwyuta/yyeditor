@@ -176,9 +176,21 @@ impl FtIndex {
         FtIndex {
             root: root.to_path_buf(),
             files: Vec::new(),
-            post: vec![Vec::new(); BUCKETS],
+            // 区分けは最初に足すときに作る（空の索引は軽い）
+            post: Vec::new(),
             by_rel: HashMap::new(),
         }
+    }
+
+    /// 使っているメモリの見積もり（バイト）。
+    pub fn approx_bytes(&self) -> u64 {
+        let post: u64 = self.post.iter().map(|v| 24 + v.capacity() as u64 * 4).sum();
+        let files: u64 = self
+            .files
+            .iter()
+            .map(|f| 64 + f.rel.capacity() as u64)
+            .sum();
+        post + files * 2 // by_rel にも名前を持つ
     }
 
     pub fn load(path: &Path) -> io::Result<FtIndex> {
@@ -229,9 +241,8 @@ impl FtIndex {
         let st = Stored {
             root: self.root.clone(),
             files: self.files.clone(),
-            post: self
-                .post
-                .iter()
+            post: (0..BUCKETS)
+                .map(|g| self.post.get(g).map_or(&[][..], |v| v.as_slice()))
                 .map(|ids| {
                     let mut prev = 0u32;
                     ids.iter()
@@ -297,15 +308,20 @@ impl FtIndex {
 
     /// 記録 `id` が区分けをすべて含むか。
     pub fn has_all(&self, id: u32, grams: &[u16]) -> bool {
-        grams
-            .iter()
-            .all(|&g| self.post[g as usize].binary_search(&id).is_ok())
+        grams.iter().all(|&g| {
+            self.post
+                .get(g as usize)
+                .is_some_and(|p| p.binary_search(&id).is_ok())
+        })
     }
 
     /// ファイルの記録を足す（前の記録は消したにする）。
     pub fn add(&mut self, e: &FileEntry, state: FtState, grams: &[u16]) {
         if let Some(&old) = self.by_rel.get(&e.rel) {
             self.files[old as usize].state = FtState::Dead;
+        }
+        if self.post.len() != BUCKETS {
+            self.post.resize(BUCKETS, Vec::new());
         }
         let id = self.files.len() as u32;
         self.files.push(FtFile {

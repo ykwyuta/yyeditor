@@ -1250,6 +1250,15 @@ impl App {
         }
     }
 
+    /// 裏の処理（中身の索引の作成・中身の検索・索引のバキューム）の CPU・メモリの上限（設定）。
+    fn background_limits(&self) -> yy_files::limits::Limits {
+        let fm = &self.config.filemanager;
+        yy_files::limits::Limits {
+            cpu_percent: fm.background_cpu_percent.clamp(1, 100),
+            memory: fm.background_memory_mb << 20,
+        }
+    }
+
     /// 中身を探す・中身の索引を作るファイルのパターン（設定。空なら既定の一覧）。
     fn content_patterns(&self) -> yy_files::pattern::Patterns {
         let p = &self.config.filemanager.content_patterns;
@@ -1626,7 +1635,12 @@ fn cmd_search() {
             pdf: office,
             patterns: a.content_patterns(),
             max_size: a.config.filemanager.search_max_mb << 20,
-            threads: a.config.filemanager.search_threads.max(1),
+            // 裏の処理: 許した CPU の割合のスレッド数・メモリの上限・低い優先度
+            threads: a
+                .background_limits()
+                .threads(a.config.filemanager.search_threads.max(1)),
+            memory_limit: a.background_limits().memory,
+            background: true,
             ..yy_files::search::ContentOptions::default()
         };
         a.search_rows.clear();
@@ -1741,34 +1755,34 @@ fn cmd_search() {
             let r = match &fulltext_dir {
                 // 中身の索引で読むファイルを絞り、読んだものは索引に足す
                 Some(dir) => {
-                    let paths: Vec<PathBuf> = cats
-                        .iter()
-                        .map(|c| yy_files::fulltext::path_for(dir, &c.root))
-                        .collect();
-                    let mut ixs: Vec<yy_files::fulltext::FtIndex> = cats
-                        .iter()
-                        .zip(&paths)
-                        .map(|(c, p)| {
-                            yy_files::fulltext::FtIndex::load(p)
-                                .ok()
-                                .filter(|ix| ix.root == c.root)
-                                .unwrap_or_else(|| yy_files::fulltext::FtIndex::new(&c.root))
-                        })
-                        .collect();
-                    let r = yy_files::search::search_content_indexed(
-                        &cats, &found, &content, &copts, &mut ixs, &progress, &rec,
-                    );
-                    for ((ix, p), c) in ixs.iter_mut().zip(&paths).zip(&cats) {
-                        ix.retain_catalog(c);
-                        if let Err(e) = ix.save(p) {
+                    // 索引は場所ごとに 1 つずつ読み込み、探し終えたら保存して手放す（メモリを抑える）
+                    let path_of = |ri: usize| yy_files::fulltext::path_for(dir, &cats[ri].root);
+                    let load = |ri: usize| {
+                        yy_files::fulltext::FtIndex::load(&path_of(ri))
+                            .ok()
+                            .filter(|ix| ix.root == cats[ri].root)
+                            .unwrap_or_else(|| yy_files::fulltext::FtIndex::new(&cats[ri].root))
+                    };
+                    let save = |ri: usize, ix: &mut yy_files::fulltext::FtIndex| {
+                        ix.retain_catalog(&cats[ri]);
+                        if let Err(e) = ix.save(&path_of(ri)) {
                             cx.send(Msg::Log(format!("中身の索引を保存できません: {e}")));
                         }
-                    }
+                    };
+                    let r = yy_files::search::search_content_indexed_by_root(
+                        &cats, &found, &content, &copts, &load, &save, &progress, &rec,
+                    );
                     if let Ok(st) = &r {
                         cx.send(Msg::Log(format!(
                             "中身の索引: {} 個を読まずに済みました・{} 個を索引に足しました（パターンに合わず読まなかったもの {} 個）",
                             st.pruned, st.indexed, st.excluded
                         )));
+                        if st.not_indexed > 0 {
+                            cx.send(Msg::Log(format!(
+                                "中身の索引: メモリの上限（background_memory_mb）のため {} 個は索引に足さずに探しました",
+                                st.not_indexed
+                            )));
+                        }
                     }
                     r
                 }
@@ -1950,6 +1964,8 @@ fn vacuum_fulltext() {
             return;
         }
         a.start("中身の索引をバキュームしています", move |cx| {
+            // 裏の処理として優先度を下げる（索引は 1 つずつ読み込む）
+            yy_files::limits::enter_background();
             let r = yy_files::fulltext::vacuum_dir(&yy_files::Local, &dir, &keep, &|p| {
                 cx.progress(&format!("{} をバキュームしています…", p.display()))
             });

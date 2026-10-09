@@ -95,6 +95,10 @@ pub struct FileManagerConfig {
     pub index_max_age_min: u64,
     /// 中身の検索で中身の索引（全文検索）を使い、読んだファイルを索引に足す
     pub fulltext_index: bool,
+    /// 裏の処理（中身の索引の作成・中身の検索・索引のバキューム）が使ってよい CPU の割合（%）
+    pub background_cpu_percent: u32,
+    /// 裏の処理が使ってよいメモリ（MB。0 は上限なし）
+    pub background_memory_mb: u64,
     /// 中身を探す・中身の索引を作るファイルの名前のパターン（これに合わないファイルの中身は読まない。
     /// 空なら既定の一覧）
     pub content_patterns: Vec<String>,
@@ -119,6 +123,8 @@ impl Default for FileManagerConfig {
             search_max_mb: 1024,
             index_max_age_min: 60,
             fulltext_index: true,
+            background_cpu_percent: 25,
+            background_memory_mb: 512,
             content_patterns: [
                 "*.txt", "*.csv", "*.tsv", "*.log", "*.md", "*.json", "*.xml", "*.html", "*.htm",
                 "*.ini", "*.yml", "*.yaml", "*.toml", "*.sql", "*.bat", "*.ps1", "*.cbl", "*.cob",

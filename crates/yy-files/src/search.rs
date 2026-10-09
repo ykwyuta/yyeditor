@@ -550,6 +550,8 @@ pub struct ContentStats {
     pub pruned: u64,
     /// 読んで中身の索引に足した
     pub indexed: u64,
+    /// メモリの上限のため中身の索引に足さなかった
+    pub not_indexed: u64,
 }
 
 /// 中身の検索の設定。
@@ -565,6 +567,10 @@ pub struct ContentOptions {
     pub max_size: u64,
     /// 並列に読むファイルの数
     pub threads: usize,
+    /// 同時に読むファイルの大きさの見積もりと、中身の索引に使ってよいメモリ（バイト。0 は上限なし）
+    pub memory_limit: u64,
+    /// 裏の処理として優先度を下げる（Windows のバックグラウンド モード）
+    pub background: bool,
     /// 1 ファイルで知らせる行の上限
     pub max_hits_per_file: u64,
 }
@@ -577,6 +583,8 @@ impl Default for ContentOptions {
             patterns: crate::pattern::Patterns::new(crate::pattern::DEFAULT_CONTENT_PATTERNS),
             max_size: 1 << 30,
             threads: 8,
+            memory_limit: 0,
+            background: false,
             max_hits_per_file: 1000,
         }
     }
@@ -606,6 +614,57 @@ pub fn search_content_indexed(
     hit: &(dyn Fn(Hit) -> bool + Sync),
 ) -> io::Result<ContentStats> {
     search_inner(cats, files, q, opts, Some(indexes), progress, hit)
+}
+
+/// 中身の索引を場所（ルート）ごとに 1 つずつ読み込んで探す（同時にメモリに置く索引を 1 つにする）。
+/// `load(何番目)` で索引を読み、探し終えたら `save(何番目, 索引)` で保存して手放す。
+#[allow(clippy::too_many_arguments)]
+pub fn search_content_indexed_by_root(
+    cats: &[Catalog],
+    files: &[FileRef],
+    q: &yy_search::Query,
+    opts: &ContentOptions,
+    load: &dyn Fn(usize) -> crate::fulltext::FtIndex,
+    save: &dyn Fn(usize, &mut crate::fulltext::FtIndex),
+    progress: &(dyn Fn(u64) -> bool + Sync),
+    hit: &(dyn Fn(Hit) -> bool + Sync),
+) -> io::Result<ContentStats> {
+    let mut total = ContentStats::default();
+    let base = AtomicU64::new(0);
+    for ri in 0..cats.len() {
+        let mine: Vec<FileRef> = files.iter().copied().filter(|r| r.root == ri).collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let mut ixs: Vec<crate::fulltext::FtIndex> = cats
+            .iter()
+            .map(|c| crate::fulltext::FtIndex::new(&c.root))
+            .collect();
+        ixs[ri] = load(ri);
+        let b = base.load(Ordering::Relaxed);
+        let r = search_inner(
+            cats,
+            &mine,
+            q,
+            opts,
+            Some(&mut ixs),
+            &|n| progress(b + n),
+            hit,
+        );
+        save(ri, &mut ixs[ri]);
+        drop(ixs);
+        let st = r?;
+        base.fetch_add(st.files + st.excluded, Ordering::Relaxed);
+        total.files += st.files;
+        total.matched_files += st.matched_files;
+        total.hits += st.hits;
+        total.skipped += st.skipped;
+        total.excluded += st.excluded;
+        total.pruned += st.pruned;
+        total.indexed += st.indexed;
+        total.not_indexed += st.not_indexed;
+    }
+    Ok(total)
 }
 
 /// 中身を読む（Office・PDF は文字列を取り出す。種類の選択は見ない）。
@@ -693,6 +752,16 @@ fn search_inner(
             })
             .collect(),
     };
+    // 中身の索引に使ってよいのはメモリの上限の半分まで（残りは読むファイルに）。超えたら足さない
+    let index_room = (opts.memory_limit > 0).then(|| {
+        let now: u64 = indexes
+            .as_deref()
+            .map_or(0, |ix| ix.iter().map(|i| i.approx_bytes()).sum());
+        (opts.memory_limit / 2).saturating_sub(now)
+    });
+    let index_used = AtomicU64::new(0);
+    let not_indexed = AtomicU64::new(0);
+    let budget = crate::limits::MemoryBudget::new(opts.memory_limit / 2);
     let stop = AtomicBool::new(false);
     let done = AtomicU64::new(pruned + index_skipped);
     let matched = AtomicU64::new(0);
@@ -701,8 +770,14 @@ fn search_inner(
     let indexed = AtomicU64::new(0);
     let new_entries: std::sync::Mutex<Vec<(FileRef, FtState, Vec<u16>)>> =
         std::sync::Mutex::new(Vec::new());
+    let background = opts.background;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads.max(1))
+        .start_handler(move |_| {
+            if background {
+                crate::limits::enter_background();
+            }
+        })
         .build()
         .map_err(io::Error::other)?;
     pool.install(|| {
@@ -714,6 +789,16 @@ fn search_inner(
             let path = cats[r.root].path(e);
             let office = crate::office::is_office(e.name());
             let pdf = crate::pdf::is_pdf(e.name());
+            // 読むのに要るメモリの見積もり（文字コードの変換・取り出しで大きくなる分を見込む）
+            let need = e
+                .meta
+                .size
+                .min(opts.max_size)
+                .saturating_mul(if office || pdf { 4 } else { 2 });
+            let Some(_lease) = budget.acquire(need, &|| stop.load(Ordering::Relaxed)) else {
+                return;
+            };
+
             let wanted = (!office || opts.office) && (!pdf || opts.pdf);
             // 索引に足さず、種類で探さないものは読まない
             let loaded = if !add && !wanted {
@@ -733,8 +818,16 @@ fn search_inner(
                     Loaded::Binary => (FtState::Binary, Vec::new()),
                     Loaded::TooBig => (FtState::TooBig(opts.max_size), Vec::new()),
                 };
-                indexed.fetch_add(1, Ordering::Relaxed);
-                new_entries.lock().unwrap().push((r, state, grams));
+                // 索引に足す余裕がなければ、読んで探すだけにする
+                let est = grams.len() as u64 * 4 + 128 + e.rel.len() as u64 * 2;
+                let room_ok = index_room
+                    .is_none_or(|room| index_used.fetch_add(est, Ordering::Relaxed) + est <= room);
+                if room_ok {
+                    indexed.fetch_add(1, Ordering::Relaxed);
+                    new_entries.lock().unwrap().push((r, state, grams));
+                } else {
+                    not_indexed.fetch_add(1, Ordering::Relaxed);
+                }
             }
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
             let snap = match loaded {
@@ -789,6 +882,7 @@ fn search_inner(
         excluded,
         pruned,
         indexed: indexed.load(Ordering::Relaxed),
+        not_indexed: not_indexed.load(Ordering::Relaxed),
     };
     if stop.load(Ordering::Relaxed) {
         return Err(crate::cancelled());
@@ -1209,5 +1303,103 @@ mod tests {
                 "{pat:?} cs={cs}"
             );
         }
+    }
+
+    #[test]
+    fn respects_memory_limit_and_searches_root_by_root() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        for (root, n) in [(&a, 12usize), (&b, 8)] {
+            std::fs::create_dir_all(root).unwrap();
+            for i in 0..n {
+                let body = format!("{} 税込 {i}\n", "あいうえおかきくけこ".repeat(50 + i));
+                std::fs::write(root.join(format!("{i}.txt")), body).unwrap();
+            }
+        }
+        let cats: Vec<Catalog> = [&a, &b]
+            .iter()
+            .map(|r| {
+                crate::scan::scan(&crate::fs::Local, r, &Default::default(), &|_| true).unwrap()
+            })
+            .collect();
+        let files: Vec<FileRef> = cats
+            .iter()
+            .enumerate()
+            .flat_map(|(ri, c)| (0..c.files.len()).map(move |index| FileRef { root: ri, index }))
+            .collect();
+        let q = yy_search::Query {
+            pattern: "税込".into(),
+            regex: false,
+            case_sensitive: false,
+            whole_word: false,
+        };
+        let store = d.path().join("ft");
+        let load = |ri: usize| {
+            crate::fulltext::FtIndex::load(&crate::fulltext::path_for(&store, &cats[ri].root))
+                .unwrap_or_else(|_| crate::fulltext::FtIndex::new(&cats[ri].root))
+        };
+        let loaded = std::sync::Mutex::new(Vec::new());
+        let save = |ri: usize, ix: &mut crate::fulltext::FtIndex| {
+            loaded.lock().unwrap().push(ri);
+            ix.save(&crate::fulltext::path_for(&store, &cats[ri].root))
+                .unwrap();
+        };
+        // メモリの上限がとても小さいと、索引に足さずに探すだけ（結果は同じ）
+        let tiny = ContentOptions {
+            memory_limit: 4096,
+            background: true,
+            threads: 2,
+            ..ContentOptions::default()
+        };
+        let hits = AtomicU64::new(0);
+        let st = search_content_indexed_by_root(
+            &cats,
+            &files,
+            &q,
+            &tiny,
+            &load,
+            &save,
+            &|_| true,
+            &|_| {
+                hits.fetch_add(1, Ordering::Relaxed);
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(hits.load(Ordering::Relaxed), 20);
+        assert_eq!(st.matched_files, 20);
+        assert!(st.not_indexed > 0, "{st:?}");
+        // 場所ごとに 1 つずつ読み込んで保存した
+        assert_eq!(*loaded.lock().unwrap(), [0, 1]);
+        // 上限が十分なら全部足す
+        let roomy = ContentOptions {
+            memory_limit: 64 << 20,
+            ..tiny
+        };
+        let st = search_content_indexed_by_root(
+            &cats,
+            &files,
+            &q,
+            &roomy,
+            &load,
+            &save,
+            &|_| true,
+            &|_| true,
+        )
+        .unwrap();
+        assert_eq!(st.not_indexed, 0);
+        assert_eq!(st.matched_files, 20);
+        let st = search_content_indexed_by_root(
+            &cats,
+            &files,
+            &q,
+            &roomy,
+            &load,
+            &save,
+            &|_| true,
+            &|_| true,
+        )
+        .unwrap();
+        assert_eq!((st.indexed, st.matched_files), (0, 20));
     }
 }

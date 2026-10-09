@@ -12,6 +12,7 @@
 //! * [`search`] … ファイルの検索（名前・属性・中身）
 //! * [`fulltext`] … 中身の索引（バイグラムの転置索引。中身の検索で読むファイルを絞る）
 //! * [`office`]・[`pdf`] … Office の文書・PDF の文字列の取り出し
+//! * [`limits`] … 裏の処理の CPU・メモリの上限
 //! * [`jobs`] … 同期ジョブ・保存した検索・置き場所・画面なしでの実行
 
 pub mod catalogs;
@@ -21,6 +22,7 @@ pub mod fulltext;
 pub mod hash;
 pub mod index;
 pub mod jobs;
+pub mod limits;
 pub mod office;
 pub mod pattern;
 pub mod pdf;
