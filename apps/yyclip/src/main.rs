@@ -37,9 +37,9 @@ mod resident {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
     use windows::Win32::UI::Controls::{
-        EM_SETLIMITTEXT, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, NMHDR,
-        TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW, TCM_SETCURSEL,
-        TCN_SELCHANGE, WC_TABCONTROLW,
+        EM_SETCUEBANNER, EM_SETLIMITTEXT, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX,
+        InitCommonControlsEx, NMHDR, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL,
+        TCM_INSERTITEMW, TCM_SETCURSEL, TCN_SELCHANGE, WC_TABCONTROLW,
     };
     use windows::Win32::UI::HiDpi::{
         GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI, SystemParametersInfoForDpi,
@@ -617,6 +617,14 @@ mod resident {
                 Some(WPARAM(templates::MEMO_LIMIT)),
                 None,
             );
+            // 空のときに欄の中に薄い字で出す（狭い画面で見出しを省いたときにも分かるように）
+            let cue = HSTRING::from("メモ（何に使う定型文か）");
+            SendMessageW(
+                memo,
+                EM_SETCUEBANNER,
+                Some(WPARAM(1)),
+                Some(LPARAM(cue.as_ptr() as isize)),
+            );
         }
         let edit_label = unsafe {
             CreateWindowExW(
@@ -841,19 +849,31 @@ mod resident {
             save_w = available / 2;
             cancel_w = available - save_w;
         }
-        let memo_h = scaled(28, scale).max(font_px + scaled(12, scale));
-        let label_y = pad + label_h + memo_h + gap;
-        let edit_y = label_y + label_h + gap;
+        let mut memo_h = scaled(28, scale).max(font_px + scaled(12, scale));
+        let mut memo_label_h = label_h;
+        let mut label_h = label_h;
+        let mut gap_v = gap;
+        // 狭いとき（大きな文字・小さな画面）は、メモの見出しを省き（欄の中の薄い字で示す）、高さと間を詰める
+        let natural_edit = button_y - gap - (pad + memo_label_h + memo_h + gap + label_h + gap);
+        if natural_edit < font_px * 2 {
+            memo_label_h = 0;
+            label_h = font_px + 4;
+            memo_h = font_px + 8;
+            gap_v = 4.min(gap);
+        }
+        let memo_y = pad + memo_label_h;
+        let label_y = memo_y + memo_h + gap_v;
+        let edit_y = label_y + label_h + gap_v;
         EditorLayout {
             memo_label: BoxRect {
                 x: pad,
                 y: pad,
                 w: (width - 2 * pad).max(1),
-                h: label_h,
+                h: memo_label_h,
             },
             memo: BoxRect {
                 x: pad,
-                y: pad + label_h,
+                y: memo_y,
                 w: (width - 2 * pad).max(1),
                 h: memo_h,
             },
@@ -867,7 +887,7 @@ mod resident {
                 x: pad,
                 y: edit_y,
                 w: (width - 2 * pad).max(1),
-                h: (button_y - gap - edit_y).max(1),
+                h: (button_y - gap_v - edit_y).max(1),
             },
             save: BoxRect {
                 x: width - pad - cancel_w - gap - save_w,
