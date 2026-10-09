@@ -3848,17 +3848,26 @@ mod tests {
         };
         let options: ICoreWebView2EnvironmentOptions =
             CoreWebView2EnvironmentOptions::default().into();
-        let state: Rc<std::cell::Cell<i32>> = Rc::default(); // 0: 待ち、1: 完了、-1: 失敗
+        // 0: 待ち、2: ダウンロードが始まった
+        let started: Rc<std::cell::Cell<i32>> = Rc::default();
         let failed: Rc<std::cell::Cell<bool>> = Rc::default();
+        let op: Rc<RefCell<Option<ICoreWebView2DownloadOperation>>> = Rc::default();
         let url = format!("http://127.0.0.1:{port}/data.bin");
-        let (s1, f1, t1, u1) = (state.clone(), failed.clone(), target.clone(), url.clone());
+        let (s1, f1, t1, u1, op1) = (
+            started.clone(),
+            failed.clone(),
+            target.clone(),
+            url.clone(),
+            op.clone(),
+        );
         let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
             move |res: Result<()>, env: Option<ICoreWebView2Environment>| {
                 let Some(env) = env.filter(|_| res.is_ok()) else {
                     f1.set(true);
                     return Ok(());
                 };
-                let (s1, f1, t1, u1) = (s1.clone(), f1.clone(), t1.clone(), u1.clone());
+                let (s1, f1, t1, u1, op1) =
+                    (s1.clone(), f1.clone(), t1.clone(), u1.clone(), op1.clone());
                 let on_controller = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
                     move |res: Result<()>, c: Option<ICoreWebView2Controller>| {
                         let Some(c) = c.filter(|_| res.is_ok()) else {
@@ -3867,36 +3876,16 @@ mod tests {
                         };
                         let w = unsafe { c.CoreWebView2()? };
                         let mut token = 0i64;
-                        let (s2, t2) = (s1.clone(), t1.clone());
+                        let (t2, op2, s2) = (t1.clone(), op1.clone(), s1.clone());
                         unsafe {
                             w.cast::<ICoreWebView2_4>()?.add_DownloadStarting(
                                 &DownloadStartingEventHandler::create(Box::new(move |_, args| {
                                     let Some(args) = args else { return Ok(()) };
                                     args.SetHandled(true)?;
                                     args.SetResultFilePath(&HSTRING::from(t2.as_os_str()))?;
-                                    let op = args.DownloadOperation()?;
-                                    let s3 = s2.clone();
-                                    let mut tk = 0i64;
-                                    op.add_StateChanged(
-                                        &webview2_com::StateChangedEventHandler::create(Box::new(
-                                            move |sender, _| {
-                                                if let Some(op) = sender {
-                                                    let mut st =
-                                                        COREWEBVIEW2_DOWNLOAD_STATE::default();
-                                                    let _ = op.State(&mut st);
-                                                    if st == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
-                                                        s3.set(1);
-                                                    } else if st
-                                                        == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED
-                                                    {
-                                                        s3.set(-1);
-                                                    }
-                                                }
-                                                Ok(())
-                                            },
-                                        )),
-                                        &mut tk,
-                                    )?;
+                                    // 操作は手放さない（本物でも一覧に持っている）
+                                    *op2.borrow_mut() = Some(args.DownloadOperation()?);
+                                    s2.set(2);
                                     Ok(())
                                 })),
                                 &mut token,
@@ -3928,14 +3917,42 @@ mod tests {
             assert!(!required, "WebView2 を使えません");
             return;
         }
-        crate::preview::testing::pump_until(Duration::from_secs(60), || {
-            state.get() != 0 || failed.get()
+        // 操作の状態を見ながら待つ（終わり・止まり）
+        let dl = || {
+            let mut st = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+            let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
+            let mut got = 0i64;
+            if let Some(o) = op.borrow().as_ref() {
+                unsafe {
+                    let _ = o.State(&mut st);
+                    let _ = o.InterruptReason(&mut reason);
+                    let _ = o.BytesReceived(&mut got);
+                }
+            }
+            (st, reason.0, got)
+        };
+        crate::preview::testing::pump_until(Duration::from_secs(90), || {
+            failed.get()
+                || (started.get() == 2 && dl().0 != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS)
         });
         if failed.get() {
             assert!(!required, "WebView2 を使えません");
             return;
         }
-        assert_eq!(state.get(), 1, "ダウンロードが終わりません");
+        assert_eq!(
+            started.get(),
+            2,
+            "ダウンロードが始まりません（DownloadStarting が来ない）"
+        );
+        let (st, reason, got) = dl();
+        assert_eq!(
+            st, COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED,
+            "ダウンロードが終わりません（理由 {reason}・{got} バイト）"
+        );
+        // 終わったと知らせてから、ファイルの名前が付くまで少し待つことがある
+        crate::preview::testing::pump_until(Duration::from_secs(10), || {
+            std::fs::metadata(&target).map(|m| m.len()).ok() == Some(body.len() as u64)
+        });
         assert_eq!(std::fs::read(&target).unwrap(), body);
         assert_eq!(std::fs::read(dir.join("data.bin")).unwrap(), b"old");
     }
