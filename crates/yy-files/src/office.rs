@@ -7,6 +7,8 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 /// 展開する XML の大きさの上限（壊れた・悪意のある ZIP で膨らまないように）。
 const MAX_XML: usize = 256 << 20;
+pub const DEFAULT_MEMORY_LIMIT: usize = 128 << 20;
+const MAX_ENTRIES: usize = 16_384;
 
 /// 対象の拡張子か。
 pub fn is_office(name: &str) -> bool {
@@ -34,10 +36,13 @@ fn bad(msg: &str) -> io::Error {
 }
 
 /// ZIP の目次（中央ディレクトリ）を読む。
-fn entries<R: Read + Seek>(f: &mut R) -> io::Result<Vec<ZipEntry>> {
+fn entries<R: Read + Seek>(f: &mut R, limit: usize) -> io::Result<Vec<ZipEntry>> {
     let len = f.seek(SeekFrom::End(0))?;
     // 終わりのレコード（22 バイト + コメント最大 64 KiB）
     let tail_len = len.min(22 + 65_535);
+    if tail_len > limit as u64 {
+        return Err(bad("Office の目次が大きすぎます"));
+    }
     f.seek(SeekFrom::Start(len - tail_len))?;
     let mut tail = vec![0u8; tail_len as usize];
     f.read_exact(&mut tail)?;
@@ -48,6 +53,13 @@ fn entries<R: Read + Seek>(f: &mut R) -> io::Result<Vec<ZipEntry>> {
     let count = u16le(&tail, eocd + 10) as usize;
     let cd_size = u32le(&tail, eocd + 12) as u64;
     let cd_off = u32le(&tail, eocd + 16) as u64;
+    if count > MAX_ENTRIES
+        || cd_size > limit as u64
+        || count as u64 > cd_size / 46
+        || count > limit / (std::mem::size_of::<ZipEntry>() + 64)
+    {
+        return Err(bad("Office の目次が大きすぎます"));
+    }
     if cd_off == u32::MAX as u64 || cd_off + cd_size > len {
         return Err(bad("ZIP64 には対応していません"));
     }
@@ -57,12 +69,18 @@ fn entries<R: Read + Seek>(f: &mut R) -> io::Result<Vec<ZipEntry>> {
     let mut out = Vec::with_capacity(count);
     let mut p = 0;
     while p + 46 <= cd.len() && cd[p..p + 4] == [0x50, 0x4b, 0x01, 0x02] {
+        if out.len() >= count {
+            return Err(bad("ZIP の項目数が目次と一致しません"));
+        }
         let method = u16le(&cd, p + 10);
         let comp_size = u32le(&cd, p + 20) as u64;
         let name_len = u16le(&cd, p + 28) as usize;
         let extra_len = u16le(&cd, p + 30) as usize;
         let comment_len = u16le(&cd, p + 32) as usize;
         let offset = u32le(&cd, p + 42) as u64;
+        if p + 46 + name_len + extra_len + comment_len > cd.len() {
+            return Err(bad("ZIP の目次が途中で終わっています"));
+        }
         let name =
             String::from_utf8_lossy(cd.get(p + 46..p + 46 + name_len).unwrap_or(&[])).into_owned();
         out.push(ZipEntry {
@@ -77,7 +95,7 @@ fn entries<R: Read + Seek>(f: &mut R) -> io::Result<Vec<ZipEntry>> {
 }
 
 /// ZIP の 1 項目の中身。
-fn read_entry<R: Read + Seek>(f: &mut R, e: &ZipEntry) -> io::Result<Vec<u8>> {
+fn read_entry<R: Read + Seek>(f: &mut R, e: &ZipEntry, limit: usize) -> io::Result<Vec<u8>> {
     f.seek(SeekFrom::Start(e.offset))?;
     let mut h = [0u8; 30];
     f.read_exact(&mut h)?;
@@ -86,14 +104,14 @@ fn read_entry<R: Read + Seek>(f: &mut R, e: &ZipEntry) -> io::Result<Vec<u8>> {
     }
     let skip = u16le(&h, 26) as i64 + u16le(&h, 28) as i64;
     f.seek(SeekFrom::Current(skip))?;
-    if e.comp_size as usize > MAX_XML {
+    if e.comp_size > limit as u64 {
         return Err(bad("大きすぎます"));
     }
     let mut data = vec![0u8; e.comp_size as usize];
     f.read_exact(&mut data)?;
     match e.method {
         0 => Ok(data),
-        8 => miniz_oxide::inflate::decompress_to_vec_with_limit(&data, MAX_XML)
+        8 => miniz_oxide::inflate::decompress_to_vec_with_limit(&data, limit)
             .map_err(|_| bad("展開できません")),
         _ => Err(bad("対応していない圧縮です")),
     }
@@ -112,16 +130,28 @@ fn wanted(name: &str) -> bool {
 }
 
 /// 文字の参照（`&amp;`・`&#x3042;` など）を戻す。
+#[cfg(test)]
 fn unescape(s: &str) -> String {
+    unescape_with_cancel(s, &|| false).unwrap()
+}
+
+fn unescape_with_cancel(s: &str, cancelled: &dyn Fn() -> bool) -> io::Result<String> {
     if !s.contains('&') {
-        return s.to_owned();
+        return Ok(s.to_owned());
     }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
+    let mut checked_at = rest.len();
     while let Some(i) = rest.find('&') {
+        if checked_at - rest.len() >= 4096 {
+            if cancelled() {
+                return Err(crate::cancelled());
+            }
+            checked_at = rest.len();
+        }
         out.push_str(&rest[..i]);
         let after = &rest[i + 1..];
-        let Some(end) = after.find(';').filter(|&e| e <= 10) else {
+        let Some(end) = after.as_bytes().iter().take(11).position(|&b| b == b';') else {
             out.push('&');
             rest = after;
             continue;
@@ -151,17 +181,24 @@ fn unescape(s: &str) -> String {
         }
     }
     out.push_str(rest);
-    out
+    Ok(out)
 }
 
 /// XML から文字列を取り出す（文字列の要素の中身。段落・行・セルの終わりで区切る）。
 pub fn xml_text(xml: &str) -> String {
+    xml_text_with_cancel(xml, &|| false).unwrap()
+}
+
+fn xml_text_with_cancel(xml: &str, cancelled: &dyn Fn() -> bool) -> io::Result<String> {
     let mut out = String::new();
     let mut rest = xml;
     let mut in_text = false;
     while let Some(lt) = rest.find('<') {
+        if cancelled() {
+            return Err(crate::cancelled());
+        }
         if in_text {
-            out.push_str(&unescape(&rest[..lt]));
+            out.push_str(&unescape_with_cancel(&rest[..lt], cancelled)?);
         }
         let Some(gt) = rest[lt..].find('>') else {
             break;
@@ -188,7 +225,7 @@ pub fn xml_text(xml: &str) -> String {
             out.push('\t');
         }
     }
-    out
+    Ok(out)
 }
 
 /// 並べる順（`slide10.xml` は `slide2.xml` の後）。
@@ -201,14 +238,39 @@ fn order_key(name: &str) -> (String, u64) {
 
 /// Office の文書の中の文字列。
 pub fn extract_text<R: Read + Seek>(f: &mut R) -> io::Result<String> {
-    let mut list = entries(f)?;
+    extract_text_with_limit(f, DEFAULT_MEMORY_LIMIT, &|| false)
+}
+
+/// Bound all expanded XML and text, not just individual ZIP members.
+/// Reserve headroom for compressed buffers, UTF-8 text, String growth and directory metadata.
+pub fn extract_text_with_limit<R: Read + Seek>(
+    f: &mut R,
+    memory_limit: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<String> {
+    let limit = (memory_limit / 16).min(MAX_XML);
+    if limit == 0 {
+        return Err(bad("Office の解析用メモリが不足しています"));
+    }
+    let mut list = entries(f, limit)?;
     list.retain(|e| wanted(&e.name));
     // スライド・シートは番号の順に
     list.sort_by_cached_key(|e| order_key(&e.name));
     let mut out = String::new();
+    let mut expanded = 0;
     for e in &list {
-        let xml = read_entry(f, e)?;
-        out.push_str(&xml_text(&String::from_utf8_lossy(&xml)));
+        if cancelled() {
+            return Err(crate::cancelled());
+        }
+        let remaining = limit.saturating_sub(expanded);
+        let xml = read_entry(f, e, remaining)?;
+        expanded += xml.len();
+        let xml = String::from_utf8(xml).map_err(|_| bad("Office XML が UTF-8 ではありません"))?;
+        let text = xml_text_with_cancel(&xml, cancelled)?;
+        if out.len().saturating_add(text.len()).saturating_add(1) > limit {
+            return Err(bad("Office の抽出結果が大きすぎます"));
+        }
+        out.push_str(&text);
         out.push('\n');
     }
     Ok(out)
@@ -217,6 +279,27 @@ pub fn extract_text<R: Read + Seek>(f: &mut R) -> io::Result<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_entities_are_bounded_and_parsing_can_be_cancelled() {
+        let body = "&".repeat(400_000);
+        let xml = format!("<t>{body}</t>");
+        assert_eq!(xml_text(&xml), body);
+        assert_eq!(
+            xml_text("<t>&amp;日本&#x3042;&unknown;</t>"),
+            "&日本あ&unknown;"
+        );
+        let calls = std::cell::Cell::new(0);
+        let bytes = zip(&[("word/document.xml", &xml, true)]);
+        let err =
+            extract_text_with_limit(&mut io::Cursor::new(bytes), DEFAULT_MEMORY_LIMIT, &|| {
+                calls.set(calls.get() + 1);
+                calls.get() == 5
+            })
+            .unwrap_err();
+        assert!(crate::is_cancelled(&err));
+        assert_eq!(calls.get(), 5);
+    }
 
     /// 試験用の小さな ZIP（無圧縮と deflate）。
     pub(crate) fn zip(files: &[(&str, &str, bool)]) -> Vec<u8> {
@@ -258,6 +341,40 @@ pub(crate) mod tests {
         out.extend_from_slice(&cd_off.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out
+    }
+
+    #[test]
+    fn limits_the_document_total_and_honors_cancellation() {
+        let xml = format!("<t>{}</t>", "x".repeat(1024));
+        let bytes = zip(&[
+            ("xl/worksheets/sheet1.xml", &xml, true),
+            ("xl/worksheets/sheet2.xml", &xml, true),
+        ]);
+        // Each member fits, but their total exceeds the allowed expansion.
+        assert!(
+            extract_text_with_limit(&mut io::Cursor::new(&bytes), 16 * 1500, &|| false).is_err()
+        );
+        assert_eq!(
+            extract_text_with_limit(&mut io::Cursor::new(&bytes), 16 * 4096, &|| false)
+                .unwrap()
+                .len(),
+            2050
+        );
+        let error =
+            extract_text_with_limit(&mut io::Cursor::new(&bytes), 16 * 4096, &|| true).unwrap_err();
+        assert!(crate::is_cancelled(&error));
+    }
+
+    #[test]
+    fn rejects_oversized_directory_before_allocating_it() {
+        let mut bytes = zip(&[("word/document.xml", "<t>ok</t>", false)]);
+        let eocd = bytes.len() - 22;
+        bytes[eocd + 12..eocd + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(extract_text(&mut io::Cursor::new(bytes)).is_err());
+        let mut bytes = zip(&[("word/document.xml", "<t>ok</t>", false)]);
+        let eocd = bytes.len() - 22;
+        bytes[eocd + 10..eocd + 12].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(extract_text(&mut io::Cursor::new(bytes)).is_err());
     }
 
     #[test]

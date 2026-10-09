@@ -1205,13 +1205,20 @@ fn add_events(
     webview: &ICoreWebView2,
     controller: &ICoreWebView2Controller,
 ) -> Result<()> {
+    let generation = with(|a| a.generation).unwrap_or(0);
     let mut token = 0i64;
     unsafe {
         webview.add_DocumentTitleChanged(
             &DocumentTitleChangedEventHandler::create(Box::new(move |sender, _| {
                 if let Some(w) = sender {
-                    let title = take_string(|p| w.DocumentTitle(p));
+                    let title: String = take_string(|p| w.DocumentTitle(p))
+                        .chars()
+                        .take(1024)
+                        .collect();
                     with(|a| {
+                        if a.generation != generation {
+                            return;
+                        }
                         if let Some(i) = a.index_of(id) {
                             if let Some(v) = a.tabs[i].pending_visit.as_mut() {
                                 v.title = title.clone();
@@ -1230,6 +1237,9 @@ fn add_events(
                 if let Some(w) = sender {
                     let url = take_string(|p| w.Source(p));
                     with(|a| {
+                        if a.generation != generation {
+                            return;
+                        }
                         if let Some(i) = a.index_of(id) {
                             a.tabs[i].url = url;
                             a.refresh_tab_label(i);
@@ -1255,6 +1265,9 @@ fn add_events(
             &NavigationStartingEventHandler::create(Box::new(move |_, args| {
                 let uri = args.map(|a| take_string(|p| a.Uri(p))).unwrap_or_default();
                 with(|a| {
+                    if a.generation != generation {
+                        return;
+                    }
                     if let Some(i) = a.index_of(id) {
                         a.flush_visit(i);
                         a.tabs[i].loading = true;
@@ -1277,6 +1290,9 @@ fn add_events(
                     let _ = args.WebErrorStatus(&mut status);
                 }
                 with(|a| {
+                    if a.generation != generation {
+                        return;
+                    }
                     if let Some(i) = a.index_of(id) {
                         a.tabs[i].loading = false;
                         if ok.as_bool() {
@@ -1370,7 +1386,11 @@ fn add_events(
             w4.add_DownloadStarting(
                 &DownloadStartingEventHandler::create(Box::new(move |_, args| {
                     if let (Some(args), Some(frame)) = (args, with(|a| a.frame)) {
-                        downloads::on_starting(frame, &args);
+                        if with(|a| a.generation == generation).unwrap_or(false) {
+                            downloads::on_starting(frame, &args);
+                        } else {
+                            let _ = args.SetCancel(true);
+                        }
                     }
                     Ok(())
                 })),
@@ -2550,6 +2570,10 @@ fn new_window(profile: Option<&str>) {
 
 /// このウィンドウのプロキシのプロファイルを切り替える（環境を作り直し、タブを同じ URL で開き直す）。
 fn switch_profile(name: &str) {
+    switch_profile_inner(name, false);
+}
+
+fn switch_profile_inner(name: &str, force: bool) {
     let Some((frame, profile, same, count)) = with(|a| {
         let p = a.profiles.get(name).cloned();
         (a.frame, p, a.profile.name == name, a.tabs.len())
@@ -2557,7 +2581,7 @@ fn switch_profile(name: &str) {
         return;
     };
     let Some(profile) = profile else { return };
-    if same {
+    if same && !force {
         return;
     }
     let ok = unsafe {
@@ -2575,6 +2599,9 @@ fn switch_profile(name: &str) {
         return;
     }
     let controllers = with(|a| {
+        a.flush_visits();
+        a.last_visit.clear();
+        a.generation += 1; // Invalidate old callbacks before closing their controllers.
         a.profile = profile;
         a.find = None;
         let mut cs = Vec::new();
@@ -2646,8 +2673,7 @@ fn proxy_settings() {
             .map(|p| p.name)
             .unwrap_or_else(|| edited.startup().name);
         // 名前が同じでも中身が変わったら作り直す
-        with(|a| a.profile.name = String::new());
-        switch_profile(&target);
+        switch_profile_inner(&target, true);
     }
 }
 
@@ -3889,7 +3915,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // 同じ名前のファイルがあるので「data (1).bin」になる
         std::fs::write(dir.join("data.bin"), b"old").unwrap();
-        let target = downloads::unique_path(&dir, "data.bin");
+        let target = downloads::unique_path(&dir, "data.bin").unwrap();
         assert!(target.ends_with("data (1).bin"), "{}", target.display());
         let parent = unsafe {
             CreateWindowExW(
@@ -4027,6 +4053,18 @@ mod tests {
             None
         );
         std::fs::write(dir.join("copy.bin"), &body).unwrap();
+        // A locally created copy must not replace a download's origin metadata.
+        let mut zone_path = target.as_os_str().to_os_string();
+        zone_path.push(":Zone.Identifier");
+        if let Ok(zone) = std::fs::read(&zone_path) {
+            assert_eq!(
+                yy_browser::history::discard_if_duplicate(&target).unwrap(),
+                None
+            );
+            let mut copy_zone = dir.join("copy.bin").into_os_string();
+            copy_zone.push(":Zone.Identifier");
+            std::fs::write(copy_zone, zone).unwrap();
+        }
         let dup = yy_browser::history::discard_if_duplicate(&target).unwrap();
         assert_eq!(dup.as_deref(), Some(dir.join("copy.bin").as_path()));
         assert!(!target.exists());

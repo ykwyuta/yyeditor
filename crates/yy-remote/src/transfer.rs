@@ -11,7 +11,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -54,6 +54,52 @@ enum Name {
     Bytes(Vec<u8>),
 }
 
+/// Convert one remote filename to a portable local name. Never interpret it as a path.
+pub fn local_file_name(name: &[u8]) -> io::Result<OsString> {
+    let name = String::from_utf8_lossy(name);
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix).is_some_and(|n| {
+                matches!(
+                    n,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        });
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.ends_with(['.', ' '])
+        || reserved
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "安全なローカルファイル名に変換できません",
+        ));
+    }
+    Ok(OsString::from(name.into_owned()))
+}
+
+fn remote_file_name(name: &[u8]) -> io::Result<()> {
+    if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') || name.contains(&0)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "接続先から不正なファイル名を受け取りました",
+        ));
+    }
+    Ok(())
+}
+
 impl Loc {
     /// 接続先なら、そのファイル操作とパス。
     fn remote_fs(&self) -> Option<(&dyn RemoteFs, &[u8])> {
@@ -64,17 +110,18 @@ impl Loc {
         }
     }
 
-    fn join(&self, name: &Name) -> Loc {
-        match self {
+    fn join(&self, name: &Name) -> io::Result<Loc> {
+        Ok(match self {
             Loc::Local(p) => Loc::Local(p.join(match name {
                 Name::Os(n) => n.clone(),
-                Name::Bytes(b) => OsString::from(String::from_utf8_lossy(b).into_owned()),
+                Name::Bytes(b) => local_file_name(b)?,
             })),
             Loc::Remote(_, p) | Loc::Sftp(_, p) => {
                 let n = match name {
                     Name::Os(n) => n.to_string_lossy().into_owned().into_bytes(),
                     Name::Bytes(b) => b.clone(),
                 };
+                remote_file_name(&n)?;
                 let path = yy_proto::join_path(p, &n);
                 match self {
                     Loc::Remote(s, _) => Loc::Remote(s.clone(), path),
@@ -82,7 +129,7 @@ impl Loc {
                     Loc::Local(_) => unreachable!(),
                 }
             }
-        }
+        })
     }
 
     fn kind(&self) -> io::Result<Kind> {
@@ -142,13 +189,14 @@ impl Loc {
                     .read_dir(p)?
                     .into_iter()
                     .map(|e| {
+                        remote_file_name(&e.name)?;
                         let kind = e
                             .info
                             .as_ref()
                             .map_or(Kind::Skip, |i| remote_kind(i.kind, i.link));
-                        (Name::Bytes(e.name), kind)
+                        Ok((Name::Bytes(e.name), kind))
                     })
-                    .collect())
+                    .collect::<io::Result<Vec<_>>>()?)
             }
         }
     }
@@ -258,7 +306,7 @@ fn measure_node(loc: &Loc, kind: Kind, t: &mut Ticker) -> io::Result<()> {
         Kind::Dir => {
             t.stats.dirs += 1;
             for (name, kind) in loc.children()? {
-                measure_node(&loc.join(&name), kind, t)?;
+                measure_node(&loc.join(&name)?, kind, t)?;
             }
         }
     }
@@ -332,7 +380,7 @@ fn copy_node(from: &Loc, to: &Loc, kind: Kind, t: &mut Ticker) -> io::Result<()>
             t.stats.dirs += 1;
             t.tick()?;
             for (name, kind) in from.children()? {
-                copy_node(&from.join(&name), &to.join(&name), kind, t)?;
+                copy_node(&from.join(&name)?, &to.join(&name)?, kind, t)?;
             }
             Ok(())
         }
@@ -387,22 +435,24 @@ fn copy_file(from: &Loc, to: &Loc, t: &mut Ticker) -> io::Result<()> {
         }
         _ => {
             // 接続先の間（別の接続先・エージェントと SFTP）は、手元の一時ファイルを経由する
-            let tmp = std::env::temp_dir().join(format!(
-                "yyeditor-copy-{}-{}.tmp",
-                std::process::id(),
-                t.stats.files
-            ));
-            let r = (|| {
-                let mut w = BufWriter::with_capacity(1 << 20, File::create(&tmp)?);
-                read_remote(from, &mut w, t)?;
-                w.flush()?;
-                drop(w);
-                write_remote(to, &mut File::open(&tmp)?)
-            })();
-            let _ = fs::remove_file(&tmp);
-            r
+            spool_copy(|out| read_remote(from, out, t), |src| write_remote(to, src))
         }
     }
+}
+
+/// Keep the anonymous, exclusive temporary file open throughout both transfers.
+fn spool_copy(
+    read: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut tmp = tempfile::tempfile()?;
+    {
+        let mut out = BufWriter::with_capacity(1 << 20, &mut tmp);
+        read(&mut out)?;
+        out.flush()?;
+    }
+    tmp.rewind()?;
+    write(&mut tmp)
 }
 
 /// 接続先のファイルを読んで `out` に書く。
@@ -627,6 +677,86 @@ fn sibling_temp(path: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&path[cut..]);
     out.extend_from_slice(format!(".yy-{}.tmp", std::process::id()).as_bytes());
     out
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn overlapping_spools_keep_contents_separate_and_fail_closed() {
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        spool_copy(
+            |out| {
+                out.write_all(b"first secret")?;
+                spool_copy(
+                    |out| out.write_all(b"second secret"),
+                    |src| src.read_to_end(&mut second).map(|_| ()),
+                )
+            },
+            |src| src.read_to_end(&mut first).map(|_| ()),
+        )
+        .unwrap();
+        assert_eq!(first, b"first secret");
+        assert_eq!(second, b"second secret");
+        assert!(
+            spool_copy(
+                |out| {
+                    out.write_all(b"partial")?;
+                    Err(io::Error::other("download failed"))
+                },
+                |_| panic!("partial download must not be uploaded")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_names_cannot_escape_local_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = Loc::Local(root.path().join("downloads"));
+        for name in [
+            "..\\outside.txt",
+            "../outside.txt",
+            "C:\\outside.txt",
+            "\\\\host\\share\\x",
+            "x:stream",
+            "CON.txt",
+            "LPT1",
+            "COM¹",
+            "x.",
+            "x ",
+            ".",
+            "..",
+            "",
+            "a\0b",
+        ] {
+            assert!(
+                destination
+                    .join(&Name::Bytes(name.as_bytes().to_vec()))
+                    .is_err(),
+                "{name:?}"
+            );
+        }
+        let Loc::Local(path) = destination
+            .join(&Name::Bytes("日本語.txt".as_bytes().to_vec()))
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(path, root.path().join("downloads/日本語.txt"));
+        assert!(fs::read_dir(root.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn remote_entries_must_be_single_posix_names() {
+        for name in [b"../x".as_slice(), b"/absolute", b"..", b".", b"a\0b", b""] {
+            assert!(remote_file_name(name).is_err());
+        }
+        assert!(remote_file_name(b"valid\\posix.txt").is_ok());
+        assert!(local_file_name(b"valid\\posix.txt").is_err());
+    }
 }
 
 #[cfg(all(test, unix))]

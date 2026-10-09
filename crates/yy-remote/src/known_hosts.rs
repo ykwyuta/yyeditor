@@ -30,6 +30,7 @@ pub enum HostKeyStatus {
 /// `files` の記録と照合する。`name` は [`crate::HostSpec::known_hosts_name`]。
 pub fn check(files: &[PathBuf], name: &str, algorithm: &str, key_b64: &str) -> HostKeyStatus {
     let mut changed = None;
+    let mut known = false;
     for file in files {
         let Ok(text) = std::fs::read_to_string(file) else {
             continue;
@@ -50,13 +51,16 @@ pub fn check(files: &[PathBuf], name: &str, algorithm: &str, key_b64: &str) -> H
                     };
                 }
                 Marker::Revoked | Marker::CertAuthority => {}
-                Marker::None if same_key => return HostKeyStatus::Known,
+                Marker::None if same_key => known = true,
                 Marker::None if entry.algorithm == algorithm => {
                     changed.get_or_insert((file.clone(), i + 1));
                 }
                 Marker::None => {}
             }
         }
+    }
+    if known {
+        return HostKeyStatus::Known;
     }
     match changed {
         Some((file, line)) => HostKeyStatus::Changed { file, line },
@@ -296,5 +300,30 @@ mod tests {
         assert!(fp.starts_with("SHA256:") && !fp.ends_with('='));
         assert_eq!(fp.len(), "SHA256:".len() + 43);
         assert!(fingerprint("not base64!").is_none());
+    }
+
+    #[test]
+    fn revocation_overrides_matches_in_any_order() {
+        let (_a, accepted) = write(&format!("host ssh-ed25519 {ED}\n"));
+        let (_r, revoked) = write(&format!("@revoked * ssh-ed25519 {ED}\n"));
+        for files in [
+            vec![accepted.clone(), revoked.clone()],
+            vec![revoked.clone(), accepted.clone()],
+        ] {
+            assert!(matches!(
+                check(&files, "host", "ssh-ed25519", ED),
+                HostKeyStatus::Changed { .. }
+            ));
+        }
+        for text in [
+            format!("host ssh-ed25519 {ED}\n@revoked host ssh-ed25519 {ED}\n"),
+            format!("@revoked host ssh-ed25519 {ED}\nhost ssh-ed25519 {ED}\n"),
+        ] {
+            let (_d, file) = write(&text);
+            assert!(matches!(
+                check(&[file], "host", "ssh-ed25519", ED),
+                HostKeyStatus::Changed { .. }
+            ));
+        }
     }
 }

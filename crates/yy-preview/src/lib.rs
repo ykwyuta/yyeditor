@@ -9,6 +9,7 @@
 //! （文書のフォルダを割り当てた仮想ホスト）から読む。
 
 mod markdown;
+pub mod security;
 
 use std::borrow::Cow;
 use std::path::Path;

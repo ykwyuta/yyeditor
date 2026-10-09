@@ -311,7 +311,7 @@ impl Screen {
             if double && i + 1 < n {
                 let b = (start + i + 1) % n;
                 let c2 = &self.cells[b];
-                if c2.fa.is_none() && !(c2.b == FC_SI && !dbcs_field) {
+                if c2.fa.is_none() && (c2.b != FC_SI || dbcs_field) {
                     let code = u16::from_be_bytes([c.b, c2.b]);
                     let text = match code {
                         0x0000 => None,
