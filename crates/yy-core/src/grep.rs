@@ -103,8 +103,8 @@ fn list_files(opts: &GrepOptions, out: &mut Vec<PathBuf>, dir: &Path) -> io::Res
     Ok(())
 }
 
-/// ファイルの内容を UTF-8 の文書として読む。バイナリらしいファイルは `None`。
-fn load(path: &Path) -> io::Result<Option<Snapshot>> {
+/// ファイルの内容を UTF-8 の文書として読む（文字コードを判別する）。バイナリらしいファイルは `None`。
+pub fn load(path: &Path) -> io::Result<Option<Snapshot>> {
     let f = yy_io::open_file(path)?;
     let bytes = f.bytes();
     let n = bytes.len().min(64 << 10);

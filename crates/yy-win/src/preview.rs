@@ -107,7 +107,7 @@ thread_local! {
 
 // ---- WebView2 の読み込み --------------------------------------------------
 
-type CreateEnvironmentFn = unsafe extern "system" fn(
+pub(crate) type CreateEnvironmentFn = unsafe extern "system" fn(
     browser_folder: PCWSTR,
     user_data_folder: PCWSTR,
     options: *mut c_void,
@@ -128,14 +128,14 @@ unsafe extern "system" {
 }
 
 #[cfg(target_env = "msvc")]
-fn create_environment_fn() -> std::result::Result<CreateEnvironmentFn, String> {
+pub(crate) fn create_environment_fn() -> std::result::Result<CreateEnvironmentFn, String> {
     Ok(CreateCoreWebView2EnvironmentWithOptions)
 }
 
 /// MSVC 以外（開発・テスト用の MinGW ビルド）では、実行ファイルと同じフォルダの
 /// WebView2Loader.dll があれば使う。
 #[cfg(not(target_env = "msvc"))]
-fn create_environment_fn() -> std::result::Result<CreateEnvironmentFn, String> {
+pub(crate) fn create_environment_fn() -> std::result::Result<CreateEnvironmentFn, String> {
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     unsafe {
         let module = LoadLibraryW(w!("WebView2Loader.dll"))
@@ -937,7 +937,7 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// WebView2 が返す文字列（CoTaskMemAlloc で確保）を受け取って解放する。
-fn take_string(f: impl FnOnce(*mut PWSTR) -> Result<()>) -> String {
+pub(crate) fn take_string(f: impl FnOnce(*mut PWSTR) -> Result<()>) -> String {
     let mut p = PWSTR::null();
     if f(&mut p).is_err() || p.is_null() {
         return String::new();

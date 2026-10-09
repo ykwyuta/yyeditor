@@ -1,0 +1,16 @@
+[package]
+name = "yy-adblock"
+description = "Ad blocking for yybrowser: filter list cache and update intervals, and a wrapper around the adblock engine (network checks, element hiding CSS)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+adblock.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

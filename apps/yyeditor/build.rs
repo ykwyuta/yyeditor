@@ -3,7 +3,7 @@
 //! マニフェストでは PerMonitorV2 DPI、長いパス、Common Controls v6、UTF-8 コードページを宣言する
 //! （MSVC リンカーのみ）。
 //!
-//! yyterm・yysftp・yysheet・yyclip も同じスクリプトを使う（各 Cargo.toml の `build`）。
+//! yyterm・yysftp・yysheet・yyclip・yyfilemanager も同じスクリプトを使う（各 Cargo.toml の `build`）。
 //!
 //! アイコン（`res/<パッケージ名>.ico`、`tools/gen-icon` で生成）は、リソースコンパイラーを使わずに
 //! ここでリソースファイル（.res）に変換してリンクする（ID 1 の RT_GROUP_ICON。エクスプローラーと
@@ -18,7 +18,7 @@ const RT_GROUP_ICON: u16 = 14;
 const APP_ICON_ID: u16 = 1;
 
 fn main() {
-    // ファイル名はパッケージ名から（yyeditor・yyterm・yysftp・yysheet・yyclip）
+    // ファイル名はパッケージ名から（yyeditor・yyterm・yysftp・yysheet・yyclip・yyfilemanager）
     let name = env!("CARGO_PKG_NAME");
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("res");
     let manifest = dir.join(format!("{name}.manifest"));

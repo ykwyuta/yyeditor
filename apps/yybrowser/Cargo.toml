@@ -1,0 +1,27 @@
+[package]
+name = "yybrowser"
+description = "Tab browser for Windows (WebView2) with its own proxy settings, independent of the OS proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# マニフェストとアイコンの埋め込みは yyeditor と同じ処理（ファイルは res/yybrowser.*）
+build = "../yyeditor/build.rs"
+
+[[bin]]
+name = "yybrowser"
+path = "src/main.rs"
+
+[features]
+default = ["devcert"]
+# 開発者用証明書を作る（rcgen + ring。C のビルドが要る）
+devcert = ["yy-browser/devcert"]
+
+[dependencies]
+yy-browser.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+yy-win.workspace = true
+
+[lints]
+workspace = true

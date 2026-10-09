@@ -45,6 +45,10 @@ pub struct Config {
     pub tn3270: Tn3270Config,
     /// スプレッドシート（yysheet。15 章）
     pub sheet: SheetConfig,
+    /// ファイル管理（yyfilemanager。18 章）
+    pub filemanager: FileManagerConfig,
+    /// タブブラウザ（yybrowser。19 章）
+    pub browser: BrowserConfig,
 }
 
 impl Default for Config {
@@ -60,6 +64,101 @@ impl Default for Config {
             transfer: TransferConfig::default(),
             tn3270: Tn3270Config::default(),
             sheet: SheetConfig::default(),
+            filemanager: FileManagerConfig::default(),
+            browser: BrowserConfig::default(),
+        }
+    }
+}
+
+/// タブブラウザ（yybrowser。19 章）の設定。プロキシのプロファイルは設定のフォルダの `browser.toml`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BrowserConfig {
+    /// ホーム（新しいタブ）
+    pub home: String,
+    /// 検索の URL（`%s` を検索語に置き換える）
+    pub search_url: String,
+    /// F12 の開発者ツール
+    pub devtools: bool,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        BrowserConfig {
+            home: "about:blank".into(),
+            search_url: "https://www.bing.com/search?q=%s".into(),
+            devtools: true,
+        }
+    }
+}
+
+/// ファイル管理（yyfilemanager。18 章）の設定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FileManagerConfig {
+    /// 走査の並列数
+    pub scan_threads: usize,
+    /// 同期で同時に送るファイルの数
+    pub copy_threads: usize,
+    /// 更新日時の誤差の許し幅（秒）
+    pub time_tolerance_sec: f64,
+    /// この大きさ以上のファイルは差分の送り方にする（MB。0 は使わない）
+    pub delta_min_mb: u64,
+    /// 送った後の確かめ（"size" か "hash"）
+    pub verify: String,
+    /// 同期で送ったファイルにアクセス権（ACL）も写す
+    pub copy_acl: bool,
+    /// 似ている度合いのしきい値
+    pub similar_threshold: f64,
+    /// 隔離フォルダに残す日数
+    pub trash_days: u32,
+    /// 共有フォルダの中身の検索の並列数
+    pub search_threads: usize,
+    /// これより大きなファイルの中身は探さない（MB）
+    pub search_max_mb: u64,
+    /// 検索で使う目録がこれより古ければ走査し直す（分）
+    pub index_max_age_min: u64,
+    /// 中身の検索で中身の索引（全文検索）を使い、読んだファイルを索引に足す
+    pub fulltext_index: bool,
+    /// 裏の処理（中身の索引の作成・中身の検索・索引のバキューム）が使ってよい CPU の割合（%）
+    pub background_cpu_percent: u32,
+    /// 裏の処理が使ってよいメモリ（MB。0 は上限なし）
+    pub background_memory_mb: u64,
+    /// 中身を探す・中身の索引を作るファイルの名前のパターン（これに合わないファイルの中身は読まない。
+    /// 空なら既定の一覧）
+    pub content_patterns: Vec<String>,
+    /// 除くファイル（名前のパターン。既定に足す）
+    pub exclude: Vec<String>,
+    /// 削除の候補にしないフォルダ
+    pub protect: Vec<String>,
+}
+
+impl Default for FileManagerConfig {
+    fn default() -> Self {
+        FileManagerConfig {
+            scan_threads: 16,
+            copy_threads: 4,
+            time_tolerance_sec: 2.0,
+            delta_min_mb: 64,
+            verify: "size".into(),
+            copy_acl: false,
+            similar_threshold: 0.85,
+            trash_days: 30,
+            search_threads: 8,
+            search_max_mb: 1024,
+            index_max_age_min: 60,
+            fulltext_index: true,
+            background_cpu_percent: 25,
+            background_memory_mb: 512,
+            content_patterns: [
+                "*.txt", "*.csv", "*.tsv", "*.log", "*.md", "*.json", "*.xml", "*.html", "*.htm",
+                "*.ini", "*.yml", "*.yaml", "*.toml", "*.sql", "*.bat", "*.ps1", "*.cbl", "*.cob",
+                "*.cpy", "*.jcl", "*.docx", "*.xlsx", "*.pptx", "*.pdf",
+            ]
+            .map(String::from)
+            .to_vec(),
+            exclude: Vec::new(),
+            protect: Vec::new(),
         }
     }
 }

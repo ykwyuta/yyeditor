@@ -1,0 +1,42 @@
+[package]
+name = "yy-files"
+description = "File management core for yyfilemanager: scanning and catalogs, folder sync to shares with resume, duplicate and version detection, reviewed purge and file search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# BLAKE3 を C・アセンブリなしで作る（Linux から Windows 向けに型検査するとき。ml64.exe がないため）
+blake3-pure = ["blake3/pure"]
+
+[dependencies]
+blake3.workspace = true
+miniz_oxide.workspace = true
+postcard.workspace = true
+rayon.workspace = true
+regex-automata.workspace = true
+serde.workspace = true
+toml.workspace = true
+unicode-normalization.workspace = true
+yy-buffer.workspace = true
+yy-core.workspace = true
+yy-search.workspace = true
+
+# ACL を写す（同期の copy_acl）・裏の処理の優先度を下げる
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+]
+
+[dev-dependencies]
+yy-encoding.workspace = true
+tempfile.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

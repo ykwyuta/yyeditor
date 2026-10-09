@@ -63,18 +63,49 @@ pub(super) fn current() -> Option<(usize, Table, View, Arc<SheetCtx>)> {
     })
 }
 
-/// アクティブなセルの表の列（表の外なら案内して `None`）。
+/// 手で入れた・貼り付けたデータ（表の外の自由なセル）を表に取り込む（`col` 列目まで）。取り込んだら
+/// `true`（Undo できる編集として扱う）。
+fn absorb_free_cells(col: u32) -> bool {
+    with(|a| {
+        a.end_edit(true);
+        let sheet = a.sheet;
+        let had_table = a.sheet().table.cols() > 0;
+        // 取り込むものがなければ Err で戻し、Undo の履歴に残さない
+        let r = a.doc.edit(|b, ctx| {
+            if b.sheets[sheet].absorb_free_cells(ctx, col)? {
+                Ok(())
+            } else {
+                Err(io::Error::other("取り込むものなし"))
+            }
+        });
+        if r.is_err() {
+            return false;
+        }
+        a.after_edit();
+        set_status(if had_table {
+            "右の列を表に取り込みました（元に戻すで取り消せます）"
+        } else {
+            "入力したデータを表にしました（1 行目を見出しにしました。元に戻すで取り消せます）"
+        });
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// アクティブなセルの表の列（表の外なら、入力したデータを表に取り込む。だめなら案内して `None`）。
 fn active_col() -> Option<u32> {
     let (frame, col, cols) = with(|a| (a.frame, a.cur.1, a.sheet().table.cols()))?;
-    if col < cols {
-        Some(col)
-    } else {
-        info_box(
-            frame,
-            "表の列を選んでください（絞り込み・並べ替えは表の列に対して行います）。",
-        );
-        None
+    if col < cols
+        || (absorb_free_cells(col) && with(|a| col < a.sheet().table.cols()) == Some(true))
+    {
+        return Some(col);
     }
+    info_box(
+        frame,
+        "絞り込み・並べ替えは、1 行目に見出しがある表に対して行います。\n\
+         A1 から見出しの行・データの行の順に入れてから、もう一度選んでください。",
+    );
+    None
 }
 
 /// 表示を計算し直してシートに入れる。`record` なら編集として扱う（Undo できる・変更あり）。
@@ -266,6 +297,10 @@ pub(super) fn sort_active(desc: bool) {
 
 /// 並べ替えのダイアログ。
 pub(super) fn sort_dialog() {
+    if with(|a| a.sheet().table.cols()) == Some(0) {
+        let col = with(|a| a.cur.1).unwrap_or(0);
+        absorb_free_cells(col);
+    }
     let Some((sheet, table, mut view, _)) = current() else {
         return;
     };

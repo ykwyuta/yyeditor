@@ -22,6 +22,12 @@ pub(crate) const HELP_MD: &str = include_str!("../help/help.md");
 /// yysheet のヘルプ（利用ガイド）の本文。
 pub(crate) const SHEET_MD: &str = include_str!("../help/sheet.md");
 
+/// yyfilemanager のヘルプの本文。
+pub(crate) const FM_MD: &str = include_str!("../help/filemanager.md");
+
+/// yybrowser のヘルプの本文。
+pub(crate) const BROWSER_MD: &str = include_str!("../help/browser.md");
+
 thread_local! {
     /// 表示するヘルプ（本文・ウィンドウの題名）。yysheet は [`use_sheet_help`] で切り替える
     static DOC: std::cell::Cell<(&'static str, &'static str)> =
@@ -34,7 +40,17 @@ fn doc() -> &'static str {
 
 /// yysheet のヘルプを表示するようにし、ヘルプのウィンドウのクラス（とプレビュー）を登録する。
 pub(crate) fn use_sheet_help(hinstance: windows::Win32::Foundation::HINSTANCE) {
-    DOC.with(|d| d.set((SHEET_MD, "yysheet ヘルプ")));
+    use_app_help(hinstance, SHEET_MD, "yysheet ヘルプ");
+}
+
+/// エディタ以外のアプリのヘルプ（本文・題名）を表示するようにし、ヘルプのウィンドウのクラス
+/// （とプレビュー）を登録する。
+pub(crate) fn use_app_help(
+    hinstance: windows::Win32::Foundation::HINSTANCE,
+    md: &'static str,
+    title: &'static str,
+) {
+    DOC.with(|d| d.set((md, title)));
     unsafe {
         let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
         for (class, proc_, bg) in [
@@ -368,7 +384,7 @@ mod tests {
     /// 目次のリンク先の見出しがすべてある。
     #[test]
     fn table_of_contents_links_resolve() {
-        for md in [HELP_MD, SHEET_MD] {
+        for md in [HELP_MD, SHEET_MD, FM_MD] {
             let mut n = 0;
             for part in md.split("](#").skip(1) {
                 let id = &part[..part.find(')').unwrap()];

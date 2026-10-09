@@ -1,0 +1,19 @@
+[package]
+name = "yyfilemanager"
+description = "File manager for Windows: resumable folder sync to shares, file search, version and duplicate detection, reviewed bulk delete"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# マニフェストとアイコンの埋め込みは yyeditor と同じ処理（ファイルは res/yyfilemanager.*）
+build = "../yyeditor/build.rs"
+
+[[bin]]
+name = "yyfilemanager"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+yy-win.workspace = true
+
+[lints]
+workspace = true

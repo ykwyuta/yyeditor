@@ -27,9 +27,13 @@ pub(crate) fn call(f: &Func, args: &[Expr], cx: &Context<'_>) -> Val {
         Func::Percentile { inc, .. } => percentile(args, cx, *inc),
         Func::Round(mode) => round(args, cx, *mode),
         Func::If => if_(args, cx),
+        Func::Ifs => ifs_(args, cx),
+        Func::AndOr(all) => and_or(args, cx, *all),
+        Func::Row => row(args, cx),
         Func::Iferror => iferror(args, cx),
         Func::CblMove => cbl_move(args, cx),
         Func::Mod => modulo(args, cx),
+        Func::Power => power(args, cx),
         Func::Pi | Func::Logical(_) if !args.is_empty() => Val::Err(Error::Value),
         Func::Pi => Val::Num(std::f64::consts::PI),
         Func::Logical(b) => Val::Bool(*b),
@@ -364,6 +368,18 @@ fn modulo(args: &[Expr], cx: &Context<'_>) -> Val {
     })
 }
 
+/// `POWER(数値, 指数)`: べき乗（`数値^指数` と同じ。`POWER(0,0)` と負の数の小数乗は `#NUM!`、
+/// `POWER(0,負)` は `#DIV/0!`）。配列なら要素ごと。
+fn power(args: &[Expr], cx: &Context<'_>) -> Val {
+    if args.len() != 2 || args.iter().any(|a| matches!(a, Expr::Missing)) {
+        return Val::Err(Error::Value);
+    }
+    let (a, b) = (eval(&args[0], cx), eval(&args[1], cx));
+    zip(&a, &b, &|x, y| {
+        crate::eval::binary(crate::parse::BinOp::Pow, x, y, cx.sys)
+    })
+}
+
 /// `IFERROR(値, エラーの場合の値)`: 値がエラーならエラーの場合の値（値がエラーでなければ計算しない）。
 /// 空の引数は 0。値が配列なら要素ごとに（エラーの場合の値も配列なら同じ位置の値）。
 fn iferror(args: &[Expr], cx: &Context<'_>) -> Val {
@@ -423,6 +439,187 @@ fn truth(v: &Val) -> Result<bool, Error> {
         Cell::Text(s) if s.eq_ignore_ascii_case("TRUE") => Ok(true),
         Cell::Text(s) if s.eq_ignore_ascii_case("FALSE") => Ok(false),
         Cell::Text(_) => Err(Error::Value),
+    }
+}
+
+/// `AND(論理式1, …)`（`all`）・`OR(論理式1, …)`: 直接書いた値は真偽値にし（数値は 0 以外が真、
+/// `"TRUE"`・`"FALSE"` の文字列も読む。ほかの文字列は `#VALUE!`）、範囲・配列の中は数値と真偽値だけを
+/// 見る（文字列・空は無視）。エラーはそのまま返し、見る値が 1 つもなければ `#VALUE!`（Excel と同じ）。
+fn and_or(args: &[Expr], cx: &Context<'_>, all: bool) -> Val {
+    if args.is_empty() {
+        return Val::Err(Error::Value);
+    }
+    let mut seen = false;
+    let mut result = all;
+    for e in args {
+        let a = arg(e, cx);
+        match &a {
+            Arg::V(v) if !matches!(v, Val::Array(_)) => {
+                if matches!(v, Val::Empty) {
+                    continue;
+                }
+                match truth(v) {
+                    Ok(b) => {
+                        seen = true;
+                        if all { result &= b } else { result |= b }
+                    }
+                    Err(e) => return Val::Err(e),
+                }
+            }
+            _ => {
+                let mut err = None;
+                each_cell_any_order(&a, cx, &mut |c| {
+                    let b = match c {
+                        Cell::Num(n) => n != 0.0,
+                        Cell::Bool(b) => b,
+                        Cell::Err(e) => {
+                            err.get_or_insert(e);
+                            return;
+                        }
+                        _ => return,
+                    };
+                    seen = true;
+                    if all { result &= b } else { result |= b }
+                });
+                if let Some(e) = err {
+                    return Val::Err(e);
+                }
+            }
+        }
+    }
+    if seen {
+        Val::Bool(result)
+    } else {
+        Val::Err(Error::Value)
+    }
+}
+
+/// `IFS(条件1, 値1, [条件2, 値2], …)`: 最初に真になった条件の値を返す（後ろの条件・値は計算しない）。
+/// どれも真でなければ `#N/A`、引数が組になっていなければ `#VALUE!`。条件が配列なら要素ごとに選ぶ
+/// （1 行・1 列は広げる）。
+fn ifs_(args: &[Expr], cx: &Context<'_>) -> Val {
+    if args.is_empty() || args.len() % 2 != 0 {
+        return Val::Err(Error::Value);
+    }
+    let value = |e: &Expr| match e {
+        Expr::Missing => Val::Num(0.0),
+        e => eval(e, cx),
+    };
+    let pairs = args.len() / 2;
+    let mut conds: Vec<Val> = Vec::with_capacity(pairs);
+    for k in 0..pairs {
+        let c = value(&args[2 * k]);
+        if !matches!(c, Val::Array(_)) {
+            match truth(&c) {
+                Err(e) if conds.is_empty() => return Val::Err(e),
+                Ok(true) if conds.is_empty() => return value(&args[2 * k + 1]),
+                Ok(false) if conds.is_empty() => continue,
+                _ => {}
+            }
+        }
+        conds.push(c);
+        // 配列の条件が出たら、残りの条件もすべて計算して要素ごとに選ぶ
+        for j in k + 1..pairs {
+            conds.push(value(&args[2 * j]));
+        }
+        let first = k;
+        let vals: Vec<Val> = (first..pairs).map(|j| value(&args[2 * j + 1])).collect();
+        let dims = |v: &Val| match v {
+            Val::Array(x) => (x.rows, x.cols),
+            _ => (1, 1),
+        };
+        let (rows, cols) = conds
+            .iter()
+            .chain(&vals)
+            .map(dims)
+            .fold((1, 1), |(r, c), (vr, vc)| (r.max(vr), c.max(vc)));
+        if (rows * cols) as u64 > MAX_ARRAY {
+            return Val::Err(Error::Num);
+        }
+        let at = |v: &Val, r: usize, col: usize| -> Val {
+            match v {
+                Val::Array(x) => {
+                    let r = if x.rows == 1 { 0 } else { r };
+                    let col = if x.cols == 1 { 0 } else { col };
+                    if r >= x.rows || col >= x.cols {
+                        Val::Err(Error::NA)
+                    } else {
+                        x.get(r, col).clone()
+                    }
+                }
+                v => v.clone(),
+            }
+        };
+        let mut data = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            for col in 0..cols {
+                let mut out = Val::Err(Error::NA);
+                for (c, v) in conds.iter().zip(&vals) {
+                    match truth(&at(c, r, col)) {
+                        Ok(true) => {
+                            out = at(v, r, col);
+                            break;
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            out = Val::Err(e);
+                            break;
+                        }
+                    }
+                }
+                data.push(out);
+            }
+        }
+        return Val::Array(Arc::new(Array::new(rows, cols, data)));
+    }
+    Val::Err(Error::NA)
+}
+
+/// `ROW([参照])`: 参照の行番号（1 始まり）。省略すれば式のあるセルの行。複数の行の範囲なら行番号の
+/// 縦の配列（スピル）。参照でない引数は `#VALUE!`。
+fn row(args: &[Expr], cx: &Context<'_>) -> Val {
+    let here = || cx.row as i64 + cx.offset + 1;
+    match args {
+        [] | [Expr::Missing] => Val::Num(here() as f64),
+        [e] => {
+            let mut e = e;
+            while let Expr::Paren(x) = e {
+                e = x;
+            }
+            let Expr::Ref(r) = e else {
+                return match eval(e, cx) {
+                    Val::Err(x) => Val::Err(x),
+                    _ => Val::Err(Error::Value),
+                };
+            };
+            let sheet = match &r.sheet {
+                None => cx.sheet,
+                Some(name) => match cx.grid.sheet(name) {
+                    Some(s) => s,
+                    None => return Val::Err(Error::Ref),
+                },
+            };
+            let Some(mut area) = crate::offset_area(&r.area, cx.offset) else {
+                return Val::Err(Error::Ref);
+            };
+            if area.r1 == u64::MAX {
+                // 列全体（`A:A`）は使っている行まで
+                let (used, _) = cx.grid.used(sheet);
+                area.r1 = used.max(area.r0 + 1) - 1;
+            }
+            let n = area.r1 - area.r0 + 1;
+            if n == 1 {
+                return Val::Num((area.r0 + 1) as f64);
+            }
+            if n > MAX_ARRAY {
+                return Val::Err(Error::Num);
+            }
+            let data = (area.r0..=area.r1)
+                .map(|r| Val::Num((r + 1) as f64))
+                .collect();
+            Val::Array(Arc::new(Array::new(n as usize, 1, data)))
+        }
+        _ => Val::Err(Error::Value),
     }
 }
 

@@ -972,6 +972,7 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                     sys,
                     cache: Some(&cache),
                     offset: 0,
+                    row: r,
                 };
                 results_column(ctx, |push| {
                     yy_formula::eval_rows(&node.expr, &cx, rows, &mut |i, v| {
@@ -1016,6 +1017,7 @@ pub fn recalc(book: &mut Workbook, ctx: &Context) {
                     sys,
                     cache: Some(&cache),
                     offset: 0,
+                    row: r,
                 },
             )
         };
@@ -1428,6 +1430,40 @@ mod shared_tests {
         assert!(d.undo());
         assert!(d.undo());
         assert_eq!(d.book.sheets[0].formulas.shared.len(), 1);
+    }
+
+    #[test]
+    fn row_function_follows_the_cell() {
+        let ctx = Context::for_tests();
+        let mut d = Document::with_book(ctx, Workbook::default());
+        d.edit(|b, ctx| {
+            let s = &mut b.sheets[0];
+            s.set_formula(ctx, 4, 0, "=ROW()")
+                .map_err(std::io::Error::other)?;
+            s.set_formula(ctx, 0, 1, "=ROW()*10+ROW(A2)")
+                .map_err(std::io::Error::other)?;
+            s.set_formula(ctx, 0, 2, "=IFS(MOD(ROW(),2)=0,\"偶\",TRUE,\"奇\")")
+                .map_err(std::io::Error::other)
+        })
+        .unwrap();
+        d.edit(|b, ctx| {
+            b.sheets[0]
+                .fill_down(ctx, 0, 49, 1, 2)
+                .map_err(std::io::Error::other)
+        })
+        .unwrap();
+        assert!(!d.book.sheets[0].formulas.shared.is_empty());
+        assert_eq!(get(&d, 4, 0), 5.0.into());
+        assert_eq!(get(&d, 0, 1), 12.0.into());
+        assert_eq!(get(&d, 20, 1), 232.0.into());
+        assert_eq!(get(&d, 20, 2), "奇".into());
+        assert_eq!(get(&d, 21, 2), "偶".into());
+        // 上に行を挿入すると、式のある行が変わる（参照のない式も計算し直す）
+        d.edit(|b, ctx| b.edit_rows_cols(ctx, 0, Edit::InsertRows(0, 3)))
+            .unwrap();
+        assert_eq!(get(&d, 7, 0), 8.0.into());
+        assert_eq!(get(&d, 23, 1), 265.0.into());
+        assert_eq!(get(&d, 23, 2), "偶".into());
     }
 
     #[test]
