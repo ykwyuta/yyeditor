@@ -14,9 +14,15 @@
 
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    mpsc,
+};
+use std::time::{Duration, Instant};
 
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::{
@@ -46,11 +52,29 @@ use crate::util::Context;
 pub(crate) const WM_APP_PREVIEW_OPEN: u32 = WM_APP + 21;
 /// WebView2 を使えなかった（プレビューの欄には案内を表示している）。フレームに送る。
 pub(crate) const WM_APP_PREVIEW_FAILED: u32 = WM_APP + 22;
-/// リモートの文書の画像などを取り寄せ終わった（`lparam` は `Box<Fetched>`）。プレビューの欄に送る。
-const WM_APP_PREVIEW_FETCHED: u32 = WM_APP + 23;
-
-/// 1 つの画像などとして取り寄せる大きさの上限
+// Poll owned result channels on the UI thread; never post heap pointers to a dying HWND.
+const FETCH_TIMER: usize = 0x5959;
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_LIMIT: u64 = 32 << 20;
+const MAX_FETCHES: usize = 4;
+static ACTIVE_FETCHES: AtomicUsize = AtomicUsize::new(0);
+
+struct FetchPermit;
+impl FetchPermit {
+    fn acquire() -> Option<Self> {
+        ACTIVE_FETCHES
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < MAX_FETCHES).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+impl Drop for FetchPermit {
+    fn drop(&mut self) {
+        ACTIVE_FETCHES.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// 文書の相対パスの起点（`https://yy-doc.local/` に当たるフォルダ）。
 #[derive(Clone)]
@@ -75,16 +99,36 @@ impl PartialEq for DocBase {
 }
 
 /// 取り寄せている要求（答えるまで WebView2 を待たせる）。
+// Bound queued requests separately from workers and completed result buffers.
+const MAX_REQUESTS: usize = 32;
+static ACTIVE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+struct RequestPermit;
+impl RequestPermit {
+    fn acquire() -> Option<Self> {
+        ACTIVE_REQUESTS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < MAX_REQUESTS).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+impl Drop for RequestPermit {
+    fn drop(&mut self) {
+        ACTIVE_REQUESTS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 struct PendingFetch {
+    owner: isize,
     env: ICoreWebView2Environment,
     args: ICoreWebView2WebResourceRequestedEventArgs,
     deferral: ICoreWebView2Deferral,
-}
-
-/// 取り寄せた結果。
-struct Fetched {
-    id: u64,
-    result: std::result::Result<Vec<u8>, String>,
+    receiver: Option<mpsc::Receiver<(io::Result<Vec<u8>>, FetchPermit)>>,
+    work: Option<(Option<DocBase>, String)>,
+    _request: RequestPermit,
+    cancelled: Arc<AtomicBool>,
+    started: Instant,
     mime: &'static str,
 }
 
@@ -369,6 +413,7 @@ impl Preview {
 
 impl Drop for Preview {
     fn drop(&mut self) {
+        cancel_fetches(self.hwnd);
         if let Some(web) = self.shared.web.borrow_mut().take() {
             unsafe {
                 let _ = web.controller.Close();
@@ -517,6 +562,7 @@ fn setup(
                 let Some(args) = args else { return Ok(()) };
                 let uri = take_string(|p| args.Uri(p));
                 if uri.starts_with(&format!("https://{PREVIEW_HOST}/")) {
+                    cancel_fetches(s.container);
                     let mut id = 0u64;
                     let _ = args.NavigationId(&mut id);
                     s.page.borrow_mut().navigation = Some(id);
@@ -620,6 +666,7 @@ fn setup(
 
 /// 表示するページへ移動する（文書のフォルダの割り当ても合わせる）。
 fn navigate(shared: &Rc<Shared>) {
+    cancel_fetches(shared.container);
     let Some(web) = shared.web.borrow().clone() else {
         return;
     };
@@ -678,41 +725,39 @@ fn serve_document_file(
     args: &ICoreWebView2WebResourceRequestedEventArgs,
     rel: &str,
 ) -> Result<()> {
+    let Some(request) = RequestPermit::acquire() else {
+        return resource_response(env, args, 503, b"Too many preview requests", "text/plain");
+    };
     let base = shared.page.borrow().folder.clone();
+    let mime = mime_of(rel);
     let rel = rel.to_owned();
-    let mime = mime_of(&rel);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let started = Instant::now();
+    let deferral = unsafe { args.GetDeferral()? };
     let id = NEXT_FETCH.with(|n| {
         n.set(n.get() + 1);
         n.get()
     });
-    let deferral = unsafe { args.GetDeferral()? };
     PENDING.with(|p| {
         p.borrow_mut().insert(
             id,
             PendingFetch {
+                owner: shared.container.0 as isize,
                 env: env.clone(),
                 args: args.clone(),
                 deferral,
+                receiver: None,
+                work: Some((base, rel)),
+                _request: request,
+                cancelled,
+                started,
+                mime,
             },
         )
     });
-    let target = shared.container.0 as isize;
-    std::thread::spawn(move || {
-        let result = fetch_document_file(base, &rel).map_err(|e| e.to_string());
-        let msg = Box::into_raw(Box::new(Fetched { id, result, mime }));
-        unsafe {
-            if PostMessageW(
-                Some(HWND(target as *mut _)),
-                WM_APP_PREVIEW_FETCHED,
-                WPARAM(0),
-                LPARAM(msg as isize),
-            )
-            .is_err()
-            {
-                drop(Box::from_raw(msg));
-            }
-        }
-    });
+    if unsafe { SetTimer(Some(shared.container), FETCH_TIMER, 50, None) } == 0 {
+        cancel_fetches(shared.container);
+    }
     Ok(())
 }
 
@@ -733,7 +778,54 @@ fn remote_document_file(
     Ok(path)
 }
 
-fn fetch_document_file(base: Option<DocBase>, raw: &str) -> io::Result<Vec<u8>> {
+struct ResourceBuffer<'a> {
+    data: &'a mut Vec<u8>,
+    cancelled: &'a dyn Fn() -> bool,
+}
+
+impl Write for ResourceBuffer<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if (self.cancelled)() {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "Preview cancelled"));
+        }
+        let len = self.data.len().saturating_add(bytes.len());
+        if len as u64 > FETCH_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Preview resource too large",
+            ));
+        }
+        if len > self.data.capacity() {
+            let capacity = len.next_power_of_two().min(FETCH_LIMIT as usize);
+            self.data
+                .try_reserve_exact(capacity - self.data.len())
+                .map_err(io::Error::other)?;
+        }
+        self.data.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn fetch_document_file(
+    base: Option<DocBase>,
+    raw: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<Vec<u8>> {
+    let check = || {
+        if cancelled() {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Preview request cancelled",
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    check()?;
     let rel = yy_preview::security::document_relative_path(raw).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -744,21 +836,31 @@ fn fetch_document_file(base: Option<DocBase>, raw: &str) -> io::Result<Vec<u8>> 
     match base {
         Some(DocBase::Local(root)) => {
             let path = yy_preview::security::local_document_file(&root, &rel)?;
-            std::fs::File::open(path)?
-                .take(FETCH_LIMIT + 1)
-                .read_to_end(&mut data)?;
-            if data.len() as u64 > FETCH_LIMIT {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "プレビュー資源が大きすぎます",
-                ));
+            let mut file = std::fs::File::open(path)?.take(FETCH_LIMIT + 1);
+            let mut chunk = [0u8; 64 * 1024];
+            loop {
+                check()?;
+                let n = file.read(&mut chunk)?;
+                if n == 0 {
+                    break;
+                }
+                ResourceBuffer {
+                    data: &mut data,
+                    cancelled,
+                }
+                .write_all(&chunk[..n])?;
             }
         }
         Some(DocBase::Remote { session, dir }) => {
             let path = remote_document_file(&session, &dir.path, &rel)?;
-            session.download(&path, &mut data, &mut |done, total| {
-                done <= FETCH_LIMIT && total <= FETCH_LIMIT
-            })?;
+            session.download(
+                &path,
+                &mut ResourceBuffer {
+                    data: &mut data,
+                    cancelled,
+                },
+                &mut |done, total| !cancelled() && done <= FETCH_LIMIT && total <= FETCH_LIMIT,
+            )?;
         }
         None => {
             return Err(io::Error::new(
@@ -767,35 +869,133 @@ fn fetch_document_file(base: Option<DocBase>, raw: &str) -> io::Result<Vec<u8>> 
             ));
         }
     }
+    check()?;
     Ok(data)
 }
 
-/// 取り寄せた結果で、待たせていた要求に答える（プレビューの欄のウィンドウプロシージャから）。
-fn complete_fetch(fetched: Fetched) {
-    let Some(p) = PENDING.with(|p| p.borrow_mut().remove(&fetched.id)) else {
-        return;
-    };
-    let (status, reason, body, mime) = match fetched.result {
-        Ok(data) => (200, w!("OK"), data, fetched.mime),
-        Err(e) => (
-            404,
-            w!("Not Found"),
-            e.into_bytes(),
-            "text/plain; charset=utf-8",
-        ),
-    };
+fn resource_response(
+    env: &ICoreWebView2Environment,
+    args: &ICoreWebView2WebResourceRequestedEventArgs,
+    status: i32,
+    body: &[u8],
+    mime: &str,
+) -> Result<()> {
     unsafe {
-        let stream: Option<IStream> = SHCreateMemStream(Some(&body));
+        let stream: Option<IStream> = SHCreateMemStream(Some(body));
         let headers = HSTRING::from(format!(
             "Content-Type: {mime}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: https://yy-preview.local"
         ));
-        if let Ok(response) =
-            p.env
-                .CreateWebResourceResponse(stream.as_ref(), status, reason, &headers)
-        {
-            let _ = p.args.SetResponse(&response);
+        let reason = if status == 200 {
+            w!("OK")
+        } else {
+            w!("Unavailable")
+        };
+        let response = env.CreateWebResourceResponse(stream.as_ref(), status, reason, &headers)?;
+        args.SetResponse(&response)
+    }
+}
+
+fn finish_fetch(p: PendingFetch, result: io::Result<Vec<u8>>) {
+    p.cancelled.store(true, Ordering::Release);
+    match result {
+        Ok(body) => {
+            let _ = resource_response(&p.env, &p.args, 200, &body, p.mime);
         }
+        Err(_) => {
+            let _ = resource_response(&p.env, &p.args, 404, b"Resource unavailable", "text/plain");
+        }
+    }
+    unsafe {
         let _ = p.deferral.Complete();
+    }
+}
+
+fn cancel_fetches(hwnd: HWND) {
+    // Remove before calling COM, whose callbacks may reenter this map.
+    let pending = PENDING.with(|p| {
+        let mut map = p.borrow_mut();
+        let ids: Vec<_> = map
+            .iter()
+            .filter(|(_, v)| v.owner == hwnd.0 as isize)
+            .map(|(&id, _)| id)
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| map.remove(&id))
+            .collect::<Vec<_>>()
+    });
+    unsafe {
+        let _ = KillTimer(Some(hwnd), FETCH_TIMER);
+    }
+    for p in pending {
+        finish_fetch(p, Err(io::Error::other("Preview closed or navigated")));
+    }
+}
+
+fn start_fetch(p: &mut PendingFetch) {
+    if p.work.is_none() {
+        return;
+    }
+    let Some(permit) = FetchPermit::acquire() else {
+        return;
+    };
+    let (base, rel) = p.work.take().unwrap();
+    let cancelled = p.cancelled.clone();
+    let started = p.started;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    p.receiver = Some(receiver);
+    // Keep the slot until the result is consumed. Timed-out I/O retains its slot
+    // until it really exits, so stalled servers cannot cause replacement threads.
+    let _ = std::thread::Builder::new()
+        .name("preview-fetch".into())
+        .spawn(move || {
+            let stop = || cancelled.load(Ordering::Acquire) || started.elapsed() >= FETCH_TIMEOUT;
+            let result = fetch_document_file(base, &rel, &stop);
+            let _ = sender.send((result, permit));
+        });
+}
+
+fn poll_fetches(hwnd: HWND) {
+    let ready = PENDING.with(|p| {
+        let mut map = p.borrow_mut();
+        let mut ready = Vec::new();
+        let ids: Vec<_> = map
+            .iter()
+            .filter(|(_, v)| v.owner == hwnd.0 as isize)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in ids {
+            let p = map.get_mut(&id).unwrap();
+            if p.started.elapsed() < FETCH_TIMEOUT {
+                start_fetch(p);
+            }
+            let received = p
+                .receiver
+                .as_ref()
+                .map_or(Err(mpsc::TryRecvError::Empty), |r| r.try_recv());
+            let result = match received {
+                Ok((body, permit)) => Some((body, Some(permit))),
+                Err(mpsc::TryRecvError::Empty) if p.started.elapsed() < FETCH_TIMEOUT => None,
+                Err(_) => Some((
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Preview request expired",
+                    )),
+                    None,
+                )),
+            };
+            if let Some((body, permit)) = result {
+                ready.push((map.remove(&id).unwrap(), body, permit));
+            }
+        }
+        ready
+    });
+    for (p, body, _permit) in ready {
+        finish_fetch(p, body);
+    }
+    if !PENDING.with(|p| p.borrow().values().any(|p| p.owner == hwnd.0 as isize)) {
+        unsafe {
+            let _ = KillTimer(Some(hwnd), FETCH_TIMER);
+        }
     }
 }
 
@@ -984,11 +1184,12 @@ pub(crate) extern "system" fn preview_proc(
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
             }
-            WM_APP_PREVIEW_FETCHED => {
-                complete_fetch(*Box::from_raw(lparam.0 as *mut Fetched));
+            WM_TIMER if wparam.0 == FETCH_TIMER => {
+                poll_fetches(hwnd);
                 LRESULT(0)
             }
             WM_NCDESTROY => {
+                cancel_fetches(hwnd);
                 set_notice(hwnd, "");
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -1067,6 +1268,43 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::{eval, pump_until};
     use super::*;
+
+    #[test]
+    fn resource_reads_enforce_limit_and_cancellation() {
+        let files = tempfile::tempdir().unwrap();
+        let path = files.path().join("large.bin");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(FETCH_LIMIT + 1)
+            .unwrap();
+        let base = Some(DocBase::Local(files.path().to_owned()));
+        assert_eq!(
+            fetch_document_file(base.clone(), "large.bin", &|| false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        let calls = Cell::new(0);
+        assert_eq!(
+            fetch_document_file(base, "large.bin", &|| {
+                calls.set(calls.get() + 1);
+                calls.get() >= 4
+            })
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::TimedOut
+        );
+        let mut data = vec![0; FETCH_LIMIT as usize];
+        assert!(
+            ResourceBuffer {
+                data: &mut data,
+                cancelled: &|| false
+            }
+            .write_all(b"x")
+            .is_err()
+        );
+        assert_eq!(data.len(), FETCH_LIMIT as usize);
+    }
 
     #[test]
     fn content_types_of_document_files() {
@@ -1211,7 +1449,80 @@ mod tests {
             SHELL_OPEN_REQUESTS.with(|requests| requests.borrow().len()),
             1
         );
+        // Admission rejects excess requests without creating workers or deferrals.
+        assert!(pump_until(Duration::from_secs(5), || ACTIVE_REQUESTS
+            .load(Ordering::Acquire)
+            == 0
+            && ACTIVE_FETCHES.load(Ordering::Acquire) == 0));
+        let requests: Vec<_> = (0..MAX_REQUESTS)
+            .map(|_| RequestPermit::acquire().unwrap())
+            .collect();
+        assert!(RequestPermit::acquire().is_none());
+        eval(
+            &preview,
+            "fetch('https://yy-doc.local/inside.txt?overload').then(r => document.body.dataset.overload = r.status); 'started'",
+        );
+        assert!(pump_until(Duration::from_secs(5), || eval(
+            &preview,
+            "document.body.dataset.overload"
+        )
+        .as_deref()
+            == Some("\"503\"")));
+        drop(requests);
+
+        eval(
+            &preview,
+            "Promise.all(Array.from({length: 8}, (_, i) => fetch('https://yy-doc.local/inside.txt?batch=' + i).then(r => r.text()))).then(xs => document.body.dataset.batch = xs.join(',')); 'started'",
+        );
+        assert!(pump_until(Duration::from_secs(5), || eval(
+            &preview,
+            "document.body.dataset.batch"
+        )
+        .as_deref()
+            == Some(
+                "\"inside,inside,inside,inside,inside,inside,inside,inside\""
+            )));
+        assert!(pump_until(Duration::from_secs(5), || ACTIVE_FETCHES
+            .load(Ordering::Acquire)
+            == 0));
+
+        // Hold all worker slots to exercise real queued WebView2 requests deterministically.
+        let permits: Vec<_> = (0..MAX_FETCHES)
+            .map(|_| FetchPermit::acquire().unwrap())
+            .collect();
+        assert!(FetchPermit::acquire().is_none());
+        let queue = |preview: &Preview| {
+            eval(
+                preview,
+                "fetch('https://yy-doc.local/inside.txt?queued').catch(() => {}); 'started'",
+            );
+            assert!(pump_until(Duration::from_secs(5), || PENDING
+                .with(|p| !p.borrow().is_empty())));
+        };
+        queue(&preview);
+        PENDING.with(|p| {
+            for p in p.borrow_mut().values_mut() {
+                p.started = Instant::now() - FETCH_TIMEOUT;
+            }
+        });
+        poll_fetches(preview.hwnd);
+        assert!(PENDING.with(|p| p.borrow().is_empty()));
+        queue(&preview);
+        let folder = preview.shared.page.borrow().folder.clone();
+        preview.show_html(
+            "<html><body>next</body></html>",
+            &PageOptions::default(),
+            folder,
+        );
+        assert!(PENDING.with(|p| p.borrow().is_empty()));
+        assert!(pump_until(Duration::from_secs(5), || preview.loaded_kind()
+            == Some(Kind::Html)));
+        queue(&preview);
         drop(preview);
+        assert!(PENDING.with(|p| p.borrow().is_empty()));
+        assert_eq!(ACTIVE_REQUESTS.load(Ordering::Acquire), 0);
+        drop(permits);
+        assert_eq!(ACTIVE_FETCHES.load(Ordering::Acquire), 0);
         unsafe {
             let _ = DestroyWindow(parent);
         }

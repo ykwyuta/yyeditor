@@ -11,7 +11,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -435,22 +435,24 @@ fn copy_file(from: &Loc, to: &Loc, t: &mut Ticker) -> io::Result<()> {
         }
         _ => {
             // 接続先の間（別の接続先・エージェントと SFTP）は、手元の一時ファイルを経由する
-            let tmp = std::env::temp_dir().join(format!(
-                "yyeditor-copy-{}-{}.tmp",
-                std::process::id(),
-                t.stats.files
-            ));
-            let r = (|| {
-                let mut w = BufWriter::with_capacity(1 << 20, File::create(&tmp)?);
-                read_remote(from, &mut w, t)?;
-                w.flush()?;
-                drop(w);
-                write_remote(to, &mut File::open(&tmp)?)
-            })();
-            let _ = fs::remove_file(&tmp);
-            r
+            spool_copy(|out| read_remote(from, out, t), |src| write_remote(to, src))
         }
     }
+}
+
+/// Keep the anonymous, exclusive temporary file open throughout both transfers.
+fn spool_copy(
+    read: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut tmp = tempfile::tempfile()?;
+    {
+        let mut out = BufWriter::with_capacity(1 << 20, &mut tmp);
+        read(&mut out)?;
+        out.flush()?;
+    }
+    tmp.rewind()?;
+    write(&mut tmp)
 }
 
 /// 接続先のファイルを読んで `out` に書く。
@@ -680,6 +682,35 @@ fn sibling_temp(path: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn overlapping_spools_keep_contents_separate_and_fail_closed() {
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        spool_copy(
+            |out| {
+                out.write_all(b"first secret")?;
+                spool_copy(
+                    |out| out.write_all(b"second secret"),
+                    |src| src.read_to_end(&mut second).map(|_| ()),
+                )
+            },
+            |src| src.read_to_end(&mut first).map(|_| ()),
+        )
+        .unwrap();
+        assert_eq!(first, b"first secret");
+        assert_eq!(second, b"second secret");
+        assert!(
+            spool_copy(
+                |out| {
+                    out.write_all(b"partial")?;
+                    Err(io::Error::other("download failed"))
+                },
+                |_| panic!("partial download must not be uploaded")
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn remote_names_cannot_escape_local_destination() {

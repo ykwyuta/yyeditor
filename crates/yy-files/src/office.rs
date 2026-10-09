@@ -130,16 +130,28 @@ fn wanted(name: &str) -> bool {
 }
 
 /// 文字の参照（`&amp;`・`&#x3042;` など）を戻す。
+#[cfg(test)]
 fn unescape(s: &str) -> String {
+    unescape_with_cancel(s, &|| false).unwrap()
+}
+
+fn unescape_with_cancel(s: &str, cancelled: &dyn Fn() -> bool) -> io::Result<String> {
     if !s.contains('&') {
-        return s.to_owned();
+        return Ok(s.to_owned());
     }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
+    let mut checked_at = rest.len();
     while let Some(i) = rest.find('&') {
+        if checked_at - rest.len() >= 4096 {
+            if cancelled() {
+                return Err(crate::cancelled());
+            }
+            checked_at = rest.len();
+        }
         out.push_str(&rest[..i]);
         let after = &rest[i + 1..];
-        let Some(end) = after.find(';').filter(|&e| e <= 10) else {
+        let Some(end) = after.as_bytes().iter().take(11).position(|&b| b == b';') else {
             out.push('&');
             rest = after;
             continue;
@@ -169,17 +181,24 @@ fn unescape(s: &str) -> String {
         }
     }
     out.push_str(rest);
-    out
+    Ok(out)
 }
 
 /// XML から文字列を取り出す（文字列の要素の中身。段落・行・セルの終わりで区切る）。
 pub fn xml_text(xml: &str) -> String {
+    xml_text_with_cancel(xml, &|| false).unwrap()
+}
+
+fn xml_text_with_cancel(xml: &str, cancelled: &dyn Fn() -> bool) -> io::Result<String> {
     let mut out = String::new();
     let mut rest = xml;
     let mut in_text = false;
     while let Some(lt) = rest.find('<') {
+        if cancelled() {
+            return Err(crate::cancelled());
+        }
         if in_text {
-            out.push_str(&unescape(&rest[..lt]));
+            out.push_str(&unescape_with_cancel(&rest[..lt], cancelled)?);
         }
         let Some(gt) = rest[lt..].find('>') else {
             break;
@@ -206,7 +225,7 @@ pub fn xml_text(xml: &str) -> String {
             out.push('\t');
         }
     }
-    out
+    Ok(out)
 }
 
 /// 並べる順（`slide10.xml` は `slide2.xml` の後）。
@@ -247,7 +266,7 @@ pub fn extract_text_with_limit<R: Read + Seek>(
         let xml = read_entry(f, e, remaining)?;
         expanded += xml.len();
         let xml = String::from_utf8(xml).map_err(|_| bad("Office XML が UTF-8 ではありません"))?;
-        let text = xml_text(&xml);
+        let text = xml_text_with_cancel(&xml, cancelled)?;
         if out.len().saturating_add(text.len()).saturating_add(1) > limit {
             return Err(bad("Office の抽出結果が大きすぎます"));
         }
@@ -260,6 +279,27 @@ pub fn extract_text_with_limit<R: Read + Seek>(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_entities_are_bounded_and_parsing_can_be_cancelled() {
+        let body = "&".repeat(400_000);
+        let xml = format!("<t>{body}</t>");
+        assert_eq!(xml_text(&xml), body);
+        assert_eq!(
+            xml_text("<t>&amp;日本&#x3042;&unknown;</t>"),
+            "&日本あ&unknown;"
+        );
+        let calls = std::cell::Cell::new(0);
+        let bytes = zip(&[("word/document.xml", &xml, true)]);
+        let err =
+            extract_text_with_limit(&mut io::Cursor::new(bytes), DEFAULT_MEMORY_LIMIT, &|| {
+                calls.set(calls.get() + 1);
+                calls.get() == 5
+            })
+            .unwrap_err();
+        assert!(crate::is_cancelled(&err));
+        assert_eq!(calls.get(), 5);
+    }
 
     /// 試験用の小さな ZIP（無圧縮と deflate）。
     pub(crate) fn zip(files: &[(&str, &str, bool)]) -> Vec<u8> {
