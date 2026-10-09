@@ -6,6 +6,7 @@
 //!
 //! 1 行の検索欄の書き方（[`parse_query`]）: `見積 ext:xlsx size:>1MB modified:>=2026-09-01 content:"税込"`。
 
+use std::collections::HashSet;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -47,6 +48,54 @@ pub struct Query {
     pub content: Option<yy_search::Query>,
     /// 全角・半角、大文字・小文字、ひらがな・カタカナの違いを無視する
     pub loose: bool,
+    /// 中身が同じファイルがほかにある（`Some(false)` はない）
+    pub dupe: Option<bool>,
+    /// 版の判定（似たファイル）の結果
+    pub version: Option<VersionMark>,
+}
+
+/// 版の判定の条件（18 章 8.1「整理の結果」）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VersionMark {
+    /// 古い版と判定された（新しい版がほかにある）
+    Old,
+    /// グループの最新と判定された
+    Newest,
+    /// 版のグループに入る
+    Any,
+}
+
+/// 整理の結果（重複・版の判定）。検索した目録と同じ並びの [`FileRef`]。
+#[derive(Clone, Debug, Default)]
+pub struct Marks {
+    /// 中身が同じファイルがほかにあるもの
+    pub dupes: HashSet<FileRef>,
+    /// 古い版
+    pub old: HashSet<FileRef>,
+    /// グループの最新
+    pub newest: HashSet<FileRef>,
+}
+
+impl Marks {
+    /// 版の判定の結果を入れる。
+    pub fn set_versions(&mut self, groups: &[crate::similar::VersionGroup]) {
+        for g in groups {
+            for (k, m) in g.members.iter().enumerate() {
+                if k == 0 {
+                    self.newest.insert(m.file);
+                } else {
+                    self.old.insert(m.file);
+                }
+            }
+        }
+    }
+
+    /// 重複の結果を入れる。
+    pub fn set_dupes(&mut self, groups: &[crate::dupes::Group]) {
+        for g in groups {
+            self.dupes.extend(g.files.iter().copied());
+        }
+    }
 }
 
 /// 種類（仲間でまとめた拡張子）。
@@ -158,7 +207,26 @@ impl Query {
         true
     }
 
-    /// 名前・属性の条件で目録から探す（目録の順）。
+    /// 整理の結果の条件を使うか（重複・版の判定）。
+    pub fn needs_marks(&self) -> (bool, bool) {
+        (self.dupe.is_some(), self.version.is_some())
+    }
+
+    /// 整理の結果の条件で絞る。
+    pub fn apply_marks(&self, found: Vec<FileRef>, marks: &Marks) -> Vec<FileRef> {
+        found
+            .into_iter()
+            .filter(|r| self.dupe.is_none_or(|d| marks.dupes.contains(r) == d))
+            .filter(|r| match self.version {
+                None => true,
+                Some(VersionMark::Old) => marks.old.contains(r),
+                Some(VersionMark::Newest) => marks.newest.contains(r),
+                Some(VersionMark::Any) => marks.old.contains(r) || marks.newest.contains(r),
+            })
+            .collect()
+    }
+
+    /// 名前・属性の条件で目録から探す（目録の順。整理の結果の条件は [`Query::apply_marks`]）。
     pub fn filter(&self, cats: &[Catalog]) -> Vec<FileRef> {
         let mut out = Vec::new();
         for (ri, c) in cats.iter().enumerate() {
@@ -418,6 +486,24 @@ pub fn parse_query(line: &str, now: i64, tz: i64) -> Result<Query, String> {
                 _ => return Err(format!("知らない属性です: {val}")),
             },
             "case" => q.loose = !matches!(val.as_str(), "on" | "yes" | "true"),
+            "dupe" | "dup" | "duplicate" => {
+                q.dupe = Some(match val.as_str() {
+                    "yes" | "on" | "true" | "あり" | "ある" => true,
+                    "no" | "off" | "false" | "なし" | "ない" => false,
+                    _ => return Err(format!("dupe: は yes か no です: {val}")),
+                })
+            }
+            "has" if matches!(val.as_str(), "dupe" | "dup" | "重複") => q.dupe = Some(true),
+            "version" | "ver" => {
+                q.version = Some(match val.as_str() {
+                    "old" | "古い" | "older" => VersionMark::Old,
+                    "newest" | "new" | "latest" | "最新" => VersionMark::Newest,
+                    "any" | "yes" | "あり" => VersionMark::Any,
+                    _ => {
+                        return Err(format!("version: は old・newest・any のどれかです: {val}"));
+                    }
+                })
+            }
             "name" => words.push(val),
             _ => {
                 if val.len() > 2 && val.starts_with('/') && val.ends_with('/') {
@@ -465,6 +551,8 @@ pub struct ContentStats {
 pub struct ContentOptions {
     /// Office の文書（docx・xlsx・pptx）の中も探す
     pub office: bool,
+    /// PDF の中も探す
+    pub pdf: bool,
     /// これより大きなファイルは飛ばす
     pub max_size: u64,
     /// 並列に読むファイルの数
@@ -477,6 +565,7 @@ impl Default for ContentOptions {
     fn default() -> Self {
         ContentOptions {
             office: true,
+            pdf: true,
             max_size: 1 << 30,
             threads: 8,
             max_hits_per_file: 1000,
@@ -517,6 +606,15 @@ pub fn search_content(
                 if opts.office {
                     std::fs::File::open(&path)
                         .and_then(|mut f| crate::office::extract_text(&mut f))
+                        .ok()
+                        .map(yy_buffer::Snapshot::from_bytes)
+                } else {
+                    None
+                }
+            } else if crate::pdf::is_pdf(e.name()) {
+                if opts.pdf {
+                    std::fs::read(&path)
+                        .and_then(|d| crate::pdf::extract_text(&d))
                         .ok()
                         .map(yy_buffer::Snapshot::from_bytes)
                 } else {
@@ -627,6 +725,33 @@ mod tests {
     }
 
     #[test]
+    fn filters_by_marks() {
+        let q = parse_query("dupe:yes version:old", NOW, JST).unwrap();
+        assert_eq!(q.needs_marks(), (true, true));
+        assert_eq!(q.version, Some(VersionMark::Old));
+        assert_eq!(parse_query("has:重複", NOW, JST).unwrap().dupe, Some(true));
+        assert_eq!(
+            parse_query("dupe:なし", NOW, JST).unwrap().dupe,
+            Some(false)
+        );
+        assert!(parse_query("version:謎", NOW, JST).is_err());
+        assert!(parse_query("dupe:maybe", NOW, JST).is_err());
+        let r = |i| FileRef { root: 0, index: i };
+        let mut m = Marks::default();
+        m.dupes.extend([r(0), r(1)]);
+        m.old.insert(r(1));
+        m.newest.insert(r(2));
+        let all = vec![r(0), r(1), r(2), r(3)];
+        assert_eq!(q.apply_marks(all.clone(), &m), [r(1)]);
+        let q = parse_query("dupe:no", NOW, JST).unwrap();
+        assert_eq!(q.apply_marks(all.clone(), &m), [r(2), r(3)]);
+        let q = parse_query("version:any", NOW, JST).unwrap();
+        assert_eq!(q.apply_marks(all.clone(), &m), [r(1), r(2)]);
+        let q = parse_query("version:最新", NOW, JST).unwrap();
+        assert_eq!(q.apply_marks(all, &m), [r(2)]);
+    }
+
+    #[test]
     fn filters_catalogs() {
         let mut c = Catalog::default();
         let t = |d: i64| (days_from_civil(2026, 9, d) * 86_400) * 1_000_000_000;
@@ -677,6 +802,21 @@ mod tests {
             true,
         )]);
         std::fs::write(root.join("契約.docx"), docx).unwrap();
+        let pdf = crate::pdf::tests::build(&[
+            ("<< /Type /Catalog /Pages 2 0 R >>", None),
+            ("<< /Type /Pages /Kids [3 0 R] /Count 1 >>", None),
+            (
+                "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+                None,
+            ),
+            ("", Some(b"BT /F1 9 Tf <00010002> Tj ET")),
+            ("<< /Type /Font /Subtype /Type0 /ToUnicode 6 0 R >>", None),
+            (
+                "",
+                Some(b"1 begincodespacerange <0000> <FFFF> endcodespacerange 2 beginbfchar <0001> <7A0E> <0002> <8FBC> endbfchar"),
+            ),
+        ]);
+        std::fs::write(root.join("請求.pdf"), pdf).unwrap();
         let c = crate::scan::scan(&crate::fs::Local, root, &Default::default(), &|_| true).unwrap();
         let all: Vec<FileRef> = (0..c.files.len())
             .map(|index| FileRef { root: 0, index })
@@ -710,9 +850,10 @@ mod tests {
                 ("sjis.csv".to_owned(), 2, "税込 1,200 円".to_owned()),
                 ("utf8.txt".to_owned(), 2, "税込の金額".to_owned()),
                 ("契約.docx".to_owned(), 1, "契約の税込金額".to_owned()),
+                ("請求.pdf".to_owned(), 1, "税込".to_owned()),
             ]
         );
-        assert_eq!((st.files, st.matched_files, st.skipped), (4, 3, 1));
+        assert_eq!((st.files, st.matched_files, st.skipped), (5, 4, 1));
         // Office を探さない
         let st = search_content(
             std::slice::from_ref(&c),
@@ -720,6 +861,7 @@ mod tests {
             &q,
             &ContentOptions {
                 office: false,
+                pdf: false,
                 ..ContentOptions::default()
             },
             &|_| true,

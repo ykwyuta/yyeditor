@@ -118,6 +118,7 @@ const CM_UNCHECK: u32 = 11;
 const CM_REMOVE: u32 = 12;
 const CM_VERSIONS: u32 = 13;
 const CM_SAME_CONTENT: u32 = 14;
+const CM_SYNC_SRC: u32 = 15;
 
 /// 一覧の列（見出し・幅・右寄せ）。
 const COLUMNS: [&[(&str, i32, bool)]; 5] = [
@@ -660,7 +661,7 @@ fn create() -> Result<HWND> {
         // 検索
         e.query = edit(ID_QUERY);
         e.search_roots = edit(ID_SEARCH_ROOTS);
-        e.office = check("Office の文書の中も", ID_OFFICE);
+        e.office = check("Office・PDF の中も", ID_OFFICE);
         SendMessageW(e.office, BM_SETCHECK, Some(WPARAM(1)), None);
         e.saved = combo(ID_SAVED, true);
         e.rescan = check("走査し直す", ID_RESCAN);
@@ -1549,13 +1550,38 @@ fn cmd_search() {
         let cache = a.catalog_cache(force);
         let copts = yy_files::search::ContentOptions {
             office,
+            pdf: office,
             max_size: a.config.filemanager.search_max_mb << 20,
             threads: a.config.filemanager.search_threads.max(1),
             ..yy_files::search::ContentOptions::default()
         };
         a.search_rows.clear();
         a.refresh_list(TAB_SEARCH);
+        let index_dir = a.dirs.index();
+        let threads = a.config.filemanager.search_threads.max(1);
+        let sim = a.similar_options();
         a.start("探しています", move |cx| {
+            // 目録が古ければ、走査し直す前に古い目録で見つかったものを先に出す（名前・属性だけの検索）
+            if q.content.is_none() && q.needs_marks() == (false, false) {
+                let olds: Vec<(Catalog, i64)> = roots
+                    .iter()
+                    .filter_map(|r| yy_files::catalogs::load(&cache.dir, r).ok())
+                    .filter(|st| roots.contains(&st.catalog.root))
+                    .map(|st| (st.catalog, st.scanned_at))
+                    .collect();
+                let stale = olds
+                    .iter()
+                    .any(|(_, t)| cache.force || cache.now - t > cache.max_age);
+                if olds.len() == roots.len() && stale {
+                    let cats: Vec<Catalog> = olds.into_iter().map(|(c, _)| c).collect();
+                    let rows = q
+                        .filter(&cats)
+                        .into_iter()
+                        .map(|f| (f, 0, String::new()))
+                        .collect();
+                    cx.send(Msg::SearchPartial(cats, rows));
+                }
+            }
             let cats = match work::scan_all(cx, &roots, &scan, Some(&cache)) {
                 Ok(c) => c,
                 Err(e) => {
@@ -1563,7 +1589,26 @@ fn cmd_search() {
                     return;
                 }
             };
-            let found = q.filter(&cats);
+            let mut found = q.filter(&cats);
+            // 整理の結果の条件（重複・版の判定）
+            let (need_dupes, need_versions) = q.needs_marks();
+            if need_dupes || need_versions {
+                let mut marks = yy_files::search::Marks::default();
+                if need_versions {
+                    cx.progress("版を判定しています…");
+                    marks.set_versions(&yy_files::similar::find_versions(&cats, &sim));
+                }
+                if need_dupes {
+                    match work::find_dupes(cx, &cats, &index_dir, threads) {
+                        Ok(g) => marks.set_dupes(&g),
+                        Err(e) => {
+                            cx.send(Msg::Searched(Err(work::describe(&e))));
+                            return;
+                        }
+                    }
+                }
+                found = q.apply_marks(found, &marks);
+            }
             let Some(content) = q.content.clone() else {
                 let rows = found.into_iter().map(|f| (f, 0, String::new())).collect();
                 cx.send(Msg::Searched(Ok((cats, rows))));
@@ -1593,7 +1638,6 @@ fn cmd_search() {
     });
 }
 
-/// 保存した検索を欄に入れて探す（左の一覧から 1 クリックで実行。18 章 8.1）。
 fn run_saved_search(name: &str) {
     let found = with(|a| {
         let Some(s) = a.searches.get(name).cloned() else {
@@ -1862,38 +1906,7 @@ fn cmd_dupes() {
                     return;
                 }
             };
-            let paths: Vec<PathBuf> = cats
-                .iter()
-                .map(|c| yy_files::index::path_for(&index_dir, &c.root))
-                .collect();
-            let mut indexes: Vec<yy_files::index::Index> = cats
-                .iter()
-                .zip(&paths)
-                .map(|(c, p)| {
-                    yy_files::index::Index::load(p)
-                        .unwrap_or_else(|_| yy_files::index::Index::new(&c.root))
-                })
-                .collect();
-            let mut refs: Vec<Option<&mut yy_files::index::Index>> =
-                indexes.iter_mut().map(Some).collect();
-            let opts = yy_files::dupes::DupeOptions {
-                threads,
-                ..yy_files::dupes::DupeOptions::default()
-            };
-            let r = yy_files::dupes::find(&yy_files::Local, &cats, &mut refs, &opts, &|p| {
-                cx.progress(&format!(
-                    "重複を探しています（段階 {}/3）… {} 個・{}",
-                    p.stage,
-                    p.files,
-                    yy_files::human_size(p.bytes)
-                ))
-            });
-            for ((ix, p), c) in indexes.iter_mut().zip(&paths).zip(&cats) {
-                let keep: std::collections::HashSet<&str> =
-                    c.files.iter().map(|f| f.rel.as_str()).collect();
-                ix.retain(&|r| keep.contains(r));
-                let _ = ix.save(p);
-            }
+            let r = work::find_dupes(cx, &cats, &index_dir, threads);
             cx.send(Msg::Dupes(
                 r.map(|g| (cats, g)).map_err(|e| work::describe(&e)),
             ));
@@ -1917,6 +1930,42 @@ fn to_review(tab: usize, rows: Vec<usize>) {
         } else {
             rows
         };
+        if tab == TAB_SEARCH {
+            // 検索の結果は 1 件ずつ（残す相手がないので、チェックは人が付ける）
+            let mut added = 0;
+            let mut seen = std::collections::HashSet::new();
+            for (k, r) in pick.iter().enumerate() {
+                let Some(row) = a.search_rows.get(*r) else {
+                    continue;
+                };
+                let c = &a.search_cats[row.file.root];
+                let f = &c.files[row.file.index];
+                let p = c.path(f);
+                if !seen.insert(p.clone()) || a.review.items.iter().any(|x| x.path() == p) {
+                    continue;
+                }
+                a.review.items.push(Candidate {
+                    root: c.root.clone(),
+                    rel: f.rel.clone(),
+                    meta: f.meta,
+                    group: next_group + k,
+                    keep: false,
+                    checked: false,
+                    reason: "検索から選んだ".into(),
+                    confidence: String::new(),
+                    dupe_of: None,
+                    alone: true,
+                });
+                added += 1;
+            }
+            a.save_review();
+            a.refresh_list(TAB_REVIEW);
+            a.update_review_info();
+            a.set_status(&format!(
+                "削除の確認に {added} 件を加えました（チェックを付けたものだけを消します）"
+            ));
+            return;
+        }
         let mut groups: Vec<usize> = Vec::new();
         for r in &pick {
             let g = match tab {
@@ -1957,6 +2006,7 @@ fn to_review(tab: usize, rows: Vec<usize>) {
                             },
                             confidence: grp.confidence.label().into(),
                             dupe_of: None,
+                            alone: false,
                         });
                     }
                 }
@@ -1987,6 +2037,7 @@ fn to_review(tab: usize, rows: Vec<usize>) {
                             },
                             confidence: "高".into(),
                             dupe_of: (k2 != 0).then(|| (grp.hash, keeper.clone())),
+                            alone: false,
                         });
                     }
                 }
@@ -2284,6 +2335,21 @@ fn handle(m: Msg) {
                 }
             });
         }
+        Msg::SearchPartial(cats, rows) => {
+            with(|a| {
+                a.search_cats = cats;
+                a.search_rows = rows
+                    .into_iter()
+                    .map(|(file, line, text)| SearchRow { file, line, text })
+                    .collect();
+                a.refresh_list(TAB_SEARCH);
+                let msg = format!(
+                    "前回の目録で {} 件見つかりました。走査し直しています…（Esc で中止）",
+                    a.search_rows.len()
+                );
+                a.set_status(&msg);
+            });
+        }
         Msg::Similar(r) => {
             with(|a| match r {
                 Ok((cats, groups)) => {
@@ -2467,7 +2533,11 @@ fn list_menu(hwnd: HWND, tab: usize) {
                 if rows.len() == 1 {
                     add(CM_VERSIONS, "このファイルの別の版を探す(&V)");
                     add(CM_SAME_CONTENT, "同じ中身のファイルを探す(&S)");
+                    add(CM_SYNC_SRC, "このフォルダを同期の送り元にする(&Y)");
                     sep();
+                }
+                if !rows.is_empty() {
+                    add(CM_TO_REVIEW, "削除の確認に加える(&R)");
                 }
                 add(CM_EXPORT, "一覧を CSV に書き出す(&X)...");
             }
@@ -2523,6 +2593,20 @@ fn list_menu(hwnd: HWND, tab: usize) {
                 let _ = crate::clipboard::set_text(hwnd, &text.join("\r\n"), false);
             }
             CM_EXPORT => export_search(hwnd),
+            CM_SYNC_SRC => {
+                if let Some((p, _)) = path
+                    && let Some(dir) = p.parent()
+                {
+                    with(|a| {
+                        set_text(a.edits.src, &dir.to_string_lossy());
+                        a.plan = None;
+                        a.show_tab(TAB_SYNC);
+                        a.set_status(
+                            "送り元にしました。送り先を指定して「比べる」を押してください",
+                        );
+                    });
+                }
+            }
             CM_VERSIONS | CM_SAME_CONTENT => {
                 if let Some(r) = first {
                     find_related(r, cmd == CM_VERSIONS);

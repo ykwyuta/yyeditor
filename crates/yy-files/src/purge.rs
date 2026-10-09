@@ -36,7 +36,31 @@ pub struct Candidate {
     pub confidence: String,
     /// 重複の写しなら、中身のハッシュと残すファイル（消す前に同じことを確かめる）
     pub dupe_of: Option<(Hash, PathBuf)>,
+    /// 1 件ずつ選んだもの（検索の結果から。残す相手がないので、グループの最後の 1 つの決まりは使わない）
+    pub alone: bool,
 }
+
+/// 前の形の候補（`alone` がない）。
+#[derive(Deserialize)]
+struct CandidateV1 {
+    root: PathBuf,
+    rel: String,
+    meta: Meta,
+    group: usize,
+    keep: bool,
+    checked: bool,
+    reason: String,
+    confidence: String,
+    dupe_of: Option<(Hash, PathBuf)>,
+}
+
+#[derive(Deserialize)]
+struct ReviewV1 {
+    items: Vec<CandidateV1>,
+}
+
+/// 一覧のファイルの印（前の形にはない）。
+const REVIEW_MAGIC: &[u8; 8] = b"YYFMRV02";
 
 impl Candidate {
     pub fn path(&self) -> PathBuf {
@@ -53,14 +77,35 @@ pub struct Review {
 impl Review {
     pub fn load(path: &Path) -> io::Result<Review> {
         let raw = std::fs::read(path)?;
-        postcard::from_bytes(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let bad = |e: postcard::Error| io::Error::new(io::ErrorKind::InvalidData, e);
+        if let Some(body) = raw.strip_prefix(REVIEW_MAGIC.as_slice()) {
+            return postcard::from_bytes(body).map_err(bad);
+        }
+        let v1: ReviewV1 = postcard::from_bytes(&raw).map_err(bad)?;
+        Ok(Review {
+            items: v1
+                .items
+                .into_iter()
+                .map(|c| Candidate {
+                    root: c.root,
+                    rel: c.rel,
+                    meta: c.meta,
+                    group: c.group,
+                    keep: c.keep,
+                    checked: c.checked,
+                    reason: c.reason,
+                    confidence: c.confidence,
+                    dupe_of: c.dupe_of,
+                    alone: false,
+                })
+                .collect(),
+        })
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        crate::index::write_atomic(
-            path,
-            &postcard::to_allocvec(self).map_err(io::Error::other)?,
-        )
+        let mut data = REVIEW_MAGIC.to_vec();
+        data.extend(postcard::to_allocvec(self).map_err(io::Error::other)?);
+        crate::index::write_atomic(path, &data)
     }
 
     /// チェックしたものの数と大きさ。
@@ -72,7 +117,7 @@ impl Review {
     /// 全部にチェックが付いたグループ（消すと何も残らない）。
     pub fn emptied_groups(&self) -> Vec<usize> {
         let mut groups: std::collections::BTreeMap<usize, bool> = std::collections::BTreeMap::new();
-        for c in &self.items {
+        for c in self.items.iter().filter(|c| !c.alone) {
             let remains = groups.entry(c.group).or_insert(false);
             if c.keep || !c.checked {
                 *remains = true;
@@ -443,7 +488,63 @@ mod tests {
             reason: "古い版".into(),
             confidence: "高".into(),
             dupe_of: None,
+            alone: false,
         }
+    }
+
+    #[test]
+    fn alone_items_are_removable_and_old_lists_load() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("r");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("x.txt"), "x").unwrap();
+        let mut c = cand(&root, "x.txt", 7, false);
+        let mut r = Review {
+            items: vec![c.clone()],
+        };
+        // グループの最後の 1 つ（ふつうの候補）は消さない
+        assert_eq!(r.emptied_groups(), [7]);
+        c.alone = true;
+        r.items = vec![c.clone()];
+        assert!(r.emptied_groups().is_empty());
+        let p = d.path().join("cur.review");
+        r.save(&p).unwrap();
+        assert_eq!(Review::load(&p).unwrap(), r);
+        // 前の形（alone がない）も読める
+        #[derive(Serialize)]
+        struct V1Cand {
+            root: PathBuf,
+            rel: String,
+            meta: Meta,
+            group: usize,
+            keep: bool,
+            checked: bool,
+            reason: String,
+            confidence: String,
+            dupe_of: Option<(Hash, PathBuf)>,
+        }
+        #[derive(Serialize)]
+        struct V1 {
+            items: Vec<V1Cand>,
+        }
+        let v1 = V1 {
+            items: vec![V1Cand {
+                root: c.root.clone(),
+                rel: c.rel.clone(),
+                meta: c.meta,
+                group: 7,
+                keep: false,
+                checked: true,
+                reason: "古い版".into(),
+                confidence: "高".into(),
+                dupe_of: None,
+            }],
+        };
+        std::fs::write(&p, postcard::to_allocvec(&v1).unwrap()).unwrap();
+        let back = Review::load(&p).unwrap();
+        assert_eq!(back.items.len(), 1);
+        assert!(!back.items[0].alone);
+        assert_eq!(back.items[0].rel, "x.txt");
     }
 
     #[test]

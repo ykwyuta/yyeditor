@@ -32,6 +32,8 @@ pub(super) enum Msg {
     SyncEvent(Event),
     /// 実行・ジャーナルのパス・結果
     SyncFinished(Run, PathBuf, Result<RunCounts, String>),
+    /// 走査し直す前に、前回の目録で見つかったもの（名前・属性だけの検索）
+    SearchPartial(Vec<Catalog>, Vec<SearchHit>),
     /// 目録と、見つかったファイル（行の番号・行。名前だけの検索なら 0 と空）
     Searched(Result<(Vec<Catalog>, Vec<SearchHit>), String>),
     Similar(Result<(Vec<Catalog>, Vec<VersionGroup>), String>),
@@ -233,6 +235,46 @@ pub(super) fn scan_all(
         cats.push(c);
     }
     Ok(cats)
+}
+
+/// 重複を探す（ハッシュは索引から使い、求めたものは索引に残す）。
+pub(super) fn find_dupes(
+    cx: &Ctx,
+    cats: &[Catalog],
+    index_dir: &std::path::Path,
+    threads: usize,
+) -> std::io::Result<Vec<Group>> {
+    let paths: Vec<PathBuf> = cats
+        .iter()
+        .map(|c| yy_files::index::path_for(index_dir, &c.root))
+        .collect();
+    let mut indexes: Vec<yy_files::index::Index> = cats
+        .iter()
+        .zip(&paths)
+        .map(|(c, p)| {
+            yy_files::index::Index::load(p).unwrap_or_else(|_| yy_files::index::Index::new(&c.root))
+        })
+        .collect();
+    let mut refs: Vec<Option<&mut yy_files::index::Index>> = indexes.iter_mut().map(Some).collect();
+    let opts = yy_files::dupes::DupeOptions {
+        threads,
+        ..yy_files::dupes::DupeOptions::default()
+    };
+    let r = yy_files::dupes::find(&yy_files::Local, cats, &mut refs, &opts, &|p| {
+        cx.progress(&format!(
+            "重複を探しています（段階 {}/3）… {} 個・{}",
+            p.stage,
+            p.files,
+            yy_files::human_size(p.bytes)
+        ))
+    });
+    for ((ix, p), c) in indexes.iter_mut().zip(&paths).zip(cats) {
+        let keep: std::collections::HashSet<&str> =
+            c.files.iter().map(|f| f.rel.as_str()).collect();
+        ix.retain(&|r| keep.contains(r));
+        let _ = ix.save(p);
+    }
+    r
 }
 
 /// 記録のファイル（設定のフォルダの `logs\filemanager.log`）。

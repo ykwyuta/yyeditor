@@ -653,3 +653,63 @@ fn state_reads_the_previous_format() {
     st2.save(&p).unwrap();
     assert_eq!(SyncState::load(&p).unwrap(), st2);
 }
+
+/// Windows の CI: 手元の管理共有（`\\localhost\C$`）を送り先にして、サーバー側のコピーを使う差分の
+/// 送り方を確かめる（共有を使えない環境では飛ばす）。
+#[cfg(windows)]
+#[test]
+fn delta_through_a_windows_share() {
+    let d = tempfile::tempdir().unwrap();
+    let local = d.path().to_string_lossy().into_owned();
+    let Some((drive, rest)) = local.split_once(":\\") else {
+        eprintln!("ドライブ文字のない一時フォルダ（{local}）なので飛ばします");
+        return;
+    };
+    let share = PathBuf::from(format!(r"\\localhost\{drive}$\{rest}"));
+    if Local.metadata(&share).is_err() {
+        eprintln!("{} を使えないので飛ばします", share.display());
+        return;
+    }
+    let src = d.path().join("src");
+    let dst = share.join("dst");
+    let opts = SyncOptions {
+        delta_min: 100_000,
+        delta_block: 64 << 10,
+        threads: 1,
+        ..SyncOptions::default()
+    };
+    let mut body = big(800_000, 11);
+    write(&src, "big.bin", &body, T0);
+    std::fs::create_dir_all(&dst).unwrap();
+    // サーバー側のコピーそのもの
+    Local
+        .copy_file(&src.join("big.bin"), &dst.join("copy.bin"))
+        .unwrap();
+    assert_eq!(std::fs::read(dst.join("copy.bin")).unwrap(), body);
+    std::fs::remove_file(dst.join("copy.bin")).unwrap();
+    let mut st = SyncState::default();
+    let once = |st: &mut SyncState, id: u64| {
+        let p = plan(&cat(&src), &cat(&dst), Some(st), &opts, &mut |_, _| {
+            Ok(false)
+        })
+        .unwrap();
+        let mut run = Run::new(id, &p, opts.mode, "t");
+        let (r, sent, logs) = run_counting(
+            &Local,
+            &mut run,
+            &d.path().join(format!("{id}.run")),
+            &opts,
+            st,
+        );
+        assert_eq!(r.unwrap().failed, 0, "{logs:?}");
+        (sent, logs)
+    };
+    let (sent, _) = once(&mut st, 1);
+    assert_eq!(sent, 800_000);
+    body[400_000] ^= 0xff;
+    write(&src, "big.bin", &body, T0 + 100 * SEC);
+    let (sent, logs) = once(&mut st, 2);
+    assert_eq!(sent, 64 << 10, "{logs:?}");
+    assert!(logs.iter().any(|l| l.contains("差分の送り方")), "{logs:?}");
+    assert_eq!(std::fs::read(dst.join("big.bin")).unwrap(), body);
+}

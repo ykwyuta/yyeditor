@@ -10,6 +10,7 @@
 //! * [`similar`] … 似た名前のファイルと新しい版の判定
 //! * [`purge`] … 確かめてからの一括削除（隔離フォルダ・取り消し）
 //! * [`search`] … ファイルの検索（名前・属性・中身）
+//! * [`office`]・[`pdf`] … Office の文書・PDF の文字列の取り出し
 //! * [`jobs`] … 同期ジョブ・保存した検索・置き場所・画面なしでの実行
 
 pub mod catalogs;
@@ -20,6 +21,7 @@ pub mod index;
 pub mod jobs;
 pub mod office;
 pub mod pattern;
+pub mod pdf;
 pub mod purge;
 pub mod scan;
 pub mod search;
