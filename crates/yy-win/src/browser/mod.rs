@@ -8,6 +8,7 @@
 //! （`APP`）を借りたまま WebView2 を呼ばない。必要なものを取り出してから呼ぶ。
 
 mod adblock;
+mod bookmarkui;
 mod filterdlg;
 mod proxydlg;
 
@@ -45,6 +46,7 @@ const ID_ADDRESS: u16 = 6006;
 const ID_PROXY: u16 = 6007;
 const ID_BADGE: u16 = 6008;
 const ID_SHIELD: u16 = 6009;
+const ID_STAR: u16 = 6015;
 const ID_FIND_EDIT: u16 = 6010;
 const ID_FIND_PREV: u16 = 6011;
 const ID_FIND_NEXT: u16 = 6012;
@@ -71,6 +73,10 @@ const ID_AB_TOGGLE: u16 = 6140;
 const ID_AB_SITE: u16 = 6141;
 const ID_AB_UPDATE: u16 = 6142;
 const ID_AB_LISTS: u16 = 6143;
+const ID_BM_ADD: u16 = 6150;
+const ID_BM_MANAGE: u16 = 6151;
+/// メニューのブックマーク（`ID_BM_BASE + 番号`）
+const ID_BM_BASE: u16 = 7000;
 /// プロキシのプロファイルの切り替え（`ID_PROFILE_BASE + 番号`）
 const ID_PROFILE_BASE: u16 = 6200;
 /// 別のプロキシで新しいウィンドウ（`ID_WINDOW_BASE + 番号`）
@@ -114,6 +120,10 @@ struct App {
     proxy_btn: HWND,
     /// 広告ブロックのボタン（🛡 件数）
     shield: HWND,
+    /// ブックマークのボタン（☆・★）
+    star: HWND,
+    /// ブックマーク（★ の表示とメニュー。メニューを開くときに読み直す）
+    bookmarks: yy_browser::bookmarks::Bookmarks,
     /// 広告ブロックのエンジン（できるまでは `None`）
     adblock: Option<Arc<yy_adblock::AdBlocker>>,
     /// フィルタを更新中
@@ -150,6 +160,8 @@ thread_local! {
     static DEV_CERT: Cell<Option<DevCertFn>> = const { Cell::new(None) };
     /// メニューバーの「広告ブロック」（開くときに中身を作る）
     static AB_MENU: Cell<isize> = const { Cell::new(0) };
+    /// メニューバーの「ブックマーク」（開くときに中身を作る）
+    static BM_MENU: Cell<isize> = const { Cell::new(0) };
 }
 
 /// 開発者用証明書を置くフォルダ（設定のフォルダの `browser-devcerts`）。
@@ -347,12 +359,15 @@ fn create_menu(profiles: &ProfileList, current: &str) -> Result<HMENU> {
         fill_proxy_menu(proxy, profiles, current);
         let ab = CreatePopupMenu()?;
         AB_MENU.with(|c| c.set(ab.0 as isize));
+        let bm = CreatePopupMenu()?;
+        BM_MENU.with(|c| c.set(bm.0 as isize));
         let help = CreatePopupMenu()?;
         add(help, ID_HELP, "yybrowser ヘルプ(&H)\tF1");
         add(help, ID_ABOUT, "yybrowser について(&A)");
         for (m, t) in [
             (file, "ファイル(&F)"),
             (view, "表示(&V)"),
+            (bm, "ブックマーク(&B)"),
             (proxy, "プロキシ(&P)"),
             (ab, "広告ブロック(&A)"),
             (help, "ヘルプ(&H)"),
@@ -503,6 +518,7 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
         let proxy_btn = button("", ID_PROXY);
         let badge = button("", ID_BADGE);
         let shield = button("🛡", ID_SHIELD);
+        let star = button("☆", ID_STAR);
         let _ = ShowWindow(badge, SW_HIDE);
         let status = child(
             STATUSCLASSNAMEW,
@@ -558,6 +574,8 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
             home,
             proxy_btn,
             shield,
+            star,
+            bookmarks: bookmarkui::load(),
             adblock: None,
             adblock_busy: false,
             badge,
@@ -610,6 +628,7 @@ impl App {
                     self.address,
                     self.proxy_btn,
                     self.shield,
+                    self.star,
                     self.badge,
                     self.status,
                 ] {
@@ -635,6 +654,7 @@ impl App {
                 self.address,
                 self.proxy_btn,
                 self.shield,
+                self.star,
                 self.status,
             ] {
                 let _ = ShowWindow(hw, SW_SHOW);
@@ -668,12 +688,20 @@ impl App {
             }
             let proxy_w = self.scaled(240);
             let shield_w = self.scaled(72);
-            let addr_w = (w - x - proxy_w - shield_w - 3 * pad).max(self.scaled(80));
+            let addr_w = (w - x - proxy_w - shield_w - btn - 4 * pad).max(self.scaled(80));
             let _ = MoveWindow(self.address, x, y, addr_w, ch, true);
-            let _ = MoveWindow(self.shield, x + addr_w + pad, y, shield_w, ch, true);
+            let _ = MoveWindow(self.star, x + addr_w + pad, y, btn, ch, true);
+            let _ = MoveWindow(
+                self.shield,
+                x + addr_w + btn + 2 * pad,
+                y,
+                shield_w,
+                ch,
+                true,
+            );
             let _ = MoveWindow(
                 self.proxy_btn,
-                x + addr_w + shield_w + 2 * pad,
+                x + addr_w + btn + shield_w + 3 * pad,
                 y,
                 proxy_w,
                 ch,
@@ -808,6 +836,14 @@ impl App {
         }
         let badge = self.badge_text(&t.url);
         self.refresh_shield();
+        let star = if self.bookmarks.find(&t.url).is_some() {
+            "★"
+        } else {
+            "☆"
+        };
+        if text_of(self.star) != star {
+            set_text(self.star, star);
+        }
         let title = if t.title.is_empty() {
             "yybrowser".to_owned()
         } else {
@@ -1695,6 +1731,69 @@ fn shield_menu() {
     }
 }
 
+// ---- ブックマーク（19 章 4.1） ---------------------------------------------------------
+
+/// 今のページをブックマークに足す（登録済みなら編集・削除）。
+fn bookmark_page() {
+    let Some(Some((frame, url, title))) = with(|a| {
+        let t = a.tabs.get(a.current)?;
+        Some((a.frame, t.url.clone(), t.title.clone()))
+    }) else {
+        return;
+    };
+    if url.is_empty() || url == "about:blank" {
+        info_box(frame, "ブックマークにするページを開いてください。");
+        return;
+    }
+    let mut list = bookmarkui::load();
+    let existing = list.find(&url);
+    let b = match existing {
+        Some(i) => list.items[i].clone(),
+        None => yy_browser::bookmarks::Bookmark::new(&title, &url, ""),
+    };
+    let folders = list.folders();
+    // ダイアログの間にほかのウィンドウが書き換えることがあるので、結果は読み直した一覧に当てる
+    let result = bookmarkui::edit(frame, b, existing.is_some(), folders);
+    list = bookmarkui::load();
+    match result {
+        bookmarkui::EditResult::Save(nb) => {
+            if let Some(i) = list.find(&url).filter(|_| nb.url != url) {
+                list.items.remove(i);
+            }
+            list.put(nb);
+        }
+        bookmarkui::EditResult::Delete => {
+            if let Some(i) = list.find(&url) {
+                list.items.remove(i);
+            }
+        }
+        bookmarkui::EditResult::Cancel => return,
+    }
+    if bookmarkui::save(frame, &list) {
+        with(|a| {
+            a.bookmarks = list;
+            a.refresh_chrome();
+        });
+    }
+}
+
+/// ブックマークの管理の画面。開くものを選んだら開く。
+fn manage_bookmarks() {
+    let Some(frame) = with(|a| a.frame) else {
+        return;
+    };
+    let open = bookmarkui::manage(frame);
+    with(|a| {
+        a.bookmarks = bookmarkui::load();
+        a.refresh_chrome();
+    });
+    match open {
+        Some((url, true)) => new_tab(Some(&url)),
+        Some((url, false)) => open_in_current(&url),
+        None => {}
+    }
+}
+
 /// アドレスバーの左の表示を押したとき: 詳しく出す。
 fn show_badge_details() {
     let Some((frame, text)) = with(|a| {
@@ -2214,6 +2313,7 @@ fn is_shortcut(vk: u16) -> bool {
         return matches!(
             k,
             VK_T | VK_W
+                | VK_D
                 | VK_N
                 | VK_L
                 | VK_F
@@ -2226,7 +2326,8 @@ fn is_shortcut(vk: u16) -> bool {
                 | VK_SUBTRACT
                 | VK_0
                 | VK_NUMPAD0
-        ) || (VK_1.0..=VK_9.0).contains(&vk);
+        ) || (VK_1.0..=VK_9.0).contains(&vk)
+            || (k == VK_O && m & 2 != 0);
     }
     if alt {
         return matches!(k, VK_LEFT | VK_RIGHT | VK_HOME | VK_D);
@@ -2245,6 +2346,8 @@ fn shortcut(vk: u16, mods: u8) -> bool {
         (true, _, VK_T) if shift => command(ID_REOPEN_TAB),
         (true, _, VK_T) => command(ID_NEW_TAB),
         (true, _, VK_W) => command(ID_CLOSE_TAB),
+        (true, _, VK_D) => command(ID_BM_ADD),
+        (true, _, VK_O) if shift => command(ID_BM_MANAGE),
         (true, _, VK_N) => command(ID_NEW_WINDOW),
         (true, _, VK_L) => command_focus_address(),
         (true, _, VK_F) => command(ID_FIND),
@@ -2416,6 +2519,20 @@ fn command(id: u16) {
         }
         ID_BADGE => show_badge_details(),
         ID_SHIELD => shield_menu(),
+        ID_STAR | ID_BM_ADD => bookmark_page(),
+        ID_BM_MANAGE => manage_bookmarks(),
+        id if (ID_BM_BASE..ID_BM_BASE + bookmarkui::MENU_MAX as u16).contains(&id) => {
+            let url = with(|a| {
+                a.bookmarks
+                    .items
+                    .get((id - ID_BM_BASE) as usize)
+                    .map(|b| b.url.clone())
+            })
+            .flatten();
+            if let Some(u) = url {
+                open_in_current(&u);
+            }
+        }
         ID_AB_TOGGLE => toggle_adblock(),
         ID_AB_SITE => toggle_adblock_site(),
         ID_AB_UPDATE => update_filters(false, true),
@@ -2581,6 +2698,31 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 }
             }
             with(|a| fill_adblock_menu(m, a));
+            LRESULT(0)
+        }
+        WM_INITMENUPOPUP if wparam.0 as isize == BM_MENU.with(|c| c.get()) => {
+            let m = HMENU(wparam.0 as *mut _);
+            let list = bookmarkui::load();
+            unsafe {
+                while GetMenuItemCount(Some(m)) > 0 {
+                    let _ = DeleteMenu(m, 0, MF_BYPOSITION);
+                }
+                let _ = AppendMenuW(
+                    m,
+                    MF_STRING,
+                    ID_BM_ADD as usize,
+                    w!("このページをブックマーク(&A)...\tCtrl+D"),
+                );
+                let _ = AppendMenuW(
+                    m,
+                    MF_STRING,
+                    ID_BM_MANAGE as usize,
+                    w!("ブックマークの管理(&M)...\tCtrl+Shift+O"),
+                );
+                let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+            }
+            bookmarkui::fill_menu(m, &list, ID_BM_BASE);
+            with(|a| a.bookmarks = list);
             LRESULT(0)
         }
         adblock::WM_APP_ADBLOCK => {
