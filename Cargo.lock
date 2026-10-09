@@ -3297,6 +3297,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-browser"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "yy-buffer"
 version = "0.1.0"
 dependencies = [
@@ -3531,6 +3540,7 @@ dependencies = [
  "yy-3270",
  "yy-3270-macro",
  "yy-3270-tls",
+ "yy-browser",
  "yy-buffer",
  "yy-cobol",
  "yy-config",
@@ -3550,6 +3560,13 @@ dependencies = [
  "yy-sheet",
  "yy-syntax",
  "yy-term",
+]
+
+[[package]]
+name = "yybrowser"
+version = "0.1.0"
+dependencies = [
+ "yy-win",
 ]
 
 [[package]]

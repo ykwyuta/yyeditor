@@ -163,6 +163,14 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 - **削除の確認**: 古い版・写しを一覧にしてチェックで選び、消す直前に変わっていないか・残すものがあるかを確かめてから、手元はごみ箱へ、共有フォルダは隔離フォルダ（`.yyfm-trash`）へ移します（作る場所は作業ごとに選びます。記録から元に戻せます）。隔離フォルダを作れない共有では、確認を 2 回してから消します。隔離フォルダの古いもの（既定 30 日）は「整理」メニューで消せます。
 - 操作と結果は画面の「記録」と `%APPDATA%\yyeditor\logs\filemanager.log` に残します。利用ガイド（F1）があります。
 
+### タブブラウザ（yybrowser）
+
+提案書 [19 章](docs/proposal/19-browser.md) の方式で、**OS とは別のプロキシを指定できる** タブブラウザ（`yybrowser.exe`）を作っています。表示は WebView2（Edge と同じ Chromium）です。
+
+- プロキシは「OS と同じ」「使わない（直接）」「指定（HTTP・HTTPS・SOCKS4/5、スキームごと）」「自動構成（PAC）」から選び、除くホストも指定できます。名前を付けたプロファイルとして保存し、メニューで切り替えます。違うプロキシのウィンドウを同時に開けます。
+- Cookie・キャッシュはプロファイルごとに分かれます。yyterm の `-D`（SOCKS）と組み合わせれば、踏み台の先のサイトを開けます。
+- ほかは最低限: タブ、アドレスバー（URL か検索語）、戻る・進む・再読み込み・ホーム、ページ内検索、拡大・縮小、印刷、全画面、閉じたタブを開き直す。利用ガイド（F1）があります。
+
 ### 対応している文字コード
 
 | 文字コード | 備考 |
@@ -317,6 +325,7 @@ crates/
   yy-sheet/    スプレッドシートの中核（列のチャンク・差分・スナップショット・メモリの予算・.yys・CSV の並列の取り込み）
   yy-numfmt/   Excel 互換の表示形式（書式記号・標準・日付のシリアル値・入力の解釈）
   yy-cobol/    COBOL のコピーブックの解析と、固定長レコードの項目の読み書き（ゾーン・パック・2 進数・浮動小数点・編集・DBCS）
+  yy-browser/  タブブラウザの中核（プロキシのプロファイル・WebView2 の起動引数・アドレスバーの入力の解釈）
   yy-files/    ファイル管理の中核（走査・目録・BLAKE3・レジュームつきの同期・重複・似た名前の版・削除と取り消し・検索）
   yy-term/     ターミナルの中核（制御シーケンスの解釈、画面、スクロールバック、キーの送り方。OS 非依存）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
@@ -325,12 +334,13 @@ apps/yyterm/   ターミナルの実行ファイル（yy-win の term モジュ�
 apps/yysftp/   ファイル転送の実行ファイル（yy-win の sftp モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yysheet/  スプレッドシートの実行ファイル（yy-win の sheet モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yyfilemanager/  ファイル管理の実行ファイル（yy-win の fm モジュール。ビルドスクリプトは yyeditor と共通）
+apps/yybrowser/  タブブラウザの実行ファイル（yy-win の browser モジュール。OS と別のプロキシ）
 apps/yyclip/   クリップボードの履歴の常駐アプリ（お気に入りのランチャー。詳しくは apps/yyclip/README.md）
 apps/yy-agent/ SSH 接続先に置くエージェント（Linux 用、musl で静的リンク）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
                     ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
-tools/gen-icon/     アイコン（apps/yyeditor・yyterm・yysftp・yysheet・yyclip・yyfilemanager の res/*.ico）の生成（Python + Pillow）
+tools/gen-icon/     アイコン（apps/yyeditor・yyterm・yysftp・yysheet・yyclip・yyfilemanager・yybrowser の res/*.ico）の生成（Python + Pillow）
 tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の取得（npm から）
 ```
 
@@ -341,12 +351,13 @@ tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の�
 Windows（MSVC）:
 
 ```sh
-cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip
+cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser
 target\release\yyeditor.exe [開くファイル]
 target\release\yyterm.exe [フォルダ | ssh://接続先/パス | ユーザー@ホスト]
 target\release\yysftp.exe [ssh://接続先/パス | ユーザー@ホスト:/パス | ユーザー@ホスト]
 target\release\yyfilemanager.exe [--sync 同期ジョブの名前]
 target\release\yyclip.exe
+target\release\yybrowser.exe [--profile 名前] [--proxy プロキシ] [URL ...]
 ```
 
 リモート編集のエージェント（Linux 用。exe と同じフォルダの `agents\yy-agent-<x86_64|aarch64>-linux` に置く）:

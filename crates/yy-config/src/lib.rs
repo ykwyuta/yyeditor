@@ -47,6 +47,8 @@ pub struct Config {
     pub sheet: SheetConfig,
     /// ファイル管理（yyfilemanager。18 章）
     pub filemanager: FileManagerConfig,
+    /// タブブラウザ（yybrowser。19 章）
+    pub browser: BrowserConfig,
 }
 
 impl Default for Config {
@@ -63,6 +65,29 @@ impl Default for Config {
             tn3270: Tn3270Config::default(),
             sheet: SheetConfig::default(),
             filemanager: FileManagerConfig::default(),
+            browser: BrowserConfig::default(),
+        }
+    }
+}
+
+/// タブブラウザ（yybrowser。19 章）の設定。プロキシのプロファイルは設定のフォルダの `browser.toml`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BrowserConfig {
+    /// ホーム（新しいタブ）
+    pub home: String,
+    /// 検索の URL（`%s` を検索語に置き換える）
+    pub search_url: String,
+    /// F12 の開発者ツール
+    pub devtools: bool,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        BrowserConfig {
+            home: "about:blank".into(),
+            search_url: "https://www.bing.com/search?q=%s".into(),
+            devtools: true,
         }
     }
 }

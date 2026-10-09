@@ -1,0 +1,17 @@
+[package]
+name = "yy-browser"
+description = "Core of yybrowser: per-app proxy profiles (system, direct, manual, PAC), Chromium switches for WebView2, profile data folders and address bar input"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

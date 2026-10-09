@@ -25,6 +25,9 @@ pub(crate) const SHEET_MD: &str = include_str!("../help/sheet.md");
 /// yyfilemanager のヘルプの本文。
 pub(crate) const FM_MD: &str = include_str!("../help/filemanager.md");
 
+/// yybrowser のヘルプの本文。
+pub(crate) const BROWSER_MD: &str = include_str!("../help/browser.md");
+
 thread_local! {
     /// 表示するヘルプ（本文・ウィンドウの題名）。yysheet は [`use_sheet_help`] で切り替える
     static DOC: std::cell::Cell<(&'static str, &'static str)> =

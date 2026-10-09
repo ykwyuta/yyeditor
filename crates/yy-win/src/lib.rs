@@ -14,6 +14,7 @@
 #![allow(unsafe_code)]
 
 mod app;
+mod browser;
 mod clipboard;
 mod crash;
 mod credstore;
@@ -50,6 +51,8 @@ use windows::core::{PCWSTR, Result, w};
 
 use crate::util::Context;
 
+/// タブブラウザ（yybrowser）を起動する
+pub use browser::run_browser;
 /// ファイル管理（yyfilemanager）を起動する
 pub use fm::run_filemanager;
 /// ファイル転送（yysftp）を起動する

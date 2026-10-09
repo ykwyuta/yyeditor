@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""yyeditor・yyterm・yysftp・yysheet・yyclip・yyfilemanager のアイコンを作る。
+"""yyeditor・yyterm・yysftp・yysheet・yyclip・yyfilemanager・yybrowser のアイコンを作る。
 
     python3 tools/gen-icon/gen_icon.py
 
@@ -23,6 +23,7 @@ TRANSFER = ((0x10, 0xB9, 0x81), (0x04, 0x78, 0x57))
 SHEET = ((0xF5, 0x9E, 0x0B), (0xB4, 0x53, 0x09))
 CLIP = ((0xA8, 0x55, 0xF7), (0x6B, 0x21, 0xA8))
 FILES = ((0x06, 0xB6, 0xD4), (0x0E, 0x74, 0x90))
+BROWSER = ((0x0e, 0x7c, 0x86), (0x0a, 0x4f, 0x8c))  # 青緑から紺
 PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
@@ -50,6 +51,7 @@ def render(size, kind="editor"):
         "sheet": SHEET,
         "clip": CLIP,
         "files": FILES,
+        "browser": BROWSER,
     }[kind]
     n = size * SCALE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
@@ -135,6 +137,14 @@ def render(size, kind="editor"):
         d.rounded_rectangle([n * 0.24, n * 0.62, n * 0.46, n * 0.7], radius=n * 0.02, fill=WHITE)
         d.rounded_rectangle([n * 0.24, n * 0.66, n * 0.76, n * 0.9], radius=n * 0.03, fill=WHITE)
         d.rectangle([n * 0.28, n * 0.72, n * 0.72, n * 0.735], fill=FILES[1] + (255,))
+    elif not small and kind == "browser":
+        # 地球（円と経線・緯線）
+        lt = max(1, round(n * 0.035))
+        cx, cy, r = n * 0.5, n * 0.76, n * 0.15
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=WHITE, width=lt)
+        d.ellipse([cx - r * 0.45, cy - r, cx + r * 0.45, cy + r], outline=WHITE, width=lt)
+        d.line([(cx - r, cy), (cx + r, cy)], fill=WHITE, width=lt)
+        d.line([(cx, cy - r), (cx, cy + r)], fill=WHITE, width=lt)
     elif not small:
         # テキストの行
         lt = n * 0.055
@@ -185,6 +195,7 @@ def main():
         ("yysheet", "sheet"),
         ("yyclip", "clip"),
         ("yyfilemanager", "files"),
+        ("yybrowser", "browser"),
     ]:
         res = root / "apps" / app / "res"
         res.mkdir(parents=True, exist_ok=True)
