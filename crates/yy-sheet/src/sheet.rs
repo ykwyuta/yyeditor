@@ -738,6 +738,95 @@ impl Sheet {
         );
     }
 
+    /// 表の外の自由なセル（手で入れた・貼り付けたデータ）を表に取り込む（15 章 9。絞り込み・並べ替えは
+    /// 表の列に対して行うため）。取り込んだら `true`。
+    ///
+    /// * 表がなければ: 1 行目を見出しにして、使っている範囲（A1 から）を表にする。1 行目が空なら取り込まない。
+    /// * 表があれば: 表の右の `col` 列目までの、表の行の範囲にある自由なセルを、表の列として足す
+    ///   （絞り込み・並べ替えの最中は行がずれるので取り込まない）。
+    pub fn absorb_free_cells(&mut self, ctx: &Context, col: u32) -> io::Result<bool> {
+        if self.table.columns.is_empty() {
+            let (rows, cols) = self.extent();
+            if rows < 2 || !self.cells.range((0, 0)..(1, 0)).any(|_| true) {
+                return Ok(false);
+            }
+            let data_rows = rows - 1;
+            let cells = Arc::make_mut(&mut self.cells);
+            let mut columns = Vec::with_capacity(cols as usize);
+            for c in 0..cols {
+                let name = cells
+                    .remove(&(0, c))
+                    .map(|v| v.general_text())
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| crate::col_name(c));
+                let mut column = Column::new(&name);
+                column.extend_empty(ctx, data_rows)?;
+                let keys: Vec<(u64, u32)> = cells
+                    .range((1, 0)..(rows, 0))
+                    .filter(|((_, cc), _)| *cc == c)
+                    .map(|(k, _)| *k)
+                    .collect();
+                for k in keys {
+                    if let Some(v) = cells.remove(&k) {
+                        column.set(ctx, k.0 - 1, v)?;
+                    }
+                }
+                column.flush(ctx)?;
+                columns.push(column);
+            }
+            self.table = Table {
+                columns: Arc::new(columns),
+                rows: data_rows,
+                header: true,
+            };
+            self.view = View::default();
+            return Ok(true);
+        }
+        let start = self.table.cols();
+        if col < start || !self.view.is_empty() {
+            return Ok(false);
+        }
+        let header = self.table.header as u64;
+        let grid = self.table.grid_rows();
+        let rows = self.table.rows;
+        let has = self
+            .cells
+            .range((0, 0)..(grid, 0))
+            .any(|((_, c), _)| *c >= start && *c <= col);
+        if !has {
+            return Ok(false);
+        }
+        let cells = Arc::make_mut(&mut self.cells);
+        let mut added = Vec::new();
+        for c in start..=col {
+            let name = if header == 1 {
+                cells
+                    .remove(&(0, c))
+                    .map(|v| v.general_text())
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| crate::col_name(c))
+            } else {
+                crate::col_name(c)
+            };
+            let mut column = Column::new(&name);
+            column.extend_empty(ctx, rows)?;
+            let keys: Vec<(u64, u32)> = cells
+                .range((header, 0)..(grid, 0))
+                .filter(|((_, cc), _)| *cc == c)
+                .map(|(k, _)| *k)
+                .collect();
+            for k in keys {
+                if let Some(v) = cells.remove(&k) {
+                    column.set(ctx, k.0 - header, v)?;
+                }
+            }
+            column.flush(ctx)?;
+            added.push(column);
+        }
+        Arc::make_mut(&mut self.table.columns).extend(added);
+        Ok(true)
+    }
+
     fn shift_cells(
         &mut self,
         map: impl Fn(u64, u32) -> (u64, u32),
@@ -962,6 +1051,72 @@ mod tests {
             header: true,
         };
         s
+    }
+
+    /// 手で入れた・貼り付けたデータ（表の外の自由なセル）を表に取り込み、絞り込めるようにする。
+    #[test]
+    fn absorbs_free_cells_into_a_table() {
+        use crate::query::{Cmp, ColFilter, Cond};
+        let ctx = Context::for_tests();
+        let mut s = Sheet::new("S");
+        let put = |s: &mut Sheet, r: u64, c: u32, v: Value| s.set(&ctx, r, c, v).unwrap();
+        put(&mut s, 0, 0, Value::text("品名"));
+        put(&mut s, 0, 1, Value::text("数"));
+        for (r, (n, q)) in [("りんご", 3.0), ("みかん", 10.0), ("ぶどう", 7.0)]
+            .iter()
+            .enumerate()
+        {
+            put(&mut s, r as u64 + 1, 0, Value::text(n));
+            put(&mut s, r as u64 + 1, 1, Value::Number(*q));
+        }
+        // 見出しのない列（C）と、表の下の自由なセル
+        put(&mut s, 2, 2, Value::text("メモ"));
+        assert_eq!(s.table.cols(), 0);
+        let before: Vec<Value> = (0..4).map(|r| s.get(&ctx, r, 1).unwrap()).collect();
+        assert!(s.absorb_free_cells(&ctx, 1).unwrap());
+        assert_eq!(s.table.cols(), 3);
+        assert_eq!(s.table.rows, 3);
+        assert!(s.table.header);
+        assert_eq!(&*s.table.columns[0].name, "品名");
+        assert_eq!(&*s.table.columns[2].name, "C");
+        assert!(s.cells.is_empty());
+        // 格子の見え方は変わらない
+        let after: Vec<Value> = (0..4).map(|r| s.get(&ctx, r, 1).unwrap()).collect();
+        assert_eq!(before, after);
+        assert_eq!(s.get(&ctx, 2, 2).unwrap(), Value::text("メモ"));
+        // 絞り込める
+        let (bits, counts) = crate::query::filter(
+            &ctx,
+            &s.table,
+            &[ColFilter {
+                col: 1,
+                cond: Cond::Number {
+                    op: Cmp::Gt,
+                    value: 5.0,
+                },
+            }],
+        )
+        .unwrap();
+        assert_eq!(counts, [2]);
+        assert_eq!(bits.count_ones(), 2);
+        // 二度目は何もしない
+        assert!(!s.absorb_free_cells(&ctx, 1).unwrap());
+        // 表の右に足した列も取り込む
+        put(&mut s, 0, 4, Value::text("産地"));
+        put(&mut s, 1, 4, Value::text("青森"));
+        put(&mut s, 9, 4, Value::text("表の下"));
+        assert!(s.absorb_free_cells(&ctx, 4).unwrap());
+        assert_eq!(s.table.cols(), 5);
+        assert_eq!(&*s.table.columns[3].name, "D");
+        assert_eq!(&*s.table.columns[4].name, "産地");
+        assert_eq!(s.get(&ctx, 1, 4).unwrap(), Value::text("青森"));
+        assert_eq!(s.get(&ctx, 9, 4).unwrap(), Value::text("表の下"));
+        assert_eq!(s.cells.len(), 1);
+        // 1 行目が空なら取り込まない
+        let mut e = Sheet::new("E");
+        e.set(&ctx, 3, 0, Value::text("x")).unwrap();
+        e.set(&ctx, 4, 0, Value::text("y")).unwrap();
+        assert!(!e.absorb_free_cells(&ctx, 0).unwrap());
     }
 
     #[test]
