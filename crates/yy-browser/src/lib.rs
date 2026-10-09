@@ -10,6 +10,6 @@ pub mod profiles;
 pub mod proxy;
 pub mod rules;
 
-pub use profiles::ProfileList;
+pub use profiles::{AdblockConfig, FilterList, ProfileList};
 pub use proxy::{ProxyMode, ProxyProfile};
 pub use rules::{DevCert, HostMap, ProxyRule};

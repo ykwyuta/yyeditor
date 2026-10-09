@@ -7,11 +7,14 @@
 //! WebView2 のイベントは `Navigate` などを呼んだその場で（同期的に）来ることがあるので、アプリの状態
 //! （`APP`）を借りたまま WebView2 を呼ばない。必要なものを取り出してから呼ぶ。
 
+mod adblock;
+mod filterdlg;
 mod proxydlg;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::*;
@@ -41,6 +44,7 @@ const ID_HOME: u16 = 6005;
 const ID_ADDRESS: u16 = 6006;
 const ID_PROXY: u16 = 6007;
 const ID_BADGE: u16 = 6008;
+const ID_SHIELD: u16 = 6009;
 const ID_FIND_EDIT: u16 = 6010;
 const ID_FIND_PREV: u16 = 6011;
 const ID_FIND_NEXT: u16 = 6012;
@@ -63,6 +67,10 @@ const ID_PROXY_SETTINGS: u16 = 6120;
 const ID_HELP: u16 = 6130;
 const ID_ABOUT: u16 = 6131;
 const ID_SETTINGS: u16 = 6132;
+const ID_AB_TOGGLE: u16 = 6140;
+const ID_AB_SITE: u16 = 6141;
+const ID_AB_UPDATE: u16 = 6142;
+const ID_AB_LISTS: u16 = 6143;
 /// プロキシのプロファイルの切り替え（`ID_PROFILE_BASE + 番号`）
 const ID_PROFILE_BASE: u16 = 6200;
 /// 別のプロキシで新しいウィンドウ（`ID_WINDOW_BASE + 番号`）
@@ -86,6 +94,12 @@ struct Tab {
     loading: bool,
     /// 表示ができる前に開くように頼まれた URL
     pending: Option<String>,
+    /// 今のページで広告ブロックが止めた要求の数
+    blocked: u32,
+    /// 読み込み中・読み込んだトップのページの URL（NavigationStarting の URL。第三者の判断に使う）
+    nav_url: String,
+    /// 今のページの非表示の情報（汎用の規則を調べるときに使う）
+    cosmetic: Option<yy_adblock::PageCosmetic>,
 }
 
 struct App {
@@ -98,6 +112,12 @@ struct App {
     reload: HWND,
     home: HWND,
     proxy_btn: HWND,
+    /// 広告ブロックのボタン（🛡 件数）
+    shield: HWND,
+    /// 広告ブロックのエンジン（できるまでは `None`）
+    adblock: Option<Arc<yy_adblock::AdBlocker>>,
+    /// フィルタを更新中
+    adblock_busy: bool,
     /// アドレスバーの左の表示（開発者用証明書を利用中・転送中）。当てはまらなければ隠す
     badge: HWND,
     badge_visible: bool,
@@ -128,6 +148,8 @@ pub type DevCertFn = fn(&str) -> std::result::Result<yy_browser::DevCert, String
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
     static DEV_CERT: Cell<Option<DevCertFn>> = const { Cell::new(None) };
+    /// メニューバーの「広告ブロック」（開くときに中身を作る）
+    static AB_MENU: Cell<isize> = const { Cell::new(0) };
 }
 
 /// 開発者用証明書を置くフォルダ（設定のフォルダの `browser-devcerts`）。
@@ -269,6 +291,7 @@ fn run_inner(args: Vec<String>) -> Result<()> {
         new_tab(Some(&u));
     }
     start_environment();
+    update_filters(true, false);
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -322,6 +345,8 @@ fn create_menu(profiles: &ProfileList, current: &str) -> Result<HMENU> {
         add(view, ID_DEVTOOLS, "開発者ツール(&D)\tF12");
         let proxy = CreatePopupMenu()?;
         fill_proxy_menu(proxy, profiles, current);
+        let ab = CreatePopupMenu()?;
+        AB_MENU.with(|c| c.set(ab.0 as isize));
         let help = CreatePopupMenu()?;
         add(help, ID_HELP, "yybrowser ヘルプ(&H)\tF1");
         add(help, ID_ABOUT, "yybrowser について(&A)");
@@ -329,6 +354,7 @@ fn create_menu(profiles: &ProfileList, current: &str) -> Result<HMENU> {
             (file, "ファイル(&F)"),
             (view, "表示(&V)"),
             (proxy, "プロキシ(&P)"),
+            (ab, "広告ブロック(&A)"),
             (help, "ヘルプ(&H)"),
         ] {
             AppendMenuW(bar, MF_POPUP, m.0 as usize, &HSTRING::from(t))?;
@@ -476,6 +502,7 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
         );
         let proxy_btn = button("", ID_PROXY);
         let badge = button("", ID_BADGE);
+        let shield = button("🛡", ID_SHIELD);
         let _ = ShowWindow(badge, SW_HIDE);
         let status = child(
             STATUSCLASSNAMEW,
@@ -530,6 +557,9 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
             reload,
             home,
             proxy_btn,
+            shield,
+            adblock: None,
+            adblock_busy: false,
             badge,
             badge_visible: false,
             find_bar,
@@ -579,6 +609,7 @@ impl App {
                     self.home,
                     self.address,
                     self.proxy_btn,
+                    self.shield,
                     self.badge,
                     self.status,
                 ] {
@@ -603,6 +634,7 @@ impl App {
                 self.home,
                 self.address,
                 self.proxy_btn,
+                self.shield,
                 self.status,
             ] {
                 let _ = ShowWindow(hw, SW_SHOW);
@@ -635,9 +667,18 @@ impl App {
                 let _ = ShowWindow(self.badge, SW_HIDE);
             }
             let proxy_w = self.scaled(240);
-            let addr_w = (w - x - proxy_w - 2 * pad).max(self.scaled(80));
+            let shield_w = self.scaled(72);
+            let addr_w = (w - x - proxy_w - shield_w - 3 * pad).max(self.scaled(80));
             let _ = MoveWindow(self.address, x, y, addr_w, ch, true);
-            let _ = MoveWindow(self.proxy_btn, x + addr_w + pad, y, proxy_w, ch, true);
+            let _ = MoveWindow(self.shield, x + addr_w + pad, y, shield_w, ch, true);
+            let _ = MoveWindow(
+                self.proxy_btn,
+                x + addr_w + shield_w + 2 * pad,
+                y,
+                proxy_w,
+                ch,
+                true,
+            );
             let top = tab_h + bar_h + pad;
             let mut bottom = h - status_h;
             if self.find_visible {
@@ -766,6 +807,7 @@ impl App {
             set_text(self.address, &t.url);
         }
         let badge = self.badge_text(&t.url);
+        self.refresh_shield();
         let title = if t.title.is_empty() {
             "yybrowser".to_owned()
         } else {
@@ -797,6 +839,28 @@ impl App {
                     LPARAM(0),
                 );
             }
+        }
+    }
+
+    /// 広告ブロックのボタンの表示（切・止めないサイト・準備中・止めた数）。
+    fn refresh_shield(&self) {
+        let Some(t) = self.tabs.get(self.current) else {
+            return;
+        };
+        let host = yy_browser::rules::url_host_port(&t.url)
+            .map(|(_, h, _)| h)
+            .unwrap_or_default();
+        let text = if self.profile.adblock_off {
+            "🛡 切".to_owned()
+        } else if self.profile.adblock_allowed_site(&host) {
+            "🛡 除外".to_owned()
+        } else if self.adblock.is_none() {
+            "🛡 …".to_owned()
+        } else {
+            format!("🛡 {}", t.blocked)
+        };
+        if text_of(self.shield) != text {
+            set_text(self.shield, &text);
         }
     }
 
@@ -1080,10 +1144,14 @@ fn add_events(
             &mut token,
         )?;
         webview.add_NavigationStarting(
-            &NavigationStartingEventHandler::create(Box::new(move |_, _| {
+            &NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                let uri = args.map(|a| take_string(|p| a.Uri(p))).unwrap_or_default();
                 with(|a| {
                     if let Some(i) = a.index_of(id) {
                         a.tabs[i].loading = true;
+                        a.tabs[i].nav_url = uri;
+                        a.tabs[i].blocked = 0;
+                        a.tabs[i].cosmetic = None;
                         a.refresh_tab_label(i);
                     }
                 });
@@ -1180,6 +1248,41 @@ fn add_events(
                 &mut token,
             )?;
         }
+        // 広告ブロック: 要求の照合（フィルタはプロファイルで入のときだけ登録する）
+        webview.add_WebResourceRequested(
+            &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
+                if let Some(args) = args {
+                    on_resource_requested(id, &args);
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
+        if with(|a| !a.profile.adblock_off).unwrap_or(false) {
+            adblock::set_request_filter(webview, true);
+        }
+        // 広告ブロック: 広告の枠を隠す（ホスト向けの CSS と、class・id を集めるスクリプト）
+        if let Ok(w2) = webview.cast::<ICoreWebView2_2>() {
+            w2.add_DOMContentLoaded(
+                &DOMContentLoadedEventHandler::create(Box::new(move |sender, _| {
+                    if let Some(w) = sender {
+                        on_dom_loaded(id, &w);
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            )?;
+        }
+        webview.add_WebMessageReceived(
+            &WebMessageReceivedEventHandler::create(Box::new(move |sender, args| {
+                if let (Some(w), Some(args)) = (sender, args) {
+                    let msg = take_string(|p| args.TryGetWebMessageAsString(p));
+                    on_web_message(id, &w, &msg);
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
         // ページにフォーカスがあってもブラウザのショートカットを使う
         controller.add_AcceleratorKeyPressed(
             &AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
@@ -1312,6 +1415,286 @@ fn server_certificate_error(args: &ICoreWebView2ServerCertificateErrorDetectedEv
     }
 }
 
+// ---- 広告ブロック（20 章） ------------------------------------------------------------
+
+/// このタブで広告ブロックを使うか（エンジン・トップのページの URL）。
+fn adblock_for(a: &App, id: u64) -> Option<(Arc<yy_adblock::AdBlocker>, String)> {
+    let blocker = a.adblock.clone()?;
+    let t = a.tabs.get(a.index_of(id)?)?;
+    let page = if t.nav_url.is_empty() {
+        t.url.clone()
+    } else {
+        t.nav_url.clone()
+    };
+    let host = yy_browser::rules::url_host_port(&page)
+        .map(|(_, h, _)| h)
+        .unwrap_or_default();
+    a.profile.adblock_on(&host).then_some((blocker, page))
+}
+
+/// 要求を照らし、広告・追跡なら止める。
+fn on_resource_requested(id: u64, args: &ICoreWebView2WebResourceRequestedEventArgs) {
+    let Some(Some((blocker, page, env))) =
+        with(|a| adblock_for(a, id).and_then(|(b, p)| Some((b, p, a.env.clone()?))))
+    else {
+        return;
+    };
+    let uri = match unsafe { args.Request() } {
+        Ok(r) => take_string(|p| unsafe { r.Uri(p) }),
+        Err(_) => return,
+    };
+    let mut ctx = COREWEBVIEW2_WEB_RESOURCE_CONTEXT::default();
+    unsafe {
+        let _ = args.ResourceContext(&mut ctx);
+    }
+    if !adblock::decide(&blocker, &page, &uri, ctx) {
+        return;
+    }
+    adblock::block(&env, args);
+    with(|a| {
+        if let Some(i) = a.index_of(id) {
+            a.tabs[i].blocked += 1;
+            if i == a.current {
+                a.refresh_shield();
+            }
+        }
+    });
+}
+
+/// ページの読み込み（DOMContentLoaded）: 広告の枠を隠す。
+fn on_dom_loaded(id: u64, webview: &ICoreWebView2) {
+    let url = take_string(|p| unsafe { webview.Source(p) });
+    let Some(Some((blocker, _))) = with(|a| adblock_for(a, id)) else {
+        return;
+    };
+    let page = adblock::on_dom_loaded(&blocker, webview, &url);
+    with(|a| {
+        if let Some(i) = a.index_of(id) {
+            a.tabs[i].cosmetic = Some(page);
+        }
+    });
+}
+
+/// ページからのメッセージ（class・id）: 当てはまる汎用の規則で隠す。
+fn on_web_message(id: u64, webview: &ICoreWebView2, msg: &str) {
+    if !msg.starts_with(yy_adblock::engine::MESSAGE_PREFIX) {
+        return;
+    }
+    let Some(Some((blocker, page))) = with(|a| {
+        let (b, _) = adblock_for(a, id)?;
+        let page = a.tabs.get(a.index_of(id)?)?.cosmetic.clone()?;
+        Some((b, page))
+    }) else {
+        return;
+    };
+    adblock::on_message(&blocker, &page, webview, msg);
+}
+
+/// フィルタを更新する（別のスレッド）。更新中なら何もしない。
+fn update_filters(initial: bool, force: bool) {
+    let Some(Some((frame, lists, profile))) = with(|a| {
+        if a.adblock_busy {
+            return None;
+        }
+        a.adblock_busy = true;
+        Some((a.frame, a.profiles.adblock.lists.clone(), a.profile.clone()))
+    }) else {
+        return;
+    };
+    adblock::spawn_update(frame, lists, profile, initial, force);
+}
+
+/// 別のスレッドからの知らせ。
+fn on_adblock_msg(m: adblock::AdMsg) {
+    match m {
+        adblock::AdMsg::Engine(b) => {
+            with(|a| {
+                a.adblock = Some(b);
+                a.refresh_shield();
+            });
+        }
+        adblock::AdMsg::Status(s) => {
+            with(|a| a.set_status(&s));
+        }
+        adblock::AdMsg::Done(s) => {
+            with(|a| {
+                a.adblock_busy = false;
+                a.set_status(&s);
+                a.refresh_shield();
+            });
+        }
+    }
+}
+
+/// プロファイル（今のものと一覧の中の同じもの）を書き換えて保存する。
+fn edit_profile(f: impl FnOnce(&mut ProxyProfile)) {
+    let Some((frame, list)) = with(|a| {
+        f(&mut a.profile);
+        let name = a.profile.name.clone();
+        if let Some(p) = a.profiles.profiles.iter_mut().find(|p| p.name == name) {
+            *p = a.profile.clone();
+        }
+        (a.frame, a.profiles.clone())
+    }) else {
+        return;
+    };
+    if let Err(e) = list.save(&profiles_path()) {
+        error_box(frame, &format!("保存できません: {e}"));
+    }
+}
+
+/// 広告ブロックの入・切（このプロファイル）。タブの要求の照合を付け外しする。
+fn toggle_adblock() {
+    edit_profile(|p| p.adblock_off = !p.adblock_off);
+    let Some((on, webviews)) = with(|a| {
+        let ws: Vec<ICoreWebView2> = a.tabs.iter().filter_map(|t| t.webview.clone()).collect();
+        (!a.profile.adblock_off, ws)
+    }) else {
+        return;
+    };
+    for w in &webviews {
+        adblock::set_request_filter(w, on);
+    }
+    with(|a| {
+        a.set_status(if on {
+            "広告ブロックを入にしました（再読み込みで反映します）"
+        } else {
+            "広告ブロックを切にしました（再読み込みで反映します）"
+        });
+        a.refresh_shield();
+    });
+}
+
+/// 今のタブのサイトを「止めない」に足す・外し、再読み込みする。
+fn toggle_adblock_site() {
+    let Some(Some(host)) = with(|a| {
+        let t = a.tabs.get(a.current)?;
+        yy_browser::rules::url_host_port(&t.url).map(|(_, h, _)| h)
+    }) else {
+        return;
+    };
+    let allowed = with(|a| a.profile.adblock_allowed_site(&host)).unwrap_or(false);
+    edit_profile(|p| {
+        if allowed {
+            // 足したもの（このホストか、その上のドメイン）を外す
+            let h = host.clone();
+            p.adblock_allow.retain(|d| {
+                let d = d.trim().to_ascii_lowercase();
+                !(h == d || h.ends_with(&format!(".{d}")))
+            });
+        } else {
+            p.set_adblock_allowed(&host, true);
+        }
+    });
+    if let Some((w, _)) = current_web() {
+        unsafe {
+            let _ = w.Reload();
+        }
+    }
+    with(|a| a.refresh_shield());
+}
+
+/// フィルタリストの一覧を編集する。保存したら作り直す（足したものはダウンロードする）。
+fn edit_filter_lists() {
+    let Some((frame, lists)) = with(|a| (a.frame, a.profiles.adblock.lists.clone())) else {
+        return;
+    };
+    let Some(edited) = filterdlg::edit(frame, lists) else {
+        return;
+    };
+    let Some(list) = with(|a| {
+        a.profiles.adblock.lists = edited;
+        a.profiles.clone()
+    }) else {
+        return;
+    };
+    if let Err(e) = list.save(&profiles_path()) {
+        error_box(frame, &format!("保存できません: {e}"));
+        return;
+    }
+    update_filters(true, false);
+}
+
+/// 広告ブロックのボタン・メニューの項目を足す。
+fn fill_adblock_menu(m: HMENU, a: &App) {
+    let host = a
+        .tabs
+        .get(a.current)
+        .and_then(|t| yy_browser::rules::url_host_port(&t.url))
+        .map(|(_, h, _)| h)
+        .unwrap_or_default();
+    unsafe {
+        let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(
+            m,
+            MF_STRING | check(!a.profile.adblock_off),
+            ID_AB_TOGGLE as usize,
+            &HSTRING::from(format!(
+                "広告ブロック（プロファイル「{}」）(&B)",
+                a.profile.name.replace('&', "&&")
+            )),
+        );
+        let site_flags = if host.is_empty() || a.profile.adblock_off {
+            MF_STRING | MF_GRAYED
+        } else {
+            MF_STRING | check(a.profile.adblock_allowed_site(&host))
+        };
+        let _ = AppendMenuW(
+            m,
+            site_flags,
+            ID_AB_SITE as usize,
+            &HSTRING::from(if host.is_empty() {
+                "このサイトでは止めない(&S)".to_owned()
+            } else {
+                format!("このサイトでは止めない（{host}）(&S)")
+            }),
+        );
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(
+            m,
+            if a.adblock_busy {
+                MF_STRING | MF_GRAYED
+            } else {
+                MF_STRING
+            },
+            ID_AB_UPDATE as usize,
+            w!("フィルタを今すぐ更新(&U)"),
+        );
+        let _ = AppendMenuW(
+            m,
+            MF_STRING,
+            ID_AB_LISTS as usize,
+            w!("フィルタリスト(&L)..."),
+        );
+    }
+}
+
+/// 広告ブロックのボタンを押したとき: メニューを出す。
+fn shield_menu() {
+    let Some((frame, btn, m)) = with(|a| {
+        let m = unsafe { CreatePopupMenu() }.ok()?;
+        fill_adblock_menu(m, a);
+        Some((a.frame, a.shield, m))
+    })
+    .flatten() else {
+        return;
+    };
+    unsafe {
+        let mut rc = RECT::default();
+        let _ = GetWindowRect(btn, &mut rc);
+        let _ = TrackPopupMenu(
+            m,
+            TPM_LEFTALIGN | TPM_TOPALIGN,
+            rc.left,
+            rc.bottom,
+            None,
+            frame,
+            None,
+        );
+        let _ = DestroyMenu(m);
+    }
+}
+
 /// アドレスバーの左の表示を押したとき: 詳しく出す。
 fn show_badge_details() {
     let Some((frame, text)) = with(|a| {
@@ -1388,6 +1771,9 @@ fn new_tab(url: Option<&str>) {
             url: url.clone(),
             loading: false,
             pending: Some(url),
+            blocked: 0,
+            nav_url: String::new(),
+            cosmetic: None,
         };
         let i = a.tabs.len();
         a.tabs.push(t);
@@ -2029,6 +2415,11 @@ fn command(id: u16) {
             }
         }
         ID_BADGE => show_badge_details(),
+        ID_SHIELD => shield_menu(),
+        ID_AB_TOGGLE => toggle_adblock(),
+        ID_AB_SITE => toggle_adblock_site(),
+        ID_AB_UPDATE => update_filters(false, true),
+        ID_AB_LISTS => edit_filter_lists(),
         ID_PROXY => {
             // プロキシのボタン: メニューを出す
             let Some((frame, btn, profiles, cur)) = with(|a| {
@@ -2180,6 +2571,21 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
         }
         WM_APP_SHORTCUT => {
             shortcut(wparam.0 as u16, lparam.0 as u8);
+            LRESULT(0)
+        }
+        WM_INITMENUPOPUP if wparam.0 as isize == AB_MENU.with(|c| c.get()) => {
+            let m = HMENU(wparam.0 as *mut _);
+            unsafe {
+                while GetMenuItemCount(Some(m)) > 0 {
+                    let _ = DeleteMenu(m, 0, MF_BYPOSITION);
+                }
+            }
+            with(|a| fill_adblock_menu(m, a));
+            LRESULT(0)
+        }
+        adblock::WM_APP_ADBLOCK => {
+            let m = unsafe { Box::from_raw(lparam.0 as *mut adblock::AdMsg) };
+            on_adblock_msg(*m);
             LRESULT(0)
         }
         WM_APP_BADGE => {
@@ -2672,6 +3078,240 @@ mod tests {
         assert_eq!(
             check_dev_cert(&p, "https://elsewhere.example/", &cert.cert_pem),
             DevCertCheck::NotPinned
+        );
+    }
+
+    /// 広告ブロック: 試験の中で立てた HTTP サーバーのページで、規則に当てはまる画像の要求が届かないこと・
+    /// ホスト向けの規則と汎用の規則（class・id を集めるスクリプト経由）で要素が隠れることを、本物の
+    /// WebView2 で確かめる（本物と同じ部品 `adblock::decide`・`on_dom_loaded`・`on_message` を使う）。
+    #[test]
+    fn blocks_ads_and_hides_elements_in_webview2() {
+        use std::io::{Read, Write};
+        use std::rc::Rc;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+        let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let paths: Arc<Mutex<Vec<String>>> = Arc::default();
+        let p2 = paths.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).to_string();
+                let path = text
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split(' ').nth(1))
+                    .unwrap_or("")
+                    .to_owned();
+                p2.lock().unwrap().push(path.clone());
+                let (ctype, body): (&str, Vec<u8>) = if path == "/" {
+                    (
+                        "text/html",
+                        b"<html><head><title>ads</title></head><body>\
+                          <img src=\"/ads/banner.png\"><img src=\"/img/ok.png\">\
+                          <div class=\"ad-box\">ad</div><div class=\"side-ad\">side</div>\
+                          <div class=\"content\">content</div></body></html>"
+                            .to_vec(),
+                    )
+                } else {
+                    ("image/gif", b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".to_vec())
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+            }
+        });
+        let blocker = Arc::new(yy_adblock::AdBlocker::build(vec![(
+            "test".into(),
+            "/ads/banner.png\n127.0.0.1##.side-ad\n##.ad-box\n".into(),
+        )]));
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("yybrowser adblock test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let url = format!("http://127.0.0.1:{port}/");
+        let folder = std::env::temp_dir().join(format!("yybrowser-adblock-{}", std::process::id()));
+        let Ok(create) = crate::preview::create_environment_fn() else {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        };
+        let options: ICoreWebView2EnvironmentOptions =
+            CoreWebView2EnvironmentOptions::default().into();
+        let web: Rc<RefCell<Option<ICoreWebView2>>> = Rc::default();
+        let done: Rc<std::cell::Cell<bool>> = Rc::default();
+        let failed: Rc<std::cell::Cell<bool>> = Rc::default();
+        let (w1, d1, f1, b1, u1) = (
+            web.clone(),
+            done.clone(),
+            failed.clone(),
+            blocker.clone(),
+            url.clone(),
+        );
+        let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
+            move |res: Result<()>, env: Option<ICoreWebView2Environment>| {
+                let Some(env) = env.filter(|_| res.is_ok()) else {
+                    f1.set(true);
+                    return Ok(());
+                };
+                let (w1, d1, f1, b1, u1) =
+                    (w1.clone(), d1.clone(), f1.clone(), b1.clone(), u1.clone());
+                let env2 = env.clone();
+                let on_controller = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
+                    move |res: Result<()>, c: Option<ICoreWebView2Controller>| {
+                        let Some(c) = c.filter(|_| res.is_ok()) else {
+                            f1.set(true);
+                            return Ok(());
+                        };
+                        let w = unsafe { c.CoreWebView2()? };
+                        let mut token = 0i64;
+                        let page: Rc<RefCell<Option<yy_adblock::PageCosmetic>>> = Rc::default();
+                        adblock::set_request_filter(&w, true);
+                        let (b2, u2, e2) = (b1.clone(), u1.clone(), env2.clone());
+                        let (b3, u3, pg3) = (b1.clone(), u1.clone(), page.clone());
+                        let (b4, pg4) = (b1.clone(), page.clone());
+                        let d2 = d1.clone();
+                        unsafe {
+                            w.add_WebResourceRequested(
+                                &WebResourceRequestedEventHandler::create(Box::new(
+                                    move |_, args| {
+                                        if let Some(args) = args {
+                                            let uri = take_string(|p| args.Request()?.Uri(p));
+                                            let mut ctx =
+                                                COREWEBVIEW2_WEB_RESOURCE_CONTEXT::default();
+                                            let _ = args.ResourceContext(&mut ctx);
+                                            if adblock::decide(&b2, &u2, &uri, ctx) {
+                                                adblock::block(&e2, &args);
+                                            }
+                                        }
+                                        Ok(())
+                                    },
+                                )),
+                                &mut token,
+                            )?;
+                            w.cast::<ICoreWebView2_2>()?.add_DOMContentLoaded(
+                                &DOMContentLoadedEventHandler::create(Box::new(
+                                    move |sender, _| {
+                                        if let Some(w) = sender {
+                                            *pg3.borrow_mut() =
+                                                Some(adblock::on_dom_loaded(&b3, &w, &u3));
+                                        }
+                                        Ok(())
+                                    },
+                                )),
+                                &mut token,
+                            )?;
+                            w.add_WebMessageReceived(
+                                &WebMessageReceivedEventHandler::create(Box::new(
+                                    move |sender, args| {
+                                        if let (Some(w), Some(args)) = (sender, args) {
+                                            let msg =
+                                                take_string(|p| args.TryGetWebMessageAsString(p));
+                                            if let Some(page) = pg4.borrow().as_ref() {
+                                                adblock::on_message(&b4, page, &w, &msg);
+                                            }
+                                        }
+                                        Ok(())
+                                    },
+                                )),
+                                &mut token,
+                            )?;
+                            w.add_NavigationCompleted(
+                                &NavigationCompletedEventHandler::create(Box::new(move |_, _| {
+                                    d2.set(true);
+                                    Ok(())
+                                })),
+                                &mut token,
+                            )?;
+                        }
+                        *w1.borrow_mut() = Some(w.clone());
+                        std::mem::forget(c);
+                        unsafe { w.Navigate(&HSTRING::from(u1.as_str()))? };
+                        Ok(())
+                    },
+                ));
+                unsafe {
+                    env.CreateCoreWebView2Controller(parent, &on_controller)?;
+                }
+                std::mem::forget(env);
+                Ok(())
+            },
+        ));
+        let folder_w = HSTRING::from(folder.as_os_str());
+        let hr = unsafe {
+            create(
+                PCWSTR::null(),
+                PCWSTR(folder_w.as_ptr()),
+                options.as_raw(),
+                handler.as_raw(),
+            )
+        };
+        if hr.is_err() {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        }
+        crate::preview::testing::pump_until(Duration::from_secs(60), || done.get() || failed.get());
+        if failed.get() {
+            assert!(!required, "WebView2 を使えません");
+            return;
+        }
+        let w = web.borrow().clone().expect("WebView2");
+        // 汎用の規則はメッセージの往復の後で効くので、少し待ちながら確かめる
+        let eval = |script: &str| -> String {
+            let out: Rc<RefCell<Option<String>>> = Rc::default();
+            let o = out.clone();
+            let h = ExecuteScriptCompletedHandler::create(Box::new(move |_, json| {
+                *o.borrow_mut() = Some(json);
+                Ok(())
+            }));
+            unsafe {
+                let _ = w.ExecuteScript(&HSTRING::from(script), &h);
+            }
+            crate::preview::testing::pump_until(Duration::from_secs(10), || out.borrow().is_some());
+            out.borrow_mut().take().unwrap_or_default()
+        };
+        let probe = "['.ad-box','.side-ad','.content'].map(s=>getComputedStyle(document.querySelector(s)).display).join('|')";
+        let mut got = String::new();
+        for _ in 0..30 {
+            got = eval(probe);
+            if got == "\"none|none|block\"" {
+                break;
+            }
+            crate::preview::testing::pump_until(Duration::from_millis(300), || false);
+        }
+        assert_eq!(got, "\"none|none|block\"", "要素が隠れません");
+        let seen = paths.lock().unwrap().clone();
+        assert!(seen.iter().any(|p| p == "/img/ok.png"), "{seen:?}");
+        assert!(
+            !seen.iter().any(|p| p.starts_with("/ads/")),
+            "広告の要求が届きました: {seen:?}"
         );
     }
 }

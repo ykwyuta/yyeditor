@@ -15,6 +15,113 @@ pub struct ProfileList {
     pub default: String,
     #[serde(default, rename = "profile")]
     pub profiles: Vec<ProxyProfile>,
+    /// 広告ブロックのフィルタリスト（全プロファイルで共通。20 章 3）
+    #[serde(default)]
+    pub adblock: AdblockConfig,
+}
+
+/// 広告ブロックのフィルタリスト 1 つ。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilterList {
+    pub name: String,
+    /// `http://`・`https://` か、ローカルのファイルのパス（`C:\…`・`file:///…`）
+    pub url: String,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl FilterList {
+    pub fn new(name: &str, url: &str, enabled: bool) -> FilterList {
+        FilterList {
+            name: name.to_owned(),
+            url: url.to_owned(),
+            enabled,
+        }
+    }
+
+    /// ローカルのファイルか（ダウンロードしない）。
+    pub fn is_local(&self) -> bool {
+        let u = self.url.trim().to_ascii_lowercase();
+        !(u.starts_with("http://") || u.starts_with("https://"))
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("フィルタリストの名前を入力してください".into());
+        }
+        let u = self.url.trim();
+        if u.is_empty() {
+            return Err(format!(
+                "「{}」の URL かファイルを入力してください",
+                self.name
+            ));
+        }
+        if u.chars().any(char::is_control) {
+            return Err(format!("「{}」の URL に改行などは使えません", self.name));
+        }
+        let lower = u.to_ascii_lowercase();
+        if lower.contains("://")
+            && !(lower.starts_with("http://")
+                || lower.starts_with("https://")
+                || lower.starts_with("file:///"))
+        {
+            return Err(format!(
+                "「{}」の URL は http://・https://・file:/// かファイルのパスにしてください",
+                self.name
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// 広告ブロックの設定（`browser.toml` の `[adblock]`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdblockConfig {
+    #[serde(default = "default_filter_lists", rename = "list")]
+    pub lists: Vec<FilterList>,
+}
+
+impl Default for AdblockConfig {
+    fn default() -> Self {
+        AdblockConfig {
+            lists: default_filter_lists(),
+        }
+    }
+}
+
+/// 既定のフィルタリスト（20 章 3.1）。同梱はせず、利用者の PC がダウンロードする。
+pub fn default_filter_lists() -> Vec<FilterList> {
+    vec![
+        FilterList::new(
+            "EasyList",
+            "https://easylist.to/easylist/easylist.txt",
+            true,
+        ),
+        FilterList::new(
+            "EasyPrivacy",
+            "https://easylist.to/easylist/easyprivacy.txt",
+            true,
+        ),
+        FilterList::new(
+            "AdGuard 日本語フィルタ",
+            "https://filters.adtidy.org/extension/ublock/filters/7.txt",
+            true,
+        ),
+        FilterList::new(
+            "uBlock filters",
+            "https://ublockorigin.github.io/uAssets/filters/filters.txt",
+            false,
+        ),
+        FilterList::new(
+            "EasyList Cookie List",
+            "https://secure.fanboy.co.nz/fanboy-cookiemonster.txt",
+            false,
+        ),
+    ]
 }
 
 impl Default for ProfileList {
@@ -26,6 +133,7 @@ impl Default for ProfileList {
                 ProxyProfile::new("OS と同じ", ProxyMode::System),
                 ProxyProfile::new("直接", ProxyMode::Direct),
             ],
+            adblock: AdblockConfig::default(),
         }
     }
 }
@@ -40,7 +148,8 @@ impl ProfileList {
             Err(e) => return Err(e),
         };
         if list.profiles.is_empty() {
-            list = ProfileList::default();
+            list.profiles = ProfileList::default().profiles;
+            list.default = ProfileList::default().default;
         }
         Ok(list)
     }
@@ -49,6 +158,10 @@ impl ProfileList {
     pub fn save(&self, path: &Path) -> io::Result<()> {
         for p in &self.profiles {
             p.validate()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        }
+        for l in &self.adblock.lists {
+            l.validate()
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         }
         let text = toml::to_string_pretty(self).map_err(io::Error::other)?;
@@ -156,6 +269,34 @@ mod tests {
         assert_eq!(list.default, "OS と同じ");
         list.remove("直接").unwrap();
         assert!(list.remove("OS と同じ").is_err());
+        // 広告ブロックの一覧も保存する（切ったもの・足したもの）
+        list.adblock.lists[0].enabled = false;
+        list.adblock
+            .lists
+            .push(FilterList::new("自作", "C:\\filters\\my.txt", true));
+        assert!(list.adblock.lists.last().unwrap().is_local());
+        assert!(!list.adblock.lists[0].is_local());
+        list.save(&p).unwrap();
+        assert_eq!(ProfileList::load(&p).unwrap().adblock, list.adblock);
+        // [adblock] がない古いファイルは既定の一覧
+        std::fs::write(
+            &p,
+            "default = \"x\"\n[[profile]]\nname = \"x\"\nmode = \"direct\"\n",
+        )
+        .unwrap();
+        let old = ProfileList::load(&p).unwrap();
+        assert_eq!(old.adblock.lists, default_filter_lists());
+        assert!(old.profiles[0].adblock_on("example.com"));
+        assert!(
+            FilterList::new("x", "javascript://x", true)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            FilterList::new("x", "file:///c:/a.txt", true)
+                .validate()
+                .is_ok()
+        );
         std::fs::write(&p, "default = 1\n[[profile]]\nname = 3").unwrap();
         assert!(ProfileList::load(&p).is_err());
     }

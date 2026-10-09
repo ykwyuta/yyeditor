@@ -60,6 +60,12 @@ pub struct ProxyProfile {
     /// ホストの転送と開発者用証明書（19 章 3.6）
     #[serde(default, rename = "host", skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<HostMap>,
+    /// 広告ブロックを切る（既定は入。20 章 6）
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adblock_off: bool,
+    /// 広告ブロックで止めないサイト（ドメインとサブドメイン）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adblock_allow: Vec<String>,
 }
 
 /// 指定のプロキシに使えるスキーム。
@@ -128,6 +134,18 @@ impl ProxyProfile {
         check_plain("プロキシ", &self.server)?;
         check_plain("除くホスト", &self.bypass)?;
         check_plain("PAC の URL", &self.pac_url)?;
+        for a in &self.adblock_allow {
+            if a.trim().is_empty()
+                || !a
+                    .trim()
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '*'))
+            {
+                return Err(format!(
+                    "広告ブロックで止めないサイト「{a}」が正しくありません"
+                ));
+            }
+        }
         for r in &self.rules {
             r.validate()
                 .map_err(|e| format!("ドメインごとのプロキシ「{}」: {e}", r.pattern))?;
@@ -234,6 +252,31 @@ impl ProxyProfile {
             args.push(format!("--host-resolver-rules=\"{map}\""));
         }
         Ok(args.join(" "))
+    }
+
+    /// このページのホストで広告ブロックを使うか（切・止めないサイトでなければ）。
+    pub fn adblock_on(&self, page_host: &str) -> bool {
+        !self.adblock_off && !self.adblock_allowed_site(page_host)
+    }
+
+    /// 止めないサイトに入っているか。
+    pub fn adblock_allowed_site(&self, host: &str) -> bool {
+        let h = host.trim_end_matches('.').to_ascii_lowercase();
+        self.adblock_allow.iter().any(|a| {
+            let a = a.trim().trim_start_matches("*.").to_ascii_lowercase();
+            !a.is_empty() && (h == a || h.ends_with(&format!(".{a}")))
+        })
+    }
+
+    /// 止めないサイトに足す・外す（`on` なら足す）。
+    pub fn set_adblock_allowed(&mut self, host: &str, on: bool) {
+        let h = host.trim().to_ascii_lowercase();
+        self.adblock_allow
+            .retain(|a| !a.trim().eq_ignore_ascii_case(&h));
+        if on && !h.is_empty() {
+            self.adblock_allow.push(h);
+            self.adblock_allow.sort();
+        }
     }
 
     /// ホスト（とポート）の転送（あれば）。
@@ -419,6 +462,26 @@ mod tests {
             "{text}"
         );
         assert_eq!(toml::from_str::<ProxyProfile>(&text).unwrap(), p);
+    }
+
+    #[test]
+    fn adblock_switches_and_allowed_sites() {
+        let mut p = ProxyProfile::new("p", ProxyMode::Direct);
+        assert!(p.adblock_on("news.example.jp"));
+        p.set_adblock_allowed("Example.JP", true);
+        assert_eq!(p.adblock_allow, ["example.jp"]);
+        assert!(!p.adblock_on("news.example.jp"));
+        assert!(!p.adblock_on("example.jp"));
+        assert!(p.adblock_on("badexample.jp"));
+        p.set_adblock_allowed("example.jp", false);
+        assert!(p.adblock_allow.is_empty());
+        p.adblock_off = true;
+        assert!(!p.adblock_on("other.example"));
+        let text = toml::to_string(&p).unwrap();
+        assert!(text.contains("adblock_off = true"), "{text}");
+        assert_eq!(toml::from_str::<ProxyProfile>(&text).unwrap(), p);
+        p.adblock_allow = vec!["bad host".into()];
+        assert!(p.validate().is_err());
     }
 
     #[test]

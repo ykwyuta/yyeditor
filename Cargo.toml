@@ -27,6 +27,7 @@ members = [
     "crates/yy-git",
     "crates/yy-files",
     "crates/yy-browser",
+    "crates/yy-adblock",
     "crates/yy-win",
     "apps/yyeditor",
     "apps/yyterm",
@@ -64,6 +65,7 @@ yy-cobol = { path = "crates/yy-cobol" }
 yy-git = { path = "crates/yy-git" }
 yy-files = { path = "crates/yy-files" }
 yy-browser = { path = "crates/yy-browser" }
+yy-adblock = { path = "crates/yy-adblock" }
 yy-search = { path = "crates/yy-search" }
 yy-delimited = { path = "crates/yy-delimited" }
 yy-core = { path = "crates/yy-core" }
@@ -106,6 +108,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-native-certs = "0.8"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 webview2-com = "0.39.1"
+# 広告ブロックの中核（Brave。MPL-2.0）。single-thread を外してエンジンを別のスレッドで作れるようにする
+adblock = { version = "0.13.3", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
 thiserror = "2"
 proptest = "1"
 criterion = "0.8"

@@ -547,6 +547,105 @@ pub fn url_host_port(url: &str) -> Option<(String, String, u16)> {
     (!host.is_empty()).then(|| (scheme, host.to_ascii_lowercase(), port))
 }
 
+/// フィルタリストなどをダウンロードする経路（20 章 3.2。WinINet で使う）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// 直接
+    Direct,
+    /// WinINet のプロキシの指定（`host:port`・`http=h:p https=h:p`・`socks=h:p`）
+    Proxy(String),
+    /// OS と同じ（インターネット オプション）
+    System,
+    /// WinINet では使えないプロキシなので OS と同じにする（理由）
+    Unsupported(String),
+}
+
+/// プロキシ 1 つ（`[scheme://]host:port`）を WinINet の書き方に。
+fn wininet_one(spec: &str) -> Result<String, String> {
+    let spec = spec.trim();
+    let (scheme, hp) = match spec.split_once("://") {
+        Some((s, r)) => (s.to_ascii_lowercase(), r),
+        None => ("http".to_owned(), spec),
+    };
+    match scheme.as_str() {
+        "http" => Ok(hp.to_owned()),
+        "socks" | "socks4" => Ok(format!("socks={hp}")),
+        _ => Err(format!(
+            "ダウンロードでは {scheme} のプロキシ（{spec}）を使えないので、OS と同じ経路にします"
+        )),
+    }
+}
+
+/// URL をダウンロードする経路。プロファイルの規則が当てはまればそれ、なければやり方に従う。
+pub fn download_route(profile: &crate::ProxyProfile, url: &str) -> Route {
+    use crate::ProxyMode;
+    let host = url_host_port(url).map(|(_, h, _)| h).unwrap_or_default();
+    let one = |spec: &str| -> Route {
+        if spec.trim().eq_ignore_ascii_case("direct") {
+            return Route::Direct;
+        }
+        match wininet_one(spec) {
+            Ok(p) => Route::Proxy(p),
+            Err(e) => Route::Unsupported(e),
+        }
+    };
+    if let Some(r) = profile.rules.iter().find(|r| r.matches(&host)) {
+        return one(&r.proxy);
+    }
+    match profile.mode {
+        ProxyMode::Direct => Route::Direct,
+        ProxyMode::System | ProxyMode::Pac => Route::System,
+        ProxyMode::Manual => {
+            let bypassed = profile
+                .bypass
+                .split([';', ',', '\n'])
+                .map(str::trim)
+                .filter(|b| !b.is_empty())
+                .any(|b| {
+                    if b == "<local>" {
+                        !host.contains('.')
+                    } else {
+                        let b = b
+                            .strip_prefix('.')
+                            .map_or(b.to_string(), |d| format!("*.{d}"));
+                        ProxyRule {
+                            pattern: b,
+                            proxy: "direct".into(),
+                        }
+                        .matches(&host)
+                    }
+                });
+            if bypassed {
+                return Route::Direct;
+            }
+            let server = profile.server.trim();
+            if !server.contains('=') {
+                return one(server);
+            }
+            // スキームごと: WinINet は「http=h:p https=h:p socks=h:p」（空白区切り）
+            let mut parts = Vec::new();
+            for part in server.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+                let Some((k, v)) = part.split_once('=') else {
+                    continue;
+                };
+                let k = k.trim();
+                match wininet_one(v) {
+                    Ok(p) if k == "socks" => {
+                        parts.push(format!("socks={}", p.trim_start_matches("socks=")))
+                    }
+                    Ok(p) if !p.starts_with("socks=") => parts.push(format!("{k}={p}")),
+                    Ok(_) | Err(_) => {
+                        return Route::Unsupported(format!(
+                            "ダウンロードでは「{part}」を使えないので、OS と同じ経路にします"
+                        ));
+                    }
+                }
+            }
+            Route::Proxy(parts.join(" "))
+        }
+    }
+}
+
 /// 開発者用証明書（PEM）。
 #[derive(Clone, Debug)]
 pub struct DevCert {
@@ -711,6 +810,48 @@ mod tests {
         assert_eq!(base64_encode(b"Man"), "TWFu");
         assert_eq!(base64_encode(b"Ma"), "TWE=");
         assert_eq!(cert_file_stem("*.dev.example:443"), "_wildcard.dev.example");
+    }
+
+    #[test]
+    fn chooses_download_routes() {
+        use crate::{ProxyMode, ProxyProfile};
+        let url = "https://easylist.to/easylist/easylist.txt";
+        assert_eq!(
+            download_route(&ProxyProfile::new("d", ProxyMode::Direct), url),
+            Route::Direct
+        );
+        assert_eq!(
+            download_route(&ProxyProfile::new("s", ProxyMode::System), url),
+            Route::System
+        );
+        let mut m = ProxyProfile::new("m", ProxyMode::Manual);
+        m.server = "127.0.0.1:8888".into();
+        assert_eq!(
+            download_route(&m, url),
+            Route::Proxy("127.0.0.1:8888".into())
+        );
+        m.bypass = "<local>;easylist.to".into();
+        assert_eq!(download_route(&m, url), Route::Direct);
+        m.bypass.clear();
+        m.server = "socks5://127.0.0.1:1080".into();
+        assert!(matches!(download_route(&m, url), Route::Unsupported(_)));
+        m.server = "socks4://127.0.0.1:1080".into();
+        assert_eq!(
+            download_route(&m, url),
+            Route::Proxy("socks=127.0.0.1:1080".into())
+        );
+        m.server = "http=p:80;https=p:443;socks=s:1080".into();
+        assert_eq!(
+            download_route(&m, url),
+            Route::Proxy("http=p:80 https=p:443 socks=s:1080".into())
+        );
+        // 規則が先
+        m.rules = parse_rules("easylist.to = direct\nadtidy.org = 10.0.0.1:8080").unwrap();
+        assert_eq!(download_route(&m, url), Route::Direct);
+        assert_eq!(
+            download_route(&m, "https://filters.adtidy.org/x.txt"),
+            Route::Proxy("10.0.0.1:8080".into())
+        );
     }
 
     #[test]
