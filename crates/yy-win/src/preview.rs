@@ -1452,20 +1452,37 @@ mod tests {
             .load(Ordering::Acquire)
             == 0
             && ACTIVE_FETCHES.load(Ordering::Acquire) == 0));
+        // 前の手順のスクリプトはページを移動させようとするので、新しいページで測る
+        let folder = preview.shared.page.borrow().folder.clone();
+        preview.show_html(
+            "<html><body>overload</body></html>",
+            &PageOptions {
+                has_folder: true,
+                ..Default::default()
+            },
+            folder,
+        );
+        assert!(pump_until(Duration::from_secs(10), || preview
+            .loaded_kind()
+            == Some(Kind::Html)
+            && eval(&preview, "document.readyState").as_deref()
+                == Some("\"complete\"")));
         let requests: Vec<_> = (0..MAX_REQUESTS)
             .map(|_| RequestPermit::acquire().unwrap())
             .collect();
         assert!(RequestPermit::acquire().is_none());
         eval(
             &preview,
-            "fetch('https://yy-doc.local/inside.txt?overload').then(r => document.body.dataset.overload = r.status); 'started'",
+            "fetch('https://yy-doc.local/inside.txt?overload').then(r => document.body.dataset.overload = String(r.status), e => document.body.dataset.overload = 'error: ' + e); 'started'",
         );
-        assert!(pump_until(Duration::from_secs(5), || eval(
-            &preview,
-            "document.body.dataset.overload"
-        )
-        .as_deref()
-            == Some("\"503\"")));
+        let observed = RefCell::new(None);
+        let overloaded = pump_until(Duration::from_secs(10), || {
+            let r = eval(&preview, "document.body.dataset.overload");
+            let done = r.as_deref() == Some("\"503\"");
+            *observed.borrow_mut() = r;
+            done
+        });
+        assert!(overloaded, "overload result: {:?}", observed.borrow());
         drop(requests);
 
         eval(
