@@ -2223,11 +2223,26 @@ mod tests {
             "{:?}",
             seen.lock().unwrap()
         );
-        // 直接: 存在しないホストなので読み込めず、試験用のプロキシにも来ない
-        let before = seen.lock().unwrap().len();
+        // 直接: 存在しないホストなので読み込めず、試験用のプロキシにも来ない。
+        // 先のページの後追いの要求（favicon など）が届くことがあるので、件数ではなく別の URL で見分ける
+        let direct_url = "http://yybrowser-direct-test.invalid/hello";
         let direct = ProxyProfile::new("direct", yy_browser::ProxyMode::Direct);
-        let ok = open_with(&direct, &dir.join(direct.data_folder_name()), parent, url).unwrap();
+        let ok = open_with(
+            &direct,
+            &dir.join(direct.data_folder_name()),
+            parent,
+            direct_url,
+        )
+        .unwrap();
         assert!(!ok);
-        assert_eq!(seen.lock().unwrap().len(), before);
+        assert!(
+            !seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("yybrowser-direct-test")),
+            "{:?}",
+            seen.lock().unwrap()
+        );
     }
 }
