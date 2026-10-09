@@ -75,6 +75,8 @@ pub trait Fs: Send + Sync {
     fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()>;
     /// 書き換えるために開く（大きさはそのまま）。
     fn open_patch(&self, path: &Path) -> io::Result<Box<dyn PatchFile>>;
+    /// アクセス権を写す（Windows は DACL の明示的な項目と継承の止め方。ほかの OS は属性のモード）。
+    fn copy_acl(&self, from: &Path, to: &Path) -> io::Result<()>;
 }
 
 /// 時刻を UNIX 時刻からのナノ秒にする。
@@ -276,6 +278,76 @@ impl Fs for Local {
             OpenOptions::new().read(true).write(true).open(path)?,
         )))
     }
+
+    fn copy_acl(&self, from: &Path, to: &Path) -> io::Result<()> {
+        copy_acl_local(from, to)
+    }
+}
+
+/// アクセス権を写す（Windows）。送り元の DACL の明示的な項目を写し、送り元が継承を止めていれば送り先も
+/// 止める（継承する項目は送り先の親から受け継ぐ）。所有者・監査（SACL）は写さない（特権が要るため）。
+#[cfg(windows)]
+#[allow(unsafe_code)] // Win32 のセキュリティ API（このクレートで unsafe を使うのはここと試験だけ）
+fn copy_acl_local(from: &Path, to: &Path) -> io::Result<()> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    };
+    use windows::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        UNPROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    use windows::core::HSTRING;
+    let src = HSTRING::from(from.as_os_str());
+    let dst = HSTRING::from(to.as_os_str());
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        let r = GetNamedSecurityInfoW(
+            &src,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut dacl),
+            None,
+            &mut sd,
+        );
+        if r.0 != 0 {
+            return Err(io::Error::from_raw_os_error(r.0 as i32));
+        }
+        let mut control = 0u16;
+        let mut rev = 0u32;
+        let protected = GetSecurityDescriptorControl(sd, &mut control, &mut rev).is_ok()
+            && control & SE_DACL_PROTECTED.0 != 0;
+        let info = DACL_SECURITY_INFORMATION
+            | if protected {
+                PROTECTED_DACL_SECURITY_INFORMATION
+            } else {
+                UNPROTECTED_DACL_SECURITY_INFORMATION
+            };
+        let r = SetNamedSecurityInfoW(
+            &dst,
+            SE_FILE_OBJECT,
+            info,
+            None,
+            None,
+            Some(dacl as *const ACL),
+            None,
+        );
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+        if r.0 != 0 {
+            return Err(io::Error::from_raw_os_error(r.0 as i32));
+        }
+    }
+    Ok(())
+}
+
+/// アクセス権を写す（Windows 以外: 属性のモード）。
+#[cfg(not(windows))]
+fn copy_acl_local(from: &Path, to: &Path) -> io::Result<()> {
+    fs::set_permissions(to, fs::metadata(from)?.permissions())
 }
 
 // ---- 試験用 ------------------------------------------------------------------------------
@@ -481,6 +553,10 @@ impl Fs for Faulty {
         self.op()?;
         self.inner.copy_file(from, to)
     }
+    fn copy_acl(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.op()?;
+        self.inner.copy_acl(from, to)
+    }
     fn open_patch(&self, path: &Path) -> io::Result<Box<dyn PatchFile>> {
         self.op()?;
         Ok(Box::new(FaultyPatch {
@@ -559,6 +635,92 @@ mod tests {
             from_nanos(to_nanos(UNIX_EPOCH - Duration::from_secs(5))),
             UNIX_EPOCH - Duration::from_secs(5)
         );
+    }
+
+    #[test]
+    #[cfg_attr(windows, allow(unsafe_code))]
+    fn copies_access_rights() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a.txt"), d.path().join("b.txt"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&a, fs::Permissions::from_mode(0o640)).unwrap();
+            Local.copy_acl(&a, &b).unwrap();
+            assert_eq!(
+                std::fs::metadata(&b).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+        #[cfg(windows)]
+        {
+            use windows::Win32::Foundation::{HLOCAL, LocalFree};
+            use windows::Win32::Security::Authorization::*;
+            use windows::Win32::Security::*;
+            use windows::core::{HSTRING, PWSTR};
+            // 継承を止めた DACL（Administrators にフル、Everyone に読み取り）を送り元に付ける
+            let sddl = HSTRING::from("D:P(A;;FA;;;BA)(A;;FR;;;WD)");
+            let dacl_of = |p: &Path| -> String {
+                unsafe {
+                    let mut sd = PSECURITY_DESCRIPTOR::default();
+                    let r = GetNamedSecurityInfoW(
+                        &HSTRING::from(p.as_os_str()),
+                        SE_FILE_OBJECT,
+                        DACL_SECURITY_INFORMATION,
+                        None,
+                        None,
+                        None,
+                        None,
+                        &mut sd,
+                    );
+                    assert_eq!(r.0, 0);
+                    let mut s = PWSTR::null();
+                    ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                        sd,
+                        SDDL_REVISION_1,
+                        DACL_SECURITY_INFORMATION,
+                        &mut s,
+                        None,
+                    )
+                    .unwrap();
+                    let out = s.to_string().unwrap();
+                    let _ = LocalFree(Some(HLOCAL(s.0 as *mut _)));
+                    let _ = LocalFree(Some(HLOCAL(sd.0)));
+                    out
+                }
+            };
+            unsafe {
+                let mut sd = PSECURITY_DESCRIPTOR::default();
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    &sddl,
+                    SDDL_REVISION_1,
+                    &mut sd,
+                    None,
+                )
+                .unwrap();
+                let mut present = windows::core::BOOL(0);
+                let mut defaulted = windows::core::BOOL(0);
+                let mut dacl: *mut ACL = std::ptr::null_mut();
+                GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted).unwrap();
+                let r = SetNamedSecurityInfoW(
+                    &HSTRING::from(a.as_os_str()),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    None,
+                    None,
+                    Some(dacl as *const ACL),
+                    None,
+                );
+                assert_eq!(r.0, 0);
+                let _ = LocalFree(Some(HLOCAL(sd.0)));
+            }
+            assert_ne!(dacl_of(&a), dacl_of(&b));
+            Local.copy_acl(&a, &b).unwrap();
+            assert_eq!(dacl_of(&a), dacl_of(&b));
+            assert!(dacl_of(&b).starts_with("D:P"), "{}", dacl_of(&b));
+        }
     }
 
     #[test]

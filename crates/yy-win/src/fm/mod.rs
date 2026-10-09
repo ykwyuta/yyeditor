@@ -1230,6 +1230,7 @@ impl App {
                 fm.delta_min_mb << 20
             },
             delta_block: 1 << 20,
+            copy_acl: fm.copy_acl,
         }
     }
 
@@ -1616,13 +1617,17 @@ fn cmd_search() {
             ..yy_files::search::ContentOptions::default()
         };
         a.search_rows.clear();
+        a.search_cats.clear();
         a.refresh_list(TAB_SEARCH);
         let index_dir = a.dirs.index();
         let threads = a.config.filemanager.search_threads.max(1);
         let sim = a.similar_options();
         a.start("探しています", move |cx| {
-            // 目録が古ければ、走査し直す前に古い目録で見つかったものを先に出す（名前・属性だけの検索）
-            if q.content.is_none() && q.needs_marks() == (false, false) {
+            // 目録が古ければ、走査し直す前に古い目録で見つかったものを先に出す（名前・属性だけの検索）。
+            // 前の目録がなければ、走査しながら見つかった順に出す
+            let simple = q.content.is_none() && q.needs_marks() == (false, false);
+            let mut previewed = false;
+            if simple {
                 let olds: Vec<(Catalog, i64)> = roots
                     .iter()
                     .filter_map(|r| yy_files::catalogs::load(&cache.dir, r).ok())
@@ -1640,15 +1645,49 @@ fn cmd_search() {
                         .map(|f| (f, 0, String::new()))
                         .collect();
                     cx.send(Msg::SearchPartial(cats, rows));
+                    previewed = true;
                 }
             }
-            let cats = match work::scan_all(cx, &roots, &scan, Some(&cache)) {
+            // 見つかった順に出す（0.2 秒ごとにまとめて送る）
+            let pending: std::sync::Mutex<(Vec<(usize, yy_files::FileEntry)>, std::time::Instant)> =
+                std::sync::Mutex::new((Vec::new(), std::time::Instant::now()));
+            let flush = |force: bool| {
+                let mut p = pending.lock().unwrap();
+                if p.0.is_empty()
+                    || (!force && p.1.elapsed() < std::time::Duration::from_millis(200))
+                {
+                    return;
+                }
+                p.1 = std::time::Instant::now();
+                let mut by_root: std::collections::BTreeMap<usize, Vec<yy_files::FileEntry>> =
+                    Default::default();
+                for (ri, f) in p.0.drain(..) {
+                    by_root.entry(ri).or_default().push(f);
+                }
+                for (ri, fs) in by_root {
+                    cx.send(Msg::SearchFound(ri, roots[ri].clone(), fs));
+                }
+            };
+            let stream = |ri: usize, fs: &[yy_files::FileEntry]| {
+                let hit: Vec<(usize, yy_files::FileEntry)> = fs
+                    .iter()
+                    .filter(|f| q.matches(f))
+                    .map(|f| (ri, f.clone()))
+                    .collect();
+                if !hit.is_empty() {
+                    pending.lock().unwrap().0.extend(hit);
+                }
+                flush(false);
+            };
+            let found: Option<&work::FoundIn<'_>> = (simple && !previewed).then_some(&stream as _);
+            let cats = match work::scan_all(cx, &roots, &scan, Some(&cache), found) {
                 Ok(c) => c,
                 Err(e) => {
                     cx.send(Msg::Searched(Err(e)));
                     return;
                 }
             };
+            flush(true);
             let mut found = q.filter(&cats);
             // 整理の結果の条件（重複・版の判定）
             let (need_dupes, need_versions) = q.needs_marks();
@@ -1932,7 +1971,7 @@ fn cmd_similar() {
         let opts = a.similar_options();
         let cache = a.catalog_cache(false);
         a.start("似たファイルを探しています", move |cx| {
-            let cats = match work::scan_all(cx, &roots, &scan, Some(&cache)) {
+            let cats = match work::scan_all(cx, &roots, &scan, Some(&cache), None) {
                 Ok(c) => c,
                 Err(e) => {
                     cx.send(Msg::Similar(Err(e)));
@@ -1959,7 +1998,7 @@ fn cmd_dupes() {
         // 中身を読むので目録は使い回さない（走査し直して保存する）
         let cache = a.catalog_cache(true);
         a.start("重複を探しています", move |cx| {
-            let cats = match work::scan_all(cx, &roots, &scan, Some(&cache)) {
+            let cats = match work::scan_all(cx, &roots, &scan, Some(&cache), None) {
                 Ok(c) => c,
                 Err(e) => {
                     cx.send(Msg::Dupes(Err(e)));
@@ -2432,6 +2471,38 @@ fn handle(m: Msg) {
                 a.refresh_list(TAB_SEARCH);
                 let msg = format!(
                     "前回の目録で {} 件見つかりました。走査し直しています…（Esc で中止）",
+                    a.search_rows.len()
+                );
+                a.set_status(&msg);
+            });
+        }
+        Msg::SearchFound(ri, root, files) => {
+            with(|a| {
+                // 走査しながらの結果は、仮の目録（場所ごと）に足していく。走査し終えたら置き換わる
+                while a.search_cats.len() <= ri {
+                    a.search_cats.push(Catalog::default());
+                }
+                let c = &mut a.search_cats[ri];
+                if c.root != root {
+                    *c = Catalog {
+                        root,
+                        ..Catalog::default()
+                    };
+                }
+                for f in files {
+                    a.search_rows.push(SearchRow {
+                        file: FileRef {
+                            root: ri,
+                            index: c.files.len(),
+                        },
+                        line: 0,
+                        text: String::new(),
+                    });
+                    c.files.push(f);
+                }
+                a.refresh_list(TAB_SEARCH);
+                let msg = format!(
+                    "走査しながら {} 件見つかりました…（Esc で中止）",
                     a.search_rows.len()
                 );
                 a.set_status(&msg);

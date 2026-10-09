@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::fs::Fs;
-use crate::scan::{Catalog, ScanOptions, ScanProgress, scan};
+use crate::scan::{Catalog, Found, ScanOptions, ScanProgress, scan_with};
 
 const MAGIC: &[u8; 8] = b"YYFMCAT1";
 
@@ -75,6 +75,7 @@ pub fn scan_cached(
     now: i64,
     force: bool,
     progress: &(dyn Fn(&ScanProgress) -> bool + Sync),
+    found: Option<&Found<'_>>,
 ) -> io::Result<(Catalog, Option<i64>)> {
     if !force
         && let Ok(st) = load(dir, root)
@@ -85,7 +86,7 @@ pub fn scan_cached(
     {
         return Ok((st.catalog, Some(st.scanned_at)));
     }
-    let c = scan(fs, root, opts, progress)?;
+    let c = scan_with(fs, root, opts, progress, found)?;
     // 保存できなくても検索は続ける
     let _ = save(dir, &c, opts, now);
     Ok((c, None))
@@ -114,6 +115,7 @@ mod tests {
             1000 * MIN,
             false,
             &|_| true,
+            None,
         )
         .unwrap();
         assert_eq!((c.files.len(), used), (1, None));
@@ -128,6 +130,7 @@ mod tests {
             1010 * MIN,
             false,
             &|_| true,
+            None,
         )
         .unwrap();
         assert_eq!((c.files.len(), used), (1, Some(1000 * MIN)));
@@ -141,6 +144,7 @@ mod tests {
             1100 * MIN,
             false,
             &|_| true,
+            None,
         )
         .unwrap();
         assert_eq!((c.files.len(), used), (2, None));
@@ -153,6 +157,7 @@ mod tests {
             1101 * MIN,
             true,
             &|_| true,
+            None,
         )
         .unwrap();
         assert_eq!(used, None);
@@ -169,6 +174,7 @@ mod tests {
             1102 * MIN,
             false,
             &|_| true,
+            None,
         )
         .unwrap();
         assert_eq!((c.files.len(), used), (0, None));

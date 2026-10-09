@@ -34,6 +34,8 @@ pub(super) enum Msg {
     SyncFinished(Run, PathBuf, Result<RunCounts, String>),
     /// 走査し直す前に、前回の目録で見つかったもの（名前・属性だけの検索）
     SearchPartial(Vec<Catalog>, Vec<SearchHit>),
+    /// 走査しながら見つかったもの（何番目の場所・そのルート・ファイル。名前・属性だけの検索）
+    SearchFound(usize, PathBuf, Vec<yy_files::FileEntry>),
     /// 目録と、見つかったファイル（行の番号・行。名前だけの検索なら 0 と空）
     Searched(Result<(Vec<Catalog>, Vec<SearchHit>), String>),
     Similar(Result<(Vec<Catalog>, Vec<VersionGroup>), String>),
@@ -188,15 +190,26 @@ pub(super) struct CatalogCache {
     pub(super) force: bool,
 }
 
+/// 走査しながら見つかったファイルを渡す口（何番目の場所か・ファイル）。
+pub(super) type FoundIn<'a> = dyn Fn(usize, &[yy_files::FileEntry]) + Sync + 'a;
+
 /// いくつかの場所を走査する（`cache` があれば、新しい保存した目録を使い、走査した目録は保存する）。
+/// `found` があれば、走査し直す場所で見つかったファイルを順に渡す（何番目の場所か・ファイル）。
 pub(super) fn scan_all(
     cx: &Ctx,
     roots: &[PathBuf],
     scan: &ScanOptions,
     cache: Option<&CatalogCache>,
+    found: Option<&FoundIn<'_>>,
 ) -> Result<Vec<Catalog>, String> {
     let mut cats = Vec::new();
-    for r in roots {
+    for (ri, r) in roots.iter().enumerate() {
+        let each = |fs: &[yy_files::FileEntry]| {
+            if let Some(f) = found {
+                f(ri, fs);
+            }
+        };
+        let each: Option<&yy_files::scan::Found<'_>> = found.map(|_| &each as _);
         let progress = |p: &yy_files::scan::ScanProgress| {
             cx.progress(&format!("{} を走査しています… {} 個", r.display(), p.files))
         };
@@ -210,6 +223,7 @@ pub(super) fn scan_all(
                 k.now,
                 k.force,
                 &progress,
+                each,
             )
             .map(|(c, used)| {
                 if let Some(t) = used {
@@ -221,7 +235,7 @@ pub(super) fn scan_all(
                 }
                 c
             }),
-            None => yy_files::scan(&yy_files::Local, r, scan, &progress),
+            None => yy_files::scan_with(&yy_files::Local, r, scan, &progress, each),
         }
         .map_err(|e| format!("{}: {}", r.display(), describe(&e)))?;
         if !c.errors.is_empty() {

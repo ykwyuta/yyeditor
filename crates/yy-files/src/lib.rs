@@ -29,7 +29,7 @@ pub mod similar;
 pub mod sync;
 
 pub use fs::{DirEntry, Fs, Local, Meta};
-pub use scan::{Catalog, FileEntry, ScanOptions, scan};
+pub use scan::{Catalog, FileEntry, ScanOptions, scan, scan_with};
 
 /// 中止したことを表すエラー（`ErrorKind::Interrupted` は読み直しの合図に使われるので使わない）。
 #[derive(Debug)]

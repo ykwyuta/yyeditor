@@ -64,6 +64,8 @@ pub struct SyncOptions {
     pub delta_min: u64,
     /// 差分の送り方のブロックの大きさ
     pub delta_block: u64,
+    /// 送ったファイルにアクセス権（ACL）も写す（写せなくても失敗にはしない）
+    pub copy_acl: bool,
 }
 
 impl Default for SyncOptions {
@@ -77,6 +79,7 @@ impl Default for SyncOptions {
             checkpoint_bytes: 64 << 20,
             delta_min: 64 << 20,
             delta_block: 1 << 20,
+            copy_acl: false,
         }
     }
 }
@@ -977,6 +980,17 @@ fn finish(
         fs.set_readonly(dst, false)?;
     }
     fs.rename_replace(part, dst)?;
+    if ex.opts.copy_acl
+        && let Err(e) = fs.copy_acl(src, dst)
+    {
+        if is_crash(&e) {
+            return Err(e);
+        }
+        (ex.hooks.event)(Event::Log(format!(
+            "{}: アクセス権を写せませんでした（送るのは済みました）: {e}",
+            item.rel
+        )));
+    }
     if now.readonly {
         fs.set_readonly(dst, true)?;
     }

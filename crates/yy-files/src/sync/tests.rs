@@ -662,11 +662,21 @@ fn delta_through_a_windows_share() {
     let d = tempfile::tempdir().unwrap();
     let local = d.path().to_string_lossy().into_owned();
     let Some((drive, rest)) = local.split_once(":\\") else {
+        assert!(
+            std::env::var_os("YY_REQUIRE_SMB_SHARE").is_none(),
+            "{local}"
+        );
         eprintln!("ドライブ文字のない一時フォルダ（{local}）なので飛ばします");
         return;
     };
     let share = PathBuf::from(format!(r"\\localhost\{drive}$\{rest}"));
-    if Local.metadata(&share).is_err() {
+    if let Err(e) = Local.metadata(&share) {
+        // CI（YY_REQUIRE_SMB_SHARE=1）では飛ばさない
+        assert!(
+            std::env::var_os("YY_REQUIRE_SMB_SHARE").is_none(),
+            "{} を使えません: {e}",
+            share.display()
+        );
         eprintln!("{} を使えないので飛ばします", share.display());
         return;
     }
@@ -766,4 +776,31 @@ fn mirror_moves_to_the_chosen_trash_and_reads_old_journals() {
     let back = Run::load(&journal).unwrap();
     assert_eq!((back.id, back.trash_root.as_path()), (9, dst.as_path()));
     assert_eq!(back.items, run.items);
+}
+
+#[cfg(unix)]
+#[test]
+fn copies_access_rights_when_asked() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let (src, dst) = (d.path().join("src"), d.path().join("dst"));
+    write(&src, "a.txt", b"a", T0);
+    std::fs::set_permissions(src.join("a.txt"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    for (copy_acl, want) in [(false, None), (true, Some(0o600))] {
+        let _ = std::fs::remove_file(dst.join("a.txt"));
+        let opts = SyncOptions {
+            copy_acl,
+            ..SyncOptions::default()
+        };
+        let p = plan(&cat(&src), &cat(&dst), None, &opts, &mut |_, _| Ok(false)).unwrap();
+        let mut run = Run::new(1, &p, opts.mode, "t");
+        let mut st = SyncState::default();
+        run_once(&Local, &mut run, &d.path().join("1.run"), &opts, &mut st).unwrap();
+        match want {
+            Some(m) => assert_eq!(mode(&dst.join("a.txt")), m),
+            None => assert_ne!(mode(&dst.join("a.txt")), 0o600),
+        }
+    }
 }

@@ -3376,6 +3376,7 @@ dependencies = [
  "tempfile",
  "toml",
  "unicode-normalization",
+ "windows",
  "yy-buffer",
  "yy-core",
  "yy-encoding",

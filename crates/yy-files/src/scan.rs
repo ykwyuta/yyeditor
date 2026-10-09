@@ -102,7 +102,11 @@ struct Shared<'a> {
     bytes: AtomicU64,
     stop: AtomicBool,
     progress: &'a (dyn Fn(&ScanProgress) -> bool + Sync),
+    found: Option<&'a Found<'a>>,
 }
+
+/// 走査しながら、見つかったファイルを渡す口（フォルダごとに、そのフォルダのファイル）。
+pub type Found<'a> = dyn Fn(&[FileEntry]) + Sync + 'a;
 
 fn visit<'s>(s: &rayon::Scope<'s>, sh: &'s Shared<'s>, rel: String) {
     if sh.stop.load(Ordering::Relaxed) {
@@ -144,6 +148,11 @@ fn visit<'s>(s: &rayon::Scope<'s>, sh: &'s Shared<'s>, rel: String) {
         }
     }
     let n = local.len() as u64;
+    if let Some(f) = sh.found
+        && !local.is_empty()
+    {
+        f(&local);
+    }
     sh.files.lock().unwrap().extend(local);
     let files = sh.nfiles.fetch_add(n, Ordering::Relaxed) + n;
     let p = ScanProgress {
@@ -162,6 +171,17 @@ pub fn scan(
     root: &Path,
     opts: &ScanOptions,
     progress: &(dyn Fn(&ScanProgress) -> bool + Sync),
+) -> io::Result<Catalog> {
+    scan_with(fs, root, opts, progress, None)
+}
+
+/// 走査する（`found` があれば、見つかった順にファイルを渡す。検索で結果を順に出すため）。
+pub fn scan_with(
+    fs: &dyn Fs,
+    root: &Path,
+    opts: &ScanOptions,
+    progress: &(dyn Fn(&ScanProgress) -> bool + Sync),
+    found: Option<&Found<'_>>,
 ) -> io::Result<Catalog> {
     let m = fs.metadata(root)?;
     if !m.dir {
@@ -184,6 +204,7 @@ pub fn scan(
         bytes: AtomicU64::new(0),
         stop: AtomicBool::new(false),
         progress,
+        found,
     };
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads.max(1))
@@ -241,6 +262,19 @@ mod tests {
         assert_eq!(c.get("sub/b.txt").unwrap().name(), "b.txt");
         assert_eq!(c.get("sub/深い/c.txt").unwrap().dir(), "sub/深い");
         assert!(c.get("nope").is_none());
+        // 見つかった順に渡す（全部を合わせると目録と同じ）
+        let seen = Mutex::new(Vec::new());
+        let c2 = scan_with(
+            &Local,
+            d.path(),
+            &ScanOptions::default(),
+            &|_| true,
+            Some(&|fs: &[FileEntry]| seen.lock().unwrap().extend(fs.iter().cloned())),
+        )
+        .unwrap();
+        let mut seen = seen.into_inner().unwrap();
+        seen.sort_by(|a, b| a.rel.cmp(&b.rel));
+        assert_eq!(seen, c2.files);
         // 中止
         let e = scan(&Local, d.path(), &ScanOptions::default(), &|_| false).unwrap_err();
         assert!(crate::is_cancelled(&e));

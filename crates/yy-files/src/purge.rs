@@ -762,6 +762,9 @@ mod tests {
         fn open_patch(&self, p: &Path) -> io::Result<Box<dyn crate::fs::PatchFile>> {
             Local.open_patch(p)
         }
+        fn copy_acl(&self, a: &Path, b: &Path) -> io::Result<()> {
+            Local.copy_acl(a, b)
+        }
     }
 
     #[test]

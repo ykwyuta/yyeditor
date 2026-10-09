@@ -23,6 +23,11 @@ yy-buffer.workspace = true
 yy-core.workspace = true
 yy-search.workspace = true
 
+# ACL を写す（同期の copy_acl）
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"]
+
 [dev-dependencies]
 yy-encoding.workspace = true
 tempfile.workspace = true

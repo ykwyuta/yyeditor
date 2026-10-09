@@ -82,6 +82,8 @@ jobs:
           Get-ItemProperty $key -ErrorAction SilentlyContinue | Select-Object pv
           # プレビューのテストで WebView2 を必須にする
           "YY_REQUIRE_WEBVIEW2=1" >> $env:GITHUB_ENV
+          # ファイル管理の試験で、手元の管理共有（\\localhost\C$）を必須にする（飛ばさない）
+          "YY_REQUIRE_SMB_SHARE=1" >> $env:GITHUB_ENV
       - name: test
         run: cargo test --workspace
       - name: build release

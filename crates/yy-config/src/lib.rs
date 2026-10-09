@@ -81,6 +81,8 @@ pub struct FileManagerConfig {
     pub delta_min_mb: u64,
     /// 送った後の確かめ（"size" か "hash"）
     pub verify: String,
+    /// 同期で送ったファイルにアクセス権（ACL）も写す
+    pub copy_acl: bool,
     /// 似ている度合いのしきい値
     pub similar_threshold: f64,
     /// 隔離フォルダに残す日数
@@ -105,6 +107,7 @@ impl Default for FileManagerConfig {
             time_tolerance_sec: 2.0,
             delta_min_mb: 64,
             verify: "size".into(),
+            copy_acl: false,
             similar_threshold: 0.85,
             trash_days: 30,
             search_threads: 8,
