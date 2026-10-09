@@ -5,7 +5,8 @@
 
 角丸の四角に白の「YY」を描く。エディタは青地にテキストの行を表す線、ターミナルは黒地に
 プロンプト（`>_`）、ファイル転送は緑地に上下の矢印、スプレッドシートは橙地に表の格子、
-クリップボード履歴は紫地にクリップボード、ファイル管理は水色地にフォルダ。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
+クリップボード履歴は紫地にクリップボード、ファイル管理は水色地にフォルダ、ブラウザはローズ地に地球。
+どのサイズ（16 px も）でも YY の下に記号を描き、色だけの違いにしない。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
 Pillow が必要。
 """
 
@@ -23,7 +24,7 @@ TRANSFER = ((0x10, 0xB9, 0x81), (0x04, 0x78, 0x57))
 SHEET = ((0xF5, 0x9E, 0x0B), (0xB4, 0x53, 0x09))
 CLIP = ((0xA8, 0x55, 0xF7), (0x6B, 0x21, 0xA8))
 FILES = ((0x06, 0xB6, 0xD4), (0x0E, 0x74, 0x90))
-BROWSER = ((0x0e, 0x7c, 0x86), (0x0a, 0x4f, 0x8c))  # 青緑から紺
+BROWSER = ((0xF4, 0x3F, 0x5E), (0x9F, 0x12, 0x39))  # ローズ（ほかの色と重ならない）
 PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
@@ -42,8 +43,69 @@ def draw_y(d, x, y, w, h, t, a):
     )
 
 
+def draw_symbol(d, kind, x, y, w, h, t, ot):
+    """アプリの記号を枠（左上 (x, y)、幅 w・高さ h）の中に描く。t は太い線（行・矢印・プロンプト）、
+    ot は輪郭の線（格子・用紙・地球）の太さ。"""
+    if kind == "terminal":
+        # プロンプト「>_」
+        size_p = h
+        left = x + (w - size_p * 1.9) / 2
+        d.line(
+            [(left, y), (left + size_p * 0.65, y + size_p / 2), (left, y + size_p)],
+            fill=PROMPT,
+            width=round(t),
+            joint="curve",
+        )
+        ux = left + size_p * 0.95
+        d.rectangle([ux, y + size_p - t, ux + size_p * 0.95, y + size_p], fill=PROMPT)
+    elif kind == "transfer":
+        # 上向きと下向きの矢印
+        ah = h * 0.55
+        for cx, up in [(x + w * 0.3, True), (x + w * 0.7, False)]:
+            y0, y1 = y, y + h
+            d.rectangle([cx - t / 2, y0 + (ah * 0.6 if up else 0), cx + t / 2, y1 - (0 if up else ah * 0.6)], fill=WHITE)
+            tip, base = (y0, y0 + ah) if up else (y1, y1 - ah)
+            d.polygon([(cx, tip), (cx - ah * 0.65, base), (cx + ah * 0.65, base)], fill=WHITE)
+    elif kind == "sheet":
+        # 表の格子（3 列 × 2 行）
+        for i in range(4):
+            xx = x + (w - ot) * i / 3
+            d.rectangle([xx, y, xx + ot, y + h], fill=WHITE)
+        for j in range(3):
+            yy = y + (h - ot) * j / 2
+            d.rectangle([x, yy, x + w, yy + ot], fill=WHITE)
+    elif kind == "clip":
+        # クリップ付きの用紙
+        bw = min(w * 0.6, h * 1.25)
+        bx = x + (w - bw) / 2
+        d.rounded_rectangle([bx, y + h * 0.2, bx + bw, y + h], radius=ot, outline=WHITE, width=round(ot))
+        d.rounded_rectangle([bx + bw * 0.25, y, bx + bw * 0.75, y + h * 0.38], radius=ot / 2, fill=WHITE)
+        # 用紙の行
+        d.rectangle([bx + bw * 0.25, y + h * 0.58, bx + bw * 0.75, y + h * 0.58 + ot], fill=WHITE)
+    elif kind == "files":
+        # フォルダ（つまみ付き）
+        d.rounded_rectangle([x, y, x + w * 0.45, y + h * 0.4], radius=t / 2, fill=WHITE)
+        d.rounded_rectangle([x, y + h * 0.18, x + w, y + h], radius=t / 2, fill=WHITE)
+    elif kind == "browser":
+        # 地球（円と経線・緯線）
+        r = h / 2
+        cx, cy = x + w / 2, y + r
+        lt = max(1, round(ot))
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=WHITE, width=lt)
+        if lt < r * 0.25:
+            d.ellipse([cx - r * 0.42, cy - r, cx + r * 0.42, cy + r], outline=WHITE, width=lt)
+        else:
+            # 小さいときは線が重なってつぶれるので、経線は 1 本にする
+            d.rectangle([cx - lt / 2, cy - r, cx + lt / 2, cy + r], fill=WHITE)
+        d.rectangle([cx - r, cy - lt / 2, cx + r, cy + lt / 2], fill=WHITE)
+    else:
+        # テキストの行
+        for i, right in enumerate([1.0, 0.62]):
+            yy = y + (h - t) * i
+            d.rounded_rectangle([x, yy, x + w * right, yy + t], radius=t / 2, fill=WHITE)
+
+
 def render(size, kind="editor"):
-    terminal = kind == "terminal"
     top_c, bottom_c = {
         "editor": EDITOR,
         "terminal": TERMINAL,
@@ -70,88 +132,26 @@ def render(size, kind="editor"):
     img.paste(grad, (0, 0), mask)
 
     d = ImageDraw.Draw(img)
-    small = size < 32
-    # 小さいサイズは「YY」だけを大きく描く
-    if small:
-        # V の切れ込みがつぶれないよう、腕を細く・文字を幅広にする
-        t, a = n * 0.12, n * 0.12
-        top, h = n * 0.16, n * 0.68
-        w, gap = n * 0.4, n * 0.04
+    # どのサイズでも「YY」の下にアプリの記号を描く（色だけの違いにしない）。小さいサイズは YY を
+    # 小さめにして、記号を太く大きく描く（16 px でも形で見分けられるように）
+    if size < 40:
+        t, a = n * 0.11, n * 0.1
+        top, h = n * 0.08, n * 0.4
+        w, gap = n * 0.34, n * 0.05
+        box = (n * 0.14, n * 0.56, n * 0.72, n * 0.36)
+        st = n * 0.12
+        ot = n * 0.075
     else:
         t, a = n * 0.1, n * 0.12
         top, h = n * 0.14, n * 0.44
         w, gap = n * 0.3, n * 0.06
+        box = (n * 0.22, n * 0.65, n * 0.56, n * 0.22)
+        st = n * 0.055
+        ot = n * 0.03
     x0 = (n - (w * 2 + gap)) / 2
     draw_y(d, x0, top, w, h, t, a)
     draw_y(d, x0 + w + gap, top, w, h, t, a)
-    if not small and terminal:
-        # プロンプト「>_」
-        lt = n * 0.06
-        left, yy = n * 0.2, n * 0.7
-        size_p = n * 0.16
-        d.line([(left, yy), (left + size_p * 0.7, yy + size_p / 2), (left, yy + size_p)], fill=PROMPT, width=round(lt))
-        ux = left + size_p * 0.95
-        d.rectangle([ux, yy + size_p - lt, ux + size_p * 0.9, yy + size_p], fill=PROMPT)
-    elif not small and kind == "transfer":
-        # 上向きと下向きの矢印
-        lt = n * 0.06
-        ah = n * 0.2
-        for cx, up in [(n * 0.38, True), (n * 0.62, False)]:
-            y0, y1 = n * 0.64, n * 0.88
-            d.rectangle([cx - lt / 2, y0 + (lt if up else 0), cx + lt / 2, y1 - (0 if up else lt)], fill=WHITE)
-            tip, base = (y0, y0 + ah * 0.6) if up else (y1, y1 - ah * 0.6)
-            d.polygon([(cx, tip), (cx - ah / 2, base), (cx + ah / 2, base)], fill=WHITE)
-    elif not small and kind == "sheet":
-        # 表の格子（3 列 × 2 行の枠）
-        lt = n * 0.04
-        left, right = n * 0.2, n * 0.8
-        top_g, bottom_g = n * 0.64, n * 0.88
-        for i in range(4):
-            x = left + (right - left) * i / 3
-            d.rectangle([x - lt / 2, top_g, x + lt / 2, bottom_g], fill=LINE)
-        for j in range(3):
-            y = top_g + (bottom_g - top_g) * j / 2
-            d.rectangle([left, y - lt / 2, right, y + lt / 2], fill=LINE)
-    elif not small and kind == "clip":
-        # クリップ付きの用紙。32px でも輪郭が残るように太めに描く。
-        lt = round(n * 0.05)
-        d.rounded_rectangle(
-            [n * 0.31, n * 0.68, n * 0.69, n * 0.9],
-            radius=n * 0.025,
-            outline=WHITE,
-            width=lt,
-        )
-        d.rounded_rectangle(
-            [n * 0.42, n * 0.63, n * 0.58, n * 0.72],
-            radius=n * 0.025,
-            fill=WHITE,
-        )
-        for yy in (0.77, 0.83):
-            d.rounded_rectangle(
-                [n * 0.39, n * yy, n * 0.61, n * (yy + 0.025)],
-                radius=n * 0.012,
-                fill=LINE,
-            )
-    elif not small and kind == "files":
-        # フォルダ（つまみ付き）
-        d.rounded_rectangle([n * 0.24, n * 0.62, n * 0.46, n * 0.7], radius=n * 0.02, fill=WHITE)
-        d.rounded_rectangle([n * 0.24, n * 0.66, n * 0.76, n * 0.9], radius=n * 0.03, fill=WHITE)
-        d.rectangle([n * 0.28, n * 0.72, n * 0.72, n * 0.735], fill=FILES[1] + (255,))
-    elif not small and kind == "browser":
-        # 地球（円と経線・緯線）
-        lt = max(1, round(n * 0.035))
-        cx, cy, r = n * 0.5, n * 0.76, n * 0.15
-        d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=WHITE, width=lt)
-        d.ellipse([cx - r * 0.45, cy - r, cx + r * 0.45, cy + r], outline=WHITE, width=lt)
-        d.line([(cx - r, cy), (cx + r, cy)], fill=WHITE, width=lt)
-        d.line([(cx, cy - r), (cx, cy + r)], fill=WHITE, width=lt)
-    elif not small:
-        # テキストの行
-        lt = n * 0.055
-        left = n * 0.18
-        for i, right in enumerate([0.82, 0.66]):
-            yy = n * (0.7 + i * 0.12)
-            d.rounded_rectangle([left, yy, n * right, yy + lt], radius=lt / 2, fill=LINE)
+    draw_symbol(d, kind, *box, st, ot)
     return img.resize((size, size), Image.LANCZOS)
 
 
