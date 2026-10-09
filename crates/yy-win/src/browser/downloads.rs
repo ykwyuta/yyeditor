@@ -271,15 +271,74 @@ fn on_state(id: u64, st: COREWEBVIEW2_DOWNLOAD_STATE, path: String) {
             url: d.url.clone(),
             path: d.path.clone(),
         };
+        if state == DownloadState::Completed {
+            // 同じフォルダに同じ内容のファイルがあるかは別のスレッドで調べる（大きなファイルもあるので）
+            a.set_status(&format!(
+                "ダウンロードしました。重複を調べています: {}",
+                d.name()
+            ));
+            let frame = a.frame.0 as isize;
+            std::thread::spawn(move || {
+                let dup = history::discard_if_duplicate(Path::new(&rec.path));
+                let b = Box::new(Finished { rec, dup });
+                let p = Box::into_raw(b);
+                let ok = unsafe {
+                    PostMessageW(
+                        Some(HWND(frame as *mut _)),
+                        WM_APP_DOWNLOAD_DONE,
+                        WPARAM(0),
+                        LPARAM(p as isize),
+                    )
+                };
+                if ok.is_err() {
+                    drop(unsafe { Box::from_raw(p) });
+                }
+            });
+            return;
+        }
         let _ = history::append(&log_path(a), &rec, history::MAX_DOWNLOADS);
         let msg = match state {
-            DownloadState::Completed => format!(
-                "ダウンロードしました: {}（Ctrl+J でダウンロードの一覧）",
-                d.name()
-            ),
             DownloadState::Cancelled => format!("ダウンロードを中止しました: {}", d.name()),
-            DownloadState::Failed => format!("ダウンロードできませんでした: {}", d.name()),
+            _ => format!("ダウンロードできませんでした: {}", d.name()),
         };
+        a.set_status(&msg);
+    });
+}
+
+/// 重複を調べ終わったダウンロード（`lparam` は `Box<Finished>`）。
+pub(super) const WM_APP_DOWNLOAD_DONE: u32 = WM_APP + 126;
+
+/// 重複を調べ終わったダウンロード。
+pub(super) struct Finished {
+    rec: DownloadRecord,
+    /// 同じ内容の、前からあるファイル（あれば新しいほうは消した）
+    dup: std::io::Result<Option<PathBuf>>,
+}
+
+/// 重複を調べ終わった: 履歴に残して知らせる。
+pub(super) fn finished(f: Finished) {
+    let Finished { mut rec, dup } = f;
+    let name = Path::new(&rec.path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let msg = match dup {
+        Ok(Some(existing)) => {
+            rec.state = DownloadState::Duplicate;
+            rec.path = existing.to_string_lossy().into_owned();
+            let ename = existing
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            format!(
+                "同じ内容のファイル「{ename}」が既にあるので、ダウンロードした「{name}」は破棄しました"
+            )
+        }
+        Ok(None) => format!("ダウンロードしました: {name}（Ctrl+J でダウンロードの一覧）"),
+        Err(e) => format!("ダウンロードしました: {name}（重複を調べられませんでした: {e}）"),
+    };
+    with(|a| {
+        let _ = history::append(&log_path(a), &rec, history::MAX_DOWNLOADS);
         a.set_status(&msg);
     });
 }
@@ -520,6 +579,7 @@ fn fill(dlg: HWND, st: &mut State) {
             DownloadState::Completed => "✔",
             DownloadState::Cancelled => "✖",
             DownloadState::Failed => "⚠",
+            DownloadState::Duplicate => "♻",
         };
         lines.push(format!(
             "{mark} {name}　—　{} {}・{}　—　{}",
@@ -632,7 +692,12 @@ extern "system" fn dialog_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 let row = selected(dlg).and_then(|i| st.rows.get(i).cloned());
                 match id {
                     D_OPEN => match &row {
-                        Some(Row::Done(r)) if r.state == DownloadState::Completed => {
+                        Some(Row::Done(r))
+                            if matches!(
+                                r.state,
+                                DownloadState::Completed | DownloadState::Duplicate
+                            ) =>
+                        {
                             open_path(&r.path)
                         }
                         Some(Row::Done(_)) => {
@@ -645,7 +710,10 @@ extern "system" fn dialog_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                     },
                     D_LIST if code == LBN_DBLCLK => {
                         if let Some(Row::Done(r)) = &row
-                            && r.state == DownloadState::Completed
+                            && matches!(
+                                r.state,
+                                DownloadState::Completed | DownloadState::Duplicate
+                            )
                         {
                             open_path(&r.path);
                         }

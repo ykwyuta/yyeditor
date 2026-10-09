@@ -3022,6 +3022,11 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             fill_search_menu(m);
             LRESULT(0)
         }
+        downloads::WM_APP_DOWNLOAD_DONE => {
+            let f = unsafe { Box::from_raw(lparam.0 as *mut downloads::Finished) };
+            downloads::finished(*f);
+            LRESULT(0)
+        }
         downloads::WM_APP_DOWNLOAD_ASK => {
             let b = unsafe { Box::from_raw(lparam.0 as *mut downloads::Ask) };
             downloads::ask(hwnd, *b);
@@ -3232,6 +3237,7 @@ mod tests {
     fn pages_go_through_the_profile_proxy_in_webview2() {
         use std::io::{Read, Write};
         use std::sync::{Arc, Mutex};
+        let _serial = crate::preview::testing::webview2_lock();
         let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -3367,6 +3373,7 @@ mod tests {
     fn rules_host_maps_and_dev_certificates_in_webview2() {
         use std::io::{Read, Write};
         use std::sync::{Arc, Mutex};
+        let _serial = crate::preview::testing::webview2_lock();
         let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -3559,6 +3566,7 @@ mod tests {
         use std::rc::Rc;
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
+        let _serial = crate::preview::testing::webview2_lock();
         let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -3791,6 +3799,7 @@ mod tests {
         use std::io::{Read, Write};
         use std::rc::Rc;
         use std::time::Duration;
+        let _serial = crate::preview::testing::webview2_lock();
         let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -3955,6 +3964,15 @@ mod tests {
         });
         assert_eq!(std::fs::read(&target).unwrap(), body);
         assert_eq!(std::fs::read(dir.join("data.bin")).unwrap(), b"old");
+        // 同じ内容のファイル（名前は違う）が前からあれば、ダウンロードしたものは破棄する（downloads::finished と同じ）
+        assert_eq!(
+            yy_browser::history::discard_if_duplicate(&target).unwrap(),
+            None
+        );
+        std::fs::write(dir.join("copy.bin"), &body).unwrap();
+        let dup = yy_browser::history::discard_if_duplicate(&target).unwrap();
+        assert_eq!(dup.as_deref(), Some(dir.join("copy.bin").as_path()));
+        assert!(!target.exists());
     }
 
     #[test]

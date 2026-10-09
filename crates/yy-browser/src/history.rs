@@ -184,6 +184,8 @@ pub enum DownloadState {
     Completed,
     Cancelled,
     Failed,
+    /// 同じ内容のファイルがフォルダにあったので、新しく落としたものは消した（`path` は前からあるファイル）
+    Duplicate,
 }
 
 impl DownloadState {
@@ -192,6 +194,7 @@ impl DownloadState {
             DownloadState::Completed => "完了",
             DownloadState::Cancelled => "中止",
             DownloadState::Failed => "失敗",
+            DownloadState::Duplicate => "重複のため破棄",
         }
     }
     fn code(self) -> &'static str {
@@ -199,6 +202,7 @@ impl DownloadState {
             DownloadState::Completed => "done",
             DownloadState::Cancelled => "cancelled",
             DownloadState::Failed => "failed",
+            DownloadState::Duplicate => "dup",
         }
     }
     fn parse(s: &str) -> Option<DownloadState> {
@@ -206,6 +210,7 @@ impl DownloadState {
             "done" => DownloadState::Completed,
             "cancelled" => DownloadState::Cancelled,
             "failed" => DownloadState::Failed,
+            "dup" => DownloadState::Duplicate,
             _ => return None,
         })
     }
@@ -240,6 +245,76 @@ impl Record for DownloadRecord {
             url: f.get(3)?.to_string(),
             path: f.get(4)?.to_string(),
         })
+    }
+}
+
+/// ファイルの SHA-256。
+fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().into())
+}
+
+/// ダウンロードしたファイルと同じ内容（SHA-256 が同じ）のファイルが、同じフォルダ（サブフォルダは見ない）に
+/// 前からあれば、そのパス。大きさが同じものだけハッシュを比べる。ダウンロード途中のファイル
+/// （`.crdownload`・`.partial`・`.tmp`）は比べない。
+pub fn find_duplicate(new_file: &Path) -> io::Result<Option<std::path::PathBuf>> {
+    let len = std::fs::metadata(new_file)?.len();
+    let Some(dir) = new_file.parent() else {
+        return Ok(None);
+    };
+    let me = std::fs::canonicalize(new_file).unwrap_or_else(|_| new_file.to_path_buf());
+    let mut mine: Option<[u8; 32]> = None;
+    for entry in std::fs::read_dir(dir)? {
+        let Ok(entry) = entry else { continue };
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() || meta.len() != len {
+            continue;
+        }
+        let p = entry.path();
+        let lower = p.to_string_lossy().to_ascii_lowercase();
+        if [".crdownload", ".partial", ".tmp"]
+            .iter()
+            .any(|e| lower.ends_with(e))
+        {
+            continue;
+        }
+        if std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone()) == me {
+            continue;
+        }
+        let a = match mine {
+            Some(h) => h,
+            None => {
+                let h = sha256_file(new_file)?;
+                mine = Some(h);
+                h
+            }
+        };
+        if sha256_file(&p).ok() == Some(a) {
+            return Ok(Some(p));
+        }
+    }
+    Ok(None)
+}
+
+/// ダウンロードしたファイルが重複なら消して、前からあるファイルのパスを返す（重複でなければ `None`）。
+pub fn discard_if_duplicate(new_file: &Path) -> io::Result<Option<std::path::PathBuf>> {
+    match find_duplicate(new_file)? {
+        Some(existing) => {
+            std::fs::remove_file(new_file)?;
+            Ok(Some(existing))
+        }
+        None => Ok(None),
     }
 }
 
@@ -396,6 +471,49 @@ mod tests {
             .write_all(b"garbage line\n")
             .unwrap();
         assert_eq!(load::<DownloadRecord>(&p), [r, c]);
+    }
+
+    #[test]
+    fn discards_duplicate_downloads() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path();
+        std::fs::write(dir.join("report.pdf"), b"same content").unwrap();
+        std::fs::write(dir.join("other.pdf"), b"same-content").unwrap(); // 同じ大きさで中身が違う
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("deep.pdf"), b"unique data!").unwrap();
+        // 同じ内容: 新しいほうを消す
+        let new = dir.join("report (1).pdf");
+        std::fs::write(&new, b"same content").unwrap();
+        let found = discard_if_duplicate(&new).unwrap();
+        assert_eq!(found.as_deref(), Some(dir.join("report.pdf").as_path()));
+        assert!(!new.exists());
+        assert!(dir.join("report.pdf").exists());
+        // 違う内容（大きさは同じ）は残す
+        let new2 = dir.join("x.pdf");
+        std::fs::write(&new2, b"different!!!").unwrap();
+        assert_eq!(discard_if_duplicate(&new2).unwrap(), None);
+        assert!(new2.exists());
+        // サブフォルダは見ない
+        let new3 = dir.join("deep (copy).pdf");
+        std::fs::write(&new3, b"unique data!").unwrap();
+        assert_eq!(discard_if_duplicate(&new3).unwrap(), None);
+        assert!(new3.exists());
+        // 途中のファイルは比べない
+        std::fs::write(dir.join("y.bin.crdownload"), b"abc").unwrap();
+        let new4 = dir.join("y.bin");
+        std::fs::write(&new4, b"abc").unwrap();
+        assert_eq!(discard_if_duplicate(&new4).unwrap(), None);
+        // 履歴に残せる
+        let p = dir.join("downloads.tsv");
+        let r = DownloadRecord {
+            time: 1,
+            state: DownloadState::Duplicate,
+            bytes: 12,
+            url: "https://example.com/report.pdf".into(),
+            path: dir.join("report.pdf").to_string_lossy().into_owned(),
+        };
+        append(&p, &r, MAX_DOWNLOADS).unwrap();
+        assert_eq!(load::<DownloadRecord>(&p), [r]);
     }
 
     #[test]
