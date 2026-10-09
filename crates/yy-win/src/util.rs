@@ -67,6 +67,19 @@ pub(crate) fn info_box(owner: HWND, text: &str) {
 }
 
 /// NUL 終端付きの UTF-16 文字列。
+/// 上限付きの数を 1 つ増やす（上限に達していれば増やさず `false`）。同時に動かすものの数を抑えるのに使う。
+pub(crate) fn try_increment(n: &std::sync::atomic::AtomicUsize, max: usize) -> bool {
+    use std::sync::atomic::Ordering;
+    let mut cur = n.load(Ordering::Acquire);
+    while cur < max {
+        match n.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(now) => cur = now,
+        }
+    }
+    false
+}
+
 pub(crate) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -161,5 +174,21 @@ pub(crate) fn ui_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
             lf
         };
         CreateFontIndirectW(&lf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn increments_up_to_the_limit() {
+        let n = AtomicUsize::new(0);
+        assert!(super::try_increment(&n, 2));
+        assert!(super::try_increment(&n, 2));
+        assert!(!super::try_increment(&n, 2));
+        assert_eq!(n.load(Ordering::Acquire), 2);
+        n.fetch_sub(1, Ordering::AcqRel);
+        assert!(super::try_increment(&n, 2));
     }
 }

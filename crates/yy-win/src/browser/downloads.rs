@@ -10,12 +10,7 @@ static DEDUP_WORKERS: AtomicUsize = AtomicUsize::new(0);
 struct DedupPermit;
 impl DedupPermit {
     fn acquire() -> Option<Self> {
-        DEDUP_WORKERS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < 2).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| Self)
+        crate::util::try_increment(&DEDUP_WORKERS, 2).then_some(Self)
     }
 }
 impl Drop for DedupPermit {
@@ -255,17 +250,14 @@ pub(super) fn ask(frame: HWND, b: Ask) {
     let chosen = crate::fm::pick_file(frame, (&filter.0, &filter.1), Some(&folder), Some(&name));
     unsafe {
         match &chosen {
-            Some(p) => {
+            Some(p)
                 if b.args
                     .SetResultFilePath(&HSTRING::from(p.as_os_str()))
-                    .is_ok()
-                {
-                    start(&b.args, p);
-                } else {
-                    let _ = b.args.SetCancel(true);
-                }
+                    .is_ok() =>
+            {
+                start(&b.args, p);
             }
-            None => {
+            _ => {
                 let _ = b.args.SetCancel(true);
             }
         }

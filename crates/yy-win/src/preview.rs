@@ -62,12 +62,7 @@ static ACTIVE_FETCHES: AtomicUsize = AtomicUsize::new(0);
 struct FetchPermit;
 impl FetchPermit {
     fn acquire() -> Option<Self> {
-        ACTIVE_FETCHES
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < MAX_FETCHES).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| Self)
+        crate::util::try_increment(&ACTIVE_FETCHES, MAX_FETCHES).then_some(Self)
     }
 }
 impl Drop for FetchPermit {
@@ -105,12 +100,7 @@ static ACTIVE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 struct RequestPermit;
 impl RequestPermit {
     fn acquire() -> Option<Self> {
-        ACTIVE_REQUESTS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < MAX_REQUESTS).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| Self)
+        crate::util::try_increment(&ACTIVE_REQUESTS, MAX_REQUESTS).then_some(Self)
     }
 }
 impl Drop for RequestPermit {
