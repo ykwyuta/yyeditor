@@ -3374,6 +3374,7 @@ dependencies = [
  "regex-automata",
  "serde",
  "tempfile",
+ "toml",
  "unicode-normalization",
  "yy-buffer",
  "yy-core",
@@ -3535,6 +3536,7 @@ dependencies = [
  "yy-core",
  "yy-delimited",
  "yy-encoding",
+ "yy-files",
  "yy-formula",
  "yy-git",
  "yy-io",
@@ -3561,6 +3563,13 @@ name = "yyeditor"
 version = "0.1.0"
 dependencies = [
  "yy-ssh",
+ "yy-win",
+]
+
+[[package]]
+name = "yyfilemanager"
+version = "0.1.0"
+dependencies = [
  "yy-win",
 ]
 

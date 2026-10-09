@@ -21,6 +21,7 @@ mod diffstream;
 mod diffview;
 mod download;
 mod findbar;
+mod fm;
 mod font;
 mod goto;
 mod grepdlg;
@@ -49,6 +50,8 @@ use windows::core::{PCWSTR, Result, w};
 
 use crate::util::Context;
 
+/// ファイル管理（yyfilemanager）を起動する
+pub use fm::run_filemanager;
 /// ファイル転送（yysftp）を起動する
 pub use sftp::run_sftp;
 /// スプレッドシート（yysheet）を起動する

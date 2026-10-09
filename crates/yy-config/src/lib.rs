@@ -45,6 +45,8 @@ pub struct Config {
     pub tn3270: Tn3270Config,
     /// スプレッドシート（yysheet。15 章）
     pub sheet: SheetConfig,
+    /// ファイル管理（yyfilemanager。18 章）
+    pub filemanager: FileManagerConfig,
 }
 
 impl Default for Config {
@@ -60,6 +62,50 @@ impl Default for Config {
             transfer: TransferConfig::default(),
             tn3270: Tn3270Config::default(),
             sheet: SheetConfig::default(),
+            filemanager: FileManagerConfig::default(),
+        }
+    }
+}
+
+/// ファイル管理（yyfilemanager。18 章）の設定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FileManagerConfig {
+    /// 走査の並列数
+    pub scan_threads: usize,
+    /// 同期で同時に送るファイルの数
+    pub copy_threads: usize,
+    /// 更新日時の誤差の許し幅（秒）
+    pub time_tolerance_sec: f64,
+    /// 送った後の確かめ（"size" か "hash"）
+    pub verify: String,
+    /// 似ている度合いのしきい値
+    pub similar_threshold: f64,
+    /// 隔離フォルダに残す日数
+    pub trash_days: u32,
+    /// 共有フォルダの中身の検索の並列数
+    pub search_threads: usize,
+    /// これより大きなファイルの中身は探さない（MB）
+    pub search_max_mb: u64,
+    /// 除くファイル（名前のパターン。既定に足す）
+    pub exclude: Vec<String>,
+    /// 削除の候補にしないフォルダ
+    pub protect: Vec<String>,
+}
+
+impl Default for FileManagerConfig {
+    fn default() -> Self {
+        FileManagerConfig {
+            scan_threads: 16,
+            copy_threads: 4,
+            time_tolerance_sec: 2.0,
+            verify: "size".into(),
+            similar_threshold: 0.85,
+            trash_days: 30,
+            search_threads: 8,
+            search_max_mb: 1024,
+            exclude: Vec::new(),
+            protect: Vec::new(),
         }
     }
 }

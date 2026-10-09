@@ -13,6 +13,7 @@ postcard.workspace = true
 rayon.workspace = true
 regex-automata.workspace = true
 serde.workspace = true
+toml.workspace = true
 unicode-normalization.workspace = true
 yy-buffer.workspace = true
 yy-core.workspace = true

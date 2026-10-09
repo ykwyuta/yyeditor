@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""yyeditor・yyterm・yysftp・yysheet・yyclip のアイコンを作る。
+"""yyeditor・yyterm・yysftp・yysheet・yyclip・yyfilemanager のアイコンを作る。
 
     python3 tools/gen-icon/gen_icon.py
 
 角丸の四角に白の「YY」を描く。エディタは青地にテキストの行を表す線、ターミナルは黒地に
 プロンプト（`>_`）、ファイル転送は緑地に上下の矢印、スプレッドシートは橙地に表の格子、
-クリップボード履歴は紫地にクリップボード。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
+クリップボード履歴は紫地にクリップボード、ファイル管理は水色地にフォルダ。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
 Pillow が必要。
 """
 
@@ -22,6 +22,7 @@ TERMINAL = ((0x37, 0x41, 0x51), (0x11, 0x18, 0x27))
 TRANSFER = ((0x10, 0xB9, 0x81), (0x04, 0x78, 0x57))
 SHEET = ((0xF5, 0x9E, 0x0B), (0xB4, 0x53, 0x09))
 CLIP = ((0xA8, 0x55, 0xF7), (0x6B, 0x21, 0xA8))
+FILES = ((0x06, 0xB6, 0xD4), (0x0E, 0x74, 0x90))
 PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
@@ -48,6 +49,7 @@ def render(size, kind="editor"):
         "transfer": TRANSFER,
         "sheet": SHEET,
         "clip": CLIP,
+        "files": FILES,
     }[kind]
     n = size * SCALE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
@@ -128,6 +130,11 @@ def render(size, kind="editor"):
                 radius=n * 0.012,
                 fill=LINE,
             )
+    elif not small and kind == "files":
+        # フォルダ（つまみ付き）
+        d.rounded_rectangle([n * 0.24, n * 0.62, n * 0.46, n * 0.7], radius=n * 0.02, fill=WHITE)
+        d.rounded_rectangle([n * 0.24, n * 0.66, n * 0.76, n * 0.9], radius=n * 0.03, fill=WHITE)
+        d.rectangle([n * 0.28, n * 0.72, n * 0.72, n * 0.735], fill=FILES[1] + (255,))
     elif not small:
         # テキストの行
         lt = n * 0.055
@@ -177,6 +184,7 @@ def main():
         ("yysftp", "transfer"),
         ("yysheet", "sheet"),
         ("yyclip", "clip"),
+        ("yyfilemanager", "files"),
     ]:
         res = root / "apps" / app / "res"
         res.mkdir(parents=True, exist_ok=True)

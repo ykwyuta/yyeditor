@@ -33,6 +33,7 @@ members = [
     "apps/yysheet",
     "apps/yy-agent",
     "apps/yyclip",
+    "apps/yyfilemanager",
     "tools/gen-bigfile",
     "tools/gen-tables",
 ]

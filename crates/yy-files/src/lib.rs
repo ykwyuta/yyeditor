@@ -9,11 +9,13 @@
 //! * [`similar`] … 似た名前のファイルと新しい版の判定
 //! * [`purge`] … 確かめてからの一括削除（隔離フォルダ・取り消し）
 //! * [`search`] … ファイルの検索（名前・属性・中身）
+//! * [`jobs`] … 同期ジョブの保存・置き場所・画面なしでの実行
 
 pub mod dupes;
 pub mod fs;
 pub mod hash;
 pub mod index;
+pub mod jobs;
 pub mod office;
 pub mod pattern;
 pub mod purge;

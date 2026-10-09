@@ -85,7 +85,7 @@ jobs:
       - name: test
         run: cargo test --workspace
       - name: build release
-        run: cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet
+        run: cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager
       # エージェントは exe と同じフォルダの agents\ に置いて配布する（11 章 6.2）
       - uses: actions/download-artifact@v4
         with:
@@ -99,6 +99,7 @@ jobs:
           Copy-Item target/release/yyterm.exe dist/
           Copy-Item target/release/yysftp.exe dist/
           Copy-Item target/release/yysheet.exe dist/
+          Copy-Item target/release/yyfilemanager.exe dist/
           # エージェントは x86_64 と aarch64 の両方を入れる
           foreach ($a in 'x86_64', 'aarch64') {
             if (-not (Test-Path "dist/agents/yy-agent-$a-linux")) { throw "yy-agent-$a-linux がありません" }
@@ -139,4 +140,4 @@ jobs:
           rustup target add x86_64-pc-windows-msvc
           # 組み込みの SSH と 3270 の TLS（ring）は C のビルドに Windows SDK が要るので、ここでは外して確かめる
           # （SSH・TLS を含むビルドは Windows のジョブで行う）
-          cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet --no-default-features --target x86_64-pc-windows-msvc
+          cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager --no-default-features --target x86_64-pc-windows-msvc

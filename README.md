@@ -152,6 +152,17 @@ Rust で実装する、Windows 向けの軽量テキストエディタです。�
 - 転送の様子（接続、続ける位置の決め方、進みと速さ、切断と再接続、確認、名前の変更）を `%APPDATA%\yyeditor\logs\transfer.log` と画面の「記録」に細かく残します。
 - 接続（組み込みの SSH、踏み台・プロキシ・ホスト鍵・保存したパスワード・接続の記録）、設定ファイル、同梱フォントはエディタ・ターミナルと共通です。転送は sftp-server（SFTP）か scp（SCP）を使います（`sudo` は使いません）。接続先にエージェントを置いて使うかは選べます（設定 `[transfer] use_agent`・転送メニュー。既定は使わない）。使うと、一覧・ファイル操作をエージェントで行い（sftp-server がなくても一覧を表示できる）、送り終えた内容をファイル全体の SHA-256 で照合します（一致しなければ 1 回送り直す）。
 
+### ファイル管理（yyfilemanager）
+
+提案書 [18 章](docs/proposal/18-filemanager.md) の方式で、同じクレートを使った別のアプリとしてファイル管理（`yyfilemanager.exe`）を作っています。中核は OS に依存しない `yy-files` で、Linux でもテストできます。
+
+- **同期**: 手元のフォルダを共有フォルダ（Windows のファイル共有・NAS）へ、フォルダ単位で一方向に同期します（更新・ミラー）。比べてから送るものの一覧（新規・更新・日時だけ・削除・衝突）を確かめて実行します。前回の同期のあとで送り先も変わったものは「衝突」として送りません。送り先には `.yypart` に書いてから置き換え、送った位置をジャーナルに書くので、切断（自動で間を空けて続ける）・中止・アプリの終了・PC の停止の後でも **ファイルの途中から** 続けられます。同期ジョブを保存でき、`yyfilemanager.exe --sync <名前>` で画面なしに実行できます（タスク スケジューラー向け）。
+- **検索**: 複数の場所から、名前（部分一致・ワイルドカード・正規表現。全角半角・かなの違いは無視）・拡張子・種類・大きさ・日時・属性・中身で探します（`見積 ext:xlsx size:>1MB modified:>=2026-09-01 content:"税込"`）。中身はエディタの Grep と同じ部品で文字コードを判別しながら並列に読み、Office の文書（docx・xlsx・pptx）の中の文字列も探します。
+- **似たファイル**: `見積_v2.xlsx`・`見積_最終.xlsx`・`見積 - コピー (2).xlsx` のような版をまとめ、名前の手がかり（版の番号・日付・「最終」）を日時より優先して、どれが新しいかを理由と自信つきで提案します（MinHash で候補を絞るので数十万ファイルでも速い）。
+- **重複**: 大きさ → 先頭と末尾 → 全体の BLAKE3 の 3 段で、中身が完全に同じファイルを探します（ハッシュは索引に残し、2 回目は変わったものだけを読む）。
+- **削除の確認**: 古い版・写しを一覧にしてチェックで選び、消す直前に変わっていないか・残すものがあるかを確かめてから、手元はごみ箱へ、共有フォルダは隔離フォルダ（`.yyfm-trash`）へ移します（記録から元に戻せます）。隔離フォルダを作れない共有では、確認を 2 回してから消します。
+- 操作と結果は画面の「記録」と `%APPDATA%\yyeditor\logs\filemanager.log` に残します。利用ガイド（F1）があります。
+
 ### 対応している文字コード
 
 | 文字コード | 備考 |
@@ -306,17 +317,19 @@ crates/
   yy-sheet/    スプレッドシートの中核（列のチャンク・差分・スナップショット・メモリの予算・.yys・CSV の並列の取り込み）
   yy-numfmt/   Excel 互換の表示形式（書式記号・標準・日付のシリアル値・入力の解釈）
   yy-cobol/    COBOL のコピーブックの解析と、固定長レコードの項目の読み書き（ゾーン・パック・2 進数・浮動小数点・編集・DBCS）
+  yy-files/    ファイル管理の中核（走査・目録・BLAKE3・レジュームつきの同期・重複・似た名前の版・削除と取り消し・検索）
   yy-term/     ターミナルの中核（制御シーケンスの解釈、画面、スクロールバック、キーの送り方。OS 非依存）
   yy-win/      Win32 + Direct2D / DirectWrite の UI（Windows のみ。ヘルプの本文は help/help.md）
 apps/yyeditor/ 実行ファイル（マニフェストとアイコンを埋め込み）
 apps/yyterm/   ターミナルの実行ファイル（yy-win の term モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yysftp/   ファイル転送の実行ファイル（yy-win の sftp モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yysheet/  スプレッドシートの実行ファイル（yy-win の sheet モジュール。ビルドスクリプトは yyeditor と共通）
+apps/yyfilemanager/  ファイル管理の実行ファイル（yy-win の fm モジュール。ビルドスクリプトは yyeditor と共通）
 apps/yy-agent/ SSH 接続先に置くエージェント（Linux 用、musl で静的リンク）
 tools/gen-bigfile/  巨大テストファイル生成（gen-bigfile）と性能計測（open-bench）
 tools/gen-tables/   文字コード対応表の生成（Project X0213 の表、ICU の IBM 変換表から）
                     ※ gen-bigfile には検索・置換（replace-bench）、CSV（csv-bench）の性能計測も含む
-tools/gen-icon/     アイコン（apps/yyeditor・yyterm・yysftp・yysheet の res/*.ico）の生成（Python + Pillow）
+tools/gen-icon/     アイコン（apps/yyeditor・yyterm・yysftp・yysheet・yyclip・yyfilemanager の res/*.ico）の生成（Python + Pillow）
 tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の取得（npm から）
 ```
 
@@ -327,10 +340,11 @@ tools/fetch-preview-assets/  プレビューで使う Mermaid・KaTeX・d3 の�
 Windows（MSVC）:
 
 ```sh
-cargo build --release -p yyeditor -p yyterm -p yysftp
+cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager
 target\release\yyeditor.exe [開くファイル]
 target\release\yyterm.exe [フォルダ | ssh://接続先/パス | ユーザー@ホスト]
 target\release\yysftp.exe [ssh://接続先/パス | ユーザー@ホスト:/パス | ユーザー@ホスト]
+target\release\yyfilemanager.exe [--sync 同期ジョブの名前]
 ```
 
 リモート編集のエージェント（Linux 用。exe と同じフォルダの `agents\yy-agent-<x86_64|aarch64>-linux` に置く）:

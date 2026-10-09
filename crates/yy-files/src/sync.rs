@@ -44,7 +44,8 @@ pub enum Compare {
 }
 
 /// 同期の設定。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SyncOptions {
     pub mode: Mode,
     pub compare: Compare,
