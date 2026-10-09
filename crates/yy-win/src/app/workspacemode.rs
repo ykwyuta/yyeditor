@@ -1707,6 +1707,9 @@ fn copy_item(hwnd: HWND, from: &Path, to_dir: &Path) -> std::result::Result<(), 
     }
     let is_dir = is_dir_path(from)?;
     let base = workspace::name_of(from);
+    if remote_uri(from).is_some() && remote_uri(to_dir).is_none() {
+        yy_remote::transfer::local_file_name(base.as_bytes()).map_err(|e| with_path(from, e))?;
+    }
     let mut target = None;
     for n in 0..1000 {
         let cand = workspace::child(to_dir, &workspace::copy_name(&base, n, is_dir));

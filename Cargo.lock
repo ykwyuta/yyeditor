@@ -3772,6 +3772,7 @@ version = "0.1.0"
 dependencies = [
  "miniz_oxide",
  "pulldown-cmark",
+ "tempfile",
  "yy-syntax",
 ]
 
@@ -3861,6 +3862,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "rustls",
+ "tempfile",
  "webview2-com",
  "windows",
  "windows-numerics",

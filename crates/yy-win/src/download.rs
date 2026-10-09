@@ -69,6 +69,10 @@ pub(crate) fn download(hwnd: HWND, uri: &RemoteUri) -> Result<Option<String>, St
     } else {
         name
     };
+    let name = transfer::local_file_name(name.as_bytes())
+        .map_err(|e| format!("{uri}\n\n{e}"))?
+        .to_string_lossy()
+        .into_owned();
     // 量を数える
     show(&format!("{name} の大きさを調べています…（Esc で中止）"));
     let s2 = src.clone();

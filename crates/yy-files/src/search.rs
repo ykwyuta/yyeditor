@@ -773,13 +773,21 @@ enum Loaded {
     TooBig,
 }
 
-fn load_text(e: &FileEntry, path: &std::path::Path, max_size: u64) -> Loaded {
+fn load_text(
+    e: &FileEntry,
+    path: &std::path::Path,
+    max_size: u64,
+    office_memory: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Loaded {
     if e.meta.size > max_size {
         return Loaded::TooBig;
     }
     let snap = if crate::office::is_office(e.name()) {
         std::fs::File::open(path)
-            .and_then(|mut f| crate::office::extract_text(&mut f))
+            .and_then(|mut f| {
+                crate::office::extract_text_with_limit(&mut f, office_memory, cancelled)
+            })
             .ok()
             .map(yy_buffer::Snapshot::from_bytes)
     } else if crate::pdf::is_pdf(e.name()) {
@@ -889,11 +897,19 @@ fn search_inner(
             let office = crate::office::is_office(e.name());
             let pdf = crate::pdf::is_pdf(e.name());
             // 読むのに要るメモリの見積もり（文字コードの変換・取り出しで大きくなる分を見込む）
-            let need = e
-                .meta
-                .size
-                .min(opts.max_size)
-                .saturating_mul(if office || pdf { 4 } else { 2 });
+            let office_memory = if opts.memory_limit == 0 {
+                crate::office::DEFAULT_MEMORY_LIMIT as u64
+            } else {
+                (opts.memory_limit / 2).min(crate::office::DEFAULT_MEMORY_LIMIT as u64)
+            };
+            let need = if office {
+                office_memory
+            } else {
+                e.meta
+                    .size
+                    .min(opts.max_size)
+                    .saturating_mul(if pdf { 4 } else { 2 })
+            };
             let Some(_lease) = budget.acquire(need, &|| stop.load(Ordering::Relaxed)) else {
                 return;
             };
@@ -903,7 +919,9 @@ fn search_inner(
             let loaded = if !add && !wanted {
                 Loaded::Binary
             } else {
-                load_text(e, &path, opts.max_size)
+                load_text(e, &path, opts.max_size, office_memory as usize, &|| {
+                    stop.load(Ordering::Relaxed)
+                })
             };
             if add {
                 let (state, grams) = match &loaded {
