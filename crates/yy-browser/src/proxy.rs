@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::rules::{self, Fallback, HostMap, ProxyRule};
+
 /// プロキシのやり方。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -52,13 +54,19 @@ pub struct ProxyProfile {
     /// 自動構成のときの PAC の URL
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pac_url: String,
+    /// ドメインごとのプロキシ（上から順に。「使わない」「指定」のときだけ。19 章 3.5）
+    #[serde(default, rename = "rule", skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<ProxyRule>,
+    /// ホストの転送と開発者用証明書（19 章 3.6）
+    #[serde(default, rename = "host", skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<HostMap>,
 }
 
 /// 指定のプロキシに使えるスキーム。
 const SCHEMES: [&str; 5] = ["http", "https", "socks", "socks4", "socks5"];
 
 /// 1 つのプロキシ（`[scheme://]host:port`）を確かめる。
-fn check_one(s: &str) -> Result<(), String> {
+pub(crate) fn check_one(s: &str) -> Result<(), String> {
     let (scheme, rest) = match s.split_once("://") {
         Some((sc, r)) => (sc.to_ascii_lowercase(), r),
         None => ("http".to_owned(), s),
@@ -120,6 +128,20 @@ impl ProxyProfile {
         check_plain("プロキシ", &self.server)?;
         check_plain("除くホスト", &self.bypass)?;
         check_plain("PAC の URL", &self.pac_url)?;
+        for r in &self.rules {
+            r.validate()
+                .map_err(|e| format!("ドメインごとのプロキシ「{}」: {e}", r.pattern))?;
+        }
+        for h in &self.hosts {
+            h.validate()
+                .map_err(|e| format!("ホストの転送「{}」: {e}", h.host))?;
+        }
+        if !self.rules.is_empty() && matches!(self.mode, ProxyMode::System | ProxyMode::Pac) {
+            return Err(
+                "ドメインごとのプロキシは、やり方が「使わない（直接）」か「指定」のときに使えます"
+                    .into(),
+            );
+        }
         match self.mode {
             ProxyMode::System | ProxyMode::Direct => Ok(()),
             ProxyMode::Manual => {
@@ -160,27 +182,63 @@ impl ProxyProfile {
         }
     }
 
-    /// Chromium の起動引数（`AdditionalBrowserArguments`）。OS と同じなら空。
+    /// Chromium の起動引数（`AdditionalBrowserArguments`）。OS と同じで転送もなければ空。
+    ///
+    /// ドメインごとのプロキシがあれば PAC を作って `data:` の URL で渡す。転送するホストは
+    /// `--host-resolver-rules` で差し替え、プロキシを通さない（PAC では直接、指定では除くホスト）。
     pub fn browser_args(&self) -> Result<String, String> {
         self.validate()?;
-        let bypass: Vec<&str> = self
+        let mut bypass: Vec<String> = self
             .bypass
             .split([';', ',', '\n'])
             .map(str::trim)
             .filter(|b| !b.is_empty())
+            .map(str::to_owned)
             .collect();
-        Ok(match self.mode {
-            ProxyMode::System => String::new(),
-            ProxyMode::Direct => "--no-proxy-server".into(),
-            ProxyMode::Manual => {
-                let mut a = format!("--proxy-server=\"{}\"", self.server.trim());
-                if !bypass.is_empty() {
-                    a.push_str(&format!(" --proxy-bypass-list=\"{}\"", bypass.join(";")));
+        let mut args = Vec::new();
+        if !self.rules.is_empty() {
+            let refs: Vec<&str> = bypass.iter().map(String::as_str).collect();
+            let fallback = match self.mode {
+                ProxyMode::Manual => Fallback::Manual {
+                    server: &self.server,
+                    bypass: &refs,
+                },
+                _ => Fallback::Direct,
+            };
+            let script = rules::pac_script(&self.hosts, &self.rules, fallback);
+            args.push(format!(
+                "--proxy-pac-url=\"{}\"",
+                rules::pac_data_url(&script)
+            ));
+        } else {
+            match self.mode {
+                ProxyMode::System => {}
+                ProxyMode::Direct => args.push("--no-proxy-server".into()),
+                ProxyMode::Manual => {
+                    for h in &self.hosts {
+                        if let Ok((host, _)) = rules::split_host_port(h.host.trim())
+                            && !bypass.iter().any(|b| b == host)
+                        {
+                            bypass.push(host.to_owned());
+                        }
+                    }
+                    args.push(format!("--proxy-server=\"{}\"", self.server.trim()));
+                    if !bypass.is_empty() {
+                        args.push(format!("--proxy-bypass-list=\"{}\"", bypass.join(";")));
+                    }
                 }
-                a
+                ProxyMode::Pac => args.push(format!("--proxy-pac-url=\"{}\"", self.pac_url.trim())),
             }
-            ProxyMode::Pac => format!("--proxy-pac-url=\"{}\"", self.pac_url.trim()),
-        })
+        }
+        if let Some(map) = rules::host_resolver_rules(&self.hosts) {
+            args.push(format!("--host-resolver-rules=\"{map}\""));
+        }
+        Ok(args.join(" "))
+    }
+
+    /// ホスト（とポート）の転送（あれば）。
+    pub fn host_map(&self, host: &str, port: u16) -> Option<&HostMap> {
+        self.hosts.iter().find(|m| m.matches(host, port))
     }
 
     /// 状態表示に出す説明（`検証用（127.0.0.1:8888）`）。
@@ -190,6 +248,18 @@ impl ProxyProfile {
             ProxyMode::Direct => "直接".to_owned(),
             ProxyMode::Manual => self.server.trim().to_owned(),
             ProxyMode::Pac => format!("PAC {}", self.pac_url.trim()),
+        };
+        let mut extra = Vec::new();
+        if !self.rules.is_empty() {
+            extra.push(format!("規則 {}", self.rules.len()));
+        }
+        if !self.hosts.is_empty() {
+            extra.push(format!("転送 {}", self.hosts.len()));
+        }
+        let detail = if extra.is_empty() {
+            detail
+        } else {
+            format!("{detail}・{}", extra.join("・"))
         };
         if detail == self.name.trim() {
             detail
@@ -308,6 +378,47 @@ mod tests {
             pac.browser_args().unwrap(),
             "--proxy-pac-url=\"http://wpad.local/proxy.pac\""
         );
+    }
+
+    #[test]
+    fn rules_and_host_maps_become_pac_and_resolver_rules() {
+        let hosts = crate::rules::parse_hosts("www.example.com = 127.0.0.1:8443").unwrap();
+        // 転送だけ: 指定なら除くホストに足す・直接ならそのまま・OS と同じでも転送は効く
+        let mut p = manual("127.0.0.1:8888", "<local>");
+        p.hosts = hosts.clone();
+        assert_eq!(
+            p.browser_args().unwrap(),
+            "--proxy-server=\"127.0.0.1:8888\" --proxy-bypass-list=\"<local>;www.example.com\" \
+             --host-resolver-rules=\"MAP www.example.com 127.0.0.1:8443\""
+        );
+        let mut os = ProxyProfile::new("os", ProxyMode::System);
+        os.hosts = hosts.clone();
+        assert_eq!(
+            os.browser_args().unwrap(),
+            "--host-resolver-rules=\"MAP www.example.com 127.0.0.1:8443\""
+        );
+        assert!(os.host_map("www.example.com", 443).is_some());
+        assert!(os.host_map("example.com", 443).is_none());
+        // 規則があれば PAC（data: の URL）
+        p.rules = crate::rules::parse_rules("*.corp.example = 10.0.0.1:8080").unwrap();
+        let a = p.browser_args().unwrap();
+        assert!(
+            a.starts_with("--proxy-pac-url=\"data:application/x-ns-proxy-autoconfig;base64,"),
+            "{a}"
+        );
+        assert!(!a.contains("--proxy-server"), "{a}");
+        assert!(a.ends_with("--host-resolver-rules=\"MAP www.example.com 127.0.0.1:8443\""));
+        assert!(p.describe().contains("規則 1・転送 1"), "{}", p.describe());
+        // 規則は「OS と同じ」「PAC」とは組み合わせられない
+        os.rules = p.rules.clone();
+        assert!(os.validate().is_err());
+        // TOML に書いて読める
+        let text = toml::to_string(&p).unwrap();
+        assert!(
+            text.contains("[[rule]]") && text.contains("[[host]]"),
+            "{text}"
+        );
+        assert_eq!(toml::from_str::<ProxyProfile>(&text).unwrap(), p);
     }
 
     #[test]

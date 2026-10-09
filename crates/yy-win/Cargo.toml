@@ -74,6 +74,9 @@ features = [
 
 [target.'cfg(windows)'.dev-dependencies]
 yy-buffer.workspace = true
+# yybrowser の開発者用証明書の試験（証明書を作り、TLS のサーバーを立てる）
+yy-browser = { workspace = true, features = ["devcert"] }
+rustls.workspace = true
 
 [lints]
 workspace = true

@@ -1,14 +1,20 @@
 [package]
 name = "yy-browser"
-description = "Core of yybrowser: per-app proxy profiles (system, direct, manual, PAC), Chromium switches for WebView2, profile data folders and address bar input"
+description = "Core of yybrowser: per-app proxy profiles (system, direct, manual, PAC), per-domain rules, host mapping and developer certificates, Chromium switches for WebView2, profile data folders and address bar input"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# 開発者用証明書を作る（rcgen + ring。C のビルドが要る）
+devcert = ["dep:rcgen"]
+
 [dependencies]
 serde.workspace = true
 toml.workspace = true
+sha2.workspace = true
+rcgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

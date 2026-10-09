@@ -52,7 +52,7 @@ use windows::core::{PCWSTR, Result, w};
 use crate::util::Context;
 
 /// タブブラウザ（yybrowser）を起動する
-pub use browser::run_browser;
+pub use browser::{DevCertFn, run_browser};
 /// ファイル管理（yyfilemanager）を起動する
 pub use fm::run_filemanager;
 /// ファイル転送（yysftp）を起動する

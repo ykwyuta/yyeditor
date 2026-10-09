@@ -2,9 +2,12 @@
 //! （[`crate::goto::Template`]）。
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::Controls::{BST_CHECKED, CheckDlgButton, IsDlgButtonChecked};
+use windows::Win32::UI::Controls::{
+    BST_CHECKED, CheckDlgButton, EM_LINEFROMCHAR, IsDlgButtonChecked,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::HSTRING;
+use yy_browser::rules::{format_hosts, format_rules, parse_hosts, parse_rules};
 use yy_browser::{ProfileList, ProxyMode, ProxyProfile};
 
 use crate::goto::{CLASS_BUTTON, CLASS_EDIT, CLASS_STATIC, Template};
@@ -20,6 +23,10 @@ const ID_SERVER: u16 = 105;
 const ID_BYPASS: u16 = 106;
 const ID_PAC: u16 = 107;
 const ID_DEFAULT: u16 = 108;
+const ID_RULES: u16 = 109;
+const ID_HOSTS: u16 = 110;
+const ID_MAKE_CERT: u16 = 111;
+const ID_PIN_CERT: u16 = 112;
 const IDOK_: u16 = 1;
 const IDCANCEL_: u16 = 2;
 
@@ -29,11 +36,13 @@ struct State {
     current: usize,
     /// OK で閉じたときの結果
     done: bool,
+    /// 読めなかった欄の理由（`store` で。OK のときに出す）
+    parse_error: Option<String>,
 }
 
 /// プロファイルの一覧を編集する。OK なら編集後の一覧（確かめ済み）。
 pub(super) fn edit(owner: HWND, list: ProfileList) -> Option<ProfileList> {
-    let mut t = Template::dialog("プロキシの設定", 300, 196);
+    let mut t = Template::dialog("プロキシの設定", 300, 334);
     let label = |t: &mut Template, y: i16, text: &str| {
         t.item(0, 7, y + 2, 60, 10, 0xFFFF, CLASS_STATIC, text);
     };
@@ -143,10 +152,56 @@ pub(super) fn edit(owner: HWND, list: ProfileList) -> Option<ProfileList> {
         CLASS_EDIT,
         "",
     );
+    let multi = (WS_BORDER | WS_TABSTOP | WS_VSCROLL).0
+        | (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32;
+    label(&mut t, 152, "ドメインごと");
+    t.item(multi, 70, 152, 222, 42, ID_RULES, CLASS_EDIT, "");
+    t.item(
+        0,
+        70,
+        196,
+        222,
+        18,
+        0xFFFF,
+        CLASS_STATIC,
+        "1 行に 1 つ。上から順に当てはめる（「使わない」「指定」のとき）。\n例: *.corp.example.jp = 10.0.0.1:8080 ／ example.org = direct",
+    );
+    label(&mut t, 218, "ホストの転送");
+    t.item(multi, 70, 218, 222, 42, ID_HOSTS, CLASS_EDIT, "");
+    t.item(
+        0,
+        70,
+        262,
+        222,
+        18,
+        0xFFFF,
+        CLASS_STATIC,
+        "例: www.example.com = 127.0.0.1:8443（https://www.example.com/ を 127.0.0.1:8443 へ）。\ncert=指紋 で開発者用証明書を受け入れる",
+    );
+    t.item(
+        WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
+        70,
+        282,
+        110,
+        14,
+        ID_MAKE_CERT,
+        CLASS_BUTTON,
+        "開発者用証明書を作る…",
+    );
+    t.item(
+        WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
+        184,
+        282,
+        108,
+        14,
+        ID_PIN_CERT,
+        CLASS_BUTTON,
+        "証明書ファイルを登録…",
+    );
     t.item(
         WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32,
         70,
-        152,
+        300,
         222,
         12,
         ID_DEFAULT,
@@ -156,7 +211,7 @@ pub(super) fn edit(owner: HWND, list: ProfileList) -> Option<ProfileList> {
     t.item(
         WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32,
         188,
-        174,
+        314,
         50,
         14,
         IDOK_,
@@ -166,7 +221,7 @@ pub(super) fn edit(owner: HWND, list: ProfileList) -> Option<ProfileList> {
     t.item(
         WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
         242,
-        174,
+        314,
         50,
         14,
         IDCANCEL_,
@@ -183,6 +238,7 @@ pub(super) fn edit(owner: HWND, list: ProfileList) -> Option<ProfileList> {
         list,
         current,
         done: false,
+        parse_error: None,
     };
     unsafe {
         DialogBoxIndirectParamW(
@@ -249,6 +305,8 @@ fn show(dlg: HWND, st: &State) {
     set_text(dlg, ID_SERVER, &p.server);
     set_text(dlg, ID_BYPASS, &p.bypass);
     set_text(dlg, ID_PAC, &p.pac_url);
+    set_text(dlg, ID_RULES, &format_rules(&p.rules));
+    set_text(dlg, ID_HOSTS, &format_hosts(&p.hosts));
     let mode = ProxyMode::ALL
         .iter()
         .position(|m| *m == p.mode)
@@ -296,6 +354,18 @@ fn store(dlg: HWND, st: &mut State) {
     p.server = get_text(dlg, ID_SERVER).trim().to_owned();
     p.bypass = get_text(dlg, ID_BYPASS).trim().to_owned();
     p.pac_url = get_text(dlg, ID_PAC).trim().to_owned();
+    st.parse_error = None;
+    match parse_rules(&get_text(dlg, ID_RULES)) {
+        Ok(r) => p.rules = r,
+        Err(e) => st.parse_error = Some(format!("「{}」のドメインごとのプロキシ: {e}", p.name)),
+    }
+    match parse_hosts(&get_text(dlg, ID_HOSTS)) {
+        Ok(h) => p.hosts = h,
+        Err(e) => {
+            st.parse_error
+                .get_or_insert(format!("「{}」のホストの転送: {e}", p.name));
+        }
+    }
     if checked || st.list.default == old_name {
         st.list.default = if checked {
             p.name.clone()
@@ -353,6 +423,13 @@ extern "system" fn dialog_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 match id {
                     ID_LIST if code == CBN_SELCHANGE => {
                         store(dlg, st);
+                        if let Some(e) = st.parse_error.take() {
+                            fill_list(dlg, st);
+                            crate::util::error_box(
+                                dlg,
+                                &format!("{e}\n（この欄は前の内容のままです）"),
+                            );
+                        }
                         let sel = combo_sel(dlg, ID_LIST);
                         if sel >= 0 {
                             st.current = sel as usize;
@@ -401,8 +478,14 @@ extern "system" fn dialog_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                             show(dlg, st);
                         }
                     }
+                    ID_MAKE_CERT => make_cert(dlg),
+                    ID_PIN_CERT => pin_cert(dlg),
                     IDOK_ => {
                         store(dlg, st);
+                        if let Some(e) = st.parse_error.take() {
+                            crate::util::error_box(dlg, &e);
+                            return 1;
+                        }
                         match check_all(st) {
                             Ok(()) => {
                                 st.done = true;
@@ -424,5 +507,158 @@ extern "system" fn dialog_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             }
             _ => 0,
         }
+    }
+}
+
+/// 転送の欄の、カーソルのある行（番号と内容）。
+fn caret_line(dlg: HWND) -> (usize, Vec<String>) {
+    let text = get_text(dlg, ID_HOSTS);
+    let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let n = unsafe {
+        SendDlgItemMessageW(
+            dlg,
+            ID_HOSTS as i32,
+            EM_LINEFROMCHAR,
+            WPARAM(usize::MAX),
+            LPARAM(0),
+        )
+        .0
+    }
+    .max(0) as usize;
+    (n, lines)
+}
+
+/// 転送の欄のカーソルの行を読む（だめなら理由を出して `None`）。
+fn caret_mapping(dlg: HWND) -> Option<(usize, Vec<String>, yy_browser::HostMap)> {
+    let (n, lines) = caret_line(dlg);
+    let line = lines.get(n).cloned().unwrap_or_default();
+    match parse_hosts(&line) {
+        Ok(mut v) if v.len() == 1 => Some((n, lines, v.remove(0))),
+        Ok(_) => {
+            crate::util::info_box(
+                dlg,
+                "「ホストの転送」の欄で、証明書を使う行（例: www.example.com = 127.0.0.1:8443）に\
+                 カーソルを置いてから押してください。",
+            );
+            None
+        }
+        Err(e) => {
+            crate::util::error_box(dlg, &e);
+            None
+        }
+    }
+}
+
+/// カーソルの行に指紋を書き込む。
+fn set_pin(dlg: HWND, n: usize, mut lines: Vec<String>, mut m: yy_browser::HostMap, fp: String) {
+    m.cert_sha256 = fp;
+    let formatted = format_hosts(std::slice::from_ref(&m));
+    if n < lines.len() {
+        lines[n] = formatted;
+    } else {
+        lines.push(formatted);
+    }
+    set_text(dlg, ID_HOSTS, &lines.join("\r\n"));
+}
+
+/// 開発者用証明書を作り（自己署名）、カーソルの行に指紋を書き込む。
+fn make_cert(dlg: HWND) {
+    let Some(generate) = super::DEV_CERT.with(|d| d.get()) else {
+        crate::util::error_box(
+            dlg,
+            "このビルドの yybrowser では開発者用証明書を作れません。",
+        );
+        return;
+    };
+    let Some((n, lines, m)) = caret_mapping(dlg) else {
+        return;
+    };
+    if !m.cert_sha256.is_empty() {
+        let ok = unsafe {
+            MessageBoxW(
+                Some(dlg),
+                &HSTRING::from(format!(
+                    "{} にはもう開発者用証明書（{}）が登録されています。作り直しますか？\n\
+                     （転送先のサーバーの証明書も入れ替える必要があります）",
+                    m.host, m.cert_sha256
+                )),
+                windows::core::w!("yybrowser"),
+                MB_OKCANCEL | MB_ICONQUESTION,
+            )
+        } == IDOK;
+        if !ok {
+            return;
+        }
+    }
+    let cert = match generate(&m.host) {
+        Ok(c) => c,
+        Err(e) => {
+            crate::util::error_box(dlg, &format!("証明書を作れません: {e}"));
+            return;
+        }
+    };
+    let dir = super::dev_cert_dir();
+    let (crt, key) = match yy_browser::rules::write_dev_cert(&dir, &m.host, &cert) {
+        Ok(v) => v,
+        Err(e) => {
+            crate::util::error_box(
+                dlg,
+                &format!("証明書を保存できません: {}: {e}", dir.display()),
+            );
+            return;
+        }
+    };
+    let host = m.host.clone();
+    let address = m.address.clone();
+    set_pin(dlg, n, lines, m, cert.sha256.clone());
+    crate::util::info_box(
+        dlg,
+        &format!(
+            "{host} の開発者用証明書を作りました。\n\n証明書: {}\n秘密鍵: {}\nSHA-256: {}\n\n\
+             転送先（{address}）のサーバーに、この証明書と秘密鍵を設定してください。\n\
+             yybrowser は、サーバーがこの証明書を出したときだけ証明書のエラーを許し、アドレスバーに\
+             「開発者用証明書を利用中」と表示します。OS の証明書ストアには入れません。\n\
+             （保存すると有効になります）",
+            crt.display(),
+            key.display(),
+            cert.sha256
+        ),
+    );
+}
+
+/// 既にある証明書のファイル（PEM・DER）の指紋を、カーソルの行に登録する。
+fn pin_cert(dlg: HWND) {
+    let Some((n, lines, m)) = caret_mapping(dlg) else {
+        return;
+    };
+    let Some(path) = crate::fm::pick_file(
+        dlg,
+        (
+            "証明書 (*.crt;*.pem;*.cer;*.der)",
+            "*.crt;*.pem;*.cer;*.der",
+        ),
+        Some(&super::dev_cert_dir()),
+        None,
+    ) else {
+        return;
+    };
+    let fp = std::fs::read(&path)
+        .ok()
+        .and_then(|b| yy_browser::rules::cert_fingerprint(&b));
+    match fp {
+        Some(fp) => {
+            set_pin(dlg, n, lines, m, fp.clone());
+            crate::util::info_box(
+                dlg,
+                &format!(
+                    "{} を登録しました。\nSHA-256: {fp}\n（保存すると有効になります）",
+                    path.display()
+                ),
+            );
+        }
+        None => crate::util::error_box(
+            dlg,
+            &format!("{} は証明書（PEM・DER）として読めません。", path.display()),
+        ),
     }
 }

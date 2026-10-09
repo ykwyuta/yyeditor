@@ -9,7 +9,8 @@
 
 mod proxydlg;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
@@ -39,6 +40,7 @@ const ID_RELOAD: u16 = 6004;
 const ID_HOME: u16 = 6005;
 const ID_ADDRESS: u16 = 6006;
 const ID_PROXY: u16 = 6007;
+const ID_BADGE: u16 = 6008;
 const ID_FIND_EDIT: u16 = 6010;
 const ID_FIND_PREV: u16 = 6011;
 const ID_FIND_NEXT: u16 = 6012;
@@ -96,6 +98,9 @@ struct App {
     reload: HWND,
     home: HWND,
     proxy_btn: HWND,
+    /// アドレスバーの左の表示（開発者用証明書を利用中・転送中）。当てはまらなければ隠す
+    badge: HWND,
+    badge_visible: bool,
     find_bar: [HWND; 5],
     find_visible: bool,
     dpi: u32,
@@ -113,10 +118,23 @@ struct App {
     /// 全画面の前の位置と形
     fullscreen: Option<(WINDOWPLACEMENT, i32)>,
     find: Option<ICoreWebView2Find>,
+    /// 開発者用証明書（指紋が一致した）で証明書のエラーを許したホスト（環境を作り直すと空）
+    dev_hosts: HashSet<String>,
 }
+
+/// 開発者用証明書を作る関数（rcgen を入れたビルドだけ。19 章 3.6）。
+pub type DevCertFn = fn(&str) -> std::result::Result<yy_browser::DevCert, String>;
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    static DEV_CERT: Cell<Option<DevCertFn>> = const { Cell::new(None) };
+}
+
+/// 開発者用証明書を置くフォルダ（設定のフォルダの `browser-devcerts`）。
+fn dev_cert_dir() -> PathBuf {
+    yy_config::config_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("browser-devcerts")
 }
 
 fn with<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
@@ -156,7 +174,9 @@ fn data_folder(p: &ProxyProfile) -> PathBuf {
 }
 
 /// yybrowser を起動する。`args`: `[--profile 名前] [--proxy URL|direct|system] [URL...]`。
-pub fn run_browser(args: Vec<String>) -> Result<()> {
+/// `dev_cert` は開発者用証明書を作る関数（なければプロキシの設定で作れない）。
+pub fn run_browser(args: Vec<String>, dev_cert: Option<DevCertFn>) -> Result<()> {
+    DEV_CERT.with(|d| d.set(dev_cert));
     crate::util::set_app_name("yybrowser");
     crate::crash::install("yybrowser");
     let r = run_inner(args);
@@ -455,6 +475,8 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
             ID_ADDRESS,
         );
         let proxy_btn = button("", ID_PROXY);
+        let badge = button("", ID_BADGE);
+        let _ = ShowWindow(badge, SW_HIDE);
         let status = child(
             STATUSCLASSNAMEW,
             "",
@@ -508,6 +530,8 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
             reload,
             home,
             proxy_btn,
+            badge,
+            badge_visible: false,
             find_bar,
             find_visible: false,
             dpi,
@@ -522,6 +546,7 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
             closed: Vec::new(),
             fullscreen: None,
             find: None,
+            dev_hosts: HashSet::new(),
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         with(|a| {
@@ -554,6 +579,7 @@ impl App {
                     self.home,
                     self.address,
                     self.proxy_btn,
+                    self.badge,
                     self.status,
                 ] {
                     let _ = ShowWindow(hw, SW_HIDE);
@@ -596,6 +622,17 @@ impl App {
             for b in [self.back, self.forward, self.reload, self.home] {
                 let _ = MoveWindow(b, x, y, btn, ch, true);
                 x += btn + pad;
+            }
+            if self.badge_visible {
+                let text = text_of(self.badge);
+                let bw = self
+                    .scaled(24 + 12 * text.chars().count() as i32)
+                    .min(self.scaled(320));
+                let _ = MoveWindow(self.badge, x, y, bw, ch, true);
+                let _ = ShowWindow(self.badge, SW_SHOW);
+                x += bw + pad;
+            } else {
+                let _ = ShowWindow(self.badge, SW_HIDE);
             }
             let proxy_w = self.scaled(240);
             let addr_w = (w - x - proxy_w - 2 * pad).max(self.scaled(80));
@@ -728,6 +765,7 @@ impl App {
         if !focused {
             set_text(self.address, &t.url);
         }
+        let badge = self.badge_text(&t.url);
         let title = if t.title.is_empty() {
             "yybrowser".to_owned()
         } else {
@@ -746,6 +784,33 @@ impl App {
             let _ = EnableWindow(self.back, back.as_bool());
             let _ = EnableWindow(self.forward, fwd.as_bool());
         }
+        let visible = badge.is_some();
+        let text = badge.unwrap_or_default();
+        if visible != self.badge_visible || text != text_of(self.badge) {
+            set_text(self.badge, &text);
+            // layout は &self なので、表示の有無は後で書き戻す（frame_proc で）
+            unsafe {
+                let _ = PostMessageW(
+                    Some(self.frame),
+                    WM_APP_BADGE,
+                    WPARAM(visible as usize),
+                    LPARAM(0),
+                );
+            }
+        }
+    }
+
+    /// アドレスバーの左に出す表示（`None` なら出さない）。
+    ///
+    /// * 開発者用証明書（指紋が一致）で証明書のエラーを許したホスト → 「🔒 開発者用証明書を利用中」
+    /// * 転送するホスト → 「転送 → 127.0.0.1:8443」
+    fn badge_text(&self, url: &str) -> Option<String> {
+        let (scheme, host, port) = yy_browser::rules::url_host_port(url)?;
+        if scheme == "https" && self.dev_hosts.contains(&host) {
+            return Some("🔒 開発者用証明書を利用中".into());
+        }
+        let m = self.profile.host_map(&host, port)?;
+        Some(format!("転送 → {}", m.address.trim()))
     }
 
     fn current_web(&self) -> Option<(ICoreWebView2, ICoreWebView2Controller)> {
@@ -766,6 +831,7 @@ fn start_environment() {
     let Some((profile, generation, frame)) = with(|a| {
         a.generation += 1;
         a.env = None;
+        a.dev_hosts.clear();
         (a.profile.clone(), a.generation, a.frame)
     }) else {
         return;
@@ -1102,6 +1168,18 @@ fn add_events(
                 &mut token,
             )?;
         }
+        // 証明書のエラー: 転送するホストで、開発者用証明書の指紋が一致したときだけ許す
+        if let Ok(w14) = webview.cast::<ICoreWebView2_14>() {
+            w14.add_ServerCertificateErrorDetected(
+                &ServerCertificateErrorDetectedEventHandler::create(Box::new(move |_, args| {
+                    if let Some(args) = args {
+                        server_certificate_error(&args);
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            )?;
+        }
         // ページにフォーカスがあってもブラウザのショートカットを使う
         controller.add_AcceleratorKeyPressed(
             &AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
@@ -1140,6 +1218,8 @@ fn add_events(
 const WM_APP_OPEN_TAB: u32 = WM_APP + 121;
 /// ページの中で押したショートカット（`wparam` は仮想キー、`lparam` は修飾キーの組）。
 const WM_APP_SHORTCUT: u32 = WM_APP + 122;
+/// アドレスバーの左の表示を出す・隠す（`wparam` が 1 なら出す）。
+const WM_APP_BADGE: u32 = WM_APP + 123;
 
 fn web_error(s: COREWEBVIEW2_WEB_ERROR_STATUS) -> &'static str {
     match s {
@@ -1159,6 +1239,106 @@ fn web_error(s: COREWEBVIEW2_WEB_ERROR_STATUS) -> &'static str {
         | COREWEBVIEW2_WEB_ERROR_STATUS_VALID_PROXY_AUTHENTICATION_REQUIRED => "認証が必要です",
         _ => "エラー",
     }
+}
+
+/// 証明書のエラーの見立て。
+#[derive(Debug, PartialEq, Eq)]
+enum DevCertCheck {
+    /// 転送するホストでない・指紋を登録していない → ふつうのエラーの画面
+    NotPinned,
+    /// 登録した指紋と一致した（ホスト, 指紋）
+    Match(String, String),
+    /// 一致しなかった（ホスト, サーバーの証明書の指紋）
+    Mismatch(String, Option<String>),
+}
+
+/// 証明書のエラーが起きた URL とサーバーの証明書（PEM）を、プロファイルの開発者用証明書と照らす。
+fn check_dev_cert(profile: &ProxyProfile, uri: &str, pem: &str) -> DevCertCheck {
+    let Some((_, host, port)) = yy_browser::rules::url_host_port(uri) else {
+        return DevCertCheck::NotPinned;
+    };
+    let Some(pinned) = profile.host_map(&host, port).and_then(|m| m.pinned()) else {
+        return DevCertCheck::NotPinned;
+    };
+    let actual = yy_browser::rules::cert_fingerprint(pem.as_bytes());
+    if actual.as_deref() == Some(pinned.as_str()) {
+        DevCertCheck::Match(host, pinned)
+    } else {
+        DevCertCheck::Mismatch(host, actual)
+    }
+}
+
+/// 証明書のエラーの引数から（URL, サーバーの証明書の PEM）。
+fn cert_error_parts(
+    args: &ICoreWebView2ServerCertificateErrorDetectedEventArgs,
+) -> (String, String) {
+    let uri = take_string(|p| unsafe { args.RequestUri(p) });
+    let pem = match unsafe { args.ServerCertificate() } {
+        Ok(c) => take_string(|p| unsafe { c.ToPemEncoding(p) }),
+        Err(_) => String::new(),
+    };
+    (uri, pem)
+}
+
+/// 証明書のエラー。転送するホストに開発者用証明書の指紋があり、サーバーの証明書の指紋と一致すれば
+/// 許す（このセッションの間。OS の証明書ストアは変えない）。それ以外はふつうのエラーの画面。
+fn server_certificate_error(args: &ICoreWebView2ServerCertificateErrorDetectedEventArgs) {
+    let (uri, pem) = cert_error_parts(args);
+    let Some(check) = with(|a| check_dev_cert(&a.profile, &uri, &pem)) else {
+        return;
+    };
+    match check {
+        DevCertCheck::NotPinned => {}
+        DevCertCheck::Match(host, pinned) => {
+            unsafe {
+                let _ = args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW);
+            }
+            with(|a| {
+                a.set_status(&format!(
+                    "{host}: 開発者用証明書（SHA-256 {pinned}）を使っています"
+                ));
+                a.dev_hosts.insert(host);
+                a.refresh_chrome();
+            });
+        }
+        DevCertCheck::Mismatch(host, actual) => {
+            with(|a| {
+                a.set_status(&format!(
+                    "{host}: サーバーの証明書が開発者用証明書と一致しません（サーバー: {}）",
+                    actual.as_deref().unwrap_or("読めません")
+                ))
+            });
+        }
+    }
+}
+
+/// アドレスバーの左の表示を押したとき: 詳しく出す。
+fn show_badge_details() {
+    let Some((frame, text)) = with(|a| {
+        let t = a.tabs.get(a.current)?;
+        let (scheme, host, port) = yy_browser::rules::url_host_port(&t.url)?;
+        let m = a.profile.host_map(&host, port);
+        let mut s = format!("{scheme}://{host}:{port}\n");
+        match m {
+            Some(m) => s.push_str(&format!(
+                "転送先: {}（プロファイル「{}」のホストの転送）\n",
+                m.address.trim(),
+                a.profile.name
+            )),
+            None => s.push_str("転送はしていません\n"),
+        }
+        if scheme == "https" && a.dev_hosts.contains(&host) {
+            let fp = m.and_then(|m| m.pinned()).unwrap_or_default();
+            s.push_str(&format!(
+                "\n開発者用証明書を利用中です。\nサーバーの証明書は公に信頼された認証局のものではありませんが、                 プロファイルに登録した開発者用証明書（SHA-256 の指紋）と一致したので、このウィンドウの間だけ                 受け入れています。OS の証明書ストアは変えていません。\n\nSHA-256: {fp}"
+            ));
+        }
+        Some((a.frame, s))
+    })
+    .flatten() else {
+        return;
+    };
+    info_box(frame, &text);
 }
 
 /// Basic 認証のユーザー名とパスワードを尋ねる。
@@ -1848,6 +2028,7 @@ fn command(id: u16) {
                 }
             }
         }
+        ID_BADGE => show_badge_details(),
         ID_PROXY => {
             // プロキシのボタン: メニューを出す
             let Some((frame, btn, profiles, cur)) = with(|a| {
@@ -2001,6 +2182,13 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             shortcut(wparam.0 as u16, lparam.0 as u8);
             LRESULT(0)
         }
+        WM_APP_BADGE => {
+            with(|a| {
+                a.badge_visible = wparam.0 != 0;
+                a.layout();
+            });
+            LRESULT(0)
+        }
         WM_DPICHANGED => {
             let dpi = (wparam.0 & 0xffff) as u32;
             with(|a| a.dpi = dpi.max(96));
@@ -2077,13 +2265,14 @@ mod tests {
         let failed: Rc<std::cell::Cell<bool>> = Rc::default();
         let (r, f) = (result.clone(), failed.clone());
         let url = url.to_owned();
+        let profile = profile.clone();
         let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
             move |res: Result<()>, env: Option<ICoreWebView2Environment>| {
                 let Some(env) = env.filter(|_| res.is_ok()) else {
                     f.set(true);
                     return Ok(());
                 };
-                let (r, f, url) = (r.clone(), f.clone(), url.clone());
+                let (r, f, url, profile) = (r.clone(), f.clone(), url.clone(), profile.clone());
                 let on_controller = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
                     move |res: Result<()>, c: Option<ICoreWebView2Controller>| {
                         let Some(c) = c.filter(|_| res.is_ok()) else {
@@ -2093,7 +2282,27 @@ mod tests {
                         let w = unsafe { c.CoreWebView2()? };
                         let r2 = r.clone();
                         let mut token = 0i64;
+                        let profile = profile.clone();
                         unsafe {
+                            // 本物と同じ見立てで、開発者用証明書なら許す
+                            w.cast::<ICoreWebView2_14>()?.add_ServerCertificateErrorDetected(
+                                &ServerCertificateErrorDetectedEventHandler::create(Box::new(
+                                    move |_, args| {
+                                        if let Some(args) = args {
+                                            let (uri, pem) = cert_error_parts(&args);
+                                            if let DevCertCheck::Match(..) =
+                                                check_dev_cert(&profile, &uri, &pem)
+                                            {
+                                                args.SetAction(
+                                                    COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW,
+                                                )?;
+                                            }
+                                        }
+                                        Ok(())
+                                    },
+                                )),
+                                &mut token,
+                            )?;
                             w.add_NavigationCompleted(
                                 &NavigationCompletedEventHandler::create(Box::new(
                                     move |_, args| {
@@ -2243,6 +2452,226 @@ mod tests {
                 .any(|l| l.contains("yybrowser-direct-test")),
             "{:?}",
             seen.lock().unwrap()
+        );
+    }
+
+    /// 試験用の HTTP プロキシ（要求の 1 行目を覚えて、小さなページを返す）。（ポート, 覚えた行）
+    fn test_proxy() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen2 = seen.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                if let Some(line) = String::from_utf8_lossy(&buf).lines().next() {
+                    seen2.lock().unwrap().push(line.to_owned());
+                }
+                let body = "<html><head><title>via proxy</title></head><body>ok</body></html>";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (port, seen)
+    }
+
+    /// ドメインごとのプロキシ（PAC を data: の URL で渡す）・ホストの転送（ポートも替える）・
+    /// 開発者用証明書（指紋が一致したときだけ許す）を、本物の WebView2 で確かめる。
+    #[test]
+    fn rules_host_maps_and_dev_certificates_in_webview2() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        let required = std::env::var_os("YY_REQUIRE_WEBVIEW2").is_some();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        // 開発者用証明書で TLS を話す試験用のサーバー（転送先）
+        let host = "www.yybrowser-devcert.test";
+        let cert = yy_browser::rules::generate_dev_cert(host).unwrap();
+        let config = {
+            use rustls::pki_types::pem::PemObject;
+            use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let certs = vec![CertificateDer::from_pem_slice(cert.cert_pem.as_bytes()).unwrap()];
+            let key = PrivateKeyDer::from_pem_slice(cert.key_pem.as_bytes()).unwrap();
+            Arc::new(
+                rustls::ServerConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(certs, key)
+                    .unwrap(),
+            )
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let tls_port = listener.local_addr().unwrap().port();
+        let hosts_seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let hs = hosts_seen.clone();
+        std::thread::spawn(move || {
+            for tcp in listener.incoming().flatten() {
+                let config = config.clone();
+                let hs = hs.clone();
+                std::thread::spawn(move || {
+                    let Ok(conn) = rustls::ServerConnection::new(config) else {
+                        return;
+                    };
+                    let mut s = rustls::StreamOwned::new(conn, tcp);
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut chunk) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = text.lines().find_map(|l| {
+                        l.strip_prefix("Host: ")
+                            .or_else(|| l.strip_prefix("host: "))
+                    }) {
+                        hs.lock().unwrap().push(h.trim().to_owned());
+                    }
+                    let body = "<html><head><title>dev</title></head><body>dev cert</body></html>";
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.flush();
+                    s.conn.send_close_notify();
+                    let _ = s.flush();
+                });
+            }
+        });
+        let (proxy_port, proxy_seen) = test_proxy();
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("yybrowser rules test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let dir = std::env::temp_dir().join(format!("yybrowser-rules-{}", std::process::id()));
+        let mut profile = ProxyProfile::new("rules", yy_browser::ProxyMode::Direct);
+        profile.rules = yy_browser::rules::parse_rules(&format!(
+            "yybrowser-rule-test.invalid = 127.0.0.1:{proxy_port}"
+        ))
+        .unwrap();
+        profile.hosts = vec![yy_browser::HostMap {
+            host: host.into(),
+            address: format!("127.0.0.1:{tls_port}"),
+            cert_sha256: cert.sha256.clone(),
+        }];
+        // 転送 + 開発者用証明書: https://www.yybrowser-devcert.test/ が 127.0.0.1:<port> に届く
+        let url = format!("https://{host}/");
+        let Some(ok) = open_with(&profile, &dir.join("a"), parent, &url) else {
+            assert!(!required, "WebView2 を使えません");
+            eprintln!("WebView2 を使えないので飛ばします");
+            return;
+        };
+        assert!(
+            ok,
+            "開発者用証明書のサーバーを開けません: {:?}",
+            hosts_seen.lock().unwrap()
+        );
+        assert!(
+            hosts_seen.lock().unwrap().iter().any(|h| h == host),
+            "{:?}",
+            hosts_seen.lock().unwrap()
+        );
+        // 規則（PAC）: 当てはまるホストは試験用のプロキシを通る
+        let ok = open_with(
+            &profile,
+            &dir.join("b"),
+            parent,
+            "http://yybrowser-rule-test.invalid/rule",
+        )
+        .unwrap();
+        assert!(
+            ok,
+            "規則のプロキシを通りません: {:?}",
+            proxy_seen.lock().unwrap()
+        );
+        assert!(
+            proxy_seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.starts_with("GET http://yybrowser-rule-test.invalid/rule")),
+            "{:?}",
+            proxy_seen.lock().unwrap()
+        );
+        // 当てはまらないホストは直接（存在しないので読み込めず、プロキシにも来ない）
+        let ok = open_with(
+            &profile,
+            &dir.join("c"),
+            parent,
+            "http://yybrowser-other-test.invalid/",
+        )
+        .unwrap();
+        assert!(!ok);
+        assert!(
+            !proxy_seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("yybrowser-other-test")),
+            "{:?}",
+            proxy_seen.lock().unwrap()
+        );
+        // 指紋が違えば許さない
+        let mut wrong = profile.clone();
+        wrong.hosts[0].cert_sha256 = vec!["00"; 32].join(":");
+        let ok = open_with(&wrong, &dir.join("d"), parent, &url).unwrap();
+        assert!(!ok, "指紋が違うのに開けました");
+    }
+
+    #[test]
+    fn checks_dev_certificates() {
+        let cert = yy_browser::rules::generate_dev_cert("dev.example").unwrap();
+        let mut p = ProxyProfile::new("p", yy_browser::ProxyMode::Direct);
+        p.hosts = yy_browser::rules::parse_hosts(&format!(
+            "dev.example = 127.0.0.1:8443 cert={}\nplain.example = 127.0.0.1:9443",
+            cert.sha256
+        ))
+        .unwrap();
+        assert_eq!(
+            check_dev_cert(&p, "https://dev.example/x", &cert.cert_pem),
+            DevCertCheck::Match("dev.example".into(), cert.sha256.clone())
+        );
+        let other = yy_browser::rules::generate_dev_cert("dev.example").unwrap();
+        assert!(matches!(
+            check_dev_cert(&p, "https://dev.example/", &other.cert_pem),
+            DevCertCheck::Mismatch(..)
+        ));
+        assert_eq!(
+            check_dev_cert(&p, "https://plain.example/", &cert.cert_pem),
+            DevCertCheck::NotPinned
+        );
+        assert_eq!(
+            check_dev_cert(&p, "https://elsewhere.example/", &cert.cert_pem),
+            DevCertCheck::NotPinned
         );
     }
 }

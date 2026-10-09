@@ -3048,7 +3048,7 @@ fn list_menu(hwnd: HWND, tab: usize) {
 }
 
 /// ファイルを選ぶ（`save` に名前を渡したら保存の画面）。
-fn pick_file(
+pub(crate) fn pick_file(
     owner: HWND,
     filter: (&str, &str),
     folder: Option<&Path>,

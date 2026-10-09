@@ -3300,7 +3300,9 @@ dependencies = [
 name = "yy-browser"
 version = "0.1.0"
 dependencies = [
+ "rcgen",
  "serde",
+ "sha2",
  "tempfile",
  "toml",
 ]
@@ -3534,6 +3536,7 @@ name = "yy-win"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "rustls",
  "webview2-com",
  "windows",
  "windows-numerics",
@@ -3566,6 +3569,7 @@ dependencies = [
 name = "yybrowser"
 version = "0.1.0"
 dependencies = [
+ "yy-browser",
  "yy-win",
 ]
 
