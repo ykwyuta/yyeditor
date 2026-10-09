@@ -82,10 +82,14 @@ const ID_SIM_ROOTS: u16 = 5300;
 const ID_SIM_BROWSE: u16 = 5301;
 const ID_SIM_FIND: u16 = 5302;
 const ID_SIM_TO_REVIEW: u16 = 5303;
+const ID_SIM_EXTS: u16 = 5304;
+const ID_SIM_REGEX: u16 = 5305;
 const ID_DUP_ROOTS: u16 = 5400;
 const ID_DUP_BROWSE: u16 = 5401;
 const ID_DUP_FIND: u16 = 5402;
 const ID_DUP_TO_REVIEW: u16 = 5403;
+const ID_DUP_EXTS: u16 = 5404;
+const ID_DUP_REGEX: u16 = 5405;
 // 削除の確認
 const ID_CHECK_ALL: u16 = 5500;
 const ID_UNCHECK_ALL: u16 = 5501;
@@ -244,7 +248,11 @@ struct Edits {
     saved: HWND,
     rescan: HWND,
     sim_roots: HWND,
+    sim_exts: HWND,
+    sim_regex: HWND,
     dup_roots: HWND,
+    dup_exts: HWND,
+    dup_regex: HWND,
     review_info: HWND,
 }
 
@@ -689,23 +697,43 @@ fn create() -> Result<HWND> {
             ],
         ];
         e.sim_roots = edit(ID_SIM_ROOTS);
-        let sim_rows = vec![vec![
-            c(label("場所"), 50),
-            c(e.sim_roots, 0),
-            c(button("追加...", ID_SIM_BROWSE), 70),
-            c(button("探す", ID_SIM_FIND), 70),
-            c(cancel(()), 70),
-            c(button("古い版を削除の確認へ", ID_SIM_TO_REVIEW), 170),
-        ]];
+        e.sim_exts = edit(ID_SIM_EXTS);
+        e.sim_regex = edit(ID_SIM_REGEX);
+        let sim_rows = vec![
+            vec![
+                c(label("場所"), 50),
+                c(e.sim_roots, 0),
+                c(button("追加...", ID_SIM_BROWSE), 70),
+                c(button("探す", ID_SIM_FIND), 70),
+                c(cancel(()), 70),
+                c(button("古い版を削除の確認へ", ID_SIM_TO_REVIEW), 170),
+            ],
+            vec![
+                c(label("拡張子"), 50),
+                c(e.sim_exts, 180),
+                c(label("名前の正規表現"), 110),
+                c(e.sim_regex, 0),
+            ],
+        ];
         e.dup_roots = edit(ID_DUP_ROOTS);
-        let dup_rows = vec![vec![
-            c(label("場所"), 50),
-            c(e.dup_roots, 0),
-            c(button("追加...", ID_DUP_BROWSE), 70),
-            c(button("探す", ID_DUP_FIND), 70),
-            c(cancel(()), 70),
-            c(button("写しを削除の確認へ", ID_DUP_TO_REVIEW), 160),
-        ]];
+        e.dup_exts = edit(ID_DUP_EXTS);
+        e.dup_regex = edit(ID_DUP_REGEX);
+        let dup_rows = vec![
+            vec![
+                c(label("場所"), 50),
+                c(e.dup_roots, 0),
+                c(button("追加...", ID_DUP_BROWSE), 70),
+                c(button("探す", ID_DUP_FIND), 70),
+                c(cancel(()), 70),
+                c(button("写しを削除の確認へ", ID_DUP_TO_REVIEW), 160),
+            ],
+            vec![
+                c(label("拡張子"), 50),
+                c(e.dup_exts, 180),
+                c(label("名前の正規表現"), 110),
+                c(e.dup_regex, 0),
+            ],
+        ];
         e.review_info = label("");
         let review_rows = vec![vec![
             c(button("すべてチェック", ID_CHECK_ALL), 110),
@@ -1730,7 +1758,7 @@ fn cmd_search() {
                     marks.set_versions(&yy_files::similar::find_versions(&cats, &sim));
                 }
                 if need_dupes {
-                    match work::find_dupes(cx, &cats, &index_dir, threads) {
+                    match work::find_dupes(cx, &cats, &index_dir, threads, true) {
                         Ok(g) => marks.set_dupes(&g),
                         Err(e) => {
                             cx.send(Msg::Searched(Err(work::describe(&e))));
@@ -2107,14 +2135,26 @@ fn cmd_similar() {
         let scan = a.scan_options();
         let opts = a.similar_options();
         let cache = a.catalog_cache(false);
+        // 対象の拡張子・名前の正規表現（空なら全部）
+        let filter = match yy_files::search::FileFilter::parse(
+            &text_of(a.edits.sim_exts),
+            &text_of(a.edits.sim_regex),
+        ) {
+            Ok(f) => f,
+            Err(e) => {
+                error_box(a.frame, &e);
+                return;
+            }
+        };
         a.start("似たファイルを探しています", move |cx| {
-            let cats = match work::scan_all(cx, &roots, &scan, Some(&cache), None) {
+            let mut cats = match work::scan_all(cx, &roots, &scan, Some(&cache), None) {
                 Ok(c) => c,
                 Err(e) => {
                     cx.send(Msg::Similar(Err(e)));
                     return;
                 }
             };
+            filter.apply(&mut cats);
             cx.progress("名前を比べています…");
             let groups = yy_files::similar::find_versions(&cats, &opts);
             cx.send(Msg::Similar(Ok((cats, groups))));
@@ -2134,15 +2174,28 @@ fn cmd_dupes() {
         let threads = a.config.filemanager.search_threads.max(1);
         // 中身を読むので目録は使い回さない（走査し直して保存する）
         let cache = a.catalog_cache(true);
+        let filter = match yy_files::search::FileFilter::parse(
+            &text_of(a.edits.dup_exts),
+            &text_of(a.edits.dup_regex),
+        ) {
+            Ok(f) => f,
+            Err(e) => {
+                error_box(a.frame, &e);
+                return;
+            }
+        };
         a.start("重複を探しています", move |cx| {
-            let cats = match work::scan_all(cx, &roots, &scan, Some(&cache), None) {
+            let mut cats = match work::scan_all(cx, &roots, &scan, Some(&cache), None) {
                 Ok(c) => c,
                 Err(e) => {
                     cx.send(Msg::Dupes(Err(e)));
                     return;
                 }
             };
-            let r = work::find_dupes(cx, &cats, &index_dir, threads);
+            // 絞り込んだときは、対象外のファイルのハッシュの覚え書きを索引から消さない
+            let prune = filter.is_empty();
+            filter.apply(&mut cats);
+            let r = work::find_dupes(cx, &cats, &index_dir, threads, prune);
             cx.send(Msg::Dupes(
                 r.map(|g| (cats, g)).map_err(|e| work::describe(&e)),
             ));

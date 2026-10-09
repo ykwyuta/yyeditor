@@ -251,12 +251,14 @@ pub(super) fn scan_all(
     Ok(cats)
 }
 
-/// 重複を探す（ハッシュは索引から使い、求めたものは索引に残す）。
+/// 重複を探す（ハッシュは索引から使い、求めたものは索引に残す）。`prune` なら目録にないファイルの
+/// 覚え書きを索引から消す（拡張子などで絞った目録では消さない）。
 pub(super) fn find_dupes(
     cx: &Ctx,
     cats: &[Catalog],
     index_dir: &std::path::Path,
     threads: usize,
+    prune: bool,
 ) -> std::io::Result<Vec<Group>> {
     let paths: Vec<PathBuf> = cats
         .iter()
@@ -283,9 +285,11 @@ pub(super) fn find_dupes(
         ))
     });
     for ((ix, p), c) in indexes.iter_mut().zip(&paths).zip(cats) {
-        let keep: std::collections::HashSet<&str> =
-            c.files.iter().map(|f| f.rel.as_str()).collect();
-        ix.retain(&|r| keep.contains(r));
+        if prune {
+            let keep: std::collections::HashSet<&str> =
+                c.files.iter().map(|f| f.rel.as_str()).collect();
+            ix.retain(&|r| keep.contains(r));
+        }
         let _ = ix.save(p);
     }
     r

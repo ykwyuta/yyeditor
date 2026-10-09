@@ -430,6 +430,64 @@ fn name_regex(p: &str) -> Result<regex_automata::meta::Regex, String> {
         .map_err(|e| format!("正規表現が読めません: {e}"))
 }
 
+/// 似たファイル・重複で探すファイルの絞り込み（拡張子と、名前の正規表現）。
+#[derive(Clone, Debug, Default)]
+pub struct FileFilter {
+    /// 拡張子（小文字、`.` なし。空ならどれでも）
+    pub exts: Vec<String>,
+    /// 名前（フォルダを含まない）の正規表現（大文字・小文字は区別しない）
+    pub name: Option<regex_automata::meta::Regex>,
+}
+
+impl FileFilter {
+    /// 拡張子（`xlsx;docx`・`*.xlsx, .csv`）と名前の正規表現（空なら使わない）から作る。
+    pub fn parse(exts: &str, name_pattern: &str) -> Result<FileFilter, String> {
+        let exts = exts
+            .split([';', ',', ' ', '\u{3000}'])
+            .map(|e| {
+                e.trim()
+                    .trim_start_matches("*.")
+                    .trim_start_matches('.')
+                    .to_ascii_lowercase()
+            })
+            .filter(|e| !e.is_empty())
+            .collect();
+        let name = match name_pattern.trim() {
+            "" => None,
+            r => Some(name_regex(r)?),
+        };
+        Ok(FileFilter { exts, name })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.exts.is_empty() && self.name.is_none()
+    }
+
+    pub fn matches(&self, f: &FileEntry) -> bool {
+        let n = f.name();
+        if !self.exts.is_empty() {
+            let ext = n
+                .rsplit_once('.')
+                .map(|(_, e)| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            if !self.exts.contains(&ext) {
+                return false;
+            }
+        }
+        self.name.as_ref().is_none_or(|r| r.is_match(n))
+    }
+
+    /// 目録から合わないファイルを除く（目録の並びはそのまま）。
+    pub fn apply(&self, cats: &mut [Catalog]) {
+        if self.is_empty() {
+            return;
+        }
+        for c in cats {
+            c.files.retain(|f| self.matches(f));
+        }
+    }
+}
+
 /// 1 行の検索欄を読む。`now` は今（ナノ秒）、`tz` は UTC との差（秒。日本は 32400）。
 pub fn parse_query(line: &str, now: i64, tz: i64) -> Result<Query, String> {
     let mut q = Query {
@@ -1401,5 +1459,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!((st.indexed, st.matched_files), (0, 20));
+    }
+
+    #[test]
+    fn filters_by_extension_and_name_regex() {
+        let mut c = Catalog::default();
+        for rel in [
+            "a/見積_v1.xlsx",
+            "a/見積_v2.XLSX",
+            "a/議事録.docx",
+            "b/見積.csv",
+            "b/memo.txt",
+        ] {
+            c.files.push(entry(rel, 1, 0));
+        }
+        let rels = |c: &Catalog| c.files.iter().map(|f| f.rel.clone()).collect::<Vec<_>>();
+        let f = FileFilter::parse("*.xlsx; .csv", "").unwrap();
+        let mut x = vec![c.clone()];
+        f.apply(&mut x);
+        assert_eq!(
+            rels(&x[0]),
+            ["a/見積_v1.xlsx", "a/見積_v2.XLSX", "b/見積.csv"]
+        );
+        let f = FileFilter::parse("", r"^見積_v\d+").unwrap();
+        let mut x = vec![c.clone()];
+        f.apply(&mut x);
+        assert_eq!(rels(&x[0]), ["a/見積_v1.xlsx", "a/見積_v2.XLSX"]);
+        // 名前だけに当てる（フォルダの a/ には当てない）。大文字・小文字は区別しない
+        let f = FileFilter::parse("xlsx", "^MEMO|v2").unwrap();
+        let mut x = vec![c.clone()];
+        f.apply(&mut x);
+        assert_eq!(rels(&x[0]), ["a/見積_v2.XLSX"]);
+        assert!(FileFilter::parse("", "(").is_err());
+        assert!(FileFilter::parse(" ; ", " ").unwrap().is_empty());
     }
 }
