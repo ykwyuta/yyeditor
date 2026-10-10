@@ -58,6 +58,8 @@ pub struct MockConfig {
     pub ind_file: IndFileStyle,
     /// ホストが送る 3270 のデータに ALWAYS-RESPONSE を付ける（RESPONSES を合意したとき）
     pub responses: bool,
+    /// TN3270E の BIND-IMAGE・SYSREQ を合意する（端末が申し出たとき）
+    pub bind_image: bool,
     /// 出来事を標準エラーにも出す
     pub verbose: bool,
     /// TLS（なければ平文）
@@ -74,6 +76,7 @@ impl Default for MockConfig {
             password: "SECRET".into(),
             ind_file: IndFileStyle::Zos,
             responses: true,
+            bind_image: false,
             verbose: false,
             tls: None,
         }
@@ -241,6 +244,8 @@ pub(crate) enum Unit {
     Cmd(u8, u8),
     Sb(Vec<u8>),
     Rec(Vec<u8>),
+    /// IAC IP・BRK・AO などの 2 バイトのコマンド
+    Signal(u8),
 }
 
 pub(crate) struct Conn {
@@ -334,6 +339,10 @@ impl Conn {
                         Rx::Sb
                     }
                     DO | DONT | WILL | WONT => Rx::Cmd(b),
+                    IP | BRK | AO | AYT => {
+                        self.units.push_back(Unit::Signal(b));
+                        Rx::Data
+                    }
                     _ => Rx::Data,
                 },
                 Rx::Cmd(c) => {
@@ -403,6 +412,94 @@ pub(crate) struct Link {
     seq: u16,
     /// 送った ALWAYS-RESPONSE のうち、まだ応答のない番号
     pub awaiting: Vec<u16>,
+    /// BIND を送った（BIND-IMAGE を合意したとき、3270-DATA の前に要る）
+    pub bound: bool,
+    /// 端末が SSCP-LU の画面にいる（SYSREQ で切り替える）
+    pub sscp: bool,
+    /// 届いた否定の応答（番号, 理由）
+    pub negative: Vec<(u16, u8)>,
+}
+
+/// 端末から届いたもの（TN3270E のデータの種類・Telnet のコマンド）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum In {
+    /// 3270-DATA（TN3270 ではレコード）
+    Data(Vec<u8>),
+    /// SSCP-LU-DATA（SSCP の画面で入れた文字）
+    Sscp(Vec<u8>),
+    /// IAC IP（ATTN）・IAC BRK（TN3270 の ATTN）・IAC AO（TN3270E の SYSREQ）
+    Signal(u8),
+}
+
+/// BIND の画面の大きさ。
+#[allow(dead_code)] // CICS の領域（作業中）で使う
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BindSize {
+    /// 既定 24×80 と代替（行, 桁）を明示する（PSERVIC の画面の大きさ X'7F'）
+    Explicit { alt: (usize, usize) },
+    /// 代替は Query で決める（X'03'）
+    Query,
+}
+
+/// LU の種類（BIND の PS プロファイル）。
+#[allow(dead_code)] // CICS の領域（作業中）で使う
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LuType {
+    /// LU1（SCS のプリンター）
+    Lu1,
+    /// LU2（3270 の端末）
+    Lu2,
+    /// LU3（3270 データストリームのプリンター）
+    Lu3,
+}
+
+/// BIND の RU（SNA の BIND イメージ）。x3270 が読む位置（最大 RU 10・11、画面 20〜24、PLU 名 27〜）に合わせる。
+#[allow(dead_code)] // CICS の領域（作業中）で使う
+pub(crate) fn bind_image(ccsid: Ccsid, plu: &str, lu: LuType, size: BindSize) -> Vec<u8> {
+    let mut b = vec![
+        0x31, // BIND
+        0x01, // 書式 0・非交渉
+        0x03, // FM プロファイル 3
+        0x03, // TS プロファイル 3
+        0xB1, // 一次の FM の使い方
+        0x90, // 二次の FM の使い方
+        0x30,
+        0x80, // 共通の FM の使い方
+        0x00,
+        0x00, // 送信のペーシング
+        0x87, // 二次の最大 RU（1024）
+        0x87, // 一次の最大 RU
+        0x00,
+        0x00, // ペーシング
+        match lu {
+            LuType::Lu1 => 0x01,
+            LuType::Lu2 => 0x02,
+            LuType::Lu3 => 0x03,
+        },
+        0x80, // PS の特性: 構造化フィールド（Query）を使う
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    ];
+    let (ra, ca, flag) = match size {
+        BindSize::Explicit { alt } => (alt.0, alt.1, 0x7F),
+        BindSize::Query => (24, 80, 0x03),
+    };
+    b.extend_from_slice(&[
+        24,
+        80,
+        ra.min(255) as u8,
+        ca.min(255) as u8,
+        flag,
+        0x00,
+        0x00,
+    ]);
+    let name = ebcdic::encode(ccsid, plu);
+    b.push(name.len() as u8);
+    b.extend_from_slice(&name);
+    b.push(0x00); // 利用者データなし
+    b
 }
 
 impl Link {
@@ -414,35 +511,124 @@ impl Link {
         self.tn3270e && self.functions.contains(&FN_RESPONSES)
     }
 
+    /// BIND-IMAGE を合意した（3270-DATA の前に BIND が要る。SSCP-LU の画面を使える）。
+    pub fn bind_image(&self) -> bool {
+        self.tn3270e && self.functions.contains(&FN_BIND_IMAGE)
+    }
+
+    #[allow(dead_code)] // CICS の領域（作業中）で使う
+    /// SYSREQ を合意した（端末の SysReq キーで IAC AO が来る）。
+    pub fn sysreq(&self) -> bool {
+        self.tn3270e && self.functions.contains(&FN_SYSREQ)
+    }
+
+    #[allow(dead_code)] // CICS の領域（作業中）で使う
+    /// BIND を送る（BIND-IMAGE を合意していなければ何もしない）。
+    pub fn bind(
+        &mut self,
+        shared: &Shared,
+        plu: &str,
+        lu: LuType,
+        size: BindSize,
+    ) -> io::Result<()> {
+        if !self.bind_image() {
+            return Ok(());
+        }
+        let img = bind_image(shared.cfg.ccsid, plu, lu, size);
+        self.send(shared, DT_BIND_IMAGE, &img)?;
+        self.bound = true;
+        self.sscp = false;
+        shared.log(format!(
+            "bind plu={plu} {lu:?} {size:?} lu={}",
+            self.lu.as_deref().unwrap_or("")
+        ));
+        Ok(())
+    }
+
+    #[allow(dead_code)] // CICS の領域（作業中）で使う
+    /// UNBIND を送る（理由 1 は通常の終わり）。
+    pub fn unbind(&mut self, shared: &Shared, reason: u8) -> io::Result<()> {
+        if !self.bound {
+            return Ok(());
+        }
+        self.send(shared, DT_UNBIND, &[reason])?;
+        self.bound = false;
+        shared.log(format!(
+            "unbind reason={reason} lu={}",
+            self.lu.as_deref().unwrap_or("")
+        ));
+        Ok(())
+    }
+
+    #[allow(dead_code)] // CICS の領域（作業中）で使う
+    /// Telnet の TIMING-MARK を送る（端末は WILL か WONT で答える。`recv` が記録する）。
+    pub fn timing_mark(&mut self) -> io::Result<()> {
+        self.conn.send_cmd(DO, OPT_TM)
+    }
+
     /// 3270 のデータなどを送る（TN3270E ならヘッダーをつけ、合意していれば応答を求める）。
     pub fn send(&mut self, shared: &Shared, data_type: u8, data: &[u8]) -> io::Result<()> {
-        if !self.tn3270e {
-            return self.conn.send_rec(data);
-        }
-        self.seq = self.seq.wrapping_add(1);
         let want = shared.cfg.responses
             && self.responses()
             && matches!(data_type, DT_3270_DATA | DT_SCS_DATA);
-        let mut rec = vec![
+        self.send_with(
+            shared,
             data_type,
-            0,
             if want {
                 RSP_ALWAYS_RESPONSE
             } else {
                 RSP_NO_RESPONSE
             },
-        ];
+            data,
+        )
+    }
+
+    /// 応答の求め方を決めて送る（`RSP_ERROR_RESPONSE` は失敗したときだけ応答を求める）。
+    pub fn send_with(
+        &mut self,
+        shared: &Shared,
+        data_type: u8,
+        rsp: u8,
+        data: &[u8],
+    ) -> io::Result<()> {
+        if !self.tn3270e {
+            return self.conn.send_rec(data);
+        }
+        let _ = shared;
+        self.seq = self.seq.wrapping_add(1);
+        let mut rec = vec![data_type, 0, rsp];
         rec.extend_from_slice(&self.seq.to_be_bytes());
         rec.extend_from_slice(data);
-        if want {
+        if rsp != RSP_NO_RESPONSE {
             self.awaiting.push(self.seq);
         }
         self.conn.send_rec(&rec)
     }
 
+    #[allow(dead_code)] // CICS の領域（作業中）で使う
+    /// 最後に送った番号。
+    pub fn last_seq(&self) -> u16 {
+        self.seq
+    }
+
     /// 端末からのレコードを受け取る（応答は記録して読み飛ばす）。`timeout` までに来なければ `None`。
+    /// 3270-DATA だけを返す（SSCP-LU-DATA・ATTN・SYSREQ は記録して読み飛ばす）。
     pub fn recv(&mut self, shared: &Shared, timeout: Duration) -> io::Result<Option<Vec<u8>>> {
         let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.recv_any(shared, left)? {
+                None => return Ok(None),
+                Some(In::Data(d)) => return Ok(Some(d)),
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// 端末から届いたものを受け取る（応答は記録して読み飛ばす）。`timeout` までに来なければ `None`。
+    pub fn recv_any(&mut self, shared: &Shared, timeout: Duration) -> io::Result<Option<In>> {
+        let deadline = Instant::now() + timeout;
+        let lu = self.lu.clone().unwrap_or_default();
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             let Some(u) = self.conn.next(left)? else {
@@ -456,22 +642,66 @@ impl Link {
                     let seq = u16::from_be_bytes([r[3], r[4]]);
                     match r[0] {
                         DT_RESPONSE => {
-                            let kind = if r.get(2) == Some(&RSP_POSITIVE) {
-                                "positive"
-                            } else {
-                                "negative"
-                            };
+                            let positive = r.get(2) == Some(&RSP_POSITIVE);
+                            let kind = if positive { "positive" } else { "negative" };
                             self.awaiting.retain(|&s| s != seq);
-                            shared.log(format!(
-                                "response {kind} seq={seq} lu={}",
-                                self.lu.as_deref().unwrap_or("")
-                            ));
+                            if positive {
+                                shared.log(format!("response {kind} seq={seq} lu={lu}"));
+                            } else {
+                                let why = r.get(5).copied().unwrap_or(0);
+                                let name = match why {
+                                    0 => "COMMAND-REJECT",
+                                    1 => "INTERVENTION-REQUIRED",
+                                    2 => "OPERATION-CHECK",
+                                    3 => "COMPONENT-DISCONNECTED",
+                                    _ => "?",
+                                };
+                                self.negative.push((seq, why));
+                                shared.log(format!(
+                                    "response {kind} seq={seq} reason={name} lu={lu}"
+                                ));
+                            }
                         }
-                        DT_3270_DATA => return Ok(Some(r[5..].to_vec())),
+                        DT_3270_DATA => return Ok(Some(In::Data(r[5..].to_vec()))),
+                        DT_SSCP_LU_DATA => {
+                            self.sscp = true;
+                            return Ok(Some(In::Sscp(r[5..].to_vec())));
+                        }
+                        DT_REQUEST => {
+                            shared.log(format!("request flag={} lu={lu}", r[1]));
+                        }
                         t => shared.log(format!("ignored data type {t}")),
                     }
                 }
-                Unit::Rec(r) => return Ok(Some(r)),
+                Unit::Rec(r) => return Ok(Some(In::Data(r))),
+                Unit::Signal(AO) => {
+                    // 端末は自分で SSCP-LU と LU-LU の画面を切り替える（x3270 の net_abort）
+                    if self.sscp {
+                        if self.bound || !self.bind_image() {
+                            self.sscp = false;
+                        }
+                    } else {
+                        self.sscp = true;
+                    }
+                    shared.log(format!(
+                        "sysreq (IAC AO) now {} lu={lu}",
+                        if self.sscp { "sscp-lu" } else { "lu-lu" }
+                    ));
+                    return Ok(Some(In::Signal(AO)));
+                }
+                Unit::Signal(s @ (IP | BRK)) => {
+                    shared.log(format!(
+                        "attn ({}) lu={lu}",
+                        if s == IP { "IAC IP" } else { "IAC BRK" }
+                    ));
+                    return Ok(Some(In::Signal(s)));
+                }
+                Unit::Signal(AYT) => self.conn.send_raw(b"\r\n[YY mock host: yes]\r\n")?,
+                Unit::Signal(_) => {}
+                Unit::Cmd(c @ (WILL | WONT), OPT_TM) => shared.log(format!(
+                    "timing mark {} lu={lu}",
+                    if c == WILL { "will" } else { "wont" }
+                )),
                 Unit::Cmd(c, o) => shared.log(format!("telnet cmd {c} {o} after negotiation")),
                 Unit::Sb(_) => {}
             }
@@ -617,7 +847,14 @@ fn negotiate(mut conn: Conn, shared: &Shared) -> io::Result<Link> {
                         .iter()
                         .copied()
                         .filter(|f| {
-                            matches!(*f, FN_RESPONSES | FN_SCS_CTL_CODES | FN_DATA_STREAM_CTL)
+                            matches!(
+                                *f,
+                                FN_BIND_IMAGE
+                                    | FN_RESPONSES
+                                    | FN_SCS_CTL_CODES
+                                    | FN_DATA_STREAM_CTL
+                                    | FN_SYSREQ
+                            ) && (shared.cfg.bind_image || !matches!(*f, FN_BIND_IMAGE | FN_SYSREQ))
                         })
                         .collect();
                     if ours.len() == asked.len() {
@@ -638,6 +875,9 @@ fn negotiate(mut conn: Conn, shared: &Shared) -> io::Result<Link> {
                             functions: ours,
                             seq: 0,
                             awaiting: Vec::new(),
+                            bound: false,
+                            sscp: false,
+                            negative: Vec::new(),
                         });
                     }
                     // 使えるものだけを提案し直す
@@ -661,6 +901,9 @@ fn negotiate(mut conn: Conn, shared: &Shared) -> io::Result<Link> {
                         functions: f,
                         seq: 0,
                         awaiting: Vec::new(),
+                        bound: false,
+                        sscp: false,
+                        negative: Vec::new(),
                     });
                 }
                 Unit::Cmd(DONT, OPT_TN3270E) => break,
@@ -711,6 +954,9 @@ fn negotiate(mut conn: Conn, shared: &Shared) -> io::Result<Link> {
         functions: Vec::new(),
         seq: 0,
         awaiting: Vec::new(),
+        bound: false,
+        sscp: false,
+        negative: Vec::new(),
     })
 }
 
