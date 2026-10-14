@@ -33,7 +33,7 @@ pub use log::ConnectLog;
 pub use session::{Session, UploadOutcome};
 pub use ssh_config::HostSpec;
 pub use uri::RemoteUri;
-pub use yy_proto::{DirEntry, FileId, FileInfo, FileKind};
+pub use yy_proto::{DirEntry, FileId, FileInfo, FileKind, ZipProgress, ZipState};
 
 /// SSH 接続（またはテスト用の代わり）。コマンドを起動して標準入出力でやり取りできる。
 pub trait Transport: Send + Sync {

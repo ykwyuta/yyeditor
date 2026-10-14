@@ -324,7 +324,7 @@ fn time_text(ns: i64) -> String {
 }
 
 /// UTC との差（秒）。
-fn tz_offset() -> i64 {
+pub(crate) fn tz_offset() -> i64 {
     let mut tz = windows::Win32::System::Time::TIME_ZONE_INFORMATION::default();
     let r = unsafe { windows::Win32::System::Time::GetTimeZoneInformation(&mut tz) };
     let dst = if r == 2 { tz.DaylightBias } else { 0 };

@@ -498,3 +498,177 @@ fn hashes_a_prefix_of_a_file() {
     };
     assert_eq!(e.kind, yy_proto::ErrorKind::InvalidInput);
 }
+
+/// zip の中身（名前 → 中身。フォルダは `None`）を、目次からたどって読む（CRC も確かめる）。
+fn read_zip(data: &[u8]) -> Vec<(String, Option<Vec<u8>>)> {
+    let u16le = |at: usize| u16::from_le_bytes([data[at], data[at + 1]]) as usize;
+    let u32le = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+    let end = data.len() - 22;
+    assert_eq!(u32le(end), 0x0605_4b50);
+    let count = u16le(end + 10);
+    let mut at = u32le(end + 16);
+    let mut out = Vec::new();
+    for _ in 0..count {
+        assert_eq!(u32le(at), 0x0201_4b50);
+        let method = u16le(at + 10);
+        let crc = u32le(at + 16) as u32;
+        let packed = u32le(at + 20);
+        let size = u32le(at + 24);
+        let name_len = u16le(at + 28);
+        let extra = u16le(at + 30);
+        let comment = u16le(at + 32);
+        let local = u32le(at + 42);
+        let name = String::from_utf8(data[at + 46..at + 46 + name_len].to_vec()).unwrap();
+        at += 46 + name_len + extra + comment;
+        assert_eq!(u32le(local), 0x0403_4b50);
+        assert_eq!(u32le(local + 14) as u32, crc, "{name}");
+        let start = local + 30 + u16le(local + 26) + u16le(local + 28);
+        let body = &data[start..start + packed];
+        if name.ends_with('/') {
+            out.push((name, None));
+            continue;
+        }
+        let content = match method {
+            8 => miniz_oxide::inflate::decompress_to_vec(body).unwrap(),
+            0 => body.to_vec(),
+            m => panic!("method {m}"),
+        };
+        assert_eq!(content.len(), size, "{name}");
+        assert_eq!(zip::crc32(0, &content), crc, "{name}");
+        out.push((name, Some(content)));
+    }
+    out
+}
+
+/// 作り終えるか上限を超えるまで進める。
+fn zip_until_done(agent: &mut Agent, path: &Path, limit: u64) -> yy_proto::ZipProgress {
+    let Response::Zip(p) = run(
+        agent,
+        Request::ZipBegin {
+            path: bytes(path),
+            limit,
+            utc_offset: 9 * 3600,
+        },
+    ) else {
+        panic!("zip begin");
+    };
+    let mut p = p;
+    while p.state == yy_proto::ZipState::Running {
+        p = match run(agent, Request::ZipStep { job: p.job }) {
+            Response::Zip(p) => p,
+            r => panic!("{r:?}"),
+        };
+    }
+    p
+}
+
+#[test]
+fn zips_a_folder_with_subfolders_and_japanese_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("プロジェクト");
+    fs::create_dir_all(root.join("src/空のフォルダ")).unwrap();
+    fs::write(root.join("README.md"), "# 見出し\n".repeat(1000)).unwrap();
+    let big: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    fs::write(root.join("src/data.bin"), &big).unwrap();
+    fs::write(root.join("src/empty.txt"), b"").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("README.md"), root.join("link")).unwrap();
+
+    let mut agent = Agent::default();
+    let p = zip_until_done(&mut agent, &root, 100 << 20);
+    assert_eq!(p.state, yy_proto::ZipState::Done);
+    assert_eq!((p.files, p.total_files, p.skipped), (3, 3, 0));
+    assert_eq!(p.read, p.total_bytes);
+    let temp = to_path(&p.temp);
+    let data = fs::read(&temp).unwrap();
+    assert_eq!(data.len() as u64, p.written);
+    let entries = read_zip(&data);
+    let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "プロジェクト/",
+            "プロジェクト/README.md",
+            "プロジェクト/src/",
+            "プロジェクト/src/data.bin",
+            "プロジェクト/src/empty.txt",
+            "プロジェクト/src/空のフォルダ/",
+        ]
+    );
+    assert_eq!(entries[3].1.as_deref(), Some(&big[..]));
+    assert_eq!(entries[4].1.as_deref(), Some(&b""[..]));
+    // 圧縮されている
+    assert!(p.written < 100_000, "{}", p.written);
+    // 取り寄せた後に終えると一時ファイルは消える
+    assert_eq!(
+        run(&mut agent, Request::ZipEnd { job: p.job }),
+        Response::Done
+    );
+    assert!(!temp.exists());
+}
+
+#[test]
+fn zip_stops_when_compressed_size_exceeds_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("big");
+    fs::create_dir_all(&root).unwrap();
+    // 圧縮できない中身
+    let mut x = 0x1234_5678u32;
+    let noise: Vec<u8> = (0..2_000_000)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as u8
+        })
+        .collect();
+    fs::write(root.join("noise.bin"), &noise).unwrap();
+    let mut agent = Agent::default();
+    let p = zip_until_done(&mut agent, &root, 1_000_000);
+    assert!(matches!(p.state, yy_proto::ZipState::TooLarge(_)), "{p:?}");
+    assert!(!to_path(&p.temp).exists());
+    // 上限の中なら作れる
+    let p = zip_until_done(&mut agent, &root, 10_000_000);
+    assert_eq!(p.state, yy_proto::ZipState::Done);
+    let entries = read_zip(&fs::read(to_path(&p.temp)).unwrap());
+    assert_eq!(entries[1].1.as_deref(), Some(&noise[..]));
+    // 終えずにエージェントが終わっても一時ファイルは残さない
+    let temp = to_path(&p.temp);
+    drop(agent);
+    assert!(!temp.exists());
+}
+
+#[test]
+fn zip_rejects_files_and_unknown_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("a.txt");
+    fs::write(&f, b"x").unwrap();
+    let mut agent = Agent::default();
+    assert!(matches!(
+        run(
+            &mut agent,
+            Request::ZipBegin {
+                path: bytes(&f),
+                limit: 1 << 20,
+                utc_offset: 0,
+            }
+        ),
+        Response::Error(_)
+    ));
+    assert!(matches!(
+        run(&mut agent, Request::ZipStep { job: 99 }),
+        Response::Error(_)
+    ));
+}
+
+#[test]
+fn dos_time_is_utc_calendar() {
+    // 2024-02-29 13:45:58 UTC
+    let (t, d) = zip::dos_time(1_709_214_358);
+    assert_eq!((d >> 9) + 1980, 2024);
+    assert_eq!((d >> 5) & 0xF, 2);
+    assert_eq!(d & 0x1F, 29);
+    assert_eq!((t >> 11, (t >> 5) & 0x3F, (t & 0x1F) * 2), (13, 45, 58));
+    assert_eq!(zip::dos_time(0), (0, (1 << 5) | 1));
+    assert_eq!(zip::crc32(0, b"123456789"), 0xCBF4_3926);
+}

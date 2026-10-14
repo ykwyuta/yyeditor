@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// プロトコルの版。メッセージの形を変えたら増やす。
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// エージェントが起動直後に出す印。ログインシェルの初期化ファイルが標準出力に文字を出しても、
 /// 端末はこれより前を読み捨てて同期する（11 章 6.2）。
@@ -133,6 +133,47 @@ pub enum Request {
     /// ファイルの先頭から `len` バイトの SHA-256（転送の照合。13 章）。ファイルが `len` より
     /// 短ければエラー。応答は [`Response::Hash`]
     Hash { path: Vec<u8>, len: u64 },
+    /// フォルダを zip にし始める（接続先の一時フォルダに作る）。圧縮した大きさが `limit` バイトを
+    /// 超えたらそこでやめる。`utc_offset` は端末の時差（秒。zip の日時は端末の時刻で書く）。
+    /// 応答は [`Response::Zip`]（作業の番号）。続きは [`Request::ZipStep`]
+    ZipBegin {
+        path: Vec<u8>,
+        limit: u64,
+        utc_offset: i32,
+    },
+    /// zip の作成を少し（目安 0.2 秒）進める。応答は [`Response::Zip`]
+    ZipStep { job: u32 },
+    /// zip の作業を終え、一時ファイルを消す（取り寄せた後・中止したとき）。応答は [`Response::Done`]
+    ZipEnd { job: u32 },
+}
+
+/// zip の作業の状態。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ZipProgress {
+    pub job: u32,
+    /// 作っている zip（接続先の一時ファイル）
+    pub temp: Vec<u8>,
+    /// 入れたファイルの数・全体の数
+    pub files: u64,
+    pub total_files: u64,
+    /// 読んだ大きさ・全体の大きさ（圧縮前）
+    pub read: u64,
+    pub total_bytes: u64,
+    /// zip の大きさ（ここまで）
+    pub written: u64,
+    /// 読めなかったファイル（入れずに飛ばした）の数
+    pub skipped: u64,
+    pub state: ZipState,
+}
+
+/// zip の作業の段階。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ZipState {
+    Running,
+    /// できた（`written` が zip の大きさ）
+    Done,
+    /// 上限を超えたのでやめた（一時ファイルは消した）。理由
+    TooLarge(String),
 }
 
 /// エージェントからの応答。
@@ -162,6 +203,7 @@ pub enum Response {
     Conflict(Option<FileInfo>),
     /// SHA-256（32 バイト）
     Hash(Vec<u8>),
+    Zip(ZipProgress),
     Error(RemoteError),
 }
 

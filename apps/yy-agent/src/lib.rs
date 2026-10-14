@@ -20,6 +20,8 @@ const READ_MAX: u32 = 4 * yy_proto::CHUNK;
 /// フォルダの一覧の応答の大きさの目安の上限（フレームの上限より小さく）
 const DIR_BYTES_MAX: usize = 6 << 20;
 
+mod zip;
+
 /// 要求に順に答える。`input` が閉じられたら終わる。
 pub fn serve(input: impl Read, output: impl Write) -> io::Result<()> {
     let mut input = BufReader::with_capacity(1 << 20, input);
@@ -41,6 +43,7 @@ struct Agent {
     next: u32,
     files: HashMap<u32, File>,
     uploads: HashMap<u32, Upload>,
+    zips: HashMap<u32, zip::ZipJob>,
 }
 
 /// 受け取り中の保存内容。
@@ -174,6 +177,29 @@ impl Agent {
                 Response::Done
             }
             Request::Hash { path, len } => Response::Hash(hash_prefix(&to_path(&path), len)?),
+            Request::ZipBegin {
+                path,
+                limit,
+                utc_offset,
+            } => {
+                let id = self.id();
+                let job = zip::ZipJob::begin(id, &to_path(&path), limit, utc_offset)?;
+                let p = job.progress();
+                self.zips.insert(id, job);
+                Response::Zip(p)
+            }
+            Request::ZipStep { job } => {
+                let z = self.zips.get_mut(&job).ok_or_else(bad_handle)?;
+                if let Err(e) = z.step() {
+                    self.zips.remove(&job);
+                    return Err(e);
+                }
+                Response::Zip(z.progress())
+            }
+            Request::ZipEnd { job } => {
+                self.zips.remove(&job);
+                Response::Done
+            }
         })
     }
 }

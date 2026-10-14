@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::sync::Arc;
 
-use yy_proto::{Block, DirEntry, FileId, FileInfo, Request, Response, VERSION};
+use yy_proto::{Block, DirEntry, FileId, FileInfo, Request, Response, VERSION, ZipProgress};
 
 use crate::deploy::{self, AgentFiles, AgentImage};
 use crate::rpc::{Client, Reply};
@@ -254,6 +254,26 @@ impl Session {
         }
     }
 
+    /// フォルダを zip にし始める（接続先の一時ファイルに作る。圧縮した大きさが `limit` を超えたら
+    /// やめる）。続きは [`zip_step`](Self::zip_step)、終わったら [`zip_end`](Self::zip_end)。
+    pub fn zip_begin(&self, path: &[u8], limit: u64, utc_offset: i32) -> io::Result<ZipProgress> {
+        zip_progress(self.client.call(&Request::ZipBegin {
+            path: path.to_vec(),
+            limit,
+            utc_offset,
+        })?)
+    }
+
+    /// zip の作成を少し（目安 0.2 秒）進める。
+    pub fn zip_step(&self, job: u32) -> io::Result<ZipProgress> {
+        zip_progress(self.client.call(&Request::ZipStep { job })?)
+    }
+
+    /// zip の作業を終え、接続先の一時ファイルを消す。
+    pub fn zip_end(&self, job: u32) -> io::Result<()> {
+        check_done(self.client.call(&Request::ZipEnd { job })?)
+    }
+
     /// 空のファイルを作る（既にあればエラー）。
     pub fn create_file(self: &Arc<Self>, path: &[u8]) -> io::Result<FileInfo> {
         match self.upload(&mut io::empty(), path, None, &mut |_| true)? {
@@ -407,6 +427,13 @@ impl Session {
 /// `f` を行い、失敗したら何をしていたかと一緒に記録する。
 fn step<T>(log: &ConnectLog, what: &str, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     f().inspect_err(|e| log.note(format!("{what}に失敗しました: {e}")))
+}
+
+fn zip_progress(r: Response) -> io::Result<ZipProgress> {
+    match r {
+        Response::Zip(p) => Ok(p),
+        r => Err(unexpected(r)),
+    }
 }
 
 fn check_done(r: Response) -> io::Result<()> {

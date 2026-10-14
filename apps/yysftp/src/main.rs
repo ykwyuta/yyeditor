@@ -4,8 +4,20 @@
 #[cfg(windows)]
 fn main() {
     // yysftp [ssh://接続先/パス | ユーザー@ホスト:/パス | ユーザー@ホスト]
-    let initial = std::env::args().nth(1);
-    if let Err(e) = yy_win::run_sftp(initial, ssh()) {
+    // yysftp --download ssh://接続先/フォルダ --to 保存先のフォルダ（転送の一覧に入れて始める）
+    let mut initial = None;
+    let (mut download, mut to) = (None, None);
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--download" => download = args.next(),
+            "--to" => to = args.next().map(std::path::PathBuf::from),
+            _ if initial.is_none() => initial = Some(a),
+            _ => {}
+        }
+    }
+    let download = download.zip(to);
+    if let Err(e) = yy_win::run_sftp_with(initial, download, ssh()) {
         eprintln!("yysftp: {e}");
         std::process::exit(1);
     }

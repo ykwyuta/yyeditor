@@ -125,6 +125,7 @@ const CM_REMOVE: u32 = 5;
 const CM_ADD: u32 = 6;
 const CM_ADD_REMOTE: u32 = 7;
 const CM_DOWNLOAD: u32 = 8;
+const CM_ZIP_DOWNLOAD: u32 = 9;
 
 /// サイドバーの幅（96 DPI でのピクセル）
 const SIDEBAR_WIDTH: i32 = 240;
@@ -3587,6 +3588,9 @@ fn context_menu(hwnd: HWND) {
                 && sidebar::remote_uri(path).is_some()
             {
                 let _ = item(CM_DOWNLOAD, w!("ダウンロード フォルダにコピー(&L)"));
+                if *is_dir {
+                    let _ = item(CM_ZIP_DOWNLOAD, w!("zip にしてダウンロード(&Z)..."));
+                }
             }
             let _ = item(CM_COPY_PATH, w!("パスをコピー(&C)"));
             if *root {
@@ -3615,6 +3619,15 @@ fn context_menu(hwnd: HWND) {
             (CM_DOWNLOAD, Some((_, path, _, _))) => {
                 if let Some(u) = sidebar::remote_uri(&path) {
                     match crate::download::download(hwnd, &u) {
+                        Ok(Some(m)) => set_status(&m),
+                        Ok(None) => {}
+                        Err(e) => error_box(hwnd, &e),
+                    }
+                }
+            }
+            (CM_ZIP_DOWNLOAD, Some((_, path, _, _))) => {
+                if let Some(u) = sidebar::remote_uri(&path) {
+                    match crate::download::zip_download(hwnd, &u) {
                         Ok(Some(m)) => set_status(&m),
                         Ok(None) => {}
                         Err(e) => error_box(hwnd, &e),
