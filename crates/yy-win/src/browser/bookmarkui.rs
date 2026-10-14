@@ -29,9 +29,13 @@ pub(super) fn path() -> PathBuf {
         .join("bookmarks.toml")
 }
 
-/// 読む（読めなければ空）。
+/// 読む（読めなければ空）。期限の過ぎたブックマークはここで消して保存する。
 pub(super) fn load() -> Bookmarks {
-    Bookmarks::load(&path()).unwrap_or_default()
+    let mut list = Bookmarks::load(&path()).unwrap_or_default();
+    if !list.purge_expired(yy_adblock::lists::now()).is_empty() {
+        let _ = list.save(&path());
+    }
+    list
 }
 
 /// 保存する（だめなら理由を出して `false`）。
@@ -145,6 +149,7 @@ const E_TITLE: u16 = 100;
 const E_URL: u16 = 101;
 const E_FOLDER: u16 = 102;
 const E_DELETE: u16 = 103;
+const E_EXPIRE: u16 = 104;
 
 /// 編集の画面の結果。
 pub(super) enum EditResult {
@@ -172,7 +177,7 @@ pub(super) fn edit(
     } else {
         "ブックマークに追加"
     };
-    let mut t = Template::dialog(title, 300, 92);
+    let mut t = Template::dialog(title, 300, 108);
     let label =
         |t: &mut Template, y: i16, s: &str| t.item(0, 7, y + 2, 44, 10, NO_ID, CLASS_STATIC, s);
     label(&mut t, 7, "名前");
@@ -209,10 +214,21 @@ pub(super) fn edit(
         CLASS_COMBO,
         "",
     );
+    // 期限付き（残りの日数は画面を開くときに添える）
+    t.item(
+        WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32,
+        54,
+        62,
+        239,
+        12,
+        E_EXPIRE,
+        CLASS_BUTTON,
+        "1 か月で消す（開くたびに 1 か月に延長）",
+    );
     t.item(
         WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
         7,
-        71,
+        87,
         50,
         14,
         E_DELETE,
@@ -222,7 +238,7 @@ pub(super) fn edit(
     t.item(
         WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32,
         189,
-        71,
+        87,
         50,
         14,
         IDOK_,
@@ -232,7 +248,7 @@ pub(super) fn edit(
     t.item(
         WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
         243,
-        71,
+        87,
         50,
         14,
         IDCANCEL_,
@@ -276,6 +292,14 @@ extern "system" fn edit_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     );
                 }
                 let _ = EnableWindow(item(dlg, E_DELETE), st.existing);
+                if let Some(d) = st.bookmark.days_left(yy_adblock::lists::now()) {
+                    set_text(
+                        dlg,
+                        E_EXPIRE,
+                        &format!("1 か月で消す（開くたびに 1 か月に延長。あと {d} 日）"),
+                    );
+                    SendDlgItemMessageW(dlg, E_EXPIRE as i32, BM_SETCHECK, WPARAM(1), LPARAM(0));
+                }
                 let _ = SetFocus(Some(item(dlg, E_TITLE)));
                 SendDlgItemMessageW(dlg, E_TITLE as i32, EM_SETSEL, WPARAM(0), LPARAM(-1));
             }
@@ -313,7 +337,21 @@ extern "system" fn edit_proc(dlg: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     } else {
                         typed
                     };
-                    let b = Bookmark::new(&get_text(dlg, E_TITLE), &get_text(dlg, E_URL), &folder);
+                    let mut b =
+                        Bookmark::new(&get_text(dlg, E_TITLE), &get_text(dlg, E_URL), &folder);
+                    let expiring = unsafe {
+                        SendDlgItemMessageW(dlg, E_EXPIRE as i32, BM_GETCHECK, WPARAM(0), LPARAM(0))
+                            .0
+                    } == 1;
+                    // 期限付きのままなら今の期限を保つ（編集は使ったことにしない）
+                    b.expires = match (expiring, st.bookmark.expires) {
+                        (true, Some(e)) => Some(e),
+                        (true, None) => {
+                            b.set_expiring(true, yy_adblock::lists::now());
+                            b.expires
+                        }
+                        (false, _) => None,
+                    };
                     match b.validate() {
                         Ok(()) => {
                             st.result = EditResult::Save(b);

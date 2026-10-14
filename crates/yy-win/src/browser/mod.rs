@@ -8,12 +8,14 @@
 //! （`APP`）を借りたまま WebView2 を呼ばない。必要なものを取り出してから呼ぶ。
 
 mod adblock;
+mod bmbar;
 mod bookmarkui;
 mod cookieui;
 mod downloads;
 mod filterdlg;
 mod historyui;
 mod proxydlg;
+mod suggest;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -50,6 +52,9 @@ const ID_PROXY: u16 = 6007;
 const ID_BADGE: u16 = 6008;
 const ID_SHIELD: u16 = 6009;
 const ID_STAR: u16 = 6015;
+const ID_BM_TREE: u16 = 6016;
+/// 左のブックマークの欄の表示・非表示（ボタン・メニュー）
+const ID_BM_BAR: u16 = 6017;
 const ID_FIND_EDIT: u16 = 6010;
 const ID_FIND_PREV: u16 = 6011;
 const ID_FIND_NEXT: u16 = 6012;
@@ -94,6 +99,8 @@ const ID_WINDOW_BASE: u16 = 6300;
 
 /// 環境ができた・タブの表示ができたなどの知らせ（`wparam` は世代。古い環境の知らせは捨てる）
 const WM_APP_ENV_READY: u32 = WM_APP + 120;
+/// アドレスバーから離れたら候補を閉じる（候補をクリックしたときは閉じない）
+const WM_APP_SUGGEST_HIDE: u32 = WM_APP + 127;
 
 /// 拡大の段階。
 const ZOOMS: [f64; 13] = [
@@ -136,6 +143,19 @@ struct App {
     star: HWND,
     /// ブックマーク（★ の表示とメニュー。メニューを開くときに読み直す）
     bookmarks: yy_browser::bookmarks::Bookmarks,
+    /// 左のブックマークの欄（ツリー）・表示を切り替えるボタン
+    bm_tree: HWND,
+    bm_btn: HWND,
+    bm_visible: bool,
+    /// 欄の幅（96 DPI でのピクセル）
+    bm_width: i32,
+    /// 境界をドラッグ中
+    bm_drag: bool,
+    /// アドレスバーの下の候補の一覧と、その URL
+    suggest: HWND,
+    suggest_urls: Vec<String>,
+    /// 候補に使う閲覧履歴（初めて使うときに読む）
+    visits: Option<Vec<yy_browser::history::Visit>>,
     /// 広告ブロックのエンジン（できるまでは `None`）
     adblock: Option<Arc<yy_adblock::AdBlocker>>,
     /// フィルタを更新中
@@ -548,6 +568,15 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
         let forward = button("→", ID_FORWARD);
         let reload = button("⟳", ID_RELOAD);
         let home = button("⌂", ID_HOME);
+        let bm_btn = button("📑", ID_BM_BAR);
+        let bm_tree = bmbar::create(frame, instance);
+        SendMessageW(
+            bm_tree,
+            WM_SETFONT,
+            Some(WPARAM(font.0 as usize)),
+            Some(LPARAM(1)),
+        );
+        let suggest_popup = suggest::create(frame, instance, font);
         let address = child(
             w!("EDIT"),
             "",
@@ -603,6 +632,11 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
             Some(WPARAM(1)),
             Some(LPARAM(cue.as_ptr() as isize)),
         );
+        let bm_visible = profiles.bookmark_bar;
+        let bm_width = match profiles.bookmark_bar_width {
+            0 => bmbar::DEFAULT_WIDTH,
+            w => w as i32,
+        };
         let app = App {
             frame,
             tabs_hwnd,
@@ -616,6 +650,14 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
             shield,
             star,
             bookmarks: bookmarkui::load(),
+            bm_tree,
+            bm_btn,
+            bm_visible,
+            bm_width,
+            bm_drag: false,
+            suggest: suggest_popup,
+            suggest_urls: Vec::new(),
+            visits: None,
             adblock: None,
             adblock_busy: false,
             downloads: Vec::new(),
@@ -642,6 +684,7 @@ fn create(config: Config, profiles: ProfileList, profile: ProxyProfile) -> Resul
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
         with(|a| {
+            bmbar::fill(a.bm_tree, &a.bookmarks, yy_adblock::lists::now());
             a.update_proxy_label();
             a.layout();
         });
@@ -669,6 +712,8 @@ impl App {
                     self.forward,
                     self.reload,
                     self.home,
+                    self.bm_btn,
+                    self.bm_tree,
                     self.address,
                     self.proxy_btn,
                     self.shield,
@@ -695,6 +740,7 @@ impl App {
                 self.forward,
                 self.reload,
                 self.home,
+                self.bm_btn,
                 self.address,
                 self.proxy_btn,
                 self.shield,
@@ -715,7 +761,7 @@ impl App {
             let mut x = pad;
             let y = tab_h + pad;
             let ch = bar_h - pad;
-            for b in [self.back, self.forward, self.reload, self.home] {
+            for b in [self.back, self.forward, self.reload, self.home, self.bm_btn] {
                 let _ = MoveWindow(b, x, y, btn, ch, true);
                 x += btn + pad;
             }
@@ -770,12 +816,53 @@ impl App {
                     let _ = ShowWindow(hw, SW_HIDE);
                 }
             }
+            // 左のブックマークの欄と境界
+            let mut left = 0;
+            if self.bm_visible {
+                let split = self.scaled(bmbar::SPLITTER);
+                let sw = self
+                    .scaled(self.bm_width)
+                    .min((w - split - self.scaled(200)).max(self.scaled(80)));
+                let _ = MoveWindow(self.bm_tree, 0, top, sw, (bottom - top).max(0), true);
+                let _ = ShowWindow(self.bm_tree, SW_SHOW);
+                left = sw + split;
+            } else {
+                let _ = ShowWindow(self.bm_tree, SW_HIDE);
+            }
             self.set_web_bounds(RECT {
-                left: 0,
+                left,
                 top,
                 right: w,
                 bottom: bottom.max(top),
             });
+        }
+    }
+
+    /// 境界の位置（フレームの座標。欄を隠していれば空）。
+    fn splitter_rect(&self) -> RECT {
+        if !self.bm_visible || self.fullscreen.is_some() {
+            return RECT::default();
+        }
+        let mut rc = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(self.bm_tree, &mut rc);
+            let mut pts = [
+                windows::Win32::Foundation::POINT {
+                    x: rc.left,
+                    y: rc.top,
+                },
+                windows::Win32::Foundation::POINT {
+                    x: rc.right,
+                    y: rc.bottom,
+                },
+            ];
+            windows::Win32::Graphics::Gdi::MapWindowPoints(None, Some(self.frame), &mut pts);
+            RECT {
+                left: pts[1].x,
+                top: pts[0].y,
+                right: pts[1].x + self.scaled(bmbar::SPLITTER),
+                bottom: pts[1].y,
+            }
         }
     }
 
@@ -919,6 +1006,31 @@ impl App {
                     LPARAM(0),
                 );
             }
+        }
+    }
+
+    /// ブックマークを入れ替え、★ と左の欄を直す。
+    fn set_bookmarks(&mut self, list: yy_browser::bookmarks::Bookmarks) {
+        if self.bm_visible || list != self.bookmarks {
+            bmbar::fill(self.bm_tree, &list, yy_adblock::lists::now());
+        }
+        self.bookmarks = list;
+        self.refresh_chrome();
+    }
+
+    /// その URL のページを開いた: 期限付きのブックマークなら期限を延ばして保存する。
+    fn bookmark_used(&mut self, url: &str) {
+        let now = yy_adblock::lists::now();
+        let Some(i) = self.bookmarks.find(url) else {
+            return;
+        };
+        if self.bookmarks.items[i].expires.is_none() {
+            return;
+        }
+        // ほかのウィンドウも書き換えるので、読み直してから延ばす
+        let mut list = bookmarkui::load();
+        if list.touch(url, now) && list.save(&bookmarkui::path()).is_ok() {
+            self.set_bookmarks(list);
         }
     }
 
@@ -1297,11 +1409,21 @@ fn add_events(
                         a.tabs[i].loading = false;
                         if ok.as_bool() {
                             a.flush_visit(i);
-                            a.tabs[i].pending_visit = Some(yy_browser::history::Visit {
+                            let v = yy_browser::history::Visit {
                                 time: yy_adblock::lists::now(),
                                 url: a.tabs[i].url.clone(),
                                 title: a.tabs[i].title.clone(),
-                            });
+                            };
+                            // アドレスバーの候補にはすぐ出す（同じ URL は候補で 1 件にまとまる）
+                            if let Some(c) = a.visits.as_mut()
+                                && yy_browser::history::worth_recording(&v.url)
+                            {
+                                c.push(v.clone());
+                            }
+                            a.tabs[i].pending_visit = Some(v);
+                            // 期限付きのブックマークを使った: 期限を延ばす
+                            let url = a.tabs[i].url.clone();
+                            a.bookmark_used(&url);
                         }
                         a.refresh_tab_label(i);
                         if i == a.current {
@@ -1937,6 +2059,7 @@ fn clear_data() {
                 since,
             );
             a.last_visit.clear();
+            a.visits = None;
             for t in &mut a.tabs {
                 t.pending_visit = None;
             }
@@ -2136,10 +2259,7 @@ fn bookmark_page() {
         bookmarkui::EditResult::Cancel => return,
     }
     if bookmarkui::save(frame, &list) {
-        with(|a| {
-            a.bookmarks = list;
-            a.refresh_chrome();
-        });
+        with(|a| a.set_bookmarks(list));
     }
 }
 
@@ -2149,15 +2269,224 @@ fn manage_bookmarks() {
         return;
     };
     let open = bookmarkui::manage(frame);
-    with(|a| {
-        a.bookmarks = bookmarkui::load();
-        a.refresh_chrome();
-    });
+    with(|a| a.set_bookmarks(bookmarkui::load()));
     match open {
         Some((url, true)) => new_tab(Some(&url)),
         Some((url, false)) => open_in_current(&url),
         None => {}
     }
+}
+
+/// 左のブックマークの欄を出す・隠す（設定に覚える）。
+fn toggle_bookmark_bar() {
+    let Some((frame, list)) = with(|a| {
+        a.bm_visible = !a.bm_visible;
+        a.profiles.bookmark_bar = a.bm_visible;
+        if a.bm_visible {
+            a.bookmarks = bookmarkui::load();
+            bmbar::fill(a.bm_tree, &a.bookmarks, yy_adblock::lists::now());
+        }
+        a.layout();
+        if a.bm_visible {
+            unsafe {
+                let _ = SetFocus(Some(a.bm_tree));
+            }
+        }
+        (a.frame, a.profiles.clone())
+    }) else {
+        return;
+    };
+    save_profiles(frame, &list);
+}
+
+/// プロファイルの一覧（ブラウザの共通の設定を含む）を保存する。
+fn save_profiles(frame: HWND, list: &ProfileList) {
+    if let Err(e) = list.save(&profiles_path()) {
+        error_box(frame, &format!("設定を保存できません: {e}"));
+    }
+}
+
+/// 左の欄で選んでいるブックマークの番号と URL。
+fn selected_bookmark() -> Option<(usize, yy_browser::bookmarks::Bookmark)> {
+    with(|a| {
+        let i = bmbar::index_of(a.bm_tree, bmbar::selected(a.bm_tree))?;
+        a.bookmarks.items.get(i).cloned().map(|b| (i, b))
+    })
+    .flatten()
+}
+
+/// 左の欄のブックマークを開く（`tab` なら新しいタブ）。
+fn open_selected_bookmark(tab: bool) {
+    let Some((_, b)) = selected_bookmark() else {
+        return;
+    };
+    if tab {
+        new_tab(Some(&b.url));
+    } else {
+        open_in_current(&b.url);
+    }
+}
+
+/// 左の欄で選んでいるブックマークを変える（読み直した一覧に当てて保存する）。
+fn change_selected_bookmark(f: impl FnOnce(&mut yy_browser::bookmarks::Bookmarks, usize)) {
+    let Some((_, b)) = selected_bookmark() else {
+        return;
+    };
+    let Some(frame) = with(|a| a.frame) else {
+        return;
+    };
+    let mut list = bookmarkui::load();
+    let Some(i) = list.find(&b.url) else {
+        return;
+    };
+    f(&mut list, i);
+    if bookmarkui::save(frame, &list) {
+        with(|a| a.set_bookmarks(list));
+    }
+}
+
+/// 左の欄で選んでいるブックマークを編集の画面で直す。
+fn edit_selected_bookmark() {
+    let Some((_, b)) = selected_bookmark() else {
+        return;
+    };
+    let Some(frame) = with(|a| a.frame) else {
+        return;
+    };
+    let url = b.url.clone();
+    let folders = bookmarkui::load().folders();
+    let result = bookmarkui::edit(frame, b, true, folders);
+    change_selected_bookmark_by_url(&url, result);
+}
+
+fn change_selected_bookmark_by_url(url: &str, result: bookmarkui::EditResult) {
+    let Some(frame) = with(|a| a.frame) else {
+        return;
+    };
+    let mut list = bookmarkui::load();
+    match result {
+        bookmarkui::EditResult::Save(nb) => {
+            if let Some(i) = list.find(url).filter(|_| nb.url != url) {
+                list.items.remove(i);
+            }
+            list.put(nb);
+        }
+        bookmarkui::EditResult::Delete => {
+            if let Some(i) = list.find(url) {
+                list.items.remove(i);
+            }
+        }
+        bookmarkui::EditResult::Cancel => return,
+    }
+    if bookmarkui::save(frame, &list) {
+        with(|a| a.set_bookmarks(list));
+    }
+}
+
+/// 左の欄の通知（ダブルクリック・Enter・右クリック・Del）。
+fn on_bookmark_tree(code: u32, lparam: LPARAM) {
+    match code {
+        NM_DBLCLK => open_selected_bookmark(false),
+        NM_RETURN => open_selected_bookmark(unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0),
+        NM_RCLICK => {
+            let Some((frame, tree)) = with(|a| (a.frame, a.bm_tree)) else {
+                return;
+            };
+            let (item, at) = bmbar::item_at_cursor(tree);
+            let b = with(|a| {
+                bmbar::index_of(tree, item).and_then(|i| a.bookmarks.items.get(i).cloned())
+            })
+            .flatten();
+            let expiring = b.as_ref().is_some_and(|b| b.expires.is_some());
+            match bmbar::context_menu(frame, at, b.is_some(), expiring) {
+                Some(bmbar::Choice::Open) => open_selected_bookmark(false),
+                Some(bmbar::Choice::OpenTab) => open_selected_bookmark(true),
+                Some(bmbar::Choice::Edit) => edit_selected_bookmark(),
+                Some(bmbar::Choice::ToggleExpiry) => change_selected_bookmark(|list, i| {
+                    list.items[i].set_expiring(!expiring, yy_adblock::lists::now());
+                }),
+                Some(bmbar::Choice::Delete) => change_selected_bookmark(|list, i| {
+                    list.items.remove(i);
+                }),
+                Some(bmbar::Choice::Hide) => toggle_bookmark_bar(),
+                None => {}
+            }
+        }
+        TVN_GETINFOTIPW => {
+            // ブックマークの上では URL を出す
+            let tip = unsafe { &mut *(lparam.0 as *mut NMTVGETINFOTIPW) };
+            let url = with(|a| {
+                bmbar::index_of(a.bm_tree, tip.hItem)
+                    .and_then(|i| a.bookmarks.items.get(i))
+                    .map(|b| b.url.clone())
+            })
+            .flatten();
+            if let Some(u) = url
+                && !tip.pszText.is_null()
+                && tip.cchTextMax > 1
+            {
+                let w: Vec<u16> = u.encode_utf16().take(tip.cchTextMax as usize - 1).collect();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(w.as_ptr(), tip.pszText.0, w.len());
+                    *tip.pszText.0.add(w.len()) = 0;
+                }
+            }
+        }
+        TVN_KEYDOWN => {
+            let k = unsafe { &*(lparam.0 as *const NMTVKEYDOWN) };
+            if k.wVKey == VK_DELETE.0 {
+                change_selected_bookmark(|list, i| {
+                    list.items.remove(i);
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// アドレスバーの入力に合わせて、閲覧履歴の候補を出し直す。
+fn update_suggestions() {
+    let found = with(|a| {
+        if unsafe { GetFocus() } != a.address {
+            return None;
+        }
+        let text = text_of(a.address);
+        if a.visits.is_none() {
+            a.visits = Some(yy_browser::history::load(&a.history_path()));
+        }
+        let visits = a.visits.as_deref().unwrap_or_default();
+        let found = yy_browser::history::suggest(visits, &text, suggest::MAX);
+        let rows: Vec<String> = found
+            .iter()
+            .map(|v| suggest::row(&v.title, &v.url))
+            .collect();
+        a.suggest_urls = found.iter().map(|v| v.url.clone()).collect();
+        Some((a.suggest, a.address, rows))
+    })
+    .flatten();
+    match found {
+        Some((popup, address, rows)) => suggest::show(popup, address, &rows),
+        None => hide_suggestions(),
+    }
+}
+
+fn hide_suggestions() {
+    if let Some(p) = with(|a| a.suggest) {
+        suggest::hide(p);
+    }
+}
+
+/// 候補の `i` 番目を開く。
+fn open_suggestion(i: usize) {
+    let Some(Some(url)) = with(|a| a.suggest_urls.get(i).cloned()) else {
+        return;
+    };
+    // 文字を入れると候補を出し直すので、入れてから閉じる
+    if let Some(h) = with(|a| a.address) {
+        set_text(h, &url);
+    }
+    hide_suggestions();
+    open_in_current(&url);
 }
 
 /// アドレスバーの左の表示を押したとき: 詳しく出す。
@@ -2336,6 +2665,7 @@ fn close_tab(i: usize) {
 
 /// アドレスバーの内容を開く。
 fn go_address() {
+    hide_suggestions();
     let Some((text, search)) = with(|a| {
         (
             text_of(a.address),
@@ -2710,6 +3040,7 @@ fn is_shortcut(vk: u16) -> bool {
                 | VK_NUMPAD0
         ) || (VK_1.0..=VK_9.0).contains(&vk)
             || (k == VK_O && m & 2 != 0)
+            || (k == VK_B && m & 2 != 0)
             || (k == VK_DELETE && m & 2 != 0);
     }
     if alt {
@@ -2734,6 +3065,7 @@ fn shortcut(vk: u16, mods: u8) -> bool {
         (true, _, VK_J) => command(ID_DOWNLOADS),
         (true, _, VK_DELETE) if shift => command(ID_CLEAR_DATA),
         (true, _, VK_O) if shift => command(ID_BM_MANAGE),
+        (true, _, VK_B) if shift => command(ID_BM_BAR),
         (true, _, VK_N) => command(ID_NEW_WINDOW),
         (true, _, VK_L) => command_focus_address(),
         (true, _, VK_F) => command(ID_FIND),
@@ -2805,8 +3137,21 @@ fn key_hook(msg: &MSG) -> bool {
     };
     let mods = modifiers();
     if msg.hwnd == address {
+        let popup = with(|a| a.suggest).unwrap_or_default();
+        let open = suggest::visible(popup);
+        if open && (vk == VK_DOWN.0 || vk == VK_UP.0) {
+            suggest::move_selection(popup, if vk == VK_DOWN.0 { 1 } else { -1 });
+            return true;
+        }
         if vk == VK_RETURN.0 {
-            go_address();
+            match suggest::selected(popup).filter(|_| open) {
+                Some(i) => open_suggestion(i),
+                None => go_address(),
+            }
+            return true;
+        }
+        if vk == VK_ESCAPE.0 && open {
+            hide_suggestions();
             return true;
         }
         if vk == VK_ESCAPE.0 {
@@ -2921,6 +3266,7 @@ fn command(id: u16) {
             set_search_url(yy_browser::history::SEARCH_ENGINES[(id - ID_SE_BASE) as usize].url);
         }
         ID_BM_MANAGE => manage_bookmarks(),
+        ID_BM_BAR => toggle_bookmark_bar(),
         id if (ID_BM_BASE..ID_BM_BASE + bookmarkui::MENU_MAX as u16).contains(&id) => {
             let url = with(|a| {
                 a.bookmarks
@@ -3044,16 +3390,129 @@ fn command(id: u16) {
 extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_SIZE => {
+            hide_suggestions();
             with(|a| a.layout());
             LRESULT(0)
         }
         WM_COMMAND => {
             let id = (wparam.0 & 0xffff) as u16;
-            command(id);
+            let code = ((wparam.0 >> 16) & 0xffff) as u32;
+            let (popup, address) = with(|a| (a.suggest, a.address)).unwrap_or_default();
+            if lparam.0 != 0 && lparam.0 == popup.0 as isize {
+                // 候補をクリックした
+                if code == LBN_SELCHANGE
+                    && let Some(i) = suggest::selected(popup)
+                {
+                    open_suggestion(i);
+                }
+            } else if lparam.0 != 0 && lparam.0 == address.0 as isize {
+                match code {
+                    EN_CHANGE => update_suggestions(),
+                    EN_KILLFOCUS => unsafe {
+                        let _ = PostMessageW(Some(hwnd), WM_APP_SUGGEST_HIDE, WPARAM(0), LPARAM(0));
+                    },
+                    _ => {}
+                }
+            } else {
+                command(id);
+            }
+            LRESULT(0)
+        }
+        WM_APP_SUGGEST_HIDE => {
+            let keep = with(|a| unsafe { GetFocus() } == a.address).unwrap_or(false);
+            if !keep {
+                hide_suggestions();
+            }
+            LRESULT(0)
+        }
+        WM_ACTIVATE => {
+            if (wparam.0 & 0xffff) as u32 == WA_INACTIVE {
+                hide_suggestions();
+            } else {
+                // ほかのウィンドウが変えたブックマーク（期限の延長など）を映す
+                let list = bookmarkui::load();
+                with(|a| {
+                    if list != a.bookmarks {
+                        a.set_bookmarks(list);
+                    }
+                });
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_SETCURSOR => {
+            let mut pt = windows::Win32::Foundation::POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut pt);
+                let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt);
+            }
+            let on = with(|a| bmbar::on_splitter(&a.splitter_rect(), pt.x, pt.y)).unwrap_or(false);
+            if on {
+                unsafe {
+                    if let Ok(c) = LoadCursorW(None, IDC_SIZEWE) {
+                        SetCursor(Some(c));
+                    }
+                }
+                return LRESULT(1);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = (
+                (lparam.0 & 0xffff) as i16 as i32,
+                ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+            );
+            let on = with(|a| {
+                let on = bmbar::on_splitter(&a.splitter_rect(), x, y);
+                a.bm_drag = on;
+                on
+            })
+            .unwrap_or(false);
+            if on {
+                unsafe {
+                    SetCapture(hwnd);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let x = (lparam.0 & 0xffff) as i16 as i32;
+            with(|a| {
+                if a.bm_drag {
+                    let w = (x * 96 / a.dpi as i32).clamp(120, 800);
+                    if w != a.bm_width {
+                        a.bm_width = w;
+                        a.layout();
+                    }
+                }
+            });
+            LRESULT(0)
+        }
+        WM_LBUTTONUP | WM_CAPTURECHANGED => {
+            let done = with(|a| {
+                let was = a.bm_drag;
+                a.bm_drag = false;
+                if was {
+                    a.profiles.bookmark_bar_width = a.bm_width as u32;
+                }
+                was.then(|| (a.frame, a.profiles.clone()))
+            })
+            .flatten();
+            if let Some((frame, list)) = done {
+                if msg == WM_LBUTTONUP {
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                }
+                save_profiles(frame, &list);
+            }
             LRESULT(0)
         }
         WM_NOTIFY => {
             let hdr = unsafe { &*(lparam.0 as *const NMHDR) };
+            if hdr.idFrom == ID_BM_TREE as usize {
+                on_bookmark_tree(hdr.code, lparam);
+                return LRESULT(0);
+            }
             if hdr.idFrom == ID_TABS as usize && hdr.code == TCN_SELCHANGE {
                 let i = with(|a| unsafe { SendMessageW(a.tabs_hwnd, TCM_GETCURSEL, None, None).0 })
                     .unwrap_or(0);
@@ -3134,6 +3593,13 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                     ID_BM_MANAGE as usize,
                     w!("ブックマークの管理(&M)...\tCtrl+Shift+O"),
                 );
+                let shown = with(|a| a.bm_visible).unwrap_or(false);
+                let _ = AppendMenuW(
+                    m,
+                    MF_STRING | if shown { MF_CHECKED } else { MF_UNCHECKED },
+                    ID_BM_BAR as usize,
+                    w!("ブックマークを左に表示(&B)\tCtrl+Shift+B"),
+                );
                 let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
             }
             bookmarkui::fill_menu(m, &list, ID_BM_BASE);
@@ -3170,6 +3636,7 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             LRESULT(0)
         }
         WM_MOVE | WM_MOVING => {
+            hide_suggestions();
             // WebView2 のポップアップ（候補の一覧など）の位置を合わせる
             let cs: Vec<ICoreWebView2Controller> =
                 with(|a| a.tabs.iter().filter_map(|t| t.controller.clone()).collect())
@@ -3192,6 +3659,135 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 左のブックマークの欄（フォルダ・期限付きの残り日数・番号の対応）と、アドレスバーの候補の一覧。
+    #[test]
+    fn bookmark_tree_and_suggestion_list() {
+        use yy_browser::bookmarks::{Bookmark, Bookmarks};
+        let instance: windows::Win32::Foundation::HINSTANCE =
+            unsafe { GetModuleHandleW(None).unwrap().into() };
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("yybrowser bookmark test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let now = 1_800_000_000;
+        let mut list = Bookmarks::default();
+        list.put(Bookmark::new("上", "https://example.com/top", ""));
+        let mut b = Bookmark::new("期限付き", "https://example.com/exp", "仕事 / 調べ物");
+        b.set_expiring(true, now);
+        list.put(b);
+        list.put(Bookmark::new("仕事の", "https://example.com/work", "仕事"));
+        let tree = bmbar::create(parent, instance);
+        bmbar::fill(tree, &list, now);
+        let count = unsafe { SendMessageW(tree, TVM_GETCOUNT, None, None).0 };
+        // フォルダ 2（仕事・調べ物）とブックマーク 3
+        assert_eq!(count, 5);
+        // 項目を順にたどって、表示名と番号を集める
+        let mut seen = Vec::new();
+        let next = |item: HTREEITEM, how: u32| unsafe {
+            HTREEITEM(
+                SendMessageW(
+                    tree,
+                    TVM_GETNEXTITEM,
+                    Some(WPARAM(how as usize)),
+                    Some(LPARAM(item.0)),
+                )
+                .0,
+            )
+        };
+        let mut item = next(HTREEITEM(0), TVGN_ROOT);
+        while item.0 != 0 {
+            let mut buf = [0u16; 128];
+            let mut it = TVITEMW {
+                mask: TVIF_TEXT | TVIF_HANDLE,
+                hItem: item,
+                pszText: PWSTR(buf.as_mut_ptr()),
+                cchTextMax: buf.len() as i32,
+                ..Default::default()
+            };
+            unsafe {
+                SendMessageW(
+                    tree,
+                    TVM_GETITEMW,
+                    None,
+                    Some(LPARAM(&mut it as *mut _ as isize)),
+                );
+            }
+            let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
+            seen.push((
+                String::from_utf16_lossy(&buf[..len]),
+                bmbar::index_of(tree, item),
+            ));
+            item = next(item, TVGN_NEXTVISIBLE);
+        }
+        assert_eq!(
+            seen,
+            [
+                ("仕事".to_owned(), None),
+                ("調べ物".to_owned(), None),
+                (
+                    format!("期限付き（あと {} 日）", yy_browser::bookmarks::EXPIRY_DAYS),
+                    Some(1)
+                ),
+                ("仕事の".to_owned(), Some(2)),
+                ("上".to_owned(), Some(0)),
+            ]
+        );
+        // 候補の一覧: 出す・選ぶ・閉じる
+        let address = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("EDIT"),
+                None,
+                WS_CHILD | WS_VISIBLE,
+                0,
+                0,
+                300,
+                24,
+                Some(parent),
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let font = crate::util::ui_font(96);
+        let popup = suggest::create(parent, instance, font);
+        let rows = vec![
+            suggest::row("Rust", "https://example.com/rust"),
+            suggest::row("", "https://example.com/go"),
+        ];
+        assert_eq!(rows[0], "Rust　—　https://example.com/rust");
+        assert_eq!(rows[1], "https://example.com/go");
+        suggest::show(popup, address, &rows);
+        assert!(suggest::visible(popup));
+        assert_eq!(suggest::selected(popup), None);
+        suggest::move_selection(popup, 1);
+        assert_eq!(suggest::selected(popup), Some(0));
+        suggest::move_selection(popup, 5);
+        assert_eq!(suggest::selected(popup), Some(1));
+        suggest::move_selection(popup, -5);
+        assert_eq!(suggest::selected(popup), None);
+        suggest::show(popup, address, &[]);
+        assert!(!suggest::visible(popup));
+        unsafe {
+            let _ = DestroyWindow(popup);
+            let _ = DestroyWindow(parent);
+        }
+    }
 
     #[test]
     fn reads_the_command_line() {
