@@ -2,10 +2,13 @@
 //!
 //! - データ > マルチレイアウトの設定: 名前を付けたレイアウト（コピーブック）を登録する。空のシートなら
 //!   レイアウトの列（「レイアウト」）と項目の列（「項目1」…）を作る（行ごとに入力する）。
-//! - ファイル > 固定長ファイルを開く（マルチレイアウト）: レイアウトを登録してから取り込む。どの行も
-//!   レイアウト未確定（背景が赤）で、項目1 に元のバイト、項目2 に文字として読んだ内容が入る。
+//! - ファイル > 固定長ファイルを開く（マルチレイアウト）: レイアウトを登録してから取り込む。行ごとに、
+//!   デコードエラーなしで読めるレイアウト（複数あれば名前の昇順で最初のもの）を既定のレイアウトにする。どれでも
+//!   読めない行はレイアウト未確定（背景が赤）で、項目1 に元のバイト、項目2 に文字として読んだ内容が入る。
 //! - データ > 行のレイアウトを指定: 選んだ行のレイアウトを選ぶ（行のバイト列をそのレイアウトで読み直す）。
 //!   レイアウトの列に名前を入力・貼り付けしても同じ。
+//! - データ > レイアウトの自動割り当て: 未確定の行に、デコードエラーなしで読めるレイアウト（複数あれば
+//!   名前の昇順で最初のもの）を自動で割り当てる。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -208,7 +211,7 @@ fn update_summary(hwnd: HWND, st: &mut MultiState) {
             ));
             if st.open.is_some() {
                 lines.push(
-                    "取り込んだ行はどれもレイアウト未確定です。行のレイアウトを指定すると、そのレイアウトで読み直します。"
+                    "取り込んだ行には、デコードエラーなしで読めるレイアウト（複数あれば名前の昇順で最初のもの）を自動で入れます。どれでも読めない行はレイアウト未確定です。行のレイアウトを指定し直すと、そのレイアウトで読み直します。"
                         .into(),
                 );
             }
@@ -723,8 +726,16 @@ pub(super) fn open_multi_path(frame: HWND, ctx: Arc<SheetCtx>, path: &Path, add:
     match r {
         Ok((sheet, rep)) => {
             with(|a| a.place_fixed_sheet(sheet, path, add));
+            let rest = if rep.undetermined == 0 {
+                "どの行もデコードエラーなしで読めるレイアウトを入れました".to_string()
+            } else {
+                format!(
+                    "{} 行はどのレイアウトでも読めないのでレイアウト未確定です。A 列にレイアウトの名前を入れるか、データ > 行のレイアウトを指定 で選んでください",
+                    crate::util::group_digits(rep.undetermined)
+                )
+            };
             set_status(&format!(
-                "{} レコードを取り込みました（{}・区切り {}）。どの行もレイアウト未確定です。A 列にレイアウトの名前を入れるか、データ > 行のレイアウトを指定 で選んでください",
+                "{} レコードを取り込みました（{}・区切り {}）。{rest}",
                 crate::util::group_digits(rep.records),
                 spec.codec.charset.name(),
                 spec.separator.label()
@@ -899,6 +910,65 @@ pub(super) fn row_layout_dialog() {
             )),
             (Err(_), Some(e)) => error_box(a.frame, &e),
             (Err(e), None) => error_box(a.frame, &format!("指定できませんでした: {e}")),
+        }
+    });
+}
+
+/// データ > レイアウトの自動割り当て: レイアウト未確定の行に、デコードエラーなしで読めるレイアウト
+/// （複数あれば名前の昇順で最初のもの）を入れる。
+pub(super) fn auto_assign_layouts() {
+    with(|a| {
+        a.end_edit(true);
+        if !a.sheet().fixed.as_deref().is_some_and(|f| f.is_multi()) {
+            info_box(
+                a.frame,
+                "このシートはマルチレイアウトではありません。\nデータ > マルチレイアウトの設定 で、レイアウトを登録してください。",
+            );
+            return;
+        }
+        if a.sheet().view.rows.is_some() {
+            info_box(
+                a.frame,
+                "絞り込み・並べ替えの表示中は自動割り当てできません。解除してから行ってください。",
+            );
+            return;
+        }
+        let sheet = a.sheet;
+        let mut out = fixed::AutoAssign::default();
+        let mut bad = None;
+        let res = a.doc.edit(|b, ctx| {
+            out = fixed::auto_assign_layouts(ctx, &mut b.sheets[sheet]).map_err(|e| {
+                bad = Some(e.clone());
+                std::io::Error::other(e)
+            })?;
+            Ok(())
+        });
+        a.after_edit();
+        a.sync_formula();
+        a.invalidate();
+        match (res, bad) {
+            (Ok(()), _) => {
+                let mut msg = if out.assigned == 0 {
+                    "レイアウトを割り当てられる未確定の行はありませんでした".to_string()
+                } else {
+                    format!(
+                        "{} 行にレイアウトを割り当てました",
+                        crate::util::group_digits(out.assigned)
+                    )
+                };
+                if out.unreadable > 0 {
+                    msg.push_str(&format!(
+                        "。{} 行はどのレイアウトでも読めないので未確定のままです{}",
+                        crate::util::group_digits(out.unreadable),
+                        out.first_unreadable
+                            .map(|r| format!("（最初は {} 行目）", r + 1))
+                            .unwrap_or_default()
+                    ));
+                }
+                set_status(&msg);
+            }
+            (Err(_), Some(e)) => error_box(a.frame, &e),
+            (Err(e), None) => error_box(a.frame, &format!("割り当てられませんでした: {e}")),
         }
     });
 }
