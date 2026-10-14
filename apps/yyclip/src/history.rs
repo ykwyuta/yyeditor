@@ -169,8 +169,11 @@ pub(crate) struct ControlSequence {
 }
 
 impl ControlSequence {
-    /// 左・右・汎用 Control の仮想キーをそれぞれ 1・2・4 として渡す。
-    pub(crate) fn event(&mut self, control_bit: u8, down: bool, time: u32) -> bool {
+    /// 左・右・汎用 Control の仮想キーをそれぞれ 1・2・4 として渡す。`physical` はこの出来事の直前に
+    /// 実際に押されている Control（同じビット）。キーを離した知らせを取りこぼす（フックの呼び出しが
+    /// 時間切れで飛ばされる）と押したままと思い込み、次の 2 回押しを押し続け（オートリピート）と
+    /// 見てしまうので、押したときに実際の状態で直す。
+    pub(crate) fn event(&mut self, control_bit: u8, down: bool, time: u32, physical: u8) -> bool {
         if control_bit == 0 {
             if down {
                 self.released_at = None;
@@ -181,6 +184,8 @@ impl ControlSequence {
             return false;
         }
         if down {
+            // 実際には離されているのに押したままと思い込んでいるキーを外す
+            self.held &= physical;
             let was_held = self.held != 0;
             self.held |= control_bit;
             if was_held {
@@ -211,27 +216,47 @@ impl ControlSequence {
 mod tests {
     use super::*;
 
+    /// 取りこぼしのない場合（直前に押されている Control は思い込みと同じ）。
+    const P: u8 = 0xFF;
+
     #[test]
     fn double_control_needs_release_and_no_other_key() {
         let mut keys = ControlSequence::default();
-        assert!(!keys.event(1, true, 100));
-        assert!(!keys.event(1, true, 120));
-        assert!(!keys.event(1, false, 150));
-        assert!(keys.event(2, true, 300));
-        assert!(!keys.event(2, false, 320));
-        assert!(!keys.event(1, true, 350));
-        assert!(!keys.event(1, false, 370));
-        keys.event(0, true, 400);
-        assert!(!keys.event(1, true, 420));
+        assert!(!keys.event(1, true, 100, P));
+        assert!(!keys.event(1, true, 120, P));
+        assert!(!keys.event(1, false, 150, P));
+        assert!(keys.event(2, true, 300, P));
+        assert!(!keys.event(2, false, 320, P));
+        assert!(!keys.event(1, true, 350, P));
+        assert!(!keys.event(1, false, 370, P));
+        keys.event(0, true, 400, P);
+        assert!(!keys.event(1, true, 420, P));
     }
 
     #[test]
     fn unmatched_release_and_expired_tap_do_not_trigger() {
         let mut keys = ControlSequence::default();
-        keys.event(1, false, 10);
-        assert!(!keys.event(1, true, 100));
-        keys.event(1, false, 150);
-        assert!(!keys.event(1, true, 651));
+        keys.event(1, false, 10, P);
+        assert!(!keys.event(1, true, 100, P));
+        keys.event(1, false, 150, P);
+        assert!(!keys.event(1, true, 651, P));
+    }
+
+    #[test]
+    fn missed_release_does_not_block_the_next_double_press() {
+        let mut keys = ControlSequence::default();
+        // 押して離したが、離した知らせを取りこぼした
+        assert!(!keys.event(1, true, 100, 0));
+        // 次の 2 回押し: 押したときは実際には離されている
+        assert!(!keys.event(1, true, 5000, 0));
+        assert!(!keys.event(1, false, 5050, 1));
+        assert!(keys.event(1, true, 5200, 0));
+        // 押し続け（オートリピート）は 2 回押しにしない
+        let mut keys = ControlSequence::default();
+        assert!(!keys.event(1, true, 100, 0));
+        assert!(!keys.event(1, true, 130, 1));
+        assert!(!keys.event(1, false, 150, 1));
+        assert!(keys.event(1, true, 300, 0));
     }
 
     #[test]
