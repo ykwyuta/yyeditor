@@ -62,12 +62,21 @@ static ACTIVE_FETCHES: AtomicUsize = AtomicUsize::new(0);
 struct FetchPermit;
 impl FetchPermit {
     fn acquire() -> Option<Self> {
-        ACTIVE_FETCHES
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < MAX_FETCHES).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| Self)
+        let mut cur = ACTIVE_FETCHES.load(Ordering::Acquire);
+        loop {
+            if cur >= MAX_FETCHES {
+                return None;
+            }
+            match ACTIVE_FETCHES.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(Self),
+                Err(actual) => cur = actual,
+            }
+        }
     }
 }
 impl Drop for FetchPermit {
@@ -105,12 +114,21 @@ static ACTIVE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 struct RequestPermit;
 impl RequestPermit {
     fn acquire() -> Option<Self> {
-        ACTIVE_REQUESTS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < MAX_REQUESTS).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| Self)
+        let mut cur = ACTIVE_REQUESTS.load(Ordering::Acquire);
+        loop {
+            if cur >= MAX_REQUESTS {
+                return None;
+            }
+            match ACTIVE_REQUESTS.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(Self),
+                Err(actual) => cur = actual,
+            }
+        }
     }
 }
 impl Drop for RequestPermit {
