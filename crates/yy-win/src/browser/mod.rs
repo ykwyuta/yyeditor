@@ -3210,36 +3210,67 @@ mod tests {
 
     /// プロファイルの起動引数で作った WebView2 の環境でページを開き、読み込みが終わるまで待つ。
     /// 読み込めたかを返す（WebView2 を使えなければ `None`）。
+    ///
+    /// 環境・表示を作れなかったときは、理由を出して別のフォルダでもう 1 回だけ試す（ほかの試験の
+    /// ブラウザーのプロセスが終わりきっていないときなど、一時的に作れないことがある）。
     fn open_with(
         profile: &ProxyProfile,
         folder: &std::path::Path,
         parent: HWND,
         url: &str,
     ) -> Option<bool> {
+        match try_open_with(profile, folder, parent, url) {
+            Err(why) => {
+                eprintln!("WebView2 を作れませんでした（{why}）。もう 1 回試します");
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                match try_open_with(profile, &folder.join("retry"), parent, url) {
+                    Ok(r) => r,
+                    Err(why) => {
+                        eprintln!("WebView2 を作れませんでした（{why}）");
+                        None
+                    }
+                }
+            }
+            Ok(None) => {
+                eprintln!("WebView2 の読み込みが 60 秒で終わりませんでした");
+                None
+            }
+            Ok(r) => r,
+        }
+    }
+
+    /// [`open_with`] の 1 回分。環境・表示を作れなければ理由、読み込みが終わらなければ `Ok(None)`。
+    fn try_open_with(
+        profile: &ProxyProfile,
+        folder: &std::path::Path,
+        parent: HWND,
+        url: &str,
+    ) -> std::result::Result<Option<bool>, String> {
         use std::rc::Rc;
         use std::time::Duration;
-        let create = crate::preview::create_environment_fn().ok()?;
+        let create = crate::preview::create_environment_fn()
+            .map_err(|e| format!("WebView2 のローダー: {e:?}"))?;
         let options = CoreWebView2EnvironmentOptions::default();
         unsafe {
             options.set_additional_browser_arguments(profile.browser_args().unwrap());
         }
         let options: ICoreWebView2EnvironmentOptions = options.into();
         let result: Rc<RefCell<Option<bool>>> = Rc::default();
-        let failed: Rc<std::cell::Cell<bool>> = Rc::default();
+        let failed: Rc<RefCell<Option<String>>> = Rc::default();
         let (r, f) = (result.clone(), failed.clone());
         let url = url.to_owned();
         let profile = profile.clone();
         let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
             move |res: Result<()>, env: Option<ICoreWebView2Environment>| {
                 let Some(env) = env.filter(|_| res.is_ok()) else {
-                    f.set(true);
+                    *f.borrow_mut() = Some(format!("環境: {res:?}"));
                     return Ok(());
                 };
                 let (r, f, url, profile) = (r.clone(), f.clone(), url.clone(), profile.clone());
                 let on_controller = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
                     move |res: Result<()>, c: Option<ICoreWebView2Controller>| {
                         let Some(c) = c.filter(|_| res.is_ok()) else {
-                            f.set(true);
+                            *f.borrow_mut() = Some(format!("表示: {res:?}"));
                             return Ok(());
                         };
                         let w = unsafe { c.CoreWebView2()? };
@@ -3302,16 +3333,16 @@ mod tests {
                 handler.as_raw(),
             )
         };
-        if hr.is_err() {
-            return None;
+        if let Err(e) = hr.ok() {
+            return Err(format!("環境の作成: {e:?}"));
         }
         crate::preview::testing::pump_until(Duration::from_secs(60), || {
-            result.borrow().is_some() || failed.get()
+            result.borrow().is_some() || failed.borrow().is_some()
         });
-        if failed.get() {
-            return None;
+        if let Some(why) = failed.borrow_mut().take() {
+            return Err(why);
         }
-        *result.borrow()
+        Ok(*result.borrow())
     }
 
     /// 「指定」のプロファイルでは要求が試験用のプロキシを通り、「直接」では通らないことを確かめる。
