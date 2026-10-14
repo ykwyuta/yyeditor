@@ -2419,7 +2419,10 @@ mod tests {
         assert_eq!((rep.undetermined, rep.first_undetermined), (2, Some(1)));
         set_row_layout(&ctx, &mut sh, 1, "").unwrap();
         let r = auto_assign_layouts(&ctx, &mut sh).unwrap();
-        assert_eq!((r.assigned, r.unreadable, r.first_unreadable), (1, 2, Some(2)));
+        assert_eq!(
+            (r.assigned, r.unreadable, r.first_unreadable),
+            (1, 2, Some(2))
+        );
         assert_eq!(sh.get(&ctx, 1, 0).unwrap(), Value::text("HDR"));
         assert_eq!(row_layout(&ctx, &sh, 2), RowLayout::Undetermined(None));
     }
@@ -2529,8 +2532,8 @@ mod tests {
         assert_eq!(back.get(&ctx, 1, 0).unwrap(), Value::text("Mid"));
         assert_eq!(back.get(&ctx, 2, 0).unwrap(), Value::text("Mid"));
         // どのレイアウトでも読めない行はレイアウト未確定（元のバイトのまま）
-        let only = FixedSpec::new_multi(&[("LONG".into(), DTL.into())], 20, ms, RecordSep::None)
-            .unwrap();
+        let only =
+            FixedSpec::new_multi(&[("LONG".into(), DTL.into())], 20, ms, RecordSep::None).unwrap();
         let (back, rep) = import_multi(&ctx, &out, &only, &|_, _| true).unwrap();
         assert_eq!((rep.undetermined, rep.first_undetermined), (2, Some(0)));
         assert_eq!(row_layout(&ctx, &back, 1), RowLayout::Undetermined(None));
