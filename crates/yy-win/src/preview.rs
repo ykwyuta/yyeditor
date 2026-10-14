@@ -62,20 +62,11 @@ static ACTIVE_FETCHES: AtomicUsize = AtomicUsize::new(0);
 struct FetchPermit;
 impl FetchPermit {
     fn acquire() -> Option<Self> {
-        let mut cur = ACTIVE_FETCHES.load(Ordering::Acquire);
-        loop {
-            if cur >= MAX_FETCHES {
-                return None;
-            }
-            match ACTIVE_FETCHES.compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Some(Self),
-                Err(actual) => cur = actual,
-            }
+        // 増やせたときだけ作る（作ってから捨てると Drop で数が減ってしまう）
+        if crate::util::try_increment(&ACTIVE_FETCHES, MAX_FETCHES) {
+            Some(Self)
+        } else {
+            None
         }
     }
 }
@@ -114,20 +105,11 @@ static ACTIVE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 struct RequestPermit;
 impl RequestPermit {
     fn acquire() -> Option<Self> {
-        let mut cur = ACTIVE_REQUESTS.load(Ordering::Acquire);
-        loop {
-            if cur >= MAX_REQUESTS {
-                return None;
-            }
-            match ACTIVE_REQUESTS.compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Some(Self),
-                Err(actual) => cur = actual,
-            }
+        // 増やせたときだけ作る（作ってから捨てると Drop で数が減ってしまう）
+        if crate::util::try_increment(&ACTIVE_REQUESTS, MAX_REQUESTS) {
+            Some(Self)
+        } else {
+            None
         }
     }
 }
@@ -743,7 +725,10 @@ fn serve_document_file(
     args: &ICoreWebView2WebResourceRequestedEventArgs,
     rel: &str,
 ) -> Result<()> {
-    let Some(request) = RequestPermit::acquire() else {
+    let permit = RequestPermit::acquire();
+    #[cfg(test)]
+    DOC_REQUESTS.with(|r| r.borrow_mut().push((rel.to_owned(), permit.is_none())));
+    let Some(request) = permit else {
         return resource_response(env, args, 503, b"Too many preview requests", "text/plain");
     };
     let base = shared.page.borrow().folder.clone();
@@ -1149,6 +1134,8 @@ fn shell_open(target: &HSTRING) {
 thread_local! {
     static SHELL_OPEN_REQUESTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static BLOCKED_SCRIPT_LINKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// 文書のフォルダへの要求（試験で、どの要求が上限で断られたかを見る）: (URL, 断ったか)
+    static DOC_REQUESTS: RefCell<Vec<(String, bool)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// WebView2 が返す文字列（CoTaskMemAlloc で確保）を受け取って解放する。
@@ -1480,20 +1467,43 @@ mod tests {
             .load(Ordering::Acquire)
             == 0
             && ACTIVE_FETCHES.load(Ordering::Acquire) == 0));
+        // 前の手順のスクリプトはページを移動させようとするので、新しいページで測る
+        let folder = preview.shared.page.borrow().folder.clone();
+        preview.show_html(
+            "<html><body>overload</body></html>",
+            &PageOptions {
+                has_folder: true,
+                ..Default::default()
+            },
+            folder,
+        );
+        assert!(pump_until(Duration::from_secs(10), || preview
+            .loaded_kind()
+            == Some(Kind::Html)
+            && eval(&preview, "document.readyState").as_deref()
+                == Some("\"complete\"")));
         let requests: Vec<_> = (0..MAX_REQUESTS)
             .map(|_| RequestPermit::acquire().unwrap())
             .collect();
         assert!(RequestPermit::acquire().is_none());
         eval(
             &preview,
-            "fetch('https://yy-doc.local/inside.txt?overload').then(r => document.body.dataset.overload = r.status); 'started'",
+            "fetch('https://yy-doc.local/inside.txt?overload').then(r => document.body.dataset.overload = String(r.status), e => document.body.dataset.overload = 'error: ' + e); 'started'",
         );
-        assert!(pump_until(Duration::from_secs(5), || eval(
-            &preview,
-            "document.body.dataset.overload"
-        )
-        .as_deref()
-            == Some("\"503\"")));
+        let observed = RefCell::new(None);
+        let overloaded = pump_until(Duration::from_secs(10), || {
+            let r = eval(&preview, "document.body.dataset.overload");
+            let done = r.as_deref() == Some("\"503\"");
+            *observed.borrow_mut() = r;
+            done
+        });
+        assert!(
+            overloaded,
+            "overload result: {:?}, active requests: {}, document requests: {:?}",
+            observed.borrow(),
+            ACTIVE_REQUESTS.load(Ordering::Acquire),
+            DOC_REQUESTS.with(|r| r.borrow().clone())
+        );
         drop(requests);
 
         eval(
@@ -1552,5 +1562,29 @@ mod tests {
         unsafe {
             let _ = DestroyWindow(parent);
         }
+    }
+
+    /// 上限で断った取得は、使用数を変えない（作ってすぐ捨てると Drop で減ってしまう）。
+    #[test]
+    fn refused_permits_do_not_change_the_count() {
+        let _serial = testing::webview2_lock();
+        let before = ACTIVE_REQUESTS.load(Ordering::Acquire);
+        let held: Vec<_> = (before..MAX_REQUESTS)
+            .map(|_| RequestPermit::acquire().unwrap())
+            .collect();
+        for _ in 0..3 {
+            assert!(RequestPermit::acquire().is_none());
+        }
+        assert_eq!(ACTIVE_REQUESTS.load(Ordering::Acquire), MAX_REQUESTS);
+        drop(held);
+        assert_eq!(ACTIVE_REQUESTS.load(Ordering::Acquire), before);
+        let fetches = ACTIVE_FETCHES.load(Ordering::Acquire);
+        let held: Vec<_> = (fetches..MAX_FETCHES)
+            .map(|_| FetchPermit::acquire().unwrap())
+            .collect();
+        assert!(FetchPermit::acquire().is_none());
+        assert_eq!(ACTIVE_FETCHES.load(Ordering::Acquire), MAX_FETCHES);
+        drop(held);
+        assert_eq!(ACTIVE_FETCHES.load(Ordering::Acquire), fetches);
     }
 }

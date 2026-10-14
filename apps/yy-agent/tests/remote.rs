@@ -358,3 +358,38 @@ fn measures_before_copying() {
     ));
     assert!(crosses_network(&r, &Loc::Remote(other, b"/x".to_vec())));
 }
+
+#[test]
+fn zips_a_folder_and_downloads_it() {
+    let s = setup();
+    let session = start(&s);
+    let dir = s.work.join("フォルダ");
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("a.txt"), "あ".repeat(10_000)).unwrap();
+    fs::write(dir.join("sub/b.txt"), b"bbb").unwrap();
+    let mut p = session.zip_begin(&bytes(&dir), 100 << 20, 0).unwrap();
+    assert_eq!(p.total_files, 2);
+    while p.state == yy_remote::ZipState::Running {
+        p = session.zip_step(p.job).unwrap();
+    }
+    assert_eq!(p.state, yy_remote::ZipState::Done);
+    let mut zip = Vec::new();
+    let info = session
+        .download(&p.temp, &mut zip, &mut |_, _| true)
+        .unwrap();
+    assert_eq!(info.len(), zip.len() as u64);
+    assert_eq!(zip.len() as u64, p.written);
+    assert_eq!(&zip[..4], b"PK\x03\x04");
+    let temp = PathBuf::from(String::from_utf8(p.temp.clone()).unwrap());
+    assert!(temp.exists());
+    session.zip_end(p.job).unwrap();
+    assert!(!temp.exists());
+
+    // 上限を超えたら一時ファイルを残さずにやめる
+    let mut p = session.zip_begin(&bytes(&dir), 10, 0).unwrap();
+    while p.state == yy_remote::ZipState::Running {
+        p = session.zip_step(p.job).unwrap();
+    }
+    assert!(matches!(p.state, yy_remote::ZipState::TooLarge(_)));
+    session.zip_end(p.job).unwrap();
+}

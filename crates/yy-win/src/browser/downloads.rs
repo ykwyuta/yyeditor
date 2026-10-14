@@ -10,20 +10,11 @@ static DEDUP_WORKERS: AtomicUsize = AtomicUsize::new(0);
 struct DedupPermit;
 impl DedupPermit {
     fn acquire() -> Option<Self> {
-        let mut cur = DEDUP_WORKERS.load(Ordering::Acquire);
-        loop {
-            if cur >= 2 {
-                return None;
-            }
-            match DEDUP_WORKERS.compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Some(Self),
-                Err(actual) => cur = actual,
-            }
+        // 増やせたときだけ作る（作ってから捨てると Drop で数が減ってしまう）
+        if crate::util::try_increment(&DEDUP_WORKERS, 2) {
+            Some(Self)
+        } else {
+            None
         }
     }
 }

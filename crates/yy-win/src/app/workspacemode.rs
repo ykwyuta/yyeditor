@@ -55,6 +55,7 @@ const CM_CUT: u32 = 15;
 const CM_PASTE: u32 = 16;
 const CM_COPY: u32 = 17;
 const CM_DOWNLOAD: u32 = 18;
+const CM_ZIP_DOWNLOAD: u32 = 19;
 
 /// サイドバーとツリーの境界の幅（96 DPI でのピクセル）
 const SPLITTER: i32 = 5;
@@ -1090,6 +1091,9 @@ fn context_menu(hwnd: HWND, tree: HWND) {
                     sep();
                 } else {
                     add(CM_DOWNLOAD, "ダウンロード フォルダにコピー(&L)");
+                    if *is_dir {
+                        add(CM_ZIP_DOWNLOAD, "zip にしてダウンロード(&Z)...");
+                    }
                     if yyterm_exe().is_some() {
                         // リモートのフォルダは yyterm の SSH で開く
                         add(CM_TERMINAL, "ターミナルで開く(&T)");
@@ -1153,6 +1157,7 @@ fn run_context_command(hwnd: HWND, cmd: u32, item: HTREEITEM, node: Option<(Path
         CM_COPY => return set_clip(path, false),
         CM_PASTE => return paste_into(hwnd, path, is_dir),
         CM_DOWNLOAD => return post_op(hwnd, WsOp::Download(path)),
+        CM_ZIP_DOWNLOAD => return post_op(hwnd, WsOp::ZipDownload(path)),
         CM_RENAME => {
             if let Some(tree) = with_app(|a| a.ws.tree) {
                 unsafe {
@@ -1475,6 +1480,8 @@ pub(crate) enum WsOp {
     },
     /// リモートの `ssh://…` をダウンロード フォルダにコピーする
     Download(PathBuf),
+    /// リモートのフォルダを zip にしてダウンロードする（保存先を尋ねる）
+    ZipDownload(PathBuf),
 }
 
 /// 操作を後で行うよう頼む。
@@ -1497,21 +1504,30 @@ pub(crate) fn on_op(hwnd: HWND, lparam: LPARAM) {
         WsOp::Delete { path, is_dir } => delete_item(hwnd, &path, is_dir),
         WsOp::Move { from, to_dir } => move_item(&from, &to_dir),
         WsOp::Copy { from, to_dir } => copy_item(hwnd, &from, &to_dir),
-        WsOp::Download(path) => match remote_uri(&path) {
-            Some(u) => crate::download::download(hwnd, &u).map(|msg| {
-                if let Some(m) = msg {
-                    with_app(|a| {
-                        a.status_msg = m;
-                        a.update_status();
-                    });
-                }
-            }),
-            None => Ok(()),
-        },
+        WsOp::Download(path) => remote_download(hwnd, &path, crate::download::download),
+        WsOp::ZipDownload(path) => remote_download(hwnd, &path, crate::download::zip_download),
     };
     if let Err(e) = r {
         error_box(hwnd, &e);
     }
+}
+
+/// リモートの `path` をダウンロードし、結果をステータスバーに出す。
+fn remote_download(
+    hwnd: HWND,
+    path: &Path,
+    run: fn(HWND, &yy_remote::RemoteUri) -> std::result::Result<Option<String>, String>,
+) -> std::result::Result<(), String> {
+    let Some(u) = remote_uri(path) else {
+        return Ok(());
+    };
+    if let Some(m) = run(hwnd, &u)? {
+        with_app(|a| {
+            a.status_msg = m;
+            a.update_status();
+        });
+    }
+    Ok(())
 }
 
 /// コピー・切り取りする（貼り付けでコピー・移動する）。

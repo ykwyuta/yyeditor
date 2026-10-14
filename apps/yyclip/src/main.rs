@@ -35,7 +35,10 @@ mod resident {
         AddClipboardFormatListener, RemoveClipboardFormatListener,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
+    use windows::Win32::System::Threading::{
+        AttachThreadInput, CreateMutexW, GetCurrentThread, GetCurrentThreadId, SetThreadPriority,
+        THREAD_PRIORITY_TIME_CRITICAL,
+    };
     use windows::Win32::UI::Controls::{
         EM_SETCUEBANNER, EM_SETLIMITTEXT, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX,
         InitCommonControlsEx, NMHDR, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL,
@@ -45,8 +48,8 @@ mod resident {
         GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI, SystemParametersInfoForDpi,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetKeyState, SetActiveWindow, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LCONTROL,
-        VK_LEFT, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
+        GetAsyncKeyState, GetKeyState, SetActiveWindow, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE,
+        VK_LCONTROL, VK_LEFT, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
     };
     use windows::Win32::UI::Shell::{
         ASSOCF_NONE, ASSOCSTR_EXECUTABLE, AssocQueryStringW, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS,
@@ -67,6 +70,9 @@ mod resident {
     const WM_SHOW_HISTORY: u32 = WM_APP + 2;
     const WM_HIDE_HISTORY: u32 = WM_APP + 3;
     const CAPTURE_TIMER: usize = 1;
+    /// キーボード・マウスのフックを付け直す間隔。応答が遅れたフックを Windows は知らせずに外すことがある
+    /// （ほかのアプリが忙しく、このスレッドに順番が回らないとき）ので、定期的に付け直す。
+    const REHOOK_MS: u32 = 30_000;
     const CAPTURE_RETRIES: u8 = 10;
     const TRAY_ID: u32 = 1;
     const ID_TABS: usize = 101;
@@ -335,32 +341,50 @@ mod resident {
                     epoch: MENU_EPOCH.load(Ordering::SeqCst),
                 });
             });
-            let hook =
-                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(instance), 0) {
-                    Ok(hook) => hook,
-                    Err(error) => {
-                        let _ = sender.send(Err(error));
-                        return;
-                    }
-                };
-            let mouse_hook =
+            // フックは決まった時間内に返らないと飛ばされる（Control を離した知らせを取りこぼす）。
+            // ほかのアプリが忙しくてもすぐに順番が回るよう、このスレッドの優先度を上げる
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            let install = || -> Result<(HHOOK, HHOOK)> {
+                let hook =
+                    SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(instance), 0)?;
                 match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(instance), 0) {
-                    Ok(hook) => hook,
+                    Ok(mouse) => Ok((hook, mouse)),
                     Err(error) => {
                         let _ = UnhookWindowsHookEx(hook);
-                        let _ = sender.send(Err(error));
-                        return;
+                        Err(error)
                     }
-                };
+                }
+            };
+            let (mut hook, mut mouse_hook) = match install() {
+                Ok(hooks) => hooks,
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    return;
+                }
+            };
             // PostThreadMessageW が届くよう、このスレッドにメッセージキューを作る。
             let mut message = MSG::default();
             let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
             let thread_id = GetCurrentThreadId();
             let _ = sender.send(Ok(thread_id));
+            let rehook = SetTimer(None, 0, REHOOK_MS, None);
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
+                if message.message == WM_TIMER
+                    && message.hwnd.0.is_null()
+                    && message.wParam.0 == rehook
+                {
+                    // 新しいフックを付けてから古いものを外す（付け直しの間もキーを取りこぼさない）
+                    if let Ok((new_hook, new_mouse)) = install() {
+                        let _ = UnhookWindowsHookEx(hook);
+                        let _ = UnhookWindowsHookEx(mouse_hook);
+                        (hook, mouse_hook) = (new_hook, new_mouse);
+                    }
+                    continue;
+                }
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+            let _ = KillTimer(None, rehook);
             let _ = UnhookWindowsHookEx(hook);
             let _ = UnhookWindowsHookEx(mouse_hook);
         });
@@ -460,7 +484,13 @@ mod resident {
                                     )
                                 };
                             }
-                            if hook.keys.event(control_bit, down, key.time) {
+                            // この出来事の直前に実際に押されている Control（フックの中では、非同期の
+                            // キーの状態はまだこの出来事を含まない）
+                            let physical = [(VK_LCONTROL, 1), (VK_RCONTROL, 2), (VK_CONTROL, 4)]
+                                .into_iter()
+                                .filter(|(vk, _)| unsafe { GetAsyncKeyState(vk.0 as i32) } < 0)
+                                .fold(0u8, |mask, (_, bit)| mask | bit);
+                            if hook.keys.event(control_bit, down, key.time, physical) {
                                 let message = if PICKER_OPEN.load(Ordering::SeqCst) {
                                     WM_HIDE_HISTORY
                                 } else if !MENU_OPEN.load(Ordering::SeqCst) {

@@ -228,9 +228,20 @@ fn set_status(text: &str) {
 ///
 /// `initial` はコマンドラインの引数（`ssh://接続先/パス` か `ユーザー@ホスト`）。
 pub fn run_sftp(initial: Option<String>, ssh: Option<yy_remote::ConnectorFactory>) -> Result<()> {
+    run_sftp_with(initial, None, ssh)
+}
+
+/// [`run_sftp`] に加え、起動したら `download`（`ssh://接続先/フォルダ` と保存先のフォルダ）を転送の一覧に
+/// 入れる（`yysftp --download URI --to フォルダ`。エディタ・ターミナルの「zip にしてダウンロード」で zip が
+/// 大きすぎたとき）。
+pub fn run_sftp_with(
+    initial: Option<String>,
+    download: Option<(String, PathBuf)>,
+    ssh: Option<yy_remote::ConnectorFactory>,
+) -> Result<()> {
     crate::util::set_app_name("yysftp");
     crate::crash::install("yysftp");
-    let r = run_inner(initial, ssh);
+    let r = run_inner(initial, download, ssh);
     crate::crash::clean_exit();
     if let Err(e) = &r {
         error_box(
@@ -241,7 +252,11 @@ pub fn run_sftp(initial: Option<String>, ssh: Option<yy_remote::ConnectorFactory
     r
 }
 
-fn run_inner(initial: Option<String>, ssh: Option<yy_remote::ConnectorFactory>) -> Result<()> {
+fn run_inner(
+    initial: Option<String>,
+    download: Option<(String, PathBuf)>,
+    ssh: Option<yy_remote::ConnectorFactory>,
+) -> Result<()> {
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
             .ok()
@@ -261,6 +276,22 @@ fn run_inner(initial: Option<String>, ssh: Option<yy_remote::ConnectorFactory>) 
     queue::offer_resume(frame);
     if let Some(loc) = initial.as_deref().and_then(parse_location) {
         go(loc, true);
+    }
+    if let Some((uri, dest)) = download {
+        match RemoteUri::parse(&uri) {
+            Some(u) => {
+                // 受け取るフォルダの親を開いておく
+                go(
+                    Loc {
+                        target: u.target(),
+                        path: yy_proto::parent_path(&u.path),
+                    },
+                    true,
+                );
+                queue::download_folder(u, dest);
+            }
+            None => error_box(frame, &format!("接続先のフォルダが正しくありません: {uri}")),
+        }
     }
     unsafe {
         let mut msg = MSG::default();

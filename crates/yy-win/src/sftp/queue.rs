@@ -1521,36 +1521,57 @@ fn default_download_dir() -> PathBuf {
 
 /// 一覧で選んでいる項目を `dest`（なければ既定の保存先）に受け取る。
 pub(super) fn download_selected(dest: Option<PathBuf>) {
-    let Some(Some((hwnd, loc, items, protocol))) = with(|a| {
+    let Some(Some((loc, items))) = with(|a| {
         let loc = a.loc.clone()?;
-        let items: Vec<super::Item> = a
+        let items: Vec<(Vec<u8>, Option<yy_remote::sftp::Attrs>)> = a
             .selected()
             .iter()
-            .filter_map(|&i| a.items.get(i).cloned())
+            .filter_map(|&i| a.items.get(i))
+            .map(|i| (i.name.clone(), Some(i.attrs.clone())))
             .collect();
-        Some((a.frame, loc, items, a.protocol))
+        Some((loc, items))
     }) else {
+        return;
+    };
+    download_items(loc, items, dest.unwrap_or_else(default_download_dir));
+}
+
+/// 接続先のフォルダ（`ssh://…`）を `dest` の中に受け取るよう、転送の一覧に入れる（`yysftp --download`。
+/// エディタ・ターミナルの「zip にしてダウンロード」で zip が大きすぎたとき）。
+pub(super) fn download_folder(uri: RemoteUri, dest: PathBuf) {
+    let name = yy_proto::file_name(&uri.path).to_vec();
+    let parent = yy_proto::parent_path(&uri.path);
+    let loc = super::Loc {
+        target: uri.target(),
+        path: parent,
+    };
+    download_items(loc, vec![(name, None)], dest);
+}
+
+/// `loc` の中の `items`（名前と属性。属性がなければ調べる）を `dest` に受け取る。
+fn download_items(
+    loc: super::Loc,
+    items: Vec<(Vec<u8>, Option<yy_remote::sftp::Attrs>)>,
+    dest: PathBuf,
+) {
+    let Some((hwnd, protocol)) = with(|a| (a.frame, a.protocol)) else {
         return;
     };
     if items.is_empty() {
         return;
     }
-    let dest = dest.unwrap_or_else(default_download_dir);
     let base = loc.path.clone();
-    let picked: Vec<(Vec<u8>, super::Item)> =
-        items.into_iter().map(|i| (i.name.clone(), i)).collect();
     let listed = super::remote_op(
         &loc.target,
         "受け取るものを調べています…（Esc で中止）",
         move |s: &dyn RemoteFs| {
             let mut dirs = Vec::new();
             let mut files = Vec::new();
-            for (name, item) in &picked {
+            for (name, attrs) in &items {
                 let full = yy_remote::join_remote(&base, name);
-                let attrs = if item.attrs.is_symlink() {
-                    s.attrs(&full)?
-                } else {
-                    item.attrs.clone()
+                let attrs = match attrs {
+                    Some(a) if !a.is_symlink() => a.clone(),
+                    _ => s.attrs(&full)?,
                 };
                 if attrs.is_dir() {
                     walk_remote(s, &full, name, 0, &mut dirs, &mut files)?;

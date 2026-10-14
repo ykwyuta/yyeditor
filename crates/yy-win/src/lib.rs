@@ -56,7 +56,7 @@ pub use browser::{DevCertFn, run_browser};
 /// ファイル管理（yyfilemanager）を起動する
 pub use fm::run_filemanager;
 /// ファイル転送（yysftp）を起動する
-pub use sftp::run_sftp;
+pub use sftp::{run_sftp, run_sftp_with};
 /// スプレッドシート（yysheet）を起動する
 pub use sheet::run_sheet;
 /// ターミナル（yyterm）を起動する

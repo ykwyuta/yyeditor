@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 yy-proto.workspace = true
 sha2.workspace = true
+miniz_oxide.workspace = true
 
 [dev-dependencies]
 yy-remote.workspace = true
