@@ -74,6 +74,7 @@ const ID_EXPORT_FIXED: u16 = 8;
 const ID_OPEN_MULTI: u16 = 9;
 const ID_MULTI_LAYOUT: u16 = 27;
 const ID_ROW_LAYOUT: u16 = 28;
+const ID_AUTO_LAYOUT: u16 = 33;
 const ID_FIXED_LAYOUT: u16 = 26;
 const ID_UNDO: u16 = 10;
 const ID_REDO: u16 = 11;
@@ -463,6 +464,7 @@ fn create_menu() -> Result<HMENU> {
         add(data, ID_FIXED_LAYOUT, "固定長のレイアウト(&Y)...");
         add(data, ID_MULTI_LAYOUT, "マルチレイアウトの設定(&M)...");
         add(data, ID_ROW_LAYOUT, "行のレイアウトを指定(&W)...");
+        add(data, ID_AUTO_LAYOUT, "レイアウトの自動割り当て(&T)");
         add(
             data,
             ID_CATALOG_APPLY,
@@ -2698,6 +2700,7 @@ fn command(id: u16) {
         ID_OPEN_MULTI => multiui::open_multi(false),
         ID_MULTI_LAYOUT => multiui::multi_layout_dialog(),
         ID_ROW_LAYOUT => multiui::row_layout_dialog(),
+        ID_AUTO_LAYOUT => multiui::auto_assign_layouts(),
         ID_CATALOG_APPLY => catalogui::apply_from_catalog(),
         ID_CATALOG_SAVE => catalogui::save_sheet_layout(),
         ID_CATALOG_FOLDER => catalogui::open_root_folder(),
