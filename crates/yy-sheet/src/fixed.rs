@@ -611,6 +611,54 @@ pub fn set_row_layout(
     Ok(())
 }
 
+/// レイアウトの自動割り当ての結果（マルチレイアウト）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AutoAssign {
+    /// レイアウトを入れた行の数
+    pub assigned: u64,
+    /// どのレイアウトでも読めず、未確定のまま残った行の数
+    pub unreadable: u64,
+    /// 最初に残った行（格子の行）
+    pub first_unreadable: Option<u64>,
+}
+
+/// レイアウト未確定の行（格子の行。絞り込み・並べ替えの表示中でないこと）に、既定のレイアウト
+/// （[`default_layout`]: デコードエラーなしで読めるもののうち名前の昇順で最初のもの）を入れて読み直す。
+/// 元のバイト（項目1 の `X'…'`）のない行（手で入力している行・空の行）はそのままにする。
+pub fn auto_assign_layouts(ctx: &Context, sheet: &mut Sheet) -> Result<AutoAssign, String> {
+    let spec = sheet
+        .fixed
+        .clone()
+        .filter(|s| s.is_multi())
+        .ok_or("マルチレイアウトのシートではありません")?;
+    layout_column(sheet).ok_or("レイアウトの列がありません")?;
+    let sorted = layouts_by_name(&spec);
+    let head = sheet.table.header as u64;
+    let last = sheet.record_rows().max(sheet.table.rows + head);
+    let mut out = AutoAssign::default();
+    for row in head..last {
+        let src = sheet.source_row(row);
+        if !matches!(row_layout(ctx, sheet, src), RowLayout::Undetermined(_)) {
+            continue;
+        }
+        let Some(bytes) = row_bytes(ctx, sheet, src).map_err(|e| e.to_string())? else {
+            continue;
+        };
+        match default_layout(&spec, &sorted, &bytes) {
+            Some(l) => {
+                let name = l.name.clone();
+                set_row_layout(ctx, sheet, row, &name)?;
+                out.assigned += 1;
+            }
+            None => {
+                out.unreadable += 1;
+                out.first_unreadable.get_or_insert(row);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// マルチレイアウトを今のシートに設定する。空のシートならレイアウトの列（「レイアウト」）と項目の列
 /// （「項目1」…）を作り、マルチレイアウトのシートならレイアウトを入れ替えて、足りない項目の列を足す。
 pub fn apply_multi(ctx: &Context, sheet: &mut Sheet, spec: &FixedSpec) -> Result<usize, String> {
@@ -663,8 +711,35 @@ fn split_records(raw: &[u8], spec: &FixedSpec) -> (Vec<usize>, u64) {
     ((0..n as usize).map(|k| k * stride).collect(), rest)
 }
 
-/// マルチレイアウトのファイルを取り込む。どの行もレイアウト未確定で、項目1 に元のバイト（`X'…'`）、
-/// 項目2 に文字として読んだ内容を置く（行のレイアウトを指定すると、そのレイアウトで読み直す）。
+/// レイアウトの名前の昇順（大文字・小文字は区別しない）に並べた、マルチレイアウトのレイアウト。
+pub fn layouts_by_name(spec: &FixedSpec) -> Vec<&NamedLayout> {
+    let mut v: Vec<&NamedLayout> = spec.multi.iter().collect();
+    v.sort_by(|a, b| {
+        a.name
+            .to_uppercase()
+            .cmp(&b.name.to_uppercase())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    v
+}
+
+/// 行のバイト列の既定のレイアウト: デコードエラーなしで読めるレイアウトのうち、名前の昇順で最初のもの
+/// （どれも読めなければ `None`）。`sorted` は [`layouts_by_name`] の結果。
+pub fn default_layout<'a>(
+    spec: &FixedSpec,
+    sorted: &[&'a NamedLayout],
+    bytes: &[u8],
+) -> Option<&'a NamedLayout> {
+    sorted
+        .iter()
+        .copied()
+        .find(|m| decode_error(spec, m, bytes).is_none())
+}
+
+/// マルチレイアウトのファイルを取り込む。行ごとに、デコードエラーなしで読めるレイアウトのうち名前の
+/// 昇順で最初のものを既定のレイアウトにして読む（[`default_layout`]。行のレイアウトを指定し直すと、
+/// そのレイアウトで読み直す）。どのレイアウトでも読めない行はレイアウト未確定で、項目1 に元のバイト
+/// （`X'…'`）、項目2 に文字として読んだ内容を置く。
 pub fn import_multi(
     ctx: &Context,
     path: &Path,
@@ -677,8 +752,12 @@ pub fn import_multi(
     let len = spec.data_len;
     let nf = spec.max_fields().max(2);
     let total = recs.len() as u64;
-    let mut builders: Vec<Builder> = (0..nf).map(|_| Builder::default()).collect();
-    let mut pieces: Vec<Vec<Piece>> = vec![Vec::new(); nf];
+    let sorted = layouts_by_name(spec);
+    let mut undetermined = 0u64;
+    let mut first_undetermined = None;
+    // 0 番はレイアウトの列、1 番からが項目の列
+    let mut builders: Vec<Builder> = (0..=nf).map(|_| Builder::default()).collect();
+    let mut pieces: Vec<Vec<Piece>> = vec![Vec::new(); nf + 1];
     let flush = |builders: &mut Vec<Builder>, pieces: &mut Vec<Vec<Piece>>| -> io::Result<()> {
         for (b, p) in builders.iter_mut().zip(pieces.iter_mut()) {
             let ch = Chunk::create(ctx, std::mem::take(b).finish())?;
@@ -693,10 +772,36 @@ pub fn import_multi(
     let mut in_chunk = 0usize;
     for (i, &at) in recs.iter().enumerate() {
         let rec = &raw[at..at + len];
-        for (k, b) in builders.iter_mut().enumerate() {
-            match raw_row_values(spec, rec, k as u32) {
-                Value::Text(s) => b.push(CellRef::Text(&s)),
-                _ => b.push(CellRef::Empty),
+        match default_layout(spec, &sorted, rec) {
+            Some(l) => {
+                // 行のレイアウトを指定したときと同じく、そのレイアウトで読む
+                builders[0].push(CellRef::Text(&l.name));
+                let mut buf = rec.to_vec();
+                let need = spec.data_len.max(l.layout.record_len);
+                if buf.len() < need {
+                    buf.resize(need, spec.codec.charset.space());
+                }
+                for (k, b) in builders[1..].iter_mut().enumerate() {
+                    let v = match l.layout.fields.get(k) {
+                        Some(f) => {
+                            let x = &buf[f.offset..f.offset + f.len];
+                            decoded_value(spec, f, spec.codec.decode(f, x), x)
+                        }
+                        None => Value::Empty,
+                    };
+                    b.push(CellRef::of(&v));
+                }
+            }
+            None => {
+                undetermined += 1;
+                first_undetermined.get_or_insert(i as u64);
+                builders[0].push(CellRef::Empty);
+                for (k, b) in builders[1..].iter_mut().enumerate() {
+                    match raw_row_values(spec, rec, k as u32) {
+                        Value::Text(s) => b.push(CellRef::Text(&s)),
+                        _ => b.push(CellRef::Empty),
+                    }
+                }
             }
         }
         in_chunk += 1;
@@ -712,16 +817,16 @@ pub fn import_multi(
         flush(&mut builders, &mut pieces)?;
     }
     let mut cols = Vec::with_capacity(nf + 1);
-    let mut lc = Column::new("レイアウト");
-    lc.extend_empty(ctx, total)?;
-    lc.field = Some(LAYOUT_COL);
-    cols.push(lc);
     for (k, p) in pieces.into_iter().enumerate() {
-        let mut c = Column::from_pieces(&format!("項目{}", k + 1), p);
+        let mut c = if k == 0 {
+            Column::from_pieces("レイアウト", p)
+        } else {
+            Column::from_pieces(&format!("項目{k}"), p)
+        };
         if c.rows() < total {
             c.extend_empty(ctx, total - c.rows())?;
         }
-        c.field = Some(k as u32);
+        c.field = Some(if k == 0 { LAYOUT_COL } else { k as u32 - 1 });
         cols.push(c);
     }
     let name = path
@@ -741,7 +846,8 @@ pub fn import_multi(
         FixedReport {
             records: total,
             remainder,
-            undetermined: total,
+            undetermined,
+            first_undetermined,
             ..Default::default()
         },
     ))
@@ -2113,13 +2219,33 @@ mod tests {
             let path = dir.path().join(format!("multi-{}.dat", cs.name()));
             std::fs::write(&path, &bytes).unwrap();
             let (sheet, rep) = import_multi(&ctx, &path, &spec, &|_, _| true).unwrap();
-            assert_eq!((rep.records, rep.undetermined), (3, 3));
+            // どの行も、デコードエラーなしで読めるレイアウトのうち名前の昇順で最初のもの（TXT より前）
+            assert_eq!((rep.records, rep.undetermined), (3, 0));
+            assert_eq!(rep.first_undetermined, None);
             // レイアウトの列と項目1〜4
             let names: Vec<&str> = sheet.table.columns.iter().map(|c| &*c.name).collect();
             assert_eq!(names, ["レイアウト", "項目1", "項目2", "項目3"]);
             let mut d = Document::new(ctx.clone());
             d.book.sheets = vec![sheet];
             let get = |d: &Document, r: u64, c: u32| d.book.sheets[0].get(&ctx, r, c).unwrap();
+            assert_eq!(get(&d, 1, 0), Value::text("HDR"));
+            assert_eq!(get(&d, 1, 2), Value::Number(20261007.0));
+            assert_eq!(get(&d, 2, 0), Value::text("DTL"));
+            assert_eq!(get(&d, 2, 2), Value::Number(-1234.5));
+            assert_eq!(get(&d, 3, 0), Value::text("DTL"));
+            // そのまま書き出すと元のバイト
+            let out = dir.path().join(format!("auto-{}.dat", cs.name()));
+            let rep = export(&ctx, &d.book.sheets[0], &out, &spec, None, &|_, _| true).unwrap();
+            assert_eq!((rep.records, rep.undetermined), (3, 0));
+            assert_eq!(std::fs::read(&out).unwrap(), bytes, "{cs:?}");
+            // 未確定に戻す（項目1 に元のバイト、項目2 に文字として読んだもの）
+            d.edit(|b, ctx| {
+                for r in 1..=3 {
+                    set_row_layout(ctx, &mut b.sheets[0], r, "").map_err(io::Error::other)?;
+                }
+                Ok(())
+            })
+            .unwrap();
             // 未確定: 項目1 は元のバイト、項目2 は文字として読んだもの
             assert_eq!(
                 row_layout(&ctx, &d.book.sheets[0], 1),
@@ -2252,6 +2378,56 @@ mod tests {
     }
 
     #[test]
+    fn auto_assign_undetermined_rows() {
+        let ctx = Context::for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let spec = multi_spec(Charset::Ms932, RecordSep::Crlf);
+        let bytes = multi_file(&spec);
+        let path = dir.path().join("auto.dat");
+        std::fs::write(&path, &bytes).unwrap();
+        let (mut sh, _) = import_multi(&ctx, &path, &spec, &|_, _| true).unwrap();
+        // 未確定に戻す・登録されていない名前・別の（読める）レイアウトの行・名前だけの行
+        set_row_layout(&ctx, &mut sh, 1, "").unwrap();
+        set_row_layout(&ctx, &mut sh, 2, "XYZ").unwrap();
+        set_row_layout(&ctx, &mut sh, 3, "TXT").unwrap();
+        sh.set(&ctx, 5, 0, Value::text("?")).unwrap();
+        let r = auto_assign_layouts(&ctx, &mut sh).unwrap();
+        assert_eq!(
+            r,
+            AutoAssign {
+                assigned: 2,
+                unreadable: 0,
+                first_unreadable: None
+            }
+        );
+        assert_eq!(sh.get(&ctx, 1, 0).unwrap(), Value::text("HDR"));
+        assert_eq!(sh.get(&ctx, 1, 2).unwrap(), Value::Number(20261007.0));
+        assert_eq!(sh.get(&ctx, 2, 0).unwrap(), Value::text("DTL"));
+        assert_eq!(sh.get(&ctx, 2, 2).unwrap(), Value::Number(-1234.5));
+        // 決まっている行・元のバイトのない行はそのまま
+        assert_eq!(sh.get(&ctx, 3, 0).unwrap(), Value::text("TXT"));
+        assert_eq!(sh.get(&ctx, 5, 0).unwrap(), Value::text("?"));
+        // どのレイアウトでも読めない行は未確定のまま数える
+        let only = FixedSpec::new_multi(
+            &[("HDR".into(), HDR.into())],
+            20,
+            spec.codec,
+            RecordSep::Crlf,
+        )
+        .unwrap();
+        let (mut sh, rep) = import_multi(&ctx, &path, &only, &|_, _| true).unwrap();
+        assert_eq!((rep.undetermined, rep.first_undetermined), (2, Some(1)));
+        set_row_layout(&ctx, &mut sh, 1, "").unwrap();
+        let r = auto_assign_layouts(&ctx, &mut sh).unwrap();
+        assert_eq!(
+            (r.assigned, r.unreadable, r.first_unreadable),
+            (1, 2, Some(2))
+        );
+        assert_eq!(sh.get(&ctx, 1, 0).unwrap(), Value::text("HDR"));
+        assert_eq!(row_layout(&ctx, &sh, 2), RowLayout::Undetermined(None));
+    }
+
+    #[test]
     fn multi_layout_setup() {
         let ctx = Context::for_tests();
         let ms = Codec::new(Charset::Ms932);
@@ -2331,8 +2507,36 @@ mod tests {
         std::fs::write(&out, &file).unwrap();
         let (back, rep) = import_multi(&ctx, &out, &short, &|_, _| true).unwrap();
         assert_eq!((rep.records, rep.remainder), (2, 3));
+        // LONG（DTL）の AMT は "BC " を読めないので、既定のレイアウトは SHORT
+        assert_eq!(rep.undetermined, 0);
+        assert_eq!(back.get(&ctx, 1, 0).unwrap(), Value::text("SHORT"));
         let mut back = back;
         set_row_layout(&ctx, &mut back, 2, "SHORT").unwrap();
         assert_eq!(back.get(&ctx, 2, 1).unwrap(), Value::text("ABC"));
+        // 読めるレイアウトが複数あれば名前の昇順（大文字・小文字は区別しない）で最初のもの
+        let two = FixedSpec::new_multi(
+            &[
+                ("zz".into(), TXT.into()),
+                ("Mid".into(), "01 MM.\n 05 MTEXT PIC X(20).\n".into()),
+                ("LONG".into(), DTL.into()),
+            ],
+            20,
+            ms,
+            RecordSep::None,
+        )
+        .unwrap();
+        let sorted: Vec<&str> = layouts_by_name(&two).iter().map(|m| &*m.name).collect();
+        assert_eq!(sorted, ["LONG", "Mid", "zz"]);
+        let (back, rep) = import_multi(&ctx, &out, &two, &|_, _| true).unwrap();
+        assert_eq!(rep.undetermined, 0);
+        assert_eq!(back.get(&ctx, 1, 0).unwrap(), Value::text("Mid"));
+        assert_eq!(back.get(&ctx, 2, 0).unwrap(), Value::text("Mid"));
+        // どのレイアウトでも読めない行はレイアウト未確定（元のバイトのまま）
+        let only =
+            FixedSpec::new_multi(&[("LONG".into(), DTL.into())], 20, ms, RecordSep::None).unwrap();
+        let (back, rep) = import_multi(&ctx, &out, &only, &|_, _| true).unwrap();
+        assert_eq!((rep.undetermined, rep.first_undetermined), (2, Some(0)));
+        assert_eq!(row_layout(&ctx, &back, 1), RowLayout::Undetermined(None));
+        assert!(matches!(back.get(&ctx, 1, 1).unwrap(), Value::Text(s) if s.starts_with("X'")));
     }
 }
