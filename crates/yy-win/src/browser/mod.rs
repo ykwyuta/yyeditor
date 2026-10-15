@@ -3957,28 +3957,26 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
         let seen2 = seen.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let mut stream = stream;
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match stream.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                    }
+        serve_each(listener, move |stream| {
+            let mut stream = stream;
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 }
-                let text = String::from_utf8_lossy(&buf);
-                if let Some(line) = text.lines().next() {
-                    seen2.lock().unwrap().push(line.to_owned());
-                }
-                let body = "<html><head><title>via proxy</title></head><body>ok</body></html>";
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
             }
+            let text = String::from_utf8_lossy(&buf);
+            if let Some(line) = text.lines().next() {
+                seen2.lock().unwrap().push(line.to_owned());
+            }
+            let body = "<html><head><title>via proxy</title></head><body>ok</body></html>";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
         });
         let parent = unsafe {
             CreateWindowExW(
@@ -4046,6 +4044,22 @@ mod tests {
         );
     }
 
+    /// 試験用のサーバー: 接続ごとにスレッドで `f` を呼ぶ（読み出しは 10 秒で諦める）。1 つずつ順に扱うと、
+    /// Chromium が先回りして開いておく（何も送らない）接続で止まり、本当の要求が待たされる。
+    fn serve_each(
+        listener: std::net::TcpListener,
+        f: impl Fn(std::net::TcpStream) + Send + Sync + 'static,
+    ) {
+        let f = std::sync::Arc::new(f);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                let f = f.clone();
+                std::thread::spawn(move || f(stream));
+            }
+        });
+    }
+
     /// 試験用の HTTP プロキシ（要求の 1 行目を覚えて、小さなページを返す）。（ポート, 覚えた行）
     fn test_proxy() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
@@ -4053,26 +4067,24 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
         let seen2 = seen.clone();
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match stream.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                    }
+        serve_each(listener, move |mut stream| {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 }
-                if let Some(line) = String::from_utf8_lossy(&buf).lines().next() {
-                    seen2.lock().unwrap().push(line.to_owned());
-                }
-                let body = "<html><head><title>via proxy</title></head><body>ok</body></html>";
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
             }
+            if let Some(line) = String::from_utf8_lossy(&buf).lines().next() {
+                seen2.lock().unwrap().push(line.to_owned());
+            }
+            let body = "<html><head><title>via proxy</title></head><body>ok</body></html>";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
         });
         (port, seen)
     }
@@ -4285,43 +4297,41 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let paths: Arc<Mutex<Vec<String>>> = Arc::default();
         let p2 = paths.clone();
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match stream.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                    }
+        serve_each(listener, move |mut stream| {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 }
-                let text = String::from_utf8_lossy(&buf).to_string();
-                let path = text
-                    .lines()
-                    .next()
-                    .and_then(|l| l.split(' ').nth(1))
-                    .unwrap_or("")
-                    .to_owned();
-                p2.lock().unwrap().push(path.clone());
-                let (ctype, body): (&str, Vec<u8>) = if path == "/" {
-                    (
-                        "text/html",
-                        b"<html><head><title>ads</title></head><body>\
-                          <img src=\"/ads/banner.png\"><img src=\"/img/ok.png\">\
-                          <div class=\"ad-box\">ad</div><div class=\"side-ad\">side</div>\
-                          <div class=\"content\">content</div></body></html>"
-                            .to_vec(),
-                    )
-                } else {
-                    ("image/gif", b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".to_vec())
-                };
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = stream.write_all(&body);
             }
+            let text = String::from_utf8_lossy(&buf).to_string();
+            let path = text
+                .lines()
+                .next()
+                .and_then(|l| l.split(' ').nth(1))
+                .unwrap_or("")
+                .to_owned();
+            p2.lock().unwrap().push(path.clone());
+            let (ctype, body): (&str, Vec<u8>) = if path == "/" {
+                (
+                    "text/html",
+                    b"<html><head><title>ads</title></head><body>\
+                      <img src=\"/ads/banner.png\"><img src=\"/img/ok.png\">\
+                      <div class=\"ad-box\">ad</div><div class=\"side-ad\">side</div>\
+                      <div class=\"content\">content</div></body></html>"
+                        .to_vec(),
+                )
+            } else {
+                ("image/gif", b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".to_vec())
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(&body);
         });
         let blocker = Arc::new(yy_adblock::AdBlocker::build(vec![(
             "test".into(),
@@ -4518,24 +4528,22 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let b2 = body.clone();
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match stream.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                    }
+        serve_each(listener, move |mut stream| {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 }
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
-                     Content-Disposition: attachment; filename=\"data.bin\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    b2.len()
-                );
-                let _ = stream.write_all(&b2);
             }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+                 Content-Disposition: attachment; filename=\"data.bin\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                b2.len()
+            );
+            let _ = stream.write_all(&b2);
         });
         let dir = std::env::temp_dir().join(format!("yybrowser-dl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -4722,30 +4730,28 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let headers: Arc<Mutex<Vec<String>>> = Arc::default();
         let h2 = headers.clone();
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match stream.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                    }
+        serve_each(listener, move |mut stream| {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 }
-                let text = String::from_utf8_lossy(&buf).to_string();
-                if let Some(c) = text.lines().find_map(|l| {
-                    l.strip_prefix("Cookie: ")
-                        .or_else(|| l.strip_prefix("cookie: "))
-                }) {
-                    h2.lock().unwrap().push(c.to_owned());
-                }
-                let body = "<html><head><title>c</title></head><body>cookies</body></html>";
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
             }
+            let text = String::from_utf8_lossy(&buf).to_string();
+            if let Some(c) = text.lines().find_map(|l| {
+                l.strip_prefix("Cookie: ")
+                    .or_else(|| l.strip_prefix("cookie: "))
+            }) {
+                h2.lock().unwrap().push(c.to_owned());
+            }
+            let body = "<html><head><title>c</title></head><body>cookies</body></html>";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
         });
         let parent = unsafe {
             CreateWindowExW(
