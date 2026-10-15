@@ -73,8 +73,8 @@ pub(crate) struct Cell {
 pub(crate) struct Scene<'a> {
     /// 見える列（列番号・左端・幅）
     pub cols: &'a [(u32, f32, f32)],
-    /// 見える行（行番号・上端）
-    pub rows: &'a [(u64, f32)],
+    /// 見える行（行番号・上端・高さ）
+    pub rows: &'a [(u64, f32, f32)],
     pub header_w: f32,
     /// `[行][列]`
     pub cells: &'a [Vec<Cell>],
@@ -146,6 +146,8 @@ pub(crate) struct GridPainter {
     dpi: f32,
     /// 左寄せ・右寄せ・中央・見出し（中央）、続けて太字・斜体・太字斜体の左・右・中央
     formats: Vec<IDWriteTextFormat>,
+    /// `formats` と同じ並びで、折り返して上から並べるもの（高くした行）
+    wrapped: Vec<IDWriteTextFormat>,
     /// 点線・破線
     dot: Option<ID2D1StrokeStyle>,
     dash: Option<ID2D1StrokeStyle>,
@@ -171,6 +173,7 @@ impl GridPainter {
                 size_pt,
                 dpi: dpi.max(96) as f32,
                 formats: Vec::new(),
+                wrapped: Vec::new(),
                 dot: None,
                 dash: None,
                 char_w: 7.0,
@@ -218,6 +221,7 @@ impl GridPainter {
         let family = HSTRING::from(family);
         let size_dip = self.size_pt * 96.0 / 72.0;
         let mut formats = Vec::new();
+        let mut wrapped = Vec::new();
         let plain = [
             DWRITE_TEXT_ALIGNMENT_LEADING,
             DWRITE_TEXT_ALIGNMENT_TRAILING,
@@ -257,6 +261,22 @@ impl GridPainter {
                 f.SetTextAlignment(align)?;
                 f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
                 formats.push(f);
+                let g = self
+                    .dwrite
+                    .CreateTextFormat(
+                        &family,
+                        collection.as_ref(),
+                        weight,
+                        style,
+                        DWRITE_FONT_STRETCH_NORMAL,
+                        size_dip,
+                        w!("ja-jp"),
+                    )
+                    .context("CreateTextFormat")?;
+                g.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+                g.SetTextAlignment(align)?;
+                g.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+                wrapped.push(g);
             }
             let probe: Vec<u16> = "0000000000".encode_utf16().collect();
             let layout = self
@@ -269,7 +289,29 @@ impl GridPainter {
             self.row_h = (tm.height * 1.45).ceil();
         }
         self.formats = formats;
+        self.wrapped = wrapped;
         Ok(())
+    }
+
+    /// `text` を幅 `width`（DIP）で折り返したときの行数（改行を含む。空なら 1）。
+    pub(crate) fn line_count(&self, text: &str, width: f32) -> u32 {
+        if text.is_empty() || self.wrapped.is_empty() {
+            return 1;
+        }
+        let w: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            let Ok(layout) =
+                self.dwrite
+                    .CreateTextLayout(&w, &self.wrapped[0], (width - 6.0).max(4.0), 1.0e6)
+            else {
+                return 1;
+            };
+            let mut tm = DWRITE_TEXT_METRICS::default();
+            if layout.GetMetrics(&mut tm).is_err() {
+                return 1;
+            }
+            tm.lineCount.max(1)
+        }
     }
 
     /// 列見出しのボタンの幅（DIP）。列の右端に置く。
@@ -371,6 +413,18 @@ impl GridPainter {
         r: D2D_RECT_F,
         color: (u8, u8, u8),
     ) {
+        self.text_in(rt, brush, text, &self.formats[fmt], r, color);
+    }
+
+    fn text_in(
+        &self,
+        rt: &ID2D1HwndRenderTarget,
+        brush: &ID2D1SolidColorBrush,
+        text: &str,
+        format: &IDWriteTextFormat,
+        r: D2D_RECT_F,
+        color: (u8, u8, u8),
+    ) {
         if text.is_empty() {
             return;
         }
@@ -379,7 +433,7 @@ impl GridPainter {
             brush.SetColor(&rgb_f(color));
             rt.DrawText(
                 &w,
-                &self.formats[fmt],
+                format,
                 &r,
                 brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
@@ -478,10 +532,10 @@ impl GridPainter {
         let hw = s.header_w;
         let (top, left, bottom, right) = s.sel;
         let pad = 3.0;
-        // セル
-        for (ri, &(row, y)) in s.rows.iter().enumerate() {
+        // セルの背景
+        for (ri, &(row, y, rh)) in s.rows.iter().enumerate() {
             for (ci, &(col, x, cw)) in s.cols.iter().enumerate() {
-                let r = rect(hw + x, hh + y, hw + x + cw, hh + y + hh);
+                let r = rect(hw + x, hh + y, hw + x + cw, hh + y + rh);
                 let selected = (top..=bottom).contains(&row) && (left..=right).contains(&col);
                 let cell = s.cells.get(ri).and_then(|v| v.get(ci));
                 if selected && (row, col) != s.active {
@@ -491,32 +545,9 @@ impl GridPainter {
                 } else if cell.is_some_and(|c| c.table_head) {
                     self.fill(rt, brush, r, TABLE_HEAD_BG);
                 }
-                if let Some(c) = cell
-                    && !(s.editing && (row, col) == s.active)
-                {
-                    let a = match c.align {
-                        Align::Left => 0,
-                        Align::Right => 1,
-                        Align::Center => 2,
-                    };
-                    let fmt = match (c.bold, c.italic) {
-                        (false, false) => a,
-                        (true, false) => 4 + a,
-                        (false, true) => 7 + a,
-                        (true, true) => 10 + a,
-                    };
-                    self.text(
-                        rt,
-                        brush,
-                        &c.text,
-                        fmt,
-                        rect(r.left + pad, r.top, r.right - pad, r.bottom),
-                        c.color.unwrap_or(FG),
-                    );
-                }
             }
         }
-        // 罫線
+        // 罫線（格子）。文字の下に引く（はみ出した文字が線で切れて見えないように）
         for &(_, x, cw) in s.cols {
             self.line(
                 rt,
@@ -525,17 +556,75 @@ impl GridPainter {
                 GRID,
             );
         }
-        for &(_, y) in s.rows {
+        for &(_, y, rh) in s.rows {
             self.line(
                 rt,
                 brush,
-                (hw, hh + y + hh - 0.5, w, hh + y + hh - 0.5),
+                (hw, hh + y + rh - 0.5, w, hh + y + rh - 0.5),
                 GRID,
             );
         }
+        // セルの文字。既定の高さの行は 1 行で出し、左寄せの長い文字は右の空のセルへはみ出させる
+        // （Excel と同じ）。高くした行は、セルの幅で折り返して上から並べる
+        for (ri, &(row, y, rh)) in s.rows.iter().enumerate() {
+            let tall = rh > hh * 1.2;
+            let line = s.cells.get(ri);
+            for (ci, &(col, x, cw)) in s.cols.iter().enumerate() {
+                let Some(c) = line.and_then(|v| v.get(ci)) else {
+                    continue;
+                };
+                if c.text.is_empty() || (s.editing && (row, col) == s.active) {
+                    continue;
+                }
+                let a = match c.align {
+                    Align::Left => 0,
+                    Align::Right => 1,
+                    Align::Center => 2,
+                };
+                let fmt = match (c.bold, c.italic) {
+                    (false, false) => a,
+                    (true, false) => 4 + a,
+                    (false, true) => 7 + a,
+                    (true, true) => 10 + a,
+                };
+                let color = c.color.unwrap_or(FG);
+                if tall {
+                    let r = rect(
+                        hw + x + pad,
+                        hh + y + 2.0,
+                        hw + x + cw - pad,
+                        hh + y + rh - 1.0,
+                    );
+                    self.text_in(rt, brush, &c.text, &self.wrapped[fmt], r, color);
+                    continue;
+                }
+                // 右の空のセルの分だけ広げる（編集中のセルの上には出さない）
+                let mut right_edge = hw + x + cw;
+                if c.align == Align::Left {
+                    for (k, &(col2, x2, cw2)) in s.cols.iter().enumerate().skip(ci + 1) {
+                        let empty = line
+                            .and_then(|v| v.get(k))
+                            .is_none_or(|n| n.text.is_empty());
+                        if !empty || (s.editing && (row, col2) == s.active) {
+                            break;
+                        }
+                        right_edge = hw + x2 + cw2;
+                    }
+                }
+                let text = one_line(&c.text);
+                self.text(
+                    rt,
+                    brush,
+                    &text,
+                    fmt,
+                    rect(hw + x + pad, hh + y, right_edge - pad, hh + y + rh),
+                    color,
+                );
+            }
+        }
         // セルの罫線（重なる辺は太い線を後に描いて勝たせる）
         let mut lines = Vec::new();
-        for (ri, &(_, y)) in s.rows.iter().enumerate() {
+        for (ri, &(_, y, rh)) in s.rows.iter().enumerate() {
             for (ci, &(_, x, cw)) in s.cols.iter().enumerate() {
                 let Some(c) = s.cells.get(ri).and_then(|v| v.get(ci)) else {
                     continue;
@@ -544,7 +633,7 @@ impl GridPainter {
                     hw + x - 0.5,
                     hh + y - 0.5,
                     hw + x + cw - 0.5,
-                    hh + y + hh - 0.5,
+                    hh + y + rh - 0.5,
                 );
                 let edges = [(l, t, r, t), (r, t, r, b), (l, b, r, b), (l, t, l, b)];
                 for (side, e) in edges.into_iter().enumerate() {
@@ -615,8 +704,8 @@ impl GridPainter {
             }
             self.line(rt, brush, (r.right - 0.5, 0.0, r.right - 0.5, hh), GRID);
         }
-        for (ri, &(row, y)) in s.rows.iter().enumerate() {
-            let r = rect(0.0, hh + y, hw, hh + y + hh);
+        for (ri, &(row, y, rh)) in s.rows.iter().enumerate() {
+            let r = rect(0.0, hh + y, hw, hh + y + rh);
             let on = (top..=bottom).contains(&row);
             if on {
                 self.fill(rt, brush, r, HEAD_SEL_BG);
@@ -642,7 +731,7 @@ impl GridPainter {
         self.line(rt, brush, (hw - 0.5, 0.0, hw - 0.5, h), GRID);
         // 選択範囲とアクティブなセルの枠
         let col_x = |c: u32| s.cols.iter().find(|x| x.0 == c).map(|x| (x.1, x.2));
-        let row_y = |r: u64| s.rows.iter().find(|x| x.0 == r).map(|x| x.1);
+        let row_y = |r: u64| s.rows.iter().find(|x| x.0 == r).map(|x| (x.1, x.2));
         let first_c = s.cols.first().map(|c| c.0).unwrap_or(0);
         let last_c = s.cols.last().map(|c| c.0).unwrap_or(0);
         let first_r = s.rows.first().map(|r| r.0).unwrap_or(0);
@@ -652,7 +741,7 @@ impl GridPainter {
             if !(right >= first_c && left <= last_c && bottom >= first_r && top <= last_r) {
                 return None;
             }
-            let (Some((lx, _)), Some((rx, rw)), Some(ty), Some(by)) = (
+            let (Some((lx, _)), Some((rx, rw)), Some((ty, _)), Some((by, bh))) = (
                 col_x(left.max(first_c)),
                 col_x(right.min(last_c)),
                 row_y(top.max(first_r)),
@@ -660,7 +749,7 @@ impl GridPainter {
             ) else {
                 return None;
             };
-            Some(rect(hw + lx, hh + ty, hw + rx + rw, hh + by + hh))
+            Some(rect(hw + lx, hh + ty, hw + rx + rw, hh + by + bh))
         };
         // 式の参照の枠
         for &(range, color) in s.marks {
@@ -687,9 +776,9 @@ impl GridPainter {
         }
         // フィルハンドル（選択範囲の右下の角が見えているとき）
         if s.handle
-            && let (Some((rx, rw)), Some(by)) = (col_x(right), row_y(bottom))
+            && let (Some((rx, rw)), Some((by, bh))) = (col_x(right), row_y(bottom))
         {
-            let (cx, cy) = (hw + rx + rw, hh + by + hh);
+            let (cx, cy) = (hw + rx + rw, hh + by + bh);
             let d = HANDLE / 2.0;
             self.fill(
                 rt,
@@ -708,17 +797,52 @@ impl GridPainter {
             }
             self.text(rt, brush, "▼", 3, br, ACTIVE);
         }
-        if let (Some((ax, aw)), Some(ay)) = (col_x(s.active.1), row_y(s.active.0)) {
+        if let (Some((ax, aw)), Some((ay, ah))) = (col_x(s.active.1), row_y(s.active.0)) {
             let r = rect(
                 hw + ax + 1.0,
                 hh + ay + 1.0,
                 hw + ax + aw - 1.0,
-                hh + ay + hh - 1.0,
+                hh + ay + ah - 1.0,
             );
             unsafe {
                 brush.SetColor(&rgb_f(ACTIVE));
                 rt.DrawRectangle(&r, brush, 2.0, None);
             }
         }
+    }
+}
+
+/// 1 行で出すときの文字（改行を ↵ にして、改行の後ろも見えるようにする）。
+pub(crate) fn one_line(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains(['\n', '\r']) {
+        std::borrow::Cow::Owned(text.replace("\r\n", "↵").replace(['\n', '\r'], "↵"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newlines_show_as_marks_on_one_line() {
+        assert_eq!(one_line("abc"), "abc");
+        assert_eq!(one_line("1行目\n2行目\r\n3行目"), "1行目↵2行目↵3行目");
+        assert!(matches!(one_line("abc"), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn counts_wrapped_lines() {
+        let p = GridPainter::new("", 11.0, 96).unwrap();
+        assert_eq!(p.line_count("", 100.0), 1);
+        assert_eq!(p.line_count("短い", 200.0), 1);
+        assert_eq!(p.line_count("1\n2\n3", 200.0), 3);
+        // 列の幅に入らない文字は折り返す（狭いほど行が増える）
+        let long = "あいうえおかきくけこさしすせそたちつてと".repeat(3);
+        let wide = p.line_count(&long, 400.0);
+        let narrow = p.line_count(&long, 80.0);
+        assert!(narrow > wide, "{narrow} > {wide}");
+        assert!(wide >= 1);
     }
 }

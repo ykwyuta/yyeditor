@@ -96,6 +96,12 @@ struct Ext6 {
     multi: Vec<(u32, Vec<(String, String)>)>,
 }
 
+/// 8 つ目の追加の記録: 行の高さ（シートの番号, （行, 既定の何倍か））。
+#[derive(Serialize, Deserialize, Default)]
+struct Ext8 {
+    heights: Vec<(u32, Vec<(u64, f32)>)>,
+}
+
 /// 7 つ目の追加の記録: マルチレイアウトの 1 行のデータ長（シートの番号, バイト数）。
 #[derive(Serialize, Deserialize, Default)]
 struct Ext7 {
@@ -503,6 +509,21 @@ fn write_into(
             .collect(),
     };
     bytes.extend(postcard::to_allocvec(&ext7).map_err(|e| invalid(&e.to_string()))?);
+    let ext8 = Ext8 {
+        heights: book
+            .sheets
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.row_heights.is_empty())
+            .map(|(i, s)| {
+                (
+                    i as u32,
+                    s.row_heights.iter().map(|(&r, &h)| (r, h)).collect(),
+                )
+            })
+            .collect(),
+    };
+    bytes.extend(postcard::to_allocvec(&ext8).map_err(|e| invalid(&e.to_string()))?);
     let dir_off = store.append(&bytes)?;
     let mut trailer = Vec::with_capacity(TRAILER as usize);
     trailer.extend_from_slice(&dir_off.to_le_bytes());
@@ -520,7 +541,7 @@ fn write_into(
 }
 
 /// 末尾を探して目次を読む（末尾が壊れていれば、前の末尾を後ろから探す）。
-type Exts = (Ext, Ext2, Ext3, Ext4, Ext5, Ext6, Ext7);
+type Exts = (Ext, Ext2, Ext3, Ext4, Ext5, Ext6, Ext7, Ext8);
 
 fn read_dir(store: &Store) -> io::Result<(Dir, Exts, u64)> {
     let len = store.len();
@@ -559,8 +580,9 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Exts, u64)> {
         let (ext4, rest): (Ext4, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
         let (ext5, rest): (Ext5, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
         let (ext6, rest): (Ext6, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
-        let (ext7, _): (Ext7, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
-        Some((d, (ext, ext2, ext3, ext4, ext5, ext6, ext7), off))
+        let (ext7, rest): (Ext7, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        let (ext8, _): (Ext8, &[u8]) = postcard::take_from_bytes(rest).unwrap_or_default();
+        Some((d, (ext, ext2, ext3, ext4, ext5, ext6, ext7, ext8), off))
     };
     if let Some(r) = try_at(len) {
         return Ok(r);
@@ -598,7 +620,7 @@ fn read_dir(store: &Store) -> io::Result<(Dir, Exts, u64)> {
 /// 開く。
 pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
     let store = Store::open(path)?;
-    let (dir, (ext, ext2, ext3, ext4, ext5, ext6, ext7), dir_off) = read_dir(&store)?;
+    let (dir, (ext, ext2, ext3, ext4, ext5, ext6, ext7, ext8), dir_off) = read_dir(&store)?;
     let chunks: Vec<Arc<Chunk>> = dir
         .chunks
         .iter()
@@ -650,6 +672,11 @@ pub fn open(ctx: Arc<Context>, path: &Path) -> io::Result<Document> {
     }
     if sheets.is_empty() {
         sheets.push(Sheet::new("Sheet1"));
+    }
+    for (i, heights) in ext8.heights {
+        if let Some(s) = sheets.get_mut(i as usize) {
+            s.row_heights = Arc::new(heights.into_iter().collect());
+        }
     }
     // 絞り込み・並べ替えの設定（表示する行は、開いたあとで計算する）
     for (i, filters, sort) in ext.views {
@@ -803,6 +830,40 @@ mod tests {
             }
         }
         v
+    }
+
+    #[test]
+    fn keeps_row_heights_and_shifts_them_with_rows() {
+        let ctx = Context::for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h.yys");
+        let mut b = book(&ctx, 100);
+        b.sheets[0].set_row_lines(3, 2.5);
+        b.sheets[0].set_row_lines(10, 4.0);
+        b.sheets[0].set_row_lines(11, 1.0);
+        b.sheets[0].set_row_lines(12, 1000.0);
+        assert_eq!(b.sheets[0].row_lines(11), 1.0);
+        assert_eq!(b.sheets[0].row_lines(12), crate::sheet::ROW_LINES_MAX);
+        let mut doc = Document::with_book(ctx.clone(), b);
+        save(&mut doc, &path, &mut |_, _| true).unwrap();
+        let mut d2 = open(ctx.clone(), &path).unwrap();
+        let s = &mut d2.book.sheets[0];
+        assert_eq!(
+            (s.row_lines(3), s.row_lines(10), s.row_lines(4)),
+            (2.5, 4.0, 1.0)
+        );
+        assert!(d2.book.sheets[1].row_heights.is_empty());
+        // 行を足す・消すと高さもずれる
+        let s = &mut d2.book.sheets[0];
+        s.insert_rows(&ctx, 5, 2).unwrap();
+        assert_eq!(
+            (s.row_lines(3), s.row_lines(10), s.row_lines(12)),
+            (2.5, 1.0, 4.0)
+        );
+        s.delete_rows(&ctx, 2, 3).unwrap();
+        assert_eq!(s.row_lines(2), 1.0);
+        assert_eq!(s.row_lines(9), 4.0);
+        assert_eq!(s.row_heights.len(), 2);
     }
 
     #[test]

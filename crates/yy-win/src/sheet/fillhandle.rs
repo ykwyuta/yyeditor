@@ -138,11 +138,8 @@ impl App {
     /// セルの右下の角（DIP。見えていなければ `None`）。
     fn corner_dip(&self, row: u64, col: u32) -> Option<(f32, f32)> {
         let &(_, cx, cw) = self.cols.iter().find(|c| c.0 == col)?;
-        let &(_, ry) = self.rows.iter().find(|w| w.0 == row)?;
-        Some((
-            self.header_w + cx + cw,
-            self.painter.row_h + ry + self.painter.row_h,
-        ))
+        let &(_, ry, rh) = self.rows.iter().find(|w| w.0 == row)?;
+        Some((self.header_w + cx + cw, self.painter.row_h + ry + rh))
     }
 
     /// 直前のフィルがまだ有効か（ほかの編集・シートの切り替えをしていない）。
