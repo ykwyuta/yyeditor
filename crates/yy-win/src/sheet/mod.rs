@@ -78,6 +78,8 @@ const ID_AUTO_LAYOUT: u16 = 33;
 const ID_ROW_HEIGHT: u16 = 34;
 const ID_ROW_AUTOFIT: u16 = 35;
 const ID_ROW_HEIGHT_RESET: u16 = 36;
+const ID_COL_AUTOFIT: u16 = 37;
+const ID_COL_WIDTH_RESET: u16 = 38;
 const ID_FIXED_LAYOUT: u16 = 26;
 const ID_UNDO: u16 = 10;
 const ID_REDO: u16 = 11;
@@ -441,6 +443,8 @@ fn create_menu() -> Result<HMENU> {
         add(fmt, ID_ROW_HEIGHT, "行の高さ(&H)...");
         add(fmt, ID_ROW_AUTOFIT, "行の高さを自動調整(&A)");
         add(fmt, ID_ROW_HEIGHT_RESET, "行の高さを既定に戻す(&D)");
+        add(fmt, ID_COL_AUTOFIT, "列の幅を自動調整(&W)");
+        add(fmt, ID_COL_WIDTH_RESET, "列の幅を既定に戻す(&R)");
         let border = CreatePopupMenu()?;
         for (i, name) in [
             "罫線なし(&N)",
@@ -912,6 +916,72 @@ impl App {
             lines = lines.max(self.painter.line_count(&text, self.col_dip(col)));
         }
         (lines as f32).min(yy_sheet::sheet::ROW_LINES_MAX)
+    }
+
+    /// 列の中身が入る幅（文字数）。見出しと、先頭から [`FIT_ROWS`] 行・見えている行の値を 1 行で出したときの
+    /// 一番広いもの。何もなければ `None`（既定の幅）。
+    fn fit_col_chars(&self, col: u32) -> Option<f32> {
+        const FIT_ROWS: u64 = 10_000;
+        let sys = self.sys();
+        let rows = self.sheet().extent().0;
+        let mut widest: f32 = 0.0;
+        let mut measure = |row: u64| {
+            let Ok(v) = self.sheet().get(&self.ctx, row, col) else {
+                return;
+            };
+            if matches!(v, Value::Empty) {
+                return;
+            }
+            let st = self.sheet().style_at(row, col);
+            let fmt = st.num_fmt.clone().or_else(|| self.format_of(row, col));
+            // 幅に合わせて丸めない（広い列として表示した文字で測る）
+            let (text, _, _) = display(&v, fmt.as_deref(), 255.0, sys);
+            widest = widest.max(self.painter.text_width(&text));
+        };
+        for row in 0..rows.min(FIT_ROWS) {
+            measure(row);
+        }
+        for &(row, _, _) in &self.rows {
+            if row >= FIT_ROWS && row < rows {
+                measure(row);
+            }
+        }
+        // 絞り込みのボタンの分も空ける
+        let button = if col < self.sheet().table.cols() {
+            self.painter.button_w() + 4.0
+        } else {
+            0.0
+        };
+        (widest > 0.0).then(|| {
+            self.painter
+                .col_chars(widest + 8.0 + button)
+                .clamp(1.0, 255.0)
+        })
+    }
+
+    /// 列の幅を変える（`None` なら既定に戻す）。
+    fn set_col_chars(&mut self, cols: &[u32], chars: impl Fn(&Self, u32) -> Option<f32>) {
+        let values: Vec<(u32, Option<f32>)> = cols.iter().map(|&c| (c, chars(self, c))).collect();
+        let sheet = self.sheet;
+        let map = std::sync::Arc::make_mut(&mut self.doc.book.sheets[sheet].col_widths);
+        for (c, w) in values {
+            match w {
+                Some(w) => map.insert(c, w),
+                None => map.remove(&c),
+            };
+        }
+        self.doc.dirty = true;
+        self.update_title();
+        self.update_scrollbars();
+        self.invalidate();
+    }
+
+    /// 選んでいる列（列全体・シート全体を選んでいれば、値のある列まで）。
+    fn selected_cols(&self) -> Vec<u32> {
+        let (_, l, _, r) = self.selection();
+        let used = self.sheet().extent().1.max(1) - 1;
+        let r = if self.whole.1 { r.min(used.max(l)) } else { r };
+        (l..=r.min(16_383)).collect()
     }
 
     /// 選んでいる行（多すぎるときは先頭から上限まで）。
@@ -2961,6 +3031,18 @@ fn command(id: u16) {
                 a.set_row_lines(&rows, |a, r| a.fit_lines(r));
             });
         }
+        ID_COL_AUTOFIT => {
+            with(|a| {
+                let cols = a.selected_cols();
+                a.set_col_chars(&cols, |a, c| a.fit_col_chars(c));
+            });
+        }
+        ID_COL_WIDTH_RESET => {
+            with(|a| {
+                let cols = a.selected_cols();
+                a.set_col_chars(&cols, |_, _| None);
+            });
+        }
         ID_ROW_HEIGHT_RESET => {
             with(|a| {
                 let rows = a.selected_rows();
@@ -3416,6 +3498,20 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
             with(|a| {
                 a.end_edit(true);
                 if let Some(c) = a.col_border(x, y) {
+                    if msg == WM_LBUTTONDBLCLK {
+                        // ダブルクリック: 中身に合わせる（列全体を選んでいて、その中の列なら選んだ列すべて）
+                        let (_, l, _, r) = a.selection();
+                        let cols = if a.whole.0 && (l..=r).contains(&c) {
+                            a.selected_cols()
+                        } else {
+                            vec![c]
+                        };
+                        a.set_col_chars(&cols, |a, c| a.fit_col_chars(c));
+                        unsafe {
+                            let _ = ReleaseCapture();
+                        }
+                        return;
+                    }
                     let start = a.painter.to_dip(x);
                     a.drag = Some(Drag::ColWidth(c, start, a.col_dip(c)));
                     return;

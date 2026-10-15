@@ -293,6 +293,27 @@ impl GridPainter {
         Ok(())
     }
 
+    /// `text` を 1 行で出したときの幅（DIP。改行があれば一番長い行）。
+    pub(crate) fn text_width(&self, text: &str) -> f32 {
+        if text.is_empty() || self.formats.is_empty() {
+            return 0.0;
+        }
+        let w: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            let Ok(layout) = self
+                .dwrite
+                .CreateTextLayout(&w, &self.formats[0], 1.0e6, 1.0e6)
+            else {
+                return 0.0;
+            };
+            let mut tm = DWRITE_TEXT_METRICS::default();
+            if layout.GetMetrics(&mut tm).is_err() {
+                return 0.0;
+            }
+            tm.widthIncludingTrailingWhitespace
+        }
+    }
+
     /// `text` を幅 `width`（DIP）で折り返したときの行数（改行を含む。空なら 1）。
     pub(crate) fn line_count(&self, text: &str, width: f32) -> u32 {
         if text.is_empty() || self.wrapped.is_empty() {
@@ -844,5 +865,17 @@ mod tests {
         let narrow = p.line_count(&long, 80.0);
         assert!(narrow > wide, "{narrow} > {wide}");
         assert!(wide >= 1);
+    }
+
+    #[test]
+    fn measures_text_width() {
+        let p = GridPainter::new("", 11.0, 96).unwrap();
+        assert_eq!(p.text_width(""), 0.0);
+        let one = p.text_width("abcdef");
+        assert!(one > 0.0);
+        assert!(p.text_width("abcdefabcdef") > one * 1.5);
+        // 改行があれば一番長い行の幅
+        let two = p.text_width("abcdef\nab");
+        assert!((two - one).abs() < 1.0, "{two} vs {one}");
     }
 }
