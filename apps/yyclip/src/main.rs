@@ -6,6 +6,8 @@ mod clipboard;
 #[cfg(windows)]
 mod favorites;
 #[cfg(windows)]
+mod filehistory;
+#[cfg(windows)]
 mod history;
 #[cfg(windows)]
 mod templates;
@@ -131,6 +133,9 @@ mod resident {
         history_entries: Vec<(std::path::PathBuf, String)>,
         template_entries: Vec<templates::Template>,
         favorite_entries: Vec<(std::path::PathBuf, Favorite)>,
+        file_entries: Vec<std::path::PathBuf>,
+        file_history_log: std::path::PathBuf,
+        file_history_sender: std::sync::mpsc::Sender<std::path::PathBuf>,
     }
 
     pub(super) fn run() -> Result<()> {
@@ -221,6 +226,14 @@ mod resident {
                     history_entries: Vec::new(),
                     template_entries: Vec::new(),
                     favorite_entries: Vec::new(),
+                    file_entries: Vec::new(),
+                    file_history_log: crate::filehistory::log_path()
+                        .unwrap_or_else(|| std::env::temp_dir().join("yyclip/file-history.log")),
+                    file_history_sender: crate::filehistory::start(
+                        crate::filehistory::log_path().unwrap_or_else(|| {
+                            std::env::temp_dir().join("yyclip/file-history.log")
+                        }),
+                    ),
                 });
             });
 
@@ -722,7 +735,7 @@ mod resident {
             };
             buttons.push(button);
         }
-        for (index, title) in ["クリップボード", "定型文", "お気に入り"]
+        for (index, title) in ["クリップボード", "定型文", "お気に入り", "ファイル履歴"]
             .iter()
             .enumerate()
         {
@@ -1036,6 +1049,7 @@ mod resident {
             match index {
                 1 => 1,
                 2 => 2,
+                3 => 3,
                 _ => 0,
             }
         })
@@ -1056,8 +1070,13 @@ mod resident {
                 state.history_entries = state.store.previews();
             } else if tab == 1 {
                 state.template_entries = state.templates.entries();
-            } else {
+            } else if tab == 2 {
                 state.favorite_entries = state.favorites.entries();
+            } else {
+                state.file_entries = crate::filehistory::load(&state.file_history_log)
+                    .into_iter()
+                    .take(crate::filehistory::DISPLAY_LIMIT)
+                    .collect();
             }
             let entries = match tab {
                 0 => state
@@ -1070,11 +1089,16 @@ mod resident {
                     .iter()
                     .map(templates::Template::label)
                     .collect::<Vec<_>>(),
-                _ => state
+                2 => state
                     .favorite_entries
                     .iter()
                     .map(|(_, favorite)| favorite.label())
                     .collect::<Vec<_>>(),
+                _ => state
+                    .file_entries
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect(),
             };
             (state.list, state.font_px, entries)
         });
@@ -1307,7 +1331,7 @@ mod resident {
     }
 
     fn switch_tab(tabs: HWND, list: HWND, offset: i32) {
-        let next = (active_tab() as i32 + offset).rem_euclid(3) as usize;
+        let next = (active_tab() as i32 + offset).rem_euclid(4) as usize;
         unsafe {
             SendMessageW(tabs, TCM_SETCURSEL, Some(WPARAM(next)), None);
         }
@@ -1416,6 +1440,22 @@ mod resident {
     }
 
     fn select_item(hwnd: HWND) {
+        if active_tab() == 3 {
+            let path = selected_index().and_then(|index| {
+                STATE.with(|cell| cell.borrow().as_ref()?.file_entries.get(index).cloned())
+            });
+            if let Some(target) = path {
+                close_popup(hwnd);
+                open_favorite(
+                    hwnd,
+                    &Favorite {
+                        kind: Kind::File,
+                        target,
+                    },
+                );
+            }
+            return;
+        }
         if active_tab() == 2 {
             let Some(favorite) = selected_favorite() else {
                 return;
@@ -1450,7 +1490,7 @@ mod resident {
         if !exists {
             popup_message(
                 hwnd,
-                "お気に入りのファイルまたはフォルダが見つかりません",
+                "ファイルまたはフォルダが見つかりません",
                 MB_ICONERROR | MB_OK,
             );
             return;
@@ -1493,9 +1533,15 @@ mod resident {
         if let Err(error) = unsafe { ShellExecuteExW(&mut launch) } {
             popup_message(
                 hwnd,
-                &format!("お気に入りを開けませんでした: {error}"),
+                &format!("ファイルまたはフォルダを開けませんでした: {error}"),
                 MB_ICONERROR | MB_OK,
             );
+        } else if favorite.kind == Kind::File {
+            STATE.with(|cell| {
+                if let Some(state) = cell.borrow().as_ref() {
+                    let _ = state.file_history_sender.send(favorite.target.clone());
+                }
+            });
         }
     }
 
@@ -1543,10 +1589,10 @@ mod resident {
         Some(wide)
     }
 
-    struct ComApartment;
+    pub(crate) struct ComApartment;
 
     impl ComApartment {
-        fn new() -> Option<Self> {
+        pub(crate) fn new() -> Option<Self> {
             unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }
                 .ok()
                 .ok()?;

@@ -17,6 +17,8 @@ mod macros;
 mod paint;
 mod printer;
 mod pty;
+mod sessionmenu;
+mod textlog;
 mod tn3270;
 
 use std::cell::RefCell;
@@ -40,6 +42,7 @@ use windows::core::{PCWSTR, PWSTR, Result, w};
 use yy_config::Config;
 use yy_config::workspace::{self, Workspace};
 use yy_remote::RemoteUri;
+use yy_remote::multiplex::{Binding, Kind as Multiplexer, OpenMode};
 use yy_remote::uri::Target;
 use yy_term::{Button, Key, Mods, MouseEvent, MouseMode, Pos, Terminal};
 
@@ -192,6 +195,10 @@ struct Tab {
     /// スクロールバックに送られた行の数（表示位置を保つのに使う）
     seen_pushed: u64,
     place: Place,
+    /// 固定のタブ名と、それに対応する接続先の永続セッション。
+    binding: Option<Binding>,
+    /// タブ単位の表示テキストのログ。新しいタブでは常に無効。
+    log: Option<textlog::TextLog>,
     /// 選択の始点と終点
     anchor: Option<Pos>,
     selection: Option<(Pos, Pos)>,
@@ -216,7 +223,9 @@ struct Tab {
 impl Tab {
     fn title(&self) -> String {
         let t = self.term.title().trim();
-        let s = if t.is_empty() {
+        let s = if let Some(binding) = &self.binding {
+            binding.tab_name().to_owned()
+        } else if t.is_empty() {
             self.place.label()
         } else {
             t.to_owned()
@@ -232,6 +241,13 @@ impl Tab {
         if !bytes.is_empty() {
             let _ = self.input.send(bytes);
         }
+    }
+}
+
+impl Drop for Tab {
+    fn drop(&mut self) {
+        // 単独・一括クローズとアプリ終了のどの経路でも、未改行の最後の行を保存する。
+        let _ = self.stop_log();
     }
 }
 
@@ -348,7 +364,7 @@ fn run_inner(initial: Option<String>, ssh: Option<yy_remote::ConnectorFactory>) 
     Ok(())
 }
 
-/// 残っているシェルを終わらせ、状態を捨てる。
+/// 残っている接続を閉じる。tmux / screen はクライアントだけ切断してセッションを残す。
 fn shutdown() {
     let tabs = with(|a| std::mem::take(&mut a.tabs)).unwrap_or_default();
     for t in tabs {
@@ -674,6 +690,9 @@ fn create_menu() -> Result<HMENU> {
         AppendMenuW(bar, MF_POPUP, edit.0 as usize, w!("編集(&E)"))?;
         AppendMenuW(bar, MF_POPUP, view.0 as usize, w!("表示(&V)"))?;
         AppendMenuW(bar, MF_POPUP, ws.0 as usize, w!("ワークスペース(&W)"))?;
+        let sessions = CreatePopupMenu()?;
+        sessionmenu::init(sessions);
+        AppendMenuW(bar, MF_POPUP, sessions.0 as usize, w!("セッション(&S)"))?;
         AppendMenuW(bar, MF_POPUP, mac.0 as usize, w!("マクロ(&A)"))?;
         AppendMenuW(bar, MF_POPUP, help.0 as usize, w!("ヘルプ(&H)"))?;
         Ok(bar)
@@ -772,10 +791,102 @@ fn open_tab(place: Place) {
     open_tab_forwarding(place, &[]);
 }
 
+fn folder_open_mode(place: &Place) -> OpenMode {
+    if matches!(place, Place::Remote { dir: Some(_), .. }) {
+        OpenMode::Create
+    } else {
+        OpenMode::CreateOrAttach
+    }
+}
+
+/// ホスト別の指定がある場合、登録したプレフィクスと明示的なタブ名を使う。
+/// `Err(())` は設定エラーまたはキャンセルで、新しいタブ・接続は作らない。
+fn tab_binding(
+    frame: HWND,
+    place: &Place,
+    mode: OpenMode,
+) -> std::result::Result<Option<Binding>, ()> {
+    let Place::Remote { target, .. } = place else {
+        return Ok(None);
+    };
+    let (kind, prefix) = with(|a| {
+        a.config
+            .remote
+            .host
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&target.host))
+            .map(|(_, h)| (h.terminal_multiplexer, h.terminal_session_prefix.clone()))
+            .unwrap_or_default()
+    })
+    .unwrap_or_default();
+    let kind = match kind {
+        yy_config::TerminalMultiplexer::None => return Ok(None),
+        yy_config::TerminalMultiplexer::Tmux => Multiplexer::Tmux,
+        yy_config::TerminalMultiplexer::Screen => Multiplexer::Screen,
+    };
+    if let Err(e) = yy_remote::multiplex::validate_prefix(&prefix) {
+        error_box(
+            frame,
+            &format!(
+                "{e}。\n設定 [remote.host.{}] の terminal_session_prefix を登録してください。",
+                target.host
+            ),
+        );
+        return Err(());
+    }
+    let mut initial = String::new();
+    let action = if mode == OpenMode::Create {
+        "新規セッションを作成します。同名の既存セッションは使いません。"
+    } else {
+        "同じ名前で開くと再接続します。"
+    };
+    loop {
+        let Some(input) = crate::goto::prompt_text(
+            frame,
+            "永続セッションのタブ名",
+            &format!(
+                "{target} / {}\nタブ名は必須です。セッション名は「{prefix}＋タブ名」です。{action}",
+                kind.program()
+            ),
+            &initial,
+        ) else {
+            return Err(());
+        };
+        initial = input.trim().to_owned();
+        match Binding::new(kind, &prefix, &initial) {
+            Ok(binding) => {
+                let duplicate = with(|a| a.tabs.iter().any(|t| {
+                    t.exited.is_none()
+                        && matches!(&t.place, Place::Remote { target: other, .. } if target.same(other))
+                        && t.binding.as_ref().is_some_and(|b| b.kind == kind && b.session_name() == binding.session_name())
+                })).unwrap_or(false);
+                if !duplicate {
+                    return Ok(Some(binding));
+                }
+                error_box(
+                    frame,
+                    "この接続先・セッション名のタブはすでに開いています。別のタブ名を入力してください。",
+                );
+            }
+            Err(e) => error_box(frame, &e),
+        }
+    }
+}
+
 /// `place` で新しいタブを開く。SSH の接続先なら、接続設定・`~/.ssh/config` と `extra` の
 /// ポートフォワーディングを（その接続でまだ始めていなければ）始め、結果をタブの先頭に表示する。
 /// 始められなくても警告を表示するだけで、シェルはそのまま使う。
 fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
+    let mode = folder_open_mode(&place);
+    open_tab_request(place, extra, None, mode);
+}
+
+fn open_tab_request(
+    place: Place,
+    extra: &[yy_remote::Forward],
+    selected: Option<Binding>,
+    mode: OpenMode,
+) {
     let Some((frame, size, shell, term, tx, pending)) = with(|a| {
         (
             a.frame,
@@ -787,6 +898,14 @@ fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
         )
     }) else {
         return;
+    };
+    let binding = match if let Some(binding) = selected {
+        Ok(Some(binding))
+    } else {
+        tab_binding(frame, &place, mode)
+    } {
+        Ok(binding) => binding,
+        Err(()) => return,
     };
     let mut reports: Vec<crate::remote::ForwardReport> = Vec::new();
     let mut tls = None;
@@ -814,8 +933,24 @@ fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
                             c.extend_from_slice(br#" && exec "${SHELL:-/bin/sh}" -l"#);
                             c
                         });
-                        let r = t
-                            .shell(&term, size, command.as_deref())
+                        let shell = if let Some(binding) = &binding {
+                            let binding = binding.clone();
+                            let transport = t.clone();
+                            let dir = dir.clone();
+                            let term = term.clone();
+                            crate::remote::wait(&set_status, move |_| {
+                                binding.open_mode(
+                                    transport.as_ref(),
+                                    &term,
+                                    size,
+                                    dir.as_deref(),
+                                    mode,
+                                )
+                            })
+                        } else {
+                            t.shell(&term, size, command.as_deref())
+                        };
+                        let r = shell
                             .map(Backend::from)
                             .map_err(|e| format!("{target} でシェルを起動できませんでした。\n{e}"));
                         set_status("");
@@ -851,11 +986,21 @@ fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
     match backend {
         Ok(b) => {
             with(|a| {
-                a.add_tab(place, b);
+                a.add_tab(place, b, binding);
                 if let Some(info) = tls {
                     a.tn_set_tls(info);
                 }
                 if let Some(t) = a.tabs.last_mut() {
+                    if let Some(binding) = &t.binding {
+                        t.term.feed(&notice_bytes(
+                            true,
+                            &format!(
+                                "{} セッション {} に接続しました（タブを閉じるとデタッチ）",
+                                binding.kind.program(),
+                                binding.session_name(),
+                            ),
+                        ));
+                    }
                     for (ok, text) in &reports {
                         t.term.feed(&notice_bytes(*ok, text));
                     }
@@ -901,7 +1046,7 @@ impl TermApp {
         }
     }
 
-    fn add_tab(&mut self, place: Place, b: Backend) {
+    fn add_tab(&mut self, place: Place, b: Backend, binding: Option<Binding>) {
         let id = self.next_id;
         self.next_id += 1;
         let (cols, rows) = self.grid;
@@ -965,6 +1110,8 @@ impl TermApp {
             back: 0,
             seen_pushed: 0,
             place,
+            binding,
+            log: None,
             anchor: None,
             selection: None,
             selecting: false,
@@ -1402,6 +1549,43 @@ impl TermApp {
         if active_dirty {
             self.update_scrollbar();
             self.invalidate();
+        }
+        self.write_text_logs();
+    }
+
+    fn write_text_logs(&mut self) {
+        let mut status_changed = false;
+        for i in 0..self.tabs.len() {
+            let tab = &mut self.tabs[i];
+            if tab.log.is_none() {
+                continue;
+            }
+            let finished = tab.exited.is_some();
+            let result = if finished {
+                tab.stop_log().map(|_| ())
+            } else {
+                tab.write_log()
+            };
+            if let Err(e) = result {
+                self.status_text = format!(
+                    "タブ「{}」のログ出力を停止しました。書き込みに失敗: {e}",
+                    tab.title()
+                );
+                tab.log = None;
+                tab.term.stop_text_capture();
+                status_changed = true;
+                self.update_tab_label(i);
+            } else if finished {
+                self.status_text = format!(
+                    "タブ「{}」のログを保存し、出力を終了しました",
+                    self.tabs[i].title()
+                );
+                status_changed = true;
+                self.update_tab_label(i);
+            }
+        }
+        if status_changed {
+            self.update_status();
         }
     }
 
@@ -2556,6 +2740,10 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             command(hwnd, loword(wparam.0) as u16);
             LRESULT(0)
         }
+        WM_INITMENUPOPUP => {
+            sessionmenu::populate(hwnd, HMENU(wparam.0 as *mut _));
+            LRESULT(0)
+        }
         WM_NOTIFY => {
             let hdr = unsafe { &*(lparam.0 as *const NMHDR) };
             if hdr.idFrom == ID_TABS as usize && hdr.code == TCN_SELCHANGE {
@@ -2609,11 +2797,17 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             LRESULT(0)
         }
         WM_CLOSE => {
-            let running =
-                with(|a| a.tabs.iter().filter(|t| t.exited.is_none()).count()).unwrap_or(0);
+            let running = with(|a| {
+                a.tabs
+                    .iter()
+                    .filter(|t| t.exited.is_none() && t.binding.is_none())
+                    .count()
+            })
+            .unwrap_or(0);
             if running > 1 {
-                let text =
-                    format!("{running} 個のタブでシェルが動いています。すべて終了しますか？");
+                let text = format!(
+                    "{running} 個のタブでシェルが動いています。すべて終了しますか？\ntmux / screen のタブはデタッチしてセッションを残します。"
+                );
                 let r = unsafe {
                     MessageBoxW(
                         Some(hwnd),
@@ -2640,6 +2834,9 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
 }
 
 fn command(hwnd: HWND, id: u16) {
+    if sessionmenu::command(id) {
+        return;
+    }
     match id {
         ID_NEW_TAB => {
             // 選んでいるタブと同じ場所（手元のフォルダは分からないのでホーム）
@@ -2902,6 +3099,9 @@ fn tab_label(t: &Tab) -> String {
     if label.chars().count() > 32 {
         label = label.chars().take(29).collect::<String>() + "...";
     }
+    if t.log.is_some() {
+        label.push_str(" [ログ]");
+    }
     label + crate::tabclose::LABEL_PAD
 }
 
@@ -2909,12 +3109,20 @@ fn tab_label(t: &Tab) -> String {
 /// シェルが動いているタブがあれば確かめる。
 fn tab_menu(hwnd: HWND, index: usize) {
     use crate::tabclose::TabMenu;
-    let Some(count) = with(|a| a.tabs.len()) else {
+    let Some(Some((count, tab_id, logging, running))) = with(|a| {
+        a.tabs
+            .get(index)
+            .map(|t| (a.tabs.len(), t.id, t.log.is_some(), t.exited.is_none()))
+    }) else {
         return;
     };
-    let Some(which) = crate::tabclose::menu(hwnd, index, count) else {
+    let Some(which) = crate::tabclose::menu_with_log(hwnd, index, count, logging, running) else {
         return;
     };
+    if which == TabMenu::ToggleLog {
+        textlog::toggle(hwnd, tab_id);
+        return;
+    }
     let targets = which.targets(index, count);
     if targets.is_empty() {
         return;
@@ -2923,7 +3131,11 @@ fn tab_menu(hwnd: HWND, index: usize) {
         let running = with(|a| {
             targets
                 .iter()
-                .filter(|&&i| a.tabs.get(i).is_some_and(|t| t.exited.is_none()))
+                .filter(|&&i| {
+                    a.tabs
+                        .get(i)
+                        .is_some_and(|t| t.exited.is_none() && t.binding.is_none())
+                })
                 .count()
         })
         .unwrap_or(0);
@@ -2932,7 +3144,7 @@ fn tab_menu(hwnd: HWND, index: usize) {
                 MessageBoxW(
                     Some(hwnd),
                     &windows::core::HSTRING::from(format!(
-                        "{} 個のタブを閉じます。そのうち {running} 個ではシェルが動いています（終了させます）。よろしいですか？",
+                        "{} 個のタブを閉じます。そのうち {running} 個ではシェルが動いています（終了させます）。tmux / screen はデタッチします。よろしいですか？",
                         targets.len()
                     )),
                     w!("yyterm"),

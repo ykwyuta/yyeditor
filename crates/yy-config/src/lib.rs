@@ -668,6 +668,16 @@ impl Default for RemoteConfig {
     }
 }
 
+/// 接続先で端末のセッションを維持するプログラム。1 ホストにつきいずれか 1 つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalMultiplexer {
+    #[default]
+    None,
+    Tmux,
+    Screen,
+}
+
 /// 接続先ごとの設定。書いていない項目は `~/.ssh/config`、それもなければ既定値を使う。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -687,6 +697,10 @@ pub struct RemoteHost {
     /// ポートフォワーディング（ターミナルだけが使う。`L 8080:localhost:80`・`R 9000:localhost:3000`・
     /// `D 1080`。`~/.ssh/config` の LocalForward なども使う）
     pub forward: Vec<String>,
+    /// タブと永続セッションの対応（none / tmux / screen のいずれか 1 つ）。
+    pub terminal_multiplexer: TerminalMultiplexer,
+    /// セッション名に付けるプレフィクス。有効にするときは必須。
+    pub terminal_session_prefix: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -897,6 +911,48 @@ mod tests {
 portt = 1"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_multiplexer_is_exclusive_per_host() {
+        let c = Config::from_toml(
+            r#"
+            [remote.host.build]
+            terminal_multiplexer = "tmux"
+            terminal_session_prefix = "yyterm-"
+            [remote.host.lab]
+            terminal_multiplexer = "screen"
+            terminal_session_prefix = "work-"
+            [remote.host.plain]
+            terminal_multiplexer = "none"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            c.remote.host["build"].terminal_multiplexer,
+            TerminalMultiplexer::Tmux
+        );
+        assert_eq!(c.remote.host["build"].terminal_session_prefix, "yyterm-");
+        assert_eq!(
+            c.remote.host["lab"].terminal_multiplexer,
+            TerminalMultiplexer::Screen
+        );
+        assert_eq!(
+            c.remote.host["plain"].terminal_multiplexer,
+            TerminalMultiplexer::None
+        );
+        assert_eq!(Config::from_toml(&toml::to_string(&c).unwrap()).unwrap(), c);
+        for value in ["\"tmux,screen\"", "[\"tmux\", \"screen\"]", "\"other\""] {
+            assert!(
+                Config::from_toml(&format!("[remote.host.x]\nterminal_multiplexer = {value}"))
+                    .is_err()
+            );
+        }
+        let legacy = Config::from_toml("[remote.host.x]\nuser = 'me'").unwrap();
+        assert_eq!(
+            legacy.remote.host["x"].terminal_multiplexer,
+            TerminalMultiplexer::None
         );
     }
 

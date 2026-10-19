@@ -140,6 +140,12 @@ const PARAM_LIMIT: usize = 32;
 /// 結合文字の長さの上限（バイト）
 const COMBINING_LIMIT: usize = 32;
 
+#[derive(Default)]
+struct TextCapture {
+    ready: String,
+    pending: bool,
+}
+
 /// 端末。
 pub struct Terminal {
     cols: usize,
@@ -181,6 +187,8 @@ pub struct Terminal {
     utf8: [u8; 4],
     utf8_len: usize,
     utf8_need: usize,
+    /// 明示的に有効にした間だけ、改行で確定した表示文字を収集する。
+    text_capture: Option<TextCapture>,
 }
 
 impl Terminal {
@@ -224,6 +232,7 @@ impl Terminal {
             utf8: [0; 4],
             utf8_len: 0,
             utf8_need: 0,
+            text_capture: None,
         }
     }
 
@@ -403,6 +412,44 @@ impl Terminal {
         }
         for &b in bytes {
             self.byte(b);
+        }
+    }
+
+    /// この時点以降の表示内容の収集を始める。既存のスクロールバックは収集しない。
+    pub fn start_text_capture(&mut self) {
+        self.text_capture.get_or_insert_with(TextCapture::default);
+    }
+
+    /// 受信した改行で確定した文字を取り出す。閲覧・再描画からは呼ぶ必要がない。
+    pub fn take_text_capture(&mut self) -> String {
+        self.text_capture
+            .as_mut()
+            .map(|c| std::mem::take(&mut c.ready))
+            .unwrap_or_default()
+    }
+
+    /// 残った未改行の行も 1 度だけ確定して収集を終える。
+    pub fn stop_text_capture(&mut self) -> String {
+        self.capture_partial_line();
+        self.text_capture
+            .take()
+            .map(|c| c.ready)
+            .unwrap_or_default()
+    }
+
+    fn capture_partial_line(&mut self) {
+        if self.text_capture.as_ref().is_some_and(|c| c.pending) {
+            self.capture_line(false);
+        }
+    }
+
+    fn capture_line(&mut self, wrapped: bool) {
+        if let Some(capture) = &mut self.text_capture {
+            capture.ready.push_str(&self.grid[self.cursor.row].text());
+            if !wrapped {
+                capture.ready.push('\n');
+            }
+            capture.pending = false;
         }
     }
 
@@ -677,6 +724,9 @@ impl Terminal {
             }
         }
         self.last_char = Some(c);
+        if let Some(capture) = &mut self.text_capture {
+            capture.pending = true;
+        }
     }
 
     /// 幅のない文字（結合文字など）を直前の文字に付ける。
@@ -699,11 +749,15 @@ impl Terminal {
             s.push(c);
         }
         cell.combining = Some(s.into_boxed_str());
+        if let Some(capture) = &mut self.text_capture {
+            capture.pending = true;
+        }
     }
 
     // ---- カーソルの移動とスクロール ---------------------------------------------
 
     fn linefeed(&mut self) {
+        self.capture_line(self.grid[self.cursor.row].wrapped);
         self.cursor.pending_wrap = false;
         if self.cursor.row == self.bottom {
             self.scroll_up(1);
@@ -1177,6 +1231,7 @@ impl Terminal {
             }
             return;
         }
+        self.capture_partial_line();
         if alt {
             let blank: Vec<Line> = (0..self.rows)
                 .map(|_| Line::new(self.cols, Attr::default()))

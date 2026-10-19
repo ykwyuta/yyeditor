@@ -12,6 +12,7 @@ pub mod known_hosts;
 #[cfg(unix)]
 pub mod local;
 pub mod log;
+pub mod multiplex;
 pub mod proxy;
 pub mod rpc;
 pub mod scp;

@@ -14,7 +14,7 @@ This repository contains the following applications and their shared libraries.
 | **yyterm** | A terminal for local shells, SSH sessions, and IBM 3270 connections |
 | **yysftp** | File and folder transfer over SFTP / SCP |
 | **yysheet** | A spreadsheet for large datasets, formulas, and COBOL fixed-length data |
-| **yyclip** | A tray application for clipboard history, text templates, and favorite files and folders |
+| **yyclip** | A tray application for clipboard history, text templates, favorites, and recent files |
 | **yyfilemanager** | Synchronization, search, duplicate detection, and version cleanup for local and shared folders |
 | **yybrowser** | A tabbed browser with its own proxy settings, ad blocking, and bookmarks |
 | **yy-agent** | A Linux helper for file operations on SSH hosts |
