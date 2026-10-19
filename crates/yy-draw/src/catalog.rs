@@ -1,4 +1,4 @@
-//! Official, bundled artwork. Only placed assets are copied into editable documents.
+//! Bundled official and original artwork. Only placed assets enter editable documents.
 use crate::*;
 use std::{io::Read, sync::OnceLock};
 
@@ -7,6 +7,8 @@ pub struct Entry {
     pub vendor: String,
     pub category: String,
     pub name: String,
+    #[serde(default)]
+    pub keywords: String,
     pub source: String,
     pub file: String,
     pub svg: String,
@@ -31,7 +33,13 @@ pub fn all() -> &'static [Entry] {
         flate2::read::GzDecoder::new(&include_bytes!("../assets/catalog.json.gz")[..])
             .read_to_end(&mut bytes)
             .expect("bundled catalog gzip");
-        serde_json::from_slice(&bytes).expect("bundled catalog JSON")
+        let mut entries: Vec<Entry> = serde_json::from_slice(&bytes).expect("bundled catalog JSON");
+        // Keep official indices stable; the independent generator cannot overwrite cloud artwork.
+        entries.extend(
+            serde_json::from_str::<Vec<Entry>>(include_str!("../assets/business-icons.json"))
+                .expect("bundled business/IT catalog JSON"),
+        );
+        entries
     })
 }
 

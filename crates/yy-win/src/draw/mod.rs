@@ -2810,6 +2810,62 @@ mod tests {
                 assert!(expected >= 3);
                 assert!(expected < 714);
             });
+            // Original business/IT icons appear before cloud categories and accept English search.
+            let (azure_index, business_index) = with(|a| {
+                let categories = &a.palette_state.categories;
+                assert!(categories[2].starts_with("業務・IT / 01 "));
+                let azure =
+                    SendMessageW(a.palette_state.category, CB_GETCURSEL, None, None).0 as usize;
+                let business = categories
+                    .iter()
+                    .position(|c| c.starts_with("業務・IT / 03 "))
+                    .unwrap();
+                (azure, business)
+            })
+            .unwrap();
+            SetWindowTextW(filter, w!("")).unwrap();
+            SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(business_index)), None);
+            SendMessageW(
+                hwnd,
+                WM_COMMAND,
+                Some(WPARAM(
+                    palette::CATEGORY as usize | ((CBN_SELCHANGE as usize) << 16),
+                )),
+                None,
+            );
+            assert_eq!(with(|a| a.palette_tools.len()).unwrap(), 10);
+            SetWindowTextW(filter, w!("eTl")).unwrap();
+            with(|a| {
+                assert_eq!(a.palette_state.items.len(), 1);
+                assert_eq!(a.palette_state.items[0].label, "ETL・データ変換");
+                a.tool = a.palette_tools[0];
+            });
+            mouse(hwnd, WM_LBUTTONDOWN, screen(Point::new(280., 280.)));
+            mouse(hwnd, WM_LBUTTONUP, screen(Point::new(280., 280.)));
+            with(|a| {
+                let d = &a.tabs[0].doc;
+                let node = d.nodes.last().unwrap();
+                assert_eq!(node.label, "ETL・データ変換");
+                assert_eq!(
+                    d.assets
+                        .iter()
+                        .find(|asset| Some(asset.id) == node.asset)
+                        .unwrap()
+                        .source,
+                    "yydraw:business-icons/v1"
+                );
+            });
+            command(hwnd, UNDO);
+            SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(azure_index)), None);
+            SetWindowTextW(filter, w!("Azure")).unwrap();
+            SendMessageW(
+                hwnd,
+                WM_COMMAND,
+                Some(WPARAM(
+                    palette::CATEGORY as usize | ((CBN_SELCHANGE as usize) << 16),
+                )),
+                None,
+            );
             with(|a| {
                 let bmp = a.test_palette_image();
                 if let Some(path) = std::env::var_os("YYDRAW_QA_PALETTE") {

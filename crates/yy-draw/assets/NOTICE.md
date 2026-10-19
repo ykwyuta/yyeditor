@@ -31,3 +31,11 @@ Download URLs, package SHA-256 hashes and entry counts are in catalog-sources.js
 Rebuild with python tools/cloud-icons/fetch.py. Original archives remain in target/
 and are not needed at runtime. Only placed artwork is embedded in user documents.
 Additional packs may be imported locally by the user.
+
+## Original business/IT icons
+
+`business-icons.json` is original yydraw artwork, licensed GPL-3.0-or-later with
+the repository. Its 100 icons are generic business and IT concepts, not provider
+logos. It is independent of the third-party cloud catalog above. Rebuild with
+`python tools/business-icons/generate.py`; the categorized inventory and search
+terms are in `docs/yydraw-business-icons.md`.

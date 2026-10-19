@@ -106,7 +106,18 @@ impl App {
         }
         let categories: Vec<_> = ["基本図形".to_owned(), "文書・追加素材".to_owned()]
             .into_iter()
-            .chain(categories)
+            .chain(
+                categories
+                    .iter()
+                    .filter(|s| s.starts_with("業務・IT / "))
+                    .cloned(),
+            )
+            .chain(
+                categories
+                    .iter()
+                    .filter(|s| !s.starts_with("業務・IT / "))
+                    .cloned(),
+            )
             .collect();
         unsafe {
             if self.palette_state.categories != categories {
@@ -176,7 +187,7 @@ impl App {
         }
         for (index, entry) in yy_draw::catalog::all().iter().enumerate() {
             let path = entry.category_path();
-            if matches(&entry.name, &path) {
+            if matches(&format!("{} {}", entry.name, entry.keywords), &path) {
                 items.push(Item {
                     tool: Tool::CatalogIcon(index),
                     label: entry.name.clone(),

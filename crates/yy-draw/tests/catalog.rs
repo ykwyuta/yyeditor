@@ -1,9 +1,14 @@
 use yy_draw::*;
 #[test]
-fn official_catalog_is_complete_static_and_renderable() {
+fn bundled_catalog_is_complete_static_and_renderable() {
     let entries = catalog::all();
-    assert_eq!(entries.len(), 1834);
-    for (vendor, count) in [("AWS", 859), ("Azure", 714), ("Google Cloud", 261)] {
+    assert_eq!(entries.len(), 1934);
+    for (vendor, count) in [
+        ("AWS", 859),
+        ("Azure", 714),
+        ("Google Cloud", 261),
+        ("業務・IT", 100),
+    ] {
         assert_eq!(entries.iter().filter(|e| e.vendor == vendor).count(), count);
     }
     let renderer = render::Renderer::new(None);
@@ -25,6 +30,42 @@ fn official_catalog_is_complete_static_and_renderable() {
             entry.file
         );
     }
+}
+#[test]
+fn business_icons_are_unique_categorized_searchable_and_embedded_without_the_catalog() {
+    let entries = catalog::all();
+    let mut categories = std::collections::BTreeMap::new();
+    let mut artwork = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
+    let mut d = Document::default();
+    for (i, e) in entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.vendor == "業務・IT")
+    {
+        *categories.entry(&e.category).or_insert(0) += 1;
+        assert!(!e.keywords.is_empty());
+        assert_eq!(e.source, "yydraw:business-icons/v1");
+        assert!(artwork.insert(&e.svg));
+        assert!(names.insert(&e.name));
+        assert!(
+            !e.svg.contains("<text"),
+            "artwork must not depend on external fonts"
+        );
+        let asset = catalog::place(&mut d, i).unwrap();
+        assert_eq!(catalog::place(&mut d, i).unwrap(), asset);
+        d.add_node(
+            Shape::Icon,
+            Point::new((i % 10) as f64 * 120., (i / 10) as f64 * 120.),
+            Some(asset),
+        );
+    }
+    assert_eq!(categories.len(), 10);
+    assert!(categories.values().all(|count| *count == 10));
+    assert_eq!(d.assets.len(), 100);
+    let bytes = format::encode(&d).unwrap();
+    assert!(bytes.len() < 200_000);
+    assert_eq!(format::decode(&bytes).unwrap(), d);
 }
 #[test]
 fn placement_embeds_only_used_artwork_and_deduplicates_it() {
