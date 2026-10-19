@@ -25,6 +25,7 @@ SHEET = ((0xF5, 0x9E, 0x0B), (0xB4, 0x53, 0x09))
 CLIP = ((0xA8, 0x55, 0xF7), (0x6B, 0x21, 0xA8))
 FILES = ((0x06, 0xB6, 0xD4), (0x0E, 0x74, 0x90))
 BROWSER = ((0xF4, 0x3F, 0x5E), (0x9F, 0x12, 0x39))  # ローズ（ほかの色と重ならない）
+DRAW = ((0x63, 0x66, 0xF1), (0x37, 0x30, 0xA3))
 PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
@@ -86,6 +87,15 @@ def draw_symbol(d, kind, x, y, w, h, t, ot):
         # フォルダ（つまみ付き）
         d.rounded_rectangle([x, y, x + w * 0.45, y + h * 0.4], radius=t / 2, fill=WHITE)
         d.rounded_rectangle([x, y + h * 0.18, x + w, y + h], radius=t / 2, fill=WHITE)
+    elif kind == "draw":
+        # 接続線で結ぶ二つの構成要素
+        bw, bh = w * 0.32, h * 0.55
+        d.line([(x + bw, y + bh / 2), (x + w / 2, y + bh / 2),
+                (x + w / 2, y + h - bh / 2), (x + w - bw, y + h - bh / 2)],
+               fill=WHITE, width=max(1, round(ot)))
+        for bx, by in [(x, y), (x + w - bw, y + h - bh)]:
+            d.rounded_rectangle([bx, by, bx + bw, by + bh], radius=ot,
+                                outline=WHITE, width=max(1, round(ot)))
     elif kind == "browser":
         # 地球（円と経線・緯線）
         r = h / 2
@@ -114,6 +124,7 @@ def render(size, kind="editor"):
         "clip": CLIP,
         "files": FILES,
         "browser": BROWSER,
+        "draw": DRAW,
     }[kind]
     n = size * SCALE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
@@ -196,6 +207,7 @@ def main():
         ("yyclip", "clip"),
         ("yyfilemanager", "files"),
         ("yybrowser", "browser"),
+        ("yydraw", "draw"),
     ]:
         res = root / "apps" / app / "res"
         res.mkdir(parents=True, exist_ok=True)

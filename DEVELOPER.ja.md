@@ -17,7 +17,7 @@
 リポジトリのルートで実行します。
 
 ```powershell
-cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser
+cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw
 ```
 
 実行ファイルは `target\release\` に生成されます。
@@ -94,7 +94,7 @@ Linux から Windows UI の型検査をする場合は、CI と同じく次を�
 
 ```sh
 rustup target add x86_64-pc-windows-msvc
-cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser --no-default-features --features yy-files/blake3-pure --target x86_64-pc-windows-msvc
+cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw --no-default-features --features yy-files/blake3-pure --target x86_64-pc-windows-msvc
 ```
 
 この検査では Windows SDK を必要とする組み込み SSH や開発者用証明書生成などの既定機能を外します。BLAKE3 は `yy-files/blake3-pure` を指定し、Windows のアセンブラーを必要としない構成で型検査します。SSH・TLS を含む通常の構成は Windows の検証で確認します。
@@ -105,6 +105,7 @@ cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanage
 | --- | --- |
 | `apps/yyeditor`、`apps/yyterm`、`apps/yysftp`、`apps/yysheet`、`apps/yyfilemanager`、`apps/yybrowser` | Windows アプリのエントリーポイントとリソース |
 | `apps/yyclip` | 独立したクリップボード常駐アプリ。履歴・定型文・お気に入りの実装 |
+| `apps/yydraw`、`crates/yy-draw` | 構成図のネイティブ画面と OS 非依存の文書・幾何・SVG／PNG 処理。[yydraw](apps/yydraw/README.md)を参照 |
 | `apps/yy-agent` | リモートでファイル操作を行うエージェント |
 | `crates/yy-win` | Win32 / Direct2D / DirectWrite の共通 UI、各アプリの画面、組み込みヘルプ |
 | `yy-buffer`、`yy-core`、`yy-io`、`yy-jobs` | 文書バッファ、編集、入出力、バックグラウンド処理 |

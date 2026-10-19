@@ -1,0 +1,37 @@
+[
+  {
+    "vendor": "AWS",
+    "source": "https://aws.amazon.com/architecture/icons/",
+    "download": "https://d1.awsstatic.com/onedam/marketing-channels/website/public/shared/architecture-icon-release/Icon-package_07312026.5846e92413caa21490223536cc97f1269e44fa92.zip",
+    "sha256": "d2d166c453526471749d520e0db022c459abef759d2946cf2dd1d1c992dc6526",
+    "icons": 859
+  },
+  {
+    "vendor": "Azure",
+    "source": "https://learn.microsoft.com/en-us/azure/architecture/icons/",
+    "download": "https://arch-center.azureedge.net/icons/Azure_Public_Service_Icons_V24.zip",
+    "sha256": "921594ccd1bf3d9c0a1bd7b6d924e050551a59342f2b353bb74bdcf761c35141",
+    "icons": 714
+  },
+  {
+    "vendor": "Google Cloud",
+    "source": "https://cloud.google.com/icons",
+    "download": "https://services.google.com/fh/files/misc/category-icons.zip",
+    "sha256": "e5bc3abd3527dc2500e9bff7f15870783e2c764129c49b7cd4c1b4e105345002",
+    "icons": 26
+  },
+  {
+    "vendor": "Google Cloud",
+    "source": "https://cloud.google.com/icons",
+    "download": "https://services.google.com/fh/files/misc/core-products-icons.zip",
+    "sha256": "6531a10f58bc599c24d9a455d81dd757c1a03c3c43da9cddf639b859c1c1eece",
+    "icons": 19
+  },
+  {
+    "vendor": "Google Cloud",
+    "source": "https://cloud.google.com/icons",
+    "download": "https://services.google.com/fh/files/misc/google-cloud-legacy-icons.zip",
+    "sha256": "a6d9d7921758042538b462f03cf64614c2cebd96743b3ed63580a769fc7de3e9",
+    "icons": 216
+  }
+]

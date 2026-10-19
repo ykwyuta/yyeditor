@@ -1,6 +1,6 @@
 //! Markdown ライブ編集の表示と、原文を変更せずに扱うための位置変換。
 use crate::{DOC_HOST, PREVIEW_HOST, escape, json_string};
-use pulldown_cmark::{Event, Options, Parser, Tag, html};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd, html};
 use std::ops::Range;
 pub mod table;
 
@@ -11,12 +11,13 @@ pub fn source_json(source: &str) -> String {
 }
 
 /// 最上位ブロックごとの表示。境界は JavaScript の UTF-16 オフセット。
-/// HTML は文字として表示し、文書内のスクリプトを編集ページでは実行しない。
+/// HTML は文字として表示する。d3 のコードは分離した描画フレームで扱う。
 pub fn blocks(source: &str) -> String {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_FOOTNOTES;
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_MATH;
     let mut out = String::new();
     let mut events = Vec::new();
     let mut depth = 0;
@@ -24,6 +25,7 @@ pub fn blocks(source: &str) -> String {
     let mut end = 0;
     let mut utf16 = 0;
     let mut cells = Vec::new();
+    let mut trailing_blank = false;
     for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
         if matches!(event, Event::Start(Tag::TableCell)) {
             cells.push(source[..range.start].encode_utf16().count());
@@ -40,7 +42,42 @@ pub fn blocks(source: &str) -> String {
         });
         if depth == 0 {
             let mut body = String::new();
-            html::push_html(&mut body, events.drain(..));
+            let mut safe_events = Vec::new();
+            let mut iter = events.drain(..);
+            while let Some(event) = iter.next() {
+                let special = match &event {
+                    Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
+                        match info.split_whitespace().next().unwrap_or("") {
+                            "mermaid" => Some("mermaid"),
+                            "math" | "latex" | "tex" => Some("math"),
+                            "d3" => Some("d3"),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(kind) = special {
+                    let mut text = String::new();
+                    for item in iter.by_ref() {
+                        match item {
+                            Event::End(TagEnd::CodeBlock) => break,
+                            Event::Text(value) => text.push_str(&value),
+                            _ => {}
+                        }
+                    }
+                    safe_events.push(Event::Html(
+                        match kind {
+                            "mermaid" => format!("<pre class=\"mermaid\">{}</pre>", escape(&text)),
+                            "d3" => format!("<div class=\"yy-d3\"><pre class=\"yy-d3-src\" hidden>{}</pre></div>", escape(&text)),
+                            _ => format!("<div class=\"math math-display\">{}</div>", escape(&text)),
+                        }
+                        .into(),
+                    ));
+                } else {
+                    safe_events.push(event);
+                }
+            }
+            html::push_html(&mut body, safe_events.into_iter());
             if !cells.is_empty() {
                 let mut cursor = 0;
                 for offset in cells.drain(..) {
@@ -59,14 +96,27 @@ pub fn blocks(source: &str) -> String {
                 }
             }
             let next = utf16 + source[start..end].encode_utf16().count();
-            out.push_str(&format!("<section class=\"block\" tabindex=\"0\" data-start=\"{utf16}\" data-end=\"{next}\">{body}</section>"));
+            let raw = &source[start..end];
+            trailing_blank = raw[raw.trim_end_matches(['\r', '\n']).len()..]
+                .bytes()
+                .filter(|b| *b == b'\n')
+                .count()
+                >= 2;
+            let trimmed = raw.trim_start_matches(['\r', '\n']);
+            let edit_start = utf16 + raw[..raw.len() - trimmed.len()].encode_utf16().count();
+            let edit_end = edit_start
+                + trimmed
+                    .trim_end_matches(['\r', '\n'])
+                    .encode_utf16()
+                    .count();
+            out.push_str(&format!("<section class=\"block\" tabindex=\"0\" data-start=\"{utf16}\" data-end=\"{next}\" data-edit-start=\"{edit_start}\" data-edit-end=\"{edit_end}\">{body}</section>"));
             start = end;
             utf16 = next;
         }
     }
-    if start < source.len() || out.is_empty() {
+    if start < source.len() || out.is_empty() || trailing_blank {
         let next = utf16 + source[start..].encode_utf16().count();
-        out.push_str(&format!("<section class=\"block blank\" tabindex=\"0\" data-start=\"{utf16}\" data-end=\"{next}\"><br></section>"));
+        out.push_str(&format!("<section class=\"block blank\" tabindex=\"0\" data-start=\"{utf16}\" data-end=\"{next}\" data-edit-start=\"{next}\" data-edit-end=\"{next}\"><br></section>"));
     }
     out
 }
@@ -81,14 +131,14 @@ pub fn page(source: &str, epoch: u64, caret: usize, read_only: bool, has_folder:
     format!(
         r#"<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://{PREVIEW_HOST}; style-src https://{PREVIEW_HOST} 'unsafe-inline'; img-src https: data:; font-src https://{PREVIEW_HOST}; base-uri https://{DOC_HOST}; form-action 'none'">
-{base}<link rel="stylesheet" href="{assets}/live.css"><script defer src="{assets}/live.js"></script>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://{PREVIEW_HOST}; frame-src https://{PREVIEW_HOST}; connect-src https://{DOC_HOST}; style-src https://{PREVIEW_HOST} 'unsafe-inline'; img-src https: data:; font-src https://{PREVIEW_HOST}; base-uri https://{DOC_HOST}; form-action 'none'">
+{base}<link rel="stylesheet" href="{assets}/katex.min.css"><link rel="stylesheet" href="{assets}/live.css"><script defer src="{assets}/katex.min.js"></script><script defer src="{assets}/mermaid.min.js"></script><script defer src="{assets}/live-render.js"></script><script defer src="{assets}/live.js"></script>
 </head><body data-epoch="{epoch}" data-caret="{caret}" data-readonly="{read_only}">
 <header><strong>Markdown ライブ編集</strong><nav aria-label="書式">
 <button data-format="heading">見出し</button><button data-format="bold"><b>太字</b></button><button data-format="italic"><i>斜体</i></button><button data-format="strike">取消線</button><button data-format="code">コード</button><button data-format="link">リンク</button><button data-format="list">箇条書き</button><button data-format="quote">引用</button><button data-format="fence">コード枠</button><button data-format="table">表</button></nav>
 <nav aria-label="表の編集" id="table-tools"><span id="table-position">表のセルを選択</span><button data-table="column-before" disabled>左に列追加</button><button data-table="column-after" disabled>右に列追加</button><button data-table="delete-column" disabled>列削除</button><button data-table="row-before" disabled>上に行追加</button><button data-table="row-after" disabled>下に行追加</button><button data-table="delete-row" disabled>行削除</button></nav>
 <button data-action="all">全体の原文</button><button data-command="source">通常編集に戻る</button>
-<span id="hint">段落をクリックして編集 · Ctrl+B 太字 · Ctrl+I 斜体 · Ctrl+S 保存</span></header>
+<span id="hint">Enter 段落 · Shift+Enter 改行 · ↑↓ 段落移動 · Ctrl+B 太字 · Ctrl+S 保存</span></header>
 <main id="blocks" aria-label="Markdown 文書">{}</main><textarea id="source" hidden>{}</textarea>
 </body></html>"#,
         blocks(source),
@@ -177,6 +227,35 @@ pub fn difference<'a>(before: &str, after: &'a str) -> Option<(Range<usize>, &'a
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paragraph_edit_ranges_exclude_separator_newlines() {
+        let body = blocks("一😀\r\n\r\n二");
+        assert!(body.contains("data-edit-start=\"0\" data-edit-end=\"3\""));
+        assert!(body.contains("data-edit-start=\"7\" data-edit-end=\"8\""));
+        assert!(blocks("文\n\n").contains("class=\"block blank\""));
+        assert!(blocks("* first\n\n").contains("class=\"block blank\""));
+    }
+    #[test]
+    fn live_blocks_render_diagrams_and_latex_with_escaped_sources() {
+        let source = "```mermaid\ngraph TD\n  A-->B\n```\n\nInline $x^2$\n\n$$\\frac{1}{2}$$\n\n```latex\n\\sqrt{x}\n```\n\n```d3\nalert('no')\n```\n";
+        let body = blocks(source);
+        assert!(body.contains("<pre class=\"mermaid\">graph TD"));
+        assert!(body.contains("math math-inline"));
+        assert!(body.contains("math math-display"));
+        assert!(body.contains("\\sqrt{x}"));
+        assert!(body.contains("class=\"yy-d3-src\" hidden>"));
+        assert!(body.contains(&escape("alert('no')")));
+        assert!(!body.contains("<script"));
+        let page = page(source, 1, 0, false, false);
+        for asset in [
+            "katex.min.js",
+            "katex.min.css",
+            "mermaid.min.js",
+            "live-render.js",
+        ] {
+            assert!(page.contains(asset));
+        }
+    }
     #[test]
     fn preserves_source_and_unicode_boundaries() {
         for (old, new) in [

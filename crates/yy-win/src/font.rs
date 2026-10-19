@@ -12,7 +12,7 @@ use windows::core::{Interface, Result};
 /// 同梱フォントのファミリー名（既定のフォント）。
 pub(crate) const BUNDLED_FAMILY: &str = "UDEV Gothic";
 
-static BUNDLED_FONT: &[u8] = include_bytes!("../fonts/UDEVGothic-Regular.ttf");
+pub(crate) static BUNDLED_FONT: &[u8] = include_bytes!("../fonts/UDEVGothic-Regular.ttf");
 
 /// 同梱フォントだけを含むコレクションを作る（DirectWrite 用）。
 ///

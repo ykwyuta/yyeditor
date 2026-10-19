@@ -17,7 +17,7 @@ This repository is a Rust Cargo workspace. See [README.md](README.md) for applic
 Run from the repository root:
 
 ```powershell
-cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser
+cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw
 ```
 
 Executables are generated under `target\release\`.
@@ -94,7 +94,7 @@ To type-check the Windows UI from Linux, use the CI command below. This check is
 
 ```sh
 rustup target add x86_64-pc-windows-msvc
-cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser --no-default-features --features yy-files/blake3-pure --target x86_64-pc-windows-msvc
+cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw --no-default-features --features yy-files/blake3-pure --target x86_64-pc-windows-msvc
 ```
 
 This check disables default features such as built-in SSH and development-certificate generation that require the Windows SDK. `yy-files/blake3-pure` avoids requiring a Windows assembler for BLAKE3. Validate the normal configuration, including SSH and TLS, on Windows.
@@ -105,6 +105,7 @@ This check disables default features such as built-in SSH and development-certif
 | --- | --- |
 | `apps/yyeditor`, `apps/yyterm`, `apps/yysftp`, `apps/yysheet`, `apps/yyfilemanager`, `apps/yybrowser` | Windows application entry points and resources |
 | `apps/yyclip` | Independent clipboard tray application: history, templates, and favorites |
+| `apps/yydraw`, `crates/yy-draw` | Native diagram editor and portable document / geometry / SVG / PNG implementation; see [yydraw](apps/yydraw/README.md) |
 | `apps/yy-agent` | Agent for remote file operations |
 | `crates/yy-win` | Shared Win32 / Direct2D / DirectWrite UI, application screens, and built-in help |
 | `yy-buffer`, `yy-core`, `yy-io`, `yy-jobs` | Document buffers, editing, I/O, and background jobs |

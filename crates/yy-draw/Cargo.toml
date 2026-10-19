@@ -1,0 +1,22 @@
+[package]
+name = "yy-draw"
+description = "Portable diagram model, geometry, binary storage and SVG/PNG rendering for yydraw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+postcard.workspace = true
+blake3.workspace = true
+tempfile.workspace = true
+resvg = "0.45"
+base64 = "0.22"
+roxmltree = "0.20"
+toml.workspace = true
+flate2 = "1"
+serde_json = "1"
+
+[lints]
+workspace = true

@@ -172,6 +172,18 @@ pub fn asset(path: &str) -> Option<(Cow<'static, [u8]>, &'static str)> {
             Cow::Borrowed(include_bytes!("../assets/live.js").as_slice()),
             js,
         ),
+        "live-render.js" => (
+            Cow::Borrowed(include_bytes!("../assets/live-render.js").as_slice()),
+            js,
+        ),
+        "live-d3.js" => (
+            Cow::Borrowed(include_bytes!("../assets/live-d3.js").as_slice()),
+            js,
+        ),
+        "live-d3.html" => (
+            Cow::Borrowed(include_bytes!("../assets/live-d3.html").as_slice()),
+            "text/html; charset=utf-8",
+        ),
         "live.css" => (
             Cow::Borrowed(include_bytes!("../assets/live.css").as_slice()),
             css,

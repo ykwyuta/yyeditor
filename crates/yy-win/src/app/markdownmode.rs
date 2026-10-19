@@ -170,7 +170,9 @@ impl App {
         }
         self.markdown.seq = seq;
         let before = self.markdown_source().ok()?;
-        let kind = if action == "edit" {
+        let kind = if matches!(action, "paragraph" | "newline") {
+            EditKind::Newline
+        } else if action == "edit" {
             EditKind::Typing
         } else {
             EditKind::Other

@@ -584,7 +584,17 @@ fn setup(
         let _ = settings.SetAreDefaultScriptDialogsEnabled(true);
 
         let filter = HSTRING::from(format!("https://{PREVIEW_HOST}/*"));
-        webview.AddWebResourceRequestedFilter(&filter, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)?;
+        // 分離した d3 フレームが読む埋め込み資源も対象にする。
+        if let Ok(all_frames) = webview.cast::<ICoreWebView2_22>() {
+            all_frames.AddWebResourceRequestedFilterWithRequestSourceKinds(
+                &filter,
+                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+                COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL,
+            )?;
+        } else {
+            webview
+                .AddWebResourceRequestedFilter(&filter, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)?;
+        }
         webview.AddWebResourceRequestedFilter(
             &HSTRING::from(format!("https://{DOC_HOST}/*")),
             COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
@@ -1482,7 +1492,7 @@ mod tests {
         pump_until(Duration::from_millis(100), || false);
         eval(
             &pane,
-            "document.querySelector('[data-action=all]').click(); document.querySelector('textarea.editor').dispatchEvent(new CompositionEvent('compositionstart')); let t=document.querySelector('textarea.editor'); t.setSelectionRange(t.value.length,t.value.length); t.setRangeText('追記😃',t.value.length,t.value.length,'end'); t.dispatchEvent(new InputEvent('input',{bubbles:true,isComposing:true}));",
+            "document.querySelector('[data-action=all]').click(); document.querySelector('textarea.editor').dispatchEvent(new CompositionEvent('compositionstart')); var t=document.querySelector('textarea.editor'); t.setSelectionRange(t.value.length,t.value.length); t.setRangeText('追記😃',t.value.length,t.value.length,'end'); t.dispatchEvent(new InputEvent('input',{bubbles:true,isComposing:true}));",
         );
         // IME 変換中はネイティブ文書に未確定文字を送らない。
         assert!(
@@ -1538,19 +1548,19 @@ mod tests {
         pane.take_edit_messages();
         eval(
             &pane,
-            "let t=document.querySelector('textarea.editor'); t.setSelectionRange(t.value.length-1,t.value.length-1); t.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));",
+            "var t=document.querySelector('textarea.editor'); t.setSelectionRange(t.value.length,t.value.length); t.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));",
         );
         let mut list_edits = Vec::new();
         assert!(pump_until(Duration::from_secs(5), || {
             list_edits.extend(pane.take_edit_messages());
             list_edits
                 .iter()
-                .any(|s| s.split('\n').nth(2) == Some("edit"))
+                .any(|s| s.split('\n').nth(2) == Some("newline"))
         }));
         assert_eq!(
             list_edits
                 .iter()
-                .find(|s| s.split('\n').nth(2) == Some("edit"))
+                .find(|s| s.split('\n').nth(2) == Some("newline"))
                 .unwrap()
                 .splitn(6, '\n')
                 .nth(5),
@@ -1565,6 +1575,16 @@ mod tests {
         eval(
             &pane,
             "document.querySelector('#blocks td:nth-child(2)').click()",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut table_source,
+            "document.querySelector('textarea.editor')?.value.startsWith('| A | B |')"
+        ));
+        pane.take_edit_messages();
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new Event('select'))",
         );
         let selected = wait_live_message(&pane, "select");
         let seq: u64 = selected.lines().nth(1).unwrap().parse().unwrap();
@@ -1629,6 +1649,328 @@ mod tests {
         unsafe {
             let _ = DestroyWindow(parent);
         }
+    }
+
+    #[test]
+    fn live_paragraph_navigation_and_diagrams_in_webview2() {
+        let _serial = testing::webview2_lock();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let class = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(preview_proc),
+                hInstance: GetModuleHandleW(None).unwrap().into(),
+                lpszClassName: PREVIEW_CLASS,
+                ..Default::default()
+            };
+            RegisterClassExW(&class);
+        }
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PREVIEW_CLASS,
+                w!("live paragraphs test"),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                0,
+                0,
+                900,
+                700,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let mut pane = Preview::new(parent, parent).unwrap();
+        pane.set_visible(true);
+        pane.set_bounds(0, 0, 880, 660);
+        let mut source = "First\n\nLast".to_owned();
+        pane.show_editor(&source, 81, 5, false, None);
+        let loaded = pump_until(Duration::from_secs(45), || {
+            eval(&pane, "!!document.querySelector('textarea.editor')").as_deref() == Some("true")
+                || pane.is_unavailable()
+        });
+        if pane.is_unavailable() {
+            assert!(
+                std::env::var_os("YY_REQUIRE_WEBVIEW2").is_none(),
+                "WebView2: {}",
+                notice_of(pane.hwnd)
+            );
+            drop(pane);
+            unsafe {
+                let _ = DestroyWindow(parent);
+            }
+            return;
+        }
+        assert!(
+            loaded,
+            "ライブ編集ページを読み込めません: {}",
+            notice_of(pane.hwnd)
+        );
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === '' && [...document.querySelectorAll('#blocks p')].some(p=>p.textContent==='Last')"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.setRangeText('Middle');t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === 'Middle'"
+        ));
+        // 明示的に反映を待つ。新しい段落が既存の Last と連結されていない。
+        reply_live_page(&pane, &mut source);
+        assert_eq!(source, "First\n\nMiddle\n\nLast");
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.setSelectionRange(2,2);t.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === 'Last'"
+        ));
+        assert_eq!(
+            eval(
+                &pane,
+                "document.querySelector('textarea.editor').selectionStart"
+            )
+            .as_deref(),
+            Some("2")
+        );
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === 'Middle'"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.setSelectionRange(t.value.length,t.value.length);t.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',shiftKey:true,bubbles:true,cancelable:true}));t.setRangeText('continued',t.selectionStart,t.selectionEnd,'end');t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === 'Middle  \\ncontinued'"
+        ));
+        reply_live_page(&pane, &mut source);
+        assert_eq!(source, "First\n\nMiddle  \ncontinued\n\nLast");
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.setSelectionRange(2,2);t.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === 'First' && !!document.querySelector('#blocks br')"
+        ));
+        // 折り返しの途中では隣の段落へ飛ばず、最終表示行から移動する。
+        source = format!("{}\n\nTail", "wrapped words ".repeat(20));
+        pane.show_editor(&source, 82, 2, false, None);
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.body.dataset.epoch==='82' && !!document.querySelector('textarea.editor')"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.style.width='120px';t.dispatchEvent(new InputEvent('input',{bubbles:true}));t.setSelectionRange(2,2);t.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value.startsWith('wrapped words') && document.querySelector('textarea.editor').selectionStart===2"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.setSelectionRange(t.value.length-2,t.value.length-2);t.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value==='Tail'"
+        ));
+        source="# Title\n\n```mermaid\ngraph TD\n A-->B\n```\n\nInline $x^2$\n\n$$\\frac{1}{2}$$\n\n```latex\n\\sqrt{x}\n```\n".into();
+        pane.show_editor(&source, 83, 0, false, None);
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.body.dataset.epoch==='83' && document.querySelectorAll('#blocks pre.mermaid svg').length===1 && document.querySelectorAll('#blocks .katex').length===3"
+        ));
+        eval(
+            &pane,
+            "document.querySelector('#blocks pre.mermaid').click()",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "!!document.querySelector('.active .live-special-preview svg')"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.value=t.value.replace('A-->B','A-->C');t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "[...document.querySelectorAll('.active .live-special-preview svg')].some(svg=>svg.textContent.includes('C'))"
+        ));
+        assert!(source.contains("A-->C"));
+        eval(
+            &pane,
+            "document.querySelector('.block:not(.active) .math-inline').click()",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "!!document.querySelector('.active .live-special-preview .katex')"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.value=t.value.replace('x^2','x^3');t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "[...document.querySelectorAll('.active .katex annotation')].some(a=>a.textContent==='x^3')"
+        ));
+        assert!(source.contains("$x^3$"));
+        source = "# d3\n\n```d3\nconst svg=d3.create('svg').attr('width',width).attr('height',80);\nsvg.append('text').text('first');\nlet isolated=false;try{parent.document.body}catch(e){isolated=true}\nparent.postMessage({testD3:svg.node().outerHTML,isolated},'*');\nreturn svg;\n```\n".into();
+        pane.show_editor(&source, 84, 0, false, None);
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.body.dataset.epoch==='84' && !!document.querySelector('textarea.editor')"
+        ));
+        eval(
+            &pane,
+            "window.d3Tests=[];window.addEventListener('message',e=>{if(e.data?.testD3)window.d3Tests.push(e.data)})",
+        );
+        // 編集欄の下にも同じ図を表示し、分離したフレーム内で SVG が実際に生成される。
+        eval(&pane, "document.querySelector('.live-d3-edit').click()");
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "!!document.querySelector('.active .yy-d3[data-status=rendered]') && window.d3Tests.some(t=>t.testD3.includes('first') && t.testD3.includes('<svg') && t.isolated)"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.value=t.value.replace(\"text('first')\",\"text('second')\");t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "!!document.querySelector('.active .yy-d3[data-status=rendered]') && window.d3Tests.some(t=>t.testD3.includes('second') && t.isolated)"
+        ));
+        assert!(source.contains("text('second')"));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.value='```d3\\nthrow new Error(\"invalid diagram\");\\n```';t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('.active .yy-d3[data-status=error] iframe')?.title.includes('invalid diagram')"
+        ));
+        let files = tempfile::tempdir().unwrap();
+        std::fs::write(files.path().join("values.csv"), "name,value\nlocal,7\n").unwrap();
+        source = "# Local data\n\n```d3\nconst rows=await d3.csv('values.csv');\nif(rows[0].name!=='local' || rows[0].value!=='7') throw new Error('CSV mismatch');\nreturn d3.create('svg').attr('height',40).append('text').text(rows[0].name);\n```\n".into();
+        pane.show_editor(
+            &source,
+            85,
+            0,
+            false,
+            Some(DocBase::Local(files.path().to_owned())),
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.body.dataset.epoch==='85' && !!document.querySelector('.yy-d3[data-status=rendered]')"
+        ));
+        source = "* first\n* ".into();
+        pane.show_editor(&source, 86, source.len(), false, None);
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.body.dataset.epoch==='86' && document.querySelector('textarea.editor')?.value==='* first\\n* '"
+        ));
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor')?.value===''"
+        ));
+        assert_eq!(source, "* first\n\n");
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor')?.value==='* first'"
+        ));
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor')?.value===''"
+        ));
+        drop(pane);
+        unsafe {
+            let _ = DestroyWindow(parent);
+        }
+    }
+
+    fn reply_live_page(pane: &Preview, source: &mut String) {
+        for message in pane.take_edit_messages() {
+            let fields: Vec<_> = message.splitn(6, '\n').collect();
+            if fields.len() != 6 {
+                continue;
+            }
+            *source = fields[5].to_owned();
+            let caret = yy_preview::live::byte_offset(source, fields[4].parse().unwrap());
+            pane.editor_post(&yy_preview::live::rendered_at(
+                fields[0].parse().unwrap(),
+                fields[1].parse().unwrap(),
+                source,
+                Some(caret),
+            ));
+        }
+    }
+
+    fn wait_live_state(pane: &Preview, source: &mut String, condition: &str) -> bool {
+        let ok = pump_until(Duration::from_secs(20), || {
+            reply_live_page(pane, source);
+            eval(pane, condition).as_deref() == Some("true")
+        });
+        if !ok {
+            eprintln!(
+                "live state: {:?}",
+                eval(
+                    pane,
+                    "JSON.stringify({d3:document.querySelector('.yy-d3')?.outerHTML,tests:window.d3Tests,editor:document.querySelector('textarea.editor')?.value,caret:document.querySelector('textarea.editor')?.selectionStart,width:document.querySelector('textarea.editor')?.clientWidth,blocks:[...document.querySelectorAll('#blocks > section')].map(b=>({...b.dataset,text:b.textContent.slice(0,30)}))})"
+                )
+            );
+        }
+        ok
     }
 
     fn wait_live_message(pane: &Preview, action: &str) -> String {

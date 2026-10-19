@@ -128,7 +128,8 @@ fn table_at(source: &str, caret: usize) -> Option<Table> {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS;
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_MATH;
     for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
         if let Event::Start(Tag::Table(ref alignments)) = event
             && depth == 0

@@ -10,6 +10,72 @@ use windows::Win32::System::Ole::CF_UNICODETEXT;
 
 /// クリップボードを開いている間だけ保持し、閉じ忘れを防ぐ。
 struct Opened;
+pub(crate) fn named_format(name: &str) -> u32 {
+    unsafe { RegisterClipboardFormatW(&windows::core::HSTRING::from(name)) }
+}
+pub(crate) fn get_data(owner: HWND, format: u32, limit: usize) -> Option<Vec<u8>> {
+    unsafe {
+        IsClipboardFormatAvailable(format).ok()?;
+        let _open = Opened::open(owner)?;
+        let handle = GetClipboardData(format).ok()?;
+        let mem = HGLOBAL(handle.0);
+        let size = windows::Win32::System::Memory::GlobalSize(mem);
+        if size > limit {
+            return None;
+        }
+        let ptr = GlobalLock(mem) as *const u8;
+        if ptr.is_null() {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(ptr, size).to_vec();
+        let _ = GlobalUnlock(mem);
+        Some(bytes)
+    }
+}
+pub(crate) fn set_formats(owner: HWND, formats: &[(u32, Vec<u8>)]) -> bool {
+    unsafe {
+        let mut allocated = vec![];
+        for (format, bytes) in formats {
+            let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) else {
+                for (_, m) in allocated {
+                    let _ = GlobalFree(Some(m));
+                }
+                return false;
+            };
+            let ptr = GlobalLock(mem) as *mut u8;
+            if ptr.is_null() {
+                let _ = GlobalFree(Some(mem));
+                for (_, m) in allocated {
+                    let _ = GlobalFree(Some(m));
+                }
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+            let _ = GlobalUnlock(mem);
+            allocated.push((*format, mem));
+        }
+        let Some(_open) = Opened::open(owner) else {
+            for (_, mem) in allocated {
+                let _ = GlobalFree(Some(mem));
+            }
+            return false;
+        };
+        if EmptyClipboard().is_err() {
+            for (_, mem) in allocated {
+                let _ = GlobalFree(Some(mem));
+            }
+            return false;
+        }
+        let mut ok = true;
+        for (format, mem) in allocated {
+            if SetClipboardData(format, Some(HANDLE(mem.0))).is_err() {
+                let _ = GlobalFree(Some(mem));
+                ok = false;
+            }
+        }
+        ok
+    }
+}
 
 impl Opened {
     fn open(owner: HWND) -> Option<Opened> {

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/yy-draw",
+    "apps/yydraw",
     "crates/yy-buffer",
     "crates/yy-jobs",
     "crates/yy-config",
@@ -50,6 +52,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/ykwyuta/yyeditor"
 
 [workspace.dependencies]
+yy-draw = { path = "crates/yy-draw" }
 yy-buffer = { path = "crates/yy-buffer" }
 yy-jobs = { path = "crates/yy-jobs" }
 yy-config = { path = "crates/yy-config" }

@@ -17,6 +17,7 @@ This repository contains the following applications and their shared libraries.
 | **yyclip** | A tray application for clipboard history, text templates, favorites, and recent files |
 | **yyfilemanager** | Synchronization, search, duplicate detection, and version cleanup for local and shared folders |
 | **yybrowser** | A tabbed browser with its own proxy settings, ad blocking, and bookmarks |
+| **yydraw** | Architecture diagrams with a grid, basic shapes, cloud service icons, line bridges, binary storage, and SVG / PNG export |
 | **yy-agent** | A Linux helper for file operations on SSH hosts |
 
 For development prerequisites, builds, tests, and internal architecture, see [DEVELOPER.md](DEVELOPER.md).
