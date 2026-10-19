@@ -207,7 +207,14 @@ mod tests {
                 .Save(&HSTRING::from(link_path.as_os_str()), true)
                 .unwrap();
         }
-        assert_eq!(target(&link_path), Some(file.clone()));
+        // TEMP は CI では RUNNER~1 のような短いパスの場合がある。
+        // ShellLink は長いパスを返すので、同じ実ファイルを指すことを確かめる。
+        let resolved = target(&link_path).unwrap();
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            file.canonicalize().unwrap()
+        );
+        let file = resolved;
         let log = dir.join("history.log");
         let mut store = Store {
             log: log.clone(),
