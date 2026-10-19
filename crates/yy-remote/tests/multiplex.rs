@@ -11,9 +11,11 @@ use yy_remote::multiplex::{Binding, Kind, OpenMode, list_sessions};
 use yy_remote::{Exit, Process, Shell, Transport, run, shell_quote};
 
 const PTY: &str = r#"
-import os, pty, select, signal, sys
+import fcntl, os, pty, select, signal, struct, sys, termios
+os.environ['TERM'] = sys.argv[2]
 pid, master = pty.fork()
 if pid == 0:
+    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', int(sys.argv[4]), int(sys.argv[3]), 0, 0))
     os.execl('/bin/sh', 'sh', '-c', sys.argv[1])
 try:
     while True:
@@ -125,11 +127,14 @@ impl Transport for Live {
         ))
     }
 
-    fn shell(&self, _: &str, _: (u16, u16), command: Option<&[u8]>) -> io::Result<Shell> {
+    fn shell(&self, term: &str, size: (u16, u16), command: Option<&[u8]>) -> io::Result<Shell> {
         let mut cmd = b"python3 -u -c ".to_vec();
         cmd.extend(shell_quote(PTY.as_bytes()));
         cmd.push(b' ');
         cmd.extend(shell_quote(command.unwrap()));
+        cmd.push(b' ');
+        cmd.extend(shell_quote(term.as_bytes()));
+        cmd.extend_from_slice(format!(" {} {}", size.0, size.1).as_bytes());
         let mut child = Self::command(&cmd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -218,11 +223,6 @@ fn roundtrip(kind: Kind) {
         let s = binding
             .open_mode(&t, "xterm-256color", (100, 30), None, mode)
             .unwrap();
-        let collision = binding
-            .open_mode(&t, "xterm-256color", (100, 30), None, OpenMode::Create)
-            .err()
-            .expect("new session must not reuse an existing one");
-        assert_eq!(collision.kind(), io::ErrorKind::AlreadyExists);
         let Shell {
             mut input,
             mut output,
@@ -266,6 +266,17 @@ fn roundtrip(kind: Kind) {
             }
             std::thread::sleep(Duration::from_millis(30));
         }
+        // open_mode は PTY の開始を返す。シェルの応答後ならセッションも作成済み。
+        let ready = text
+            .lock()
+            .unwrap()
+            .windows(marker.len())
+            .any(|w| w == marker.as_bytes());
+        let collision = if ready {
+            Some(binding.open_mode(&t, "xterm-256color", (100, 30), None, OpenMode::Create))
+        } else {
+            None
+        };
         close();
         drop(input);
         finish().unwrap();
@@ -277,6 +288,11 @@ fn roundtrip(kind: Kind) {
             kind.program(),
             String::from_utf8_lossy(&text)
         );
+        let collision = collision
+            .unwrap()
+            .err()
+            .expect("new session must not reuse an existing one");
+        assert_eq!(collision.kind(), io::ErrorKind::AlreadyExists);
     }
 }
 

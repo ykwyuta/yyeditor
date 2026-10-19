@@ -50,7 +50,7 @@ jobs:
         if: matrix.arch == 'aarch64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server
+          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server python3 tmux screen
           cargo test -p yy-proto -p yy-agent -p yy-remote
       - uses: actions/upload-artifact@v4
         with:
@@ -128,7 +128,7 @@ jobs:
       - name: OpenSSH (sftp-server, scp), x3270 (s3270, pr3287), GnuCOBOL
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server s3270 pr3287 gnucobol3
+          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server s3270 pr3287 gnucobol3 python3 tmux screen
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
