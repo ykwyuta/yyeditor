@@ -28,7 +28,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, CreateCoreWebView2ControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, NavigationCompletedEventHandler,
-    NavigationStartingEventHandler, NewWindowRequestedEventHandler,
+    NavigationStartingEventHandler, NewWindowRequestedEventHandler, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -52,6 +52,7 @@ use crate::util::Context;
 pub(crate) const WM_APP_PREVIEW_OPEN: u32 = WM_APP + 21;
 /// WebView2 を使えなかった（プレビューの欄には案内を表示している）。フレームに送る。
 pub(crate) const WM_APP_PREVIEW_FAILED: u32 = WM_APP + 22;
+pub(crate) const WM_APP_MARKDOWN_EDIT: u32 = WM_APP + 23;
 // Poll owned result channels on the UI thread; never post heap pointers to a dying HWND.
 const FETCH_TIMER: usize = 0x5959;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -235,6 +236,9 @@ struct Shared {
     visible: std::cell::Cell<bool>,
     /// WebView2 を使えなかった
     failed: std::cell::Cell<bool>,
+    editing: std::cell::Cell<bool>,
+    edit_messages: RefCell<Vec<String>>,
+    edit_initial: RefCell<Option<String>>,
 }
 
 /// プレビューの欄（子ウィンドウ）と、その中の WebView2。
@@ -274,6 +278,9 @@ impl Preview {
                 page: RefCell::new(Page::default()),
                 visible: std::cell::Cell::new(false),
                 failed: std::cell::Cell::new(false),
+                editing: std::cell::Cell::new(false),
+                edit_messages: RefCell::new(Vec::new()),
+                edit_initial: RefCell::new(None),
             }),
             started: false,
         })
@@ -323,6 +330,46 @@ impl Preview {
 
     fn web(&self) -> Option<Web> {
         self.shared.web.borrow().clone()
+    }
+
+    pub(crate) fn show_editor(
+        &self,
+        source: &str,
+        epoch: u64,
+        caret: usize,
+        read_only: bool,
+        folder: Option<DocBase>,
+    ) {
+        self.shared.editing.set(true);
+        self.shared.edit_messages.borrow_mut().clear();
+        *self.shared.edit_initial.borrow_mut() = Some(format!(
+            "{{\"epoch\":{epoch},\"initial\":{}}}",
+            yy_preview::live::source_json(source)
+        ));
+        {
+            let mut p = self.shared.page.borrow_mut();
+            p.html = yy_preview::live::page(source, epoch, caret, read_only, folder.is_some());
+            p.kind = None;
+            p.line = None;
+            p.folder = folder;
+            p.version += 1;
+        }
+        navigate(&self.shared);
+    }
+
+    pub(crate) fn take_edit_messages(&self) -> Vec<String> {
+        std::mem::take(&mut *self.shared.edit_messages.borrow_mut())
+    }
+    pub(crate) fn editor_post(&self, json: &str) {
+        self.post(json);
+    }
+    pub(crate) fn focus_action(&self) -> Option<Box<dyn FnOnce()>> {
+        let web = self.web()?;
+        Some(Box::new(move || unsafe {
+            let _ = web
+                .controller
+                .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }))
     }
 
     /// Markdown を表示する。同じ種類・同じフォルダのページを表示中なら本文だけを差し替える。
@@ -545,6 +592,38 @@ fn setup(
         let mut token = 0i64;
 
         let s = shared.clone();
+        webview.add_WebMessageReceived(
+            &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                if !s.editing.get() || !s.visible.get() {
+                    return Ok(());
+                }
+                let origin = take_string(|p| args.Source(p));
+                if origin != PAGE_URL {
+                    return Ok(());
+                }
+                let text = take_string(|p| args.TryGetWebMessageAsString(p));
+                if text.len() > yy_preview::live::MAX_BYTES + 256 {
+                    return Ok(());
+                }
+                if text.split('\n').nth(2) == Some("load") {
+                    let initial = s.edit_initial.borrow().clone();
+                    if let Some(initial) = initial
+                        && let Some(web) = s.web.borrow().clone()
+                    {
+                        let _ = web.webview.PostWebMessageAsJson(&HSTRING::from(initial));
+                    }
+                } else {
+                    // 入力の順序を保持する。ネイティブの文書はフレーム側で更新する。
+                    s.edit_messages.borrow_mut().push(text);
+                    let _ = PostMessageW(Some(s.frame), WM_APP_MARKDOWN_EDIT, WPARAM(0), LPARAM(0));
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
+
+        let s = shared.clone();
         let env2 = env;
         webview.add_WebResourceRequested(
             &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
@@ -629,6 +708,7 @@ fn setup(
 
         // プレビューにフォーカスがあってもエディタのショートカット（保存など）を使えるようにする
         let frame = shared.frame;
+        let edit_shared = shared.clone();
         controller.add_AcceleratorKeyPressed(
             &AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
@@ -641,7 +721,7 @@ fn setup(
                 }
                 let mut vk = 0u32;
                 args.VirtualKey(&mut vk)?;
-                if crate::app::translate_preview_shortcut(frame, vk) {
+                if !edit_shared.editing.get() && crate::app::translate_preview_shortcut(frame, vk) {
                     args.SetHandled(true)?;
                 }
                 Ok(())
@@ -1329,6 +1409,243 @@ mod tests {
     use std::time::Duration;
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+
+    #[test]
+    fn live_markdown_preserves_source_ime_and_flush_in_webview2() {
+        let _serial = testing::webview2_lock();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let class = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(preview_proc),
+                hInstance: GetModuleHandleW(None).unwrap().into(),
+                lpszClassName: PREVIEW_CLASS,
+                ..Default::default()
+            };
+            RegisterClassExW(&class);
+        }
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PREVIEW_CLASS,
+                w!("live editor test"),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                0,
+                0,
+                900,
+                700,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let mut pane = Preview::new(parent, parent).unwrap();
+        pane.set_visible(true);
+        pane.set_bounds(0, 0, 880, 660);
+        let source = "# 見出し😀\r\n\r\n**太字** と本文\r\n\r\n<script>window.documentInjected=true</script>\r\n";
+        pane.show_editor(source, 71, 0, false, None);
+        let mut messages = Vec::new();
+        let loaded = pump_until(Duration::from_secs(45), || {
+            messages.extend(pane.take_edit_messages());
+            messages
+                .iter()
+                .any(|s| s.split('\n').nth(2) == Some("ready"))
+                || pane.is_unavailable()
+        });
+        if pane.is_unavailable() {
+            let why = notice_of(pane.hwnd);
+            assert!(
+                std::env::var_os("YY_REQUIRE_WEBVIEW2").is_none(),
+                "WebView2: {why}"
+            );
+            drop(pane);
+            unsafe {
+                let _ = DestroyWindow(parent);
+            }
+            return;
+        }
+        assert!(
+            loaded,
+            "ライブ編集ページが準備完了を通知しませんでした: {}",
+            notice_of(pane.hwnd)
+        );
+        let ready = messages
+            .iter()
+            .find(|s| s.split('\n').nth(2) == Some("ready"))
+            .unwrap();
+        assert_eq!(ready.splitn(6, '\n').nth(5), Some(source));
+        assert_eq!(eval(&pane,"document.querySelector('#blocks strong').textContent === '太字' && !window.documentInjected").as_deref(),Some("true"));
+        let seq: u64 = ready.lines().nth(1).unwrap().parse().unwrap();
+        pane.editor_post(&yy_preview::live::rendered(71, seq, source));
+        pump_until(Duration::from_millis(100), || false);
+        eval(
+            &pane,
+            "document.querySelector('[data-action=all]').click(); document.querySelector('textarea.editor').dispatchEvent(new CompositionEvent('compositionstart')); let t=document.querySelector('textarea.editor'); t.setSelectionRange(t.value.length,t.value.length); t.setRangeText('追記😃',t.value.length,t.value.length,'end'); t.dispatchEvent(new InputEvent('input',{bubbles:true,isComposing:true}));",
+        );
+        // IME 変換中はネイティブ文書に未確定文字を送らない。
+        assert!(
+            !pane
+                .take_edit_messages()
+                .iter()
+                .any(|s| s.split('\n').nth(2) == Some("edit"))
+        );
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new CompositionEvent('compositionend'));",
+        );
+        let mut edits = Vec::new();
+        assert!(pump_until(Duration::from_secs(5), || {
+            edits.extend(pane.take_edit_messages());
+            edits.iter().any(|s| s.split('\n').nth(2) == Some("edit"))
+        }));
+        let edit = edits
+            .iter()
+            .find(|s| s.split('\n').nth(2) == Some("edit"))
+            .unwrap();
+        assert_eq!(
+            edit.splitn(6, '\n').nth(5),
+            Some(format!("{source}追記😃").as_str())
+        );
+        let anchor: usize = edit.lines().nth(3).unwrap().parse().unwrap();
+        assert_eq!(anchor, format!("{source}追記😃").encode_utf16().count());
+        pane.editor_post("{\"flush\":71}");
+        let mut flushed = Vec::new();
+        assert!(pump_until(Duration::from_secs(5), || {
+            flushed.extend(pane.take_edit_messages());
+            flushed
+                .iter()
+                .any(|s| s.split('\n').nth(2) == Some("flush:71"))
+        }));
+        assert_eq!(
+            flushed
+                .iter()
+                .find(|s| s.split('\n').nth(2) == Some("flush:71"))
+                .unwrap()
+                .splitn(6, '\n')
+                .nth(5),
+            Some(format!("{source}追記😃").as_str())
+        );
+        pane.show_editor(source, 72, 0, true, None);
+        assert!(pump_until(Duration::from_secs(10), || {
+            eval(&pane,"document.body.dataset.epoch === '72' && !!document.querySelector('textarea.editor') && document.querySelector('textarea.editor').readOnly").as_deref()==Some("true")
+        }));
+        pane.show_editor("- [ ] 一行\r\n", 73, 0, false, None);
+        assert!(pump_until(Duration::from_secs(10), || {
+            eval(&pane,"document.body.dataset.epoch === '73' && !!document.querySelector('textarea.editor') && !document.querySelector('textarea.editor').readOnly").as_deref()==Some("true")
+        }));
+        pane.take_edit_messages();
+        eval(
+            &pane,
+            "let t=document.querySelector('textarea.editor'); t.setSelectionRange(t.value.length-1,t.value.length-1); t.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));",
+        );
+        let mut list_edits = Vec::new();
+        assert!(pump_until(Duration::from_secs(5), || {
+            list_edits.extend(pane.take_edit_messages());
+            list_edits
+                .iter()
+                .any(|s| s.split('\n').nth(2) == Some("edit"))
+        }));
+        assert_eq!(
+            list_edits
+                .iter()
+                .find(|s| s.split('\n').nth(2) == Some("edit"))
+                .unwrap()
+                .splitn(6, '\n')
+                .nth(5),
+            Some("- [ ] 一行\r\n- [ ] \r\n")
+        );
+        // セルのクリック位置を使い、構造編集の応答後もカーソルと原文を保持する。
+        let original_table = "# 前\r\n\r\n| A | B |\r\n| :--- | ---: |\r\n| x\\|y | 日本語 |\r\n";
+        let mut table_source = original_table.to_owned();
+        let mut table_epoch = 74;
+        pane.show_editor(&table_source, table_epoch, 0, false, None);
+        wait_live_message(&pane, "ready");
+        eval(
+            &pane,
+            "document.querySelector('#blocks td:nth-child(2)').click()",
+        );
+        let selected = wait_live_message(&pane, "select");
+        let seq: u64 = selected.lines().nth(1).unwrap().parse().unwrap();
+        let caret = yy_preview::live::byte_offset(
+            &table_source,
+            selected.lines().nth(4).unwrap().parse().unwrap(),
+        );
+        assert_eq!(
+            yy_preview::live::table::context(&table_source, caret).map(|c| (c.row, c.column)),
+            Some((1, 1))
+        );
+        pane.editor_post(&yy_preview::live::rendered_at(
+            table_epoch,
+            seq,
+            &table_source,
+            Some(caret),
+        ));
+        assert!(pump_until(Duration::from_secs(5), || eval(
+            &pane,
+            "!document.querySelector('[data-table=column-after]').disabled"
+        )
+        .as_deref()
+            == Some("true")));
+        for operation in ["column-after", "row-after", "delete-row", "delete-column"] {
+            pane.take_edit_messages();
+            eval(
+                &pane,
+                &format!("document.querySelector('[data-table={operation}]').click()"),
+            );
+            let action = wait_live_message(&pane, &format!("table:{operation}"));
+            assert_eq!(
+                eval(&pane, "document.querySelector('textarea.editor').readOnly").as_deref(),
+                Some("true")
+            );
+            let fields: Vec<_> = action.splitn(6, '\n').collect();
+            assert_eq!(fields[5], table_source);
+            let caret = yy_preview::live::byte_offset(&table_source, fields[4].parse().unwrap());
+            let edited = yy_preview::live::table::edit(
+                &table_source,
+                caret,
+                yy_preview::live::table::Operation::parse(operation).unwrap(),
+            )
+            .unwrap();
+            let previous = table_epoch;
+            table_epoch += 1;
+            pane.editor_post(&yy_preview::live::replaced(
+                previous,
+                table_epoch,
+                &edited.source,
+                edited.caret,
+            ));
+            table_source = edited.source;
+            let ready = wait_live_message(&pane, "ready");
+            assert_eq!(ready.splitn(6, '\n').nth(5), Some(table_source.as_str()));
+            assert_eq!(
+                eval(&pane, "document.querySelector('textarea.editor').readOnly").as_deref(),
+                Some("false")
+            );
+        }
+        assert_eq!(table_source, original_table);
+        drop(pane);
+        unsafe {
+            let _ = DestroyWindow(parent);
+        }
+    }
+
+    fn wait_live_message(pane: &Preview, action: &str) -> String {
+        let mut found = None;
+        assert!(
+            pump_until(Duration::from_secs(10), || {
+                let messages = pane.take_edit_messages();
+                found = messages
+                    .into_iter()
+                    .rev()
+                    .find(|s| s.split('\n').nth(2) == Some(action));
+                found.is_some()
+            }),
+            "missing live editor message: {action}"
+        );
+        found.unwrap()
+    }
 
     /// WebView2 でページを表示し、mermaid・d3 の図と KaTeX の数式が描かれること、本文の差し替えが
     /// 反映されることを確かめる。WebView2 ランタイムがなければ飛ばす

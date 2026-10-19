@@ -43,6 +43,7 @@ mod codemode;
 mod csvmode;
 mod gitmode;
 mod hexmode;
+mod markdownmode;
 mod previewmode;
 mod syntaxmode;
 pub(crate) mod workspacemode;
@@ -299,6 +300,8 @@ pub(crate) struct App {
     ui_font: windows::Win32::Graphics::Gdi::HFONT,
     /// Markdown・HTML のプレビュー（右側）
     preview: previewmode::PreviewPane,
+    markdown: markdownmode::LivePane,
+    markdown_mode: bool,
     /// SSH 接続先のファイルの編集（11 章）
     /// ワークスペースとサイドバー（左側）
     ws: WorkspacePane,
@@ -308,6 +311,7 @@ pub(crate) struct App {
 
 /// 非表示タブの文書と表示位置。検索条件と表示設定はウィンドウ全体で共有する。
 struct TabState {
+    markdown_mode: bool,
     doc: Document,
     vp: Viewport,
     scroll_x: f32,
@@ -329,6 +333,7 @@ struct TabState {
 impl TabState {
     fn new(doc: Document) -> Self {
         Self {
+            markdown_mode: false,
             doc,
             vp: Viewport::default(),
             scroll_x: 0.0,
@@ -602,6 +607,11 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             w!("行番号(&L)"),
         )?;
         item(view, ID_PREVIEW, w!("プレビュー(&P)\tCtrl+Shift+V"))?;
+        item(
+            view,
+            markdownmode::ID_MARKDOWN,
+            w!("Markdown ライブ編集(&M)"),
+        )?;
         item(view, ID_WHITESPACE, w!("空白・タブ・改行を表示(&W)"))?;
         item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
         item(view, ID_HEX_MODE, w!("16 進数表示(&X)\tCtrl+Shift+X"))?;
@@ -858,6 +868,8 @@ impl App {
                 colhead_h: 0,
                 ui_font: crate::util::ui_font(dpi),
                 preview: Default::default(),
+                markdown: Default::default(),
+                markdown_mode: false,
                 ws,
                 scm,
             };
@@ -1042,6 +1054,7 @@ impl App {
             let _ = ShowWindow(self.colhead, if head_h > 0 { SW_SHOWNA } else { SW_HIDE });
             let h = (body_h - bar_h - head_h).max(0);
             let _ = MoveWindow(self.view, left, tab_h + bar_h + head_h, ew, h, true);
+            self.layout_markdown(left, tab_h + bar_h + head_h, ew, h);
             let w = full_w;
             // 位置 | サイズ | 文字コード | 改行コード | 挿入/上書き | 進捗・メッセージ・コード値
             // 最後の -1 は「右端まで」（0 にすると進捗の欄が見えなくなる）
@@ -1758,6 +1771,7 @@ impl App {
         self.after_move();
         self.update_title();
         self.schedule_preview();
+        self.refresh_markdown();
     }
 
     /// 行 `rows` 行分上下に移動した位置と、その水平位置。
@@ -2646,6 +2660,8 @@ impl App {
     // ---- 文書の切り替え・保存 -----------------------------------------------
 
     pub(crate) fn set_document(&mut self, doc: Document) {
+        self.markdown_mode = false;
+        self.markdown.version = None;
         ime::cancel(self.view);
         self.composition = None;
         self.drag = None;
@@ -2681,10 +2697,13 @@ impl App {
         self.update_title();
         self.after_move();
         self.refresh_preview();
+        self.refresh_markdown();
+        self.layout_children();
     }
 
     fn take_active_tab(&mut self) -> TabState {
         TabState {
+            markdown_mode: self.markdown_mode,
             doc: std::mem::replace(&mut self.doc, Document::new_empty()),
             vp: self.vp,
             scroll_x: self.scroll_x,
@@ -2705,6 +2724,8 @@ impl App {
     }
 
     fn restore_tab(&mut self, state: TabState) {
+        self.markdown_mode = state.markdown_mode;
+        self.markdown.version = None;
         ime::cancel(self.view);
         self.composition = None;
         self.drag = None;
@@ -2746,6 +2767,8 @@ impl App {
             }
         }
         self.refresh_preview();
+        self.refresh_markdown();
+        self.layout_children();
     }
 
     fn switch_tab(&mut self, index: usize) {
@@ -3988,6 +4011,17 @@ fn cmd_open_remote(hwnd: HWND) {
 }
 
 fn open_path(hwnd: HWND, path: PathBuf, encoding: Option<Encoding>, shared_read_only: bool) {
+    if markdownmode::defer(markdownmode::Action::Open(
+        path.clone(),
+        encoding,
+        shared_read_only,
+    )) {
+        return;
+    }
+    open_path_now(hwnd, path, encoding, shared_read_only);
+}
+
+fn open_path_now(hwnd: HWND, path: PathBuf, encoding: Option<Encoding>, shared_read_only: bool) {
     // SSH 接続先のファイル（履歴・ブックマーク・コマンドラインの `ssh://…`）
     if yy_config::recent::is_remote(&path) {
         if let Err(msg) = crate::remote::open_location(hwnd, &path, encoding) {
@@ -4595,6 +4629,42 @@ fn cmd_copy(hwnd: HWND, cut: bool) {
 }
 
 fn on_command(hwnd: HWND, id: u16) {
+    if markdownmode::defer(markdownmode::Action::Command(id)) {
+        return;
+    }
+    on_command_now(hwnd, id);
+}
+
+fn on_command_now(hwnd: HWND, id: u16) {
+    let was_live = with_app(|a| a.markdown_mode).unwrap_or(false);
+    with_app(|a| a.markdown.dispatching = true);
+    execute_command(hwnd, id);
+    with_app(|a| {
+        a.markdown.dispatching = false;
+        a.refresh_markdown();
+    });
+    if matches!(id, ID_TAB_NEXT | ID_TAB_PREV | markdownmode::ID_MARKDOWN)
+        || (was_live && with_app(|a| !a.markdown_mode && !a.findbar.has_focus()).unwrap_or(false))
+    {
+        markdownmode::focus_editor();
+    }
+}
+
+fn execute_command(hwnd: HWND, id: u16) {
+    // 検索や矩形選択・バイナリ表示など、既存ビュー固有の操作は原文で行う。
+    if matches!(id, ID_GOTO | ID_HEX_MODE | ID_CODE_MODE | ID_RECORD_MODE)
+        || (ID_CUT..=ID_DEDUP_LINES).contains(&id)
+        || (ID_FIND..=ID_FIND_TOGGLE_REPLACE).contains(&id)
+        || (ID_CSV_OFF..=ID_CSV_PREV_CELL).contains(&id)
+    {
+        with_app(|a| {
+            if a.markdown_mode {
+                a.markdown_mode = false;
+                a.refresh_markdown();
+                a.layout_children();
+            }
+        });
+    }
     if on_workspace_command(hwnd, id) {
         return;
     }
@@ -5057,6 +5127,11 @@ fn on_command(hwnd: HWND, id: u16) {
                 error_box(hwnd, &format!("プレビューを表示できません。\n{msg}"));
             }
         }
+        markdownmode::ID_MARKDOWN => {
+            if let Some(Err(msg)) = with_app(|a| a.toggle_markdown()) {
+                error_box(hwnd, &msg);
+            }
+        }
         ID_WHITESPACE => {
             with_app(|a| {
                 a.show_whitespace = !a.show_whitespace;
@@ -5212,11 +5287,7 @@ pub(crate) extern "system" fn frame_proc(
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_SETFOCUS => {
-            if let Some(view) = with_app(|a| a.view) {
-                unsafe {
-                    let _ = SetFocus(Some(view));
-                }
-            }
+            markdownmode::focus_editor();
             LRESULT(0)
         }
         WM_INITMENUPOPUP => {
@@ -5239,14 +5310,17 @@ pub(crate) extern "system" fn frame_proc(
                             let index =
                                 unsafe { SendMessageW(a.tabbar, TCM_GETCURSEL, None, None).0 };
                             if index >= 0 {
-                                a.switch_tab(index as usize);
+                                return Some(index as usize);
                             }
                         }
-                        a.view
+                        None
                     });
-                    if let Some(view) = view {
-                        unsafe {
-                            let _ = SetFocus(Some(view));
+                    if let Some(Some(index)) = view {
+                        if !markdownmode::defer(markdownmode::Action::Switch(index)) {
+                            with_app(|a| {
+                                a.switch_tab(index);
+                            });
+                            markdownmode::focus_editor();
                         }
                     }
                 }
@@ -5268,6 +5342,25 @@ pub(crate) extern "system" fn frame_proc(
             // プレビューのリンクから文書を開く
             let path = unsafe { Box::from_raw(lparam.0 as *mut PathBuf) };
             open_path(hwnd, *path, None, false);
+            LRESULT(0)
+        }
+        crate::preview::WM_APP_MARKDOWN_EDIT => {
+            markdownmode::on_messages(hwnd);
+            LRESULT(0)
+        }
+        crate::preview::WM_APP_PREVIEW_FAILED => {
+            with_app(|a| {
+                if a.markdown_mode && a.markdown.pane.as_ref().is_some_and(|p| p.is_unavailable()) {
+                    a.markdown_mode = false;
+                    a.refresh_markdown();
+                    a.layout_children();
+                    a.status_msg =
+                        "Markdown ライブ編集には WebView2 が必要です。通常編集に戻しました。"
+                            .into();
+                    a.update_status();
+                }
+            });
+            markdownmode::focus_editor();
             LRESULT(0)
         }
         WM_SETCURSOR if loword(lparam.0 as usize) == HTCLIENT => {
@@ -5365,11 +5458,15 @@ pub(crate) extern "system" fn frame_proc(
         // バックグラウンドの処理を待つループ（remote::wait）の外に届いた通知
         crate::remote::WM_APP_REMOTE_WAKE => LRESULT(0),
         crate::tabclose::WM_APP_CLOSE_TAB => {
-            close_tab_at(hwnd, wparam.0);
+            if !markdownmode::defer(markdownmode::Action::CloseTab(wparam.0)) {
+                close_tab_at(hwnd, wparam.0);
+            }
             LRESULT(0)
         }
         crate::tabclose::WM_APP_TAB_MENU => {
-            tab_menu(hwnd, wparam.0);
+            if !markdownmode::defer(markdownmode::Action::TabMenu(wparam.0)) {
+                tab_menu(hwnd, wparam.0);
+            }
             LRESULT(0)
         }
         WM_DPICHANGED => {
@@ -5397,19 +5494,8 @@ pub(crate) extern "system" fn frame_proc(
             LRESULT(0)
         }
         WM_CLOSE => {
-            let count = with_app(|a| a.tabs.len()).unwrap_or(0);
-            let mut ok = true;
-            for index in 0..count {
-                with_app(|a| a.switch_tab(index));
-                if !confirm_discard(hwnd) {
-                    ok = false;
-                    break;
-                }
-            }
-            if ok {
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
+            if !markdownmode::defer(markdownmode::Action::CloseWindow) {
+                close_window(hwnd);
             }
             LRESULT(0)
         }
@@ -5418,6 +5504,23 @@ pub(crate) extern "system" fn frame_proc(
             LRESULT(0)
         }
         _ => default_proc(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn close_window(hwnd: HWND) {
+    let count = with_app(|a| a.tabs.len()).unwrap_or(0);
+    let mut ok = true;
+    for index in 0..count {
+        with_app(|a| a.switch_tab(index));
+        if !confirm_discard(hwnd) {
+            ok = false;
+            break;
+        }
+    }
+    if ok {
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
     }
 }
 

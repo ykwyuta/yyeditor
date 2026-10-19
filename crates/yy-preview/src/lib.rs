@@ -8,6 +8,7 @@
 //! リソース要求を横取りして返す）。文書と同じフォルダの画像などは `https://yy-doc.local/`
 //! （文書のフォルダを割り当てた仮想ホスト）から読む。
 
+pub mod live;
 mod markdown;
 pub mod security;
 
@@ -165,6 +166,14 @@ pub fn asset(path: &str) -> Option<(Cow<'static, [u8]>, &'static str)> {
         ),
         "preview.css" => (
             Cow::Borrowed(include_bytes!("../assets/preview.css").as_slice()),
+            css,
+        ),
+        "live.js" => (
+            Cow::Borrowed(include_bytes!("../assets/live.js").as_slice()),
+            js,
+        ),
+        "live.css" => (
+            Cow::Borrowed(include_bytes!("../assets/live.css").as_slice()),
             css,
         ),
         _ => {
