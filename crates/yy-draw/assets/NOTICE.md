@@ -35,7 +35,7 @@ Additional packs may be imported locally by the user.
 ## Original business/IT icons
 
 `business-icons.json` is original yydraw artwork, licensed GPL-3.0-or-later with
-the repository. Its 306 icons illustrate business and IT concepts. Product-named
+the repository. Its 376 icons illustrate business and IT concepts. Product-named
 icons are original concept illustrations, not official product or provider logos.
 They are independent of the third-party cloud catalog above. Rebuild with
 `python tools/business-icons/generate.py`; the categorized inventory and search

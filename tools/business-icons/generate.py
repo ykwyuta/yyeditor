@@ -76,6 +76,94 @@ def chart_axes():
     return path('M10 9 V54 H57')
 
 
+def bust(style="plain"):
+    clothing = "#345b80" if style == "suit" else ("#fff" if style == "coat" else PALE)
+    art = face() + path('M16 57 V39 C16 23 48 23 48 39 V57 Z', clothing)
+    if style == "suit":
+        art += path('M25 28 L32 34 L39 28 L36 48 H28 Z', "#fff")+path('M32 33 L35 38 L32 51 L29 38 Z', ACCENT)+path('M23 29 L26 43 L30 39 M41 29 L38 43 L34 39', stroke="#d8e8f6")
+    elif style == "coat":
+        art += path('M24 29 L29 39 L25 44 L30 57 M40 29 L35 39 L39 44 L34 57 M22 34 V43 Q22 50 29 47 M42 34 V42', stroke=ACCENT)+circle(42, 46, 3, "#fff")
+    elif style == "uniform":
+        art += path('M24 29 L32 36 L40 29 M32 36 V57 M39 42 H45', stroke=ACCENT)+dot(32, 44, 1)+dot(32, 51, 1)
+    else:
+        art += path('M23 36 V57 M41 36 V57', stroke=ACCENT)
+    return art
+
+
+def face(hair="short", sad=False):
+    art = ""
+    if hair == "long":
+        art += path('M19 30 V14 C19-3 45-3 45 14 V30 L39 33 H25 Z', "#493b35")
+    art += circle(32, 14, 9, "#f5d1b5")
+    if hair == "short":
+        art += path('M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z', "#493b35")
+    else:
+        art += path('M23 11 Q24 1 33 3 Q43 3 42 13 L32 7 L26 12 Z', "#493b35")
+    art += dot(28.5, 14, 1)+dot(35.5, 14, 1)
+    art += path('M29 20 Q32 16 35 20' if sad else 'M29 18 Q32 21 35 18', stroke=INK, width=1)
+    return art
+
+
+def character(role):
+    if role == "criminal":
+        return path('M16 59 V38 Q16 27 32 27 Q48 27 48 38 V59 Z', "#ddd")+path('M17 36 H47 M17 44 H47 M17 52 H47', stroke=INK, width=4)+face()+path('M23 6 Q32-2 41 6 L43 10 H21 Z', "#303640")+path('M22 12 Q32 8 42 12 L40 19 L34 17 H30 L24 19 Z', "#303640")+circle(28, 14, 1.5, "#fff")+circle(36, 14, 1.5, "#fff")+circle(40, 49, 8, "#fff")+circle(55, 49, 7, "#fff")+path('M46 46 H49 M46 52 H49')
+    if role == "hacker":
+        return path('M11 39 V24 C11-5 53-5 53 24 V39 Z', "#303b48")+path('M23 27 V17 C23 3 41 3 41 17 V27 Z', "#f5d1b5")+path('M22 16 H42 V23 H22 Z', "#15202c")+path('M26 19 H30 M34 19 H38', stroke="#69dca4")+rect(7, 32, 50, 26, "#273e43")+path('M3 60 H61 M16 40 L22 44 L16 48 M28 48 H43 M31 38 H47', stroke="#69dca4", width=2)
+    if role == "terrorist":
+        return path('M12 59 V37 Q12 25 32 25 Q52 25 52 37 V59 Z', "#576348")+path('M18 4 Q32-5 46 4 V25 Q32 34 18 25 Z', "#252c35")+path('M21 11 H43 V18 H21 Z', "#f5d1b5")+dot(27, 14, 1.5)+dot(37, 14, 1.5)+path('M20 29 L26 58 M44 29 L38 58', stroke="#252c35", width=3)+rect(25, 33, 14, 16, "#73815b", 1)+path('M5 38 L18 42 L22 37 H43 V35 H59 V39 H43 V45 H33 L29 57 H23 L25 45 H15 L7 48 Z', "#252c35")
+    if role == "victim":
+        return face(sad=True)+path('M16 59 V38 Q16 27 32 27 Q48 27 48 38 V59 Z', "#b9cde0")+path('M23 7 H42 V13 H23 Z', "#fff")+path('M25 8 L29 12 M32 8 L36 12', stroke=INK, width=1)+path('M20 30 L40 50 L21 49 Z', "#fff")+path('M40 30 L24 45', stroke=INK, width=2)+path('M40 18 Q45 23 40 25 Q36 24 40 18 Z', "#5da4ce")
+    if role == "security":
+        return bust("suit")+path('M22 11 H30 V18 H22 Z M34 11 H42 V18 H34 Z M30 14 H34', "#fff")+path('M44 29 L61 35 V47 Q61 57 44 63 Q29 57 29 47 V35 Z', "#367d63")+path('M36 45 L42 51 L55 38', stroke="#fff", width=3)
+    if role == "spy":
+        return inset(globe(), 27, 27, .56)+path('M9 59 V35 L23 25 H33 L45 35 V59 Z', "#8d8172")+path('M18 26 L24 47 L28 38 L34 47 L40 29 M28 38 V58', stroke=INK)+circle(28, 19, 10, "#f5d1b5")+path('M10 14 L18 9 L21 2 L29 5 L36 2 L40 12 L47 15 Z', "#333b47")+path('M17 18 H26 V24 H17 Z M29 18 H38 V24 H29 Z M26 20 H29', "#252c35")
+    if role == "doctor":
+        return bust("coat")+path('M22 11 H30 V18 H22 Z M34 11 H42 V18 H34 Z M30 14 H34', "#fff")+path('M24 28 V39 Q24 48 32 48 Q40 48 40 39 V28', stroke="#2d7b88", width=2.5)+circle(32, 50, 3, "#fff")
+    if role == "nurse":
+        return face("long")+path('M15 59 L19 35 Q32 24 45 35 L49 59 Z', "#fff")+path('M23 29 L32 38 L41 29 M32 38 V58 M19 46 H26', stroke=ACCENT)+path('M20 4 H44 L40 11 H24 Z', "#fff")+path('M32 5 V10 M29 7 H35', stroke=ACCENT, width=2)+rect(38, 43, 7, 9, "#d4ede9", 0)
+    if role == "teacher":
+        return rect(24, 4, 37, 37, "#315e4a", 1)+path('M29 14 H51 M33 10 V18 M30 26 H52 M41 22 V30 M32 41 V59 M55 41 V59', stroke="#fff", width=2)+inset(bust("suit"), -8, 16, .75)+path('M23 42 L43 20', stroke="#bd8747", width=3)
+    if role == "child":
+        return rect(15, 29, 34, 22, "#b35c4f", 5)+circle(32, 20, 10, "#f5d1b5")+path('M20 13 Q32-2 44 13 H20 M26 30 H38 V48 H26 Z', "#f0c348")+dot(28, 20, 1)+dot(36, 20, 1)+path('M29 25 Q32 28 35 25', stroke=INK, width=1)+path('M24 30 L17 42 M40 30 L47 42 M24 48 H40 V54 H24 Z', "#fff")+path('M28 54 V61 M36 54 V61', stroke=INK, width=3)
+    if role == "guardian":
+        return inset(face("long"), -7, 0, 1)+path('M9 59 L12 36 Q25 22 39 36 L43 59 Z', "#b47c8d")+inset(character("child"), 29, 27, .52)+path('M34 40 L43 48', stroke=INK, width=3)
+    if role == "salesman":
+        return bust("suit")+path('M19 35 L8 47 M45 35 L54 47', stroke=INK, width=3)+rect(36, 43, 26, 17, "#8e6948", 1)+path('M43 43 V38 H55 V43 M36 49 H62 M47 48 H52 V53 H47 Z', "#fff")
+    if role == "receptionist":
+        return face("long")+path('M17 39 V32 Q32 23 47 32 V39 Z', "#c18b9c")+path('M24 27 L32 34 L40 27', "#fff")+rect(4, 38, 56, 23, "#cbb69b", 1)+path('M4 38 H60', stroke=INK, width=3)+rect(10, 29, 20, 11, "#fff", 1)+path('M40 31 Q45 21 51 31 V35 H39 Z M38 35 H53', PALE)
+    if role == "diplomat":
+        return bust("suit")+rect(36, 30, 25, 31, "#365c8c", 2)+inset(globe(), 40, 31, .26)+path('M41 52 H56 M41 57 H53', stroke="#fff")+path('M4 9 V28 M4 10 H16 L12 17 L16 23 H4', PALE)
+    raise ValueError(role)
+
+
+def warning():
+    return path('M32 5 L60 55 H4 Z', "#fff")+path('M32 23 V37', stroke=ACCENT, width=4)+dot(32, 46, 2.5)
+
+
+def globe():
+    return circle(32, 32, 25, "#fff")+path('M7 32 H57 M13 17 H51 M13 47 H51 M32 7 C15 22 15 42 32 57 C49 42 49 22 32 7', stroke=ACCENT)
+
+
+def civic_building():
+    return path('M4 20 L32 4 L60 20 Z', PALE)+path('M7 56 H57 M4 61 H60')+''.join(rect(x, 24, 7, 28, "#fff", 0) for x in (10, 28, 46))
+
+
+def scales():
+    return path('M32 5 V55 M18 59 H46 M11 17 H53 M16 17 L6 37 H26 Z M48 17 L38 37 H58 Z', PALE)+path('M6 37 Q16 49 26 37 M38 37 Q48 49 58 37', "#fff")+circle(32, 14, 4, "#fff")
+
+
+def medical_cross():
+    return path('M25 7 H39 V25 H57 V39 H39 V57 H25 V39 H7 V25 H25 Z', "#fff")
+
+
+def executive(symbol):
+    return inset(bust("suit"), -4, 1, .94)+inset(symbol, 30, 28, .5)
+
+
+def organization():
+    return rect(23, 5, 18, 14, "#fff")+path('M32 19 V32 M11 32 H53 M11 32 V43 M32 32 V43 M53 32 V43', stroke=ACCENT)+rect(3, 43, 16, 14)+rect(24, 43, 16, 14)+rect(45, 43, 16, 14)
+
+
 # Small geometric lettering is drawn as paths; no fonts are loaded by the artwork.
 LETTERS = {
     "A": "M0 8 L3 0 L6 8 M1 5 H5", "B": "M0 8 V0 H3 Q8 0 5 4 Q8 8 3 8 Z M0 4 H4",
@@ -635,6 +723,90 @@ def make_catalog():
         ("github-copilot", "GitHub Copilot", "github copilot coding assistant ギットハブ コパイロット 開発支援 ai", lambda: product('GitHub Copilot', rect(11, 13, 42, 30, "#fff", 12)+circle(24, 26, 8)+circle(42, 26, 8)+path('M16 8 L10 13 M48 8 L54 13 M26 39 H38', stroke=ACCENT))),
         ("microsoft-copilot", "Microsoft Copilot", "microsoft copilot office assistant マイクロソフト コパイロット ai", lambda: product('Microsoft Copilot', path('M10 10 H31 L42 28 L32 46 H11 L22 28 Z', PALE)+path('M32 10 H53 L42 28 L53 46 H32 L22 28 Z', "#fff")+path('M22 28 H42', stroke=ACCENT))),
     ])
+    category("32 セキュリティ・脅威の人物", "#536b8c", "#e8eef8", [
+        ("criminal-person", "犯罪者", "criminal offender perpetrator 犯罪者 加害者 犯人", lambda: character("criminal")),
+        ("cyber-attacker", "サイバー攻撃者", "cyber attacker hacker threat actor ハッカー 攻撃者", lambda: character("hacker")),
+        ("malicious-insider", "内部不正者", "malicious insider employee threat 内部不正者 内部脅威 不正", lambda: bust("suit")+rect(4, 32, 19, 27, "#fff", 2)+circle(13, 39, 3)+path('M8 47 L18 55 M18 47 L8 55 M13 27 V32', stroke=ACCENT)),
+        ("fraudster", "詐欺師", "fraudster scammer fraud social engineering 詐欺師 詐欺 なりすまし", lambda: inset(bust("suit"), -5, 0, .94)+inset(document(), 31, 27, .51)+path('M22 14 Q32 8 42 14 L39 20 H25 Z', "#fff")+dot(28, 15, 1)+dot(36, 15, 1)+path('M46 40 L56 51 M56 40 L46 51', stroke=ACCENT)),
+        ("terrorist-person", "テロリスト", "terrorist terrorism violent actor テロリスト テロ 脅威", lambda: character("terrorist")),
+        ("victim-person", "被害者", "victim affected person survivor 被害者 被害者者 被災者", lambda: character("victim")),
+        ("security-specialist", "セキュリティスペシャリスト", "security specialist expert professional analyst セキュリティスペシャリスト セキュリティ専門家", lambda: character("security")),
+        ("incident-responder", "インシデント対応担当者", "incident responder csirt response specialist インシデント 対応担当者", lambda: inset(bust("uniform"), -5, 0, .94)+inset(clock(), 31, 27, .49)+path('M7 22 L11 15 L15 22 M11 16 V29', stroke=ACCENT)),
+        ("digital-forensics-specialist", "デジタル鑑識担当者", "digital forensics investigator specialist デジタル鑑識 フォレンジック", lambda: inset(bust(), -5, 0, .94)+circle(44, 41, 11, "#fff")+path('M51 49 L61 59 M39 43 C35 32 52 31 49 42 M42 44 Q39 36 46 37 V47', stroke=ACCENT)),
+        ("police-officer", "警察官", "police officer law enforcement 警察官 警官 捜査官", lambda: bust("uniform")+path('M21 5 Q32-1 43 5 L40 10 H24 Z', PALE)+path('M39 39 L45 42 V49 L39 53 L34 49 V42 Z', "#fff")+dot(32, 7, 1.5)),
+    ])
+    category("33 安全保障・公共組織", "#626c9d", "#eceefa", [
+        ("foreign-intelligence-agency", "海外諜報機関", "foreign intelligence overseas agency espionage 海外諜報機関 外国 情報機関 諜報", lambda: character("spy")),
+        ("domestic-intelligence-agency", "国内諜報機関", "domestic intelligence agency security 国内諜報機関 情報機関 公安", lambda: civic_building()+inset(shield(), 20, 22, .43)+path('M8 10 L15 4 L22 10', stroke=ACCENT)),
+        ("investigative-agency", "捜査機関", "investigation investigative agency law enforcement 捜査機関 調査機関", lambda: inset(civic_building(), -1, 3, .84)+circle(45, 42, 12, "#fff")+path('M53 51 L62 60 M41 42 H49 M45 38 V46', stroke=ACCENT)),
+        ("police-station", "警察署", "police station law enforcement organization 警察署 交番", lambda: building()+path('M32 12 L36 21 L46 22 L39 29 L41 39 L32 34 L23 39 L25 29 L18 22 L28 21 Z', "#fff")),
+        ("government-agency", "政府機関", "government agency ministry public administration 政府機関 官庁 省庁 行政", lambda: civic_building()+path('M32 4 V0 M22 1 H42', stroke=ACCENT)),
+        ("embassy", "大使館", "embassy diplomatic mission foreign 大使館 外交 使節", lambda: inset(civic_building(), -2, 8, .83)+path('M48 4 V36 M48 5 H61 L57 12 L61 19 H48', PALE)+inset(globe(), 32, 36, .43)),
+        ("consulate", "領事館", "consulate consular visa passport 領事館 査証", lambda: inset(building(), -3, 2, .86)+rect(38, 28, 22, 31, "#fff", 2)+circle(49, 39, 6)+path('M43 49 H55 M43 54 H51', stroke=ACCENT)),
+        ("diplomat", "外交官", "diplomat ambassador envoy diplomatic 外交官 大使 外交", lambda: character("diplomat")),
+        ("international-organization", "国際機関", "international organization multinational 国際機関 国際組織", lambda: globe()+person(10, 51, .5)+person(54, 51, .5)+person(32, 53, .5)+path('M12 48 H52', stroke=ACCENT)),
+        ("humanitarian-organization", "人道支援団体", "humanitarian organization aid relief ngo 人道支援 団体 NGO", lambda: path('M32 19 C21 4 3 16 32 43 C61 16 43 4 32 19 Z', PALE)+path('M5 35 L15 48 H28 M59 35 L49 48 H36 M9 58 L19 50 H45 L55 58', stroke=ACCENT, width=3)),
+    ])
+    category("34 医療・ケアの人物と組織", "#317e7d", "#e4f5f0", [
+        ("hospital", "病院", "hospital healthcare medical institution 病院 医療機関", lambda: rect(6, 19, 52, 40, "#fff")+rect(20, 4, 24, 55)+inset(medical_cross(), 21, 5, .34)+path('M27 59 V43 H37 V59 M11 29 H16 M11 38 H16 M48 29 H53 M48 38 H53', stroke=ACCENT)),
+        ("medical-clinic", "診療所", "clinic medical practice outpatient 診療所 クリニック 医院", lambda: path('M4 27 L32 6 L60 27 M10 24 V59 H54 V24', PALE)+inset(medical_cross(), 20, 15, .38)+rect(26, 42, 13, 17, "#fff", 0)),
+        ("emergency-medical-care", "救急医療", "emergency medical urgent care ambulance 救急医療 救急 救命", lambda: rect(3, 22, 36, 29, "#fff")+path('M39 31 H51 L61 42 V51 H39 Z', PALE)+circle(15, 51, 6, "#fff")+circle(49, 51, 6, "#fff")+inset(medical_cross(), 11, 24, .33)+path('M19 16 V9 H31 V16', stroke=ACCENT)),
+        ("physician", "医師", "physician doctor medical professional 医師 医者 ドクター", lambda: character("doctor")),
+        ("nurse", "看護師", "nurse nursing medical professional 看護師 看護婦 ナース", lambda: character("nurse")),
+        ("pharmacist", "薬剤師", "pharmacist pharmacy medicine 薬剤師 調剤 薬局", lambda: inset(bust("coat"), -5, 0, .94)+rect(38, 34, 21, 22, "#fff", 2)+path('M37 30 H60 V35 H37 Z M43 41 H54 M48 37 V48', PALE)),
+        ("patient", "患者", "patient medical inpatient outpatient 患者 入院 外来", lambda: bust()+path('M25 8 H39 V14 H25 Z', PALE)+path('M29 8 L35 14 M35 8 L29 14 M21 39 H43 M21 46 H43 M21 53 H43', stroke=ACCENT)),
+        ("paramedic", "救急救命士", "paramedic emergency technician emt 救急救命士 救命士", lambda: inset(bust("uniform"), -4, 0, .94)+rect(36, 36, 25, 21, "#fff", 2)+path('M43 36 V30 H54 V36')+inset(medical_cross(), 40, 38, .27)),
+        ("physical-therapist", "理学療法士", "physical therapist physiotherapy rehabilitation 理学療法士 リハビリ", lambda: inset(bust("coat"), -8, 5, .85)+circle(48, 23, 5, "#fff")+path('M48 30 L43 41 L53 48 M43 41 L37 55 M48 31 L57 37', stroke=ACCENT, width=3)),
+        ("clinical-laboratory-technologist", "臨床検査技師", "clinical laboratory technologist lab technician 臨床検査技師 検査技師", lambda: inset(bust("coat"), -7, 0, .92)+path('M42 25 L52 31 L45 43 L36 38 Z', "#fff")+path('M49 36 Q64 49 49 55 H35 M39 47 H53 M42 55 V60 M34 60 H56', stroke=ACCENT)),
+    ])
+    category("35 教育・子育ての人物と組織", "#8e7345", "#fff2db", [
+        ("teacher", "先生・教員", "teacher educator instructor professor 先生 教員 教師 講師", lambda: character("teacher")),
+        ("school-child", "児童", "school child pupil student elementary 児童 小学生 子供 子ども", lambda: character("child")),
+        ("guardian", "保護者", "guardian parent carer 保護者 親 父母 保護者者", lambda: character("guardian")),
+        ("childcare-worker", "保育士", "childcare worker nursery teacher 保育士 保育 教育", lambda: inset(bust(), -5, 0, .94)+rect(34, 43, 12, 13, "#fff", 1)+rect(48, 43, 12, 13, "#fff", 1)+path('M47 27 L59 40 H35 Z', PALE)),
+        ("school-principal", "校長", "school principal headteacher headmaster 校長 園長 学校長", lambda: inset(bust("suit"), 0, -1, .8)+path('M10 38 H54 L49 59 H15 Z', "#fff")+path('M24 44 L32 40 L40 44 L32 48 Z M27 48 V52 H37 V48', PALE)),
+        ("school-building", "学校", "school elementary junior high education 学校 小学校 中学校 高校", lambda: rect(5, 23, 54, 36, "#fff")+path('M18 23 V16 L32 5 L46 16 V59 H18 Z', PALE)+circle(32, 22, 6, "#fff")+path('M32 18 V22 H36 M27 59 V43 H37 V59 M10 32 H14 M50 32 H54', stroke=ACCENT)),
+        ("nursery-school", "保育園", "nursery preschool kindergarten daycare 保育園 幼稚園 こども園", lambda: path('M4 26 L32 5 L60 26 H54 V59 H10 V26 Z', PALE)+rect(18, 34, 11, 13, "#fff", 1)+rect(35, 34, 11, 13, "#fff", 1)+path('M23 56 H41', stroke=ACCENT)+circle(32, 19, 5, "#fff")),
+        ("university", "大学", "university college campus academy 大学 学園 キャンパス", lambda: inset(civic_building(), 7, 14, .78)+path('M9 10 L32 2 L55 10 L32 19 Z', PALE)+path('M16 13 V21 Q32 30 48 21 V13 M54 10 V25', stroke=ACCENT)),
+        ("school-counselor", "スクールカウンセラー", "school counselor counsellor guidance スクールカウンセラー 学校相談", lambda: inset(bust(), -6, 5, .86)+path('M33 6 H60 V27 H48 L40 35 V27 H33 Z', "#fff")+path('M39 14 H54 M39 20 H50', stroke=ACCENT)+person(49, 47, .72)),
+        ("parents-association", "保護者会", "parents association pta school family 保護者会 PTA 父母会", lambda: person(12, 19, .8)+person(52, 19, .8)+person(32, 17, .8)+rect(7, 37, 50, 17, "#fff")+path('M12 54 V61 M52 54 V61 M26 39 H38 V50 H26 Z', PALE)),
+    ])
+    category("36 営業・顧客支援・管理職種", "#3c7594", "#e8f3fb", [
+        ("sales-representative", "営業マン", "sales representative salesperson salesman account executive 営業マン 営業 営業担当者", lambda: character("salesman")),
+        ("receptionist", "受付嬢", "receptionist front desk concierge 受付嬢 受付 受付係 受付担当者", lambda: character("receptionist")),
+        ("customer-success-manager", "カスタマーサクセス担当者", "customer success manager csm カスタマーサクセス 顧客支援", lambda: executive(path('M4 32 Q32 2 60 32 Q32 62 4 32 Z', "#fff")+check(29, 32))+path('M10 9 H17 M13 5 V13', stroke=ACCENT)),
+        ("business-consultant", "コンサルタント", "consultant advisor consulting コンサルタント コンサル アドバイザー", lambda: inset(bust("suit"), -6, 0, .94)+rect(34, 27, 27, 25, "#fff")+path('M39 46 L44 38 L49 43 L57 33 M45 52 V60 M54 52 V60', stroke=ACCENT)),
+        ("human-resources-staff", "人事担当者", "human resources hr personnel 人事担当者 人事 労務", lambda: executive(person(20, 28, 1)+person(46, 28, 1)+path('M10 51 H56', stroke=ACCENT))),
+        ("recruiter", "採用担当者", "recruiter recruitment hiring talent 採用担当者 採用 リクルーター", lambda: inset(bust("suit"), -6, 0, .94)+circle(45, 40, 11, "#fff")+person(45, 39, .5)+path('M52 48 L61 59', stroke=ACCENT, width=3)),
+        ("accounting-staff", "経理担当者", "accountant accounting finance bookkeeper 経理担当者 経理 会計", lambda: inset(bust("suit"), -6, 0, .94)+rect(36, 29, 24, 31, "#fff", 2)+rect(40, 33, 16, 7, radius=0)+''.join(dot(x, y, 1.5) for y in (46, 53) for x in (42, 49, 56))),
+        ("legal-staff", "法務担当者", "legal counsel lawyer corporate law 法務担当者 法務 法律", lambda: executive(scales())),
+        ("public-relations-staff", "広報担当者", "public relations pr communications spokesperson 広報担当者 広報 宣伝", lambda: executive(path('M7 22 H25 L54 7 V51 L25 36 H7 Z', "#fff")+path('M17 36 L22 57 H32 L27 37 M59 15 V42', stroke=ACCENT))),
+        ("executive-assistant", "秘書・役員補佐", "secretary executive assistant personal assistant 秘書 役員補佐 補佐", lambda: inset(bust("suit"), -6, 0, .94)+rect(34, 30, 27, 27, "#fff")+path('M34 38 H61 M41 25 V34 M54 25 V34 M40 46 H45 M50 46 H55', stroke=ACCENT)),
+    ])
+    category("37 経営・ガバナンス", "#997044", "#fff1df", [
+        ("board-director", "取締役", "director board member executive 取締役 役員", lambda: executive(document())),
+        ("representative-director", "代表取締役", "representative director company president 代表取締役 社長", lambda: inset(bust("suit"), -6, 0, .94)+inset(document(), 31, 25, .5)+path('M42 53 L57 36 L61 40 L46 57 H42 Z', "#fff")),
+        ("board-of-directors", "取締役会", "board of directors governance board meeting 取締役会 経営会議", lambda: person(10, 23, .7)+person(32, 12, .8)+person(54, 23, .7)+path('M17 32 L47 32 L57 52 H7 Z', PALE)+path('M15 52 V61 M49 52 V61 M27 38 H37 V46 H27 Z', "#fff")),
+        ("outside-director", "社外取締役", "outside independent director board 社外取締役 独立役員", lambda: inset(bust("suit"), -6, 0, .94)+inset(building(), 34, 26, .43)+path('M39 10 H59 V23 M53 4 L59 10 L53 16', stroke=ACCENT)),
+        ("statutory-auditor", "監査役", "statutory auditor corporate audit supervisor 監査役 監査委員", lambda: executive(document()+check(31, 36))+circle(11, 11, 6, "#fff")+check(9, 10)),
+        ("chief-officer", "CxO・経営責任者", "cxo chief officer executive management CxO 経営責任者 最高責任者", lambda: inset(bust("suit"), 3, 7, .9)+rect(2, 3, 13, 10, "#fff")+rect(49, 3, 13, 10, "#fff")+path('M15 8 H24 M40 8 H49 M8 13 V28 M56 13 V28', stroke=ACCENT)),
+        ("chief-executive-officer", "最高経営責任者（CEO）", "ceo chief executive officer 最高経営責任者 経営 CEO", lambda: executive(organization())+path('M20 3 H35 M24 0 V6 M31 0 V6', stroke=ACCENT)),
+        ("chief-financial-officer", "最高財務責任者（CFO）", "cfo chief financial officer 最高財務責任者 財務 CFO", lambda: executive(circle(26, 32, 19, "#fff")+circle(42, 42, 16, "#fff")+path('M20 21 L26 30 L32 21 M26 30 V42 M20 33 H32 M37 47 L47 37', stroke=ACCENT))),
+        ("chief-technology-officer", "最高技術責任者（CTO）", "cto chief technology officer 最高技術責任者 技術 CTO", lambda: executive(gear())+path('M10 17 H16 M13 14 V20', stroke=ACCENT)),
+        ("chief-information-security-officer", "最高情報セキュリティ責任者（CISO）", "ciso chief information security officer 最高情報セキュリティ責任者 CISO", lambda: executive(shield()+inset(key_shape(), 15, 11, .6))+path('M10 12 H18 M14 8 V16', stroke=ACCENT)),
+    ])
+    category("38 経営責任者・企業組織", "#815b95", "#f3eafa", [
+        ("chief-information-officer", "最高情報責任者（CIO）", "cio chief information officer 最高情報責任者 情報システム CIO", lambda: executive(database()+path('M20 27 H44 M20 34 H44', stroke=ACCENT))),
+        ("chief-operating-officer", "最高執行責任者（COO）", "coo chief operating officer 最高執行責任者 業務執行 COO", lambda: executive(gear()+check(29, 31))),
+        ("chief-human-resources-officer", "最高人事責任者（CHRO）", "chro chief human resources officer 最高人事責任者 人事 CHRO", lambda: executive(organization()+person(32, 9, .55))),
+        ("chief-data-officer", "最高データ責任者（CDO）", "cdo chief data officer 最高データ責任者 データ CDO", lambda: executive(database()+path('M20 42 L28 32 L36 37 L45 24', stroke=ACCENT, width=3))),
+        ("chief-product-officer", "最高製品責任者（CPO）", "cpo chief product officer 最高製品責任者 プロダクト CPO", lambda: executive(path('M6 20 L32 7 L58 20 V48 L32 61 L6 48 Z', "#fff")+path('M6 20 L32 33 L58 20 M32 33 V61 M19 14 L45 27', stroke=ACCENT))),
+        ("chief-legal-officer", "最高法務責任者（CLO）", "clo chief legal officer general counsel 最高法務責任者 法務 CLO", lambda: executive(scales()+circle(32, 14, 8, "#fff")+check(30, 13))),
+        ("chief-risk-officer", "最高リスク管理責任者（CRO）", "cro chief risk officer 最高リスク管理責任者 リスク CRO", lambda: executive(shield()+inset(warning(), 15, 15, .56))),
+        ("business-division", "事業部", "business division department unit 事業部 部門 部署", lambda: rect(20, 5, 24, 16, "#fff")+path('M32 21 V32 M12 32 H52 M12 32 V44 M52 32 V44', stroke=ACCENT)+rect(3, 44, 19, 16)+rect(42, 44, 19, 16)+path('M25 11 H39 M8 50 H17 M47 50 H56')),
+        ("subsidiary-company", "子会社", "subsidiary company group affiliate 子会社 グループ会社 関係会社", lambda: inset(building(), -3, -1, .66)+inset(building(), 35, 27, .45)+path('M25 21 H48 V30 M43 25 L48 30 L53 25', stroke=ACCENT)),
+        ("holding-company", "持株会社", "holding company group parent company 持株会社 ホールディングス 親会社", lambda: inset(civic_building(), 12, -1, .63)+path('M32 39 V45 M11 45 H53 M11 45 V50 M53 45 V50', stroke=ACCENT)+rect(3, 50, 16, 11, "#fff")+rect(24, 50, 16, 11, "#fff")+rect(45, 50, 16, 11, "#fff")),
+    ])
     return entries, categories
 
 
@@ -643,16 +815,16 @@ def main():
     parser.add_argument("--check", action="store_true", help="fail when generated files differ")
     args = parser.parse_args()
     entries, categories = make_catalog()
-    assert len(entries) == 306 and len({e["file"] for e in entries}) == 306
-    assert len({e["svg"] for e in entries}) == 306
-    assert len(categories) == 31
+    assert len(entries) == 376 and len({e["file"] for e in entries}) == 376
+    assert len({e["svg"] for e in entries}) == 376
+    assert len(categories) == 38
     assert all(len(rows) == (6 if name == "21 メッセージング製品" else 10) for name, rows in categories)
-    inventory = ["# yydraw 業務・ITアイコン306種", "",
+    inventory = ["# yydraw 業務・ITアイコン376種", "",
                  "システム構成図、業務フロー、プロジェクト計画、戦略・分析資料向けの独自SVGアイコンです。",
-                 "左のカテゴリで「業務・IT / 01 …」～「業務・IT / 31 …」を選び、名前または検索語で絞り込めます。",
+                 "左のカテゴリで「業務・IT / 01 …」～「業務・IT / 38 …」を選び、名前または検索語で絞り込めます。",
                  "名前と画像を表示し、ドラッグして配置します。配置した図柄だけが文書に保存されます。",
                  "ラベルは他のyyシリーズと同じフォントを使用します。図柄内の製品名も省略せずパスで描き、外部フォントに依存しません。", "",
-                 "既存クラウドアイコン1,834種と合わせて2,140種です。公式クラウド素材とは別の独自図柄で、",
+                 "既存クラウドアイコン1,834種と合わせて2,210種です。公式クラウド素材とは別の独自図柄で、",
                  "このリポジトリと同じGPL-3.0-or-laterで提供します。製品名のアイコンも公式ロゴではなく、用途を表す独自イラストです。", "",
                  "再生成: `python tools/business-icons/generate.py`。整合性確認: `python tools/business-icons/generate.py --check`。", ""]
     for name, rows in categories:

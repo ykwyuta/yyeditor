@@ -2752,5 +2752,635 @@
     "source": "yydraw:business-icons/v1",
     "file": "business/microsoft-copilot.svg",
     "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(6 0) scale(0.8)\"><path d=\"M10 10 H31 L42 28 L32 46 H11 L22 28 Z\" fill=\"#e3f3ee\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 10 H53 L42 28 L53 46 H32 L22 28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M22 28 H42\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"2\"/></g><title>Microsoft Copilot</title><rect x=\"3\" y=\"43\" width=\"58\" height=\"19\" rx=\"2\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(32 45) scale(0.8333333333333333 1)\"><g transform=\"translate(-31.200000000000003 0) scale(0.8)\"><path d=\"M0 8 V0 L3 4 L6 0 V8\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(-24.000000000000004 0) scale(0.8)\"><path d=\"M0 0 H6 M3 0 V8 M0 8 H6\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(-16.800000000000004 0) scale(0.8)\"><path d=\"M6 1 Q0-2 0 4 Q0 10 6 7\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(-9.600000000000001 0) scale(0.8)\"><path d=\"M0 8 V0 H3 Q9 0 5 4 H0 M3 4 L6 8\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(-2.400000000000002 0) scale(0.8)\"><path d=\"M3 0 Q0 0 0 4 Q0 8 3 8 Q6 8 6 4 Q6 0 3 0 Z\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(4.799999999999997 0) scale(0.8)\"><path d=\"M6 1 Q0-2 0 2 Q0 4 3 4 Q6 4 6 6 Q6 10 0 7\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(12.0 0) scale(0.8)\"><path d=\"M3 0 Q0 0 0 4 Q0 8 3 8 Q6 8 6 4 Q6 0 3 0 Z\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(19.200000000000003 0) scale(0.8)\"><path d=\"M6 0 H0 V8 M0 4 H5\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(26.4 0) scale(0.8)\"><path d=\"M0 0 H6 M3 0 V8\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g></g><g transform=\"translate(32 53) scale(1 1)\"><g transform=\"translate(-24.0 0) scale(0.8)\"><path d=\"M6 1 Q0-2 0 4 Q0 10 6 7\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(-16.8 0) scale(0.8)\"><path d=\"M3 0 Q0 0 0 4 Q0 8 3 8 Q6 8 6 4 Q6 0 3 0 Z\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(-9.6 0) scale(0.8)\"><path d=\"M0 8 V0 H3 Q9 0 5 4 H0\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(-2.3999999999999986 0) scale(0.8)\"><path d=\"M0 0 H6 M3 0 V8 M0 8 H6\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(4.800000000000001 0) scale(0.8)\"><path d=\"M0 0 V8 H6\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(12.0 0) scale(0.8)\"><path d=\"M3 0 Q0 0 0 4 Q0 8 3 8 Q6 8 6 4 Q6 0 3 0 Z\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g><g transform=\"translate(19.200000000000003 0) scale(0.8)\"><path d=\"M0 0 H6 M3 0 V8\" fill=\"none\" stroke=\"#377e78\" stroke-width=\"1.5\"/></g></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "32 セキュリティ・脅威の人物",
+    "name": "犯罪者",
+    "keywords": "criminal offender perpetrator 犯罪者 加害者 犯人",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/criminal-person.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M16 59 V38 Q16 27 32 27 Q48 27 48 38 V59 Z\" fill=\"#ddd\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M17 36 H47 M17 44 H47 M17 52 H47\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"4\"/><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M23 6 Q32-2 41 6 L43 10 H21 Z\" fill=\"#303640\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M22 12 Q32 8 42 12 L40 19 L34 17 H30 L24 19 Z\" fill=\"#303640\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28\" cy=\"14\" r=\"1.5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"36\" cy=\"14\" r=\"1.5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"40\" cy=\"49\" r=\"8\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"55\" cy=\"49\" r=\"7\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M46 46 H49 M46 52 H49\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "32 セキュリティ・脅威の人物",
+    "name": "サイバー攻撃者",
+    "keywords": "cyber attacker hacker threat actor ハッカー 攻撃者",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/cyber-attacker.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M11 39 V24 C11-5 53-5 53 24 V39 Z\" fill=\"#303b48\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 27 V17 C23 3 41 3 41 17 V27 Z\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M22 16 H42 V23 H22 Z\" fill=\"#15202c\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M26 19 H30 M34 19 H38\" fill=\"none\" stroke=\"#69dca4\" stroke-width=\"2\"/><rect x=\"7\" y=\"32\" width=\"50\" height=\"26\" rx=\"3\" fill=\"#273e43\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M3 60 H61 M16 40 L22 44 L16 48 M28 48 H43 M31 38 H47\" fill=\"none\" stroke=\"#69dca4\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "32 セキュリティ・脅威の人物",
+    "name": "内部不正者",
+    "keywords": "malicious insider employee threat 内部不正者 内部脅威 不正",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/malicious-insider.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#536b8c\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/><rect x=\"4\" y=\"32\" width=\"19\" height=\"27\" rx=\"2\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"13\" cy=\"39\" r=\"3\" fill=\"#e8eef8\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M8 47 L18 55 M18 47 L8 55 M13 27 V32\" fill=\"none\" stroke=\"#536b8c\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "32 セキュリティ・脅威の人物",
+    "name": "詐欺師",
+    "keywords": "fraudster scammer fraud social engineering 詐欺師 詐欺 なりすまし",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/fraudster.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-5 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#536b8c\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(31 27) scale(0.51)\"><path d=\"M16 6 H39 L50 17 V58 H16 Z\" fill=\"#e8eef8\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M39 6 V17 H50 M23 26 H42 M23 33 H42 M23 40 H35\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M22 14 Q32 8 42 14 L39 20 H25 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28\" cy=\"15\" r=\"1\" fill=\"#536b8c\"/><circle cx=\"36\" cy=\"15\" r=\"1\" fill=\"#536b8c\"/><path d=\"M46 40 L56 51 M56 40 L46 51\" fill=\"none\" stroke=\"#536b8c\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "32 セキュリティ・脅威の人物",
+    "name": "テロリスト",
+    "keywords": "terrorist terrorism violent actor テロリスト テロ 脅威",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/terrorist-person.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 59 V37 Q12 25 32 25 Q52 25 52 37 V59 Z\" fill=\"#576348\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M18 4 Q32-5 46 4 V25 Q32 34 18 25 Z\" fill=\"#252c35\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M21 11 H43 V18 H21 Z\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"27\" cy=\"14\" r=\"1.5\" fill=\"#536b8c\"/><circle cx=\"37\" cy=\"14\" r=\"1.5\" fill=\"#536b8c\"/><path d=\"M20 29 L26 58 M44 29 L38 58\" fill=\"none\" stroke=\"#252c35\" stroke-width=\"3\"/><rect x=\"25\" y=\"33\" width=\"14\" height=\"16\" rx=\"1\" fill=\"#73815b\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M5 38 L18 42 L22 37 H43 V35 H59 V39 H43 V45 H33 L29 57 H23 L25 45 H15 L7 48 Z\" fill=\"#252c35\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "32 セキュリティ・脅威の人物",
+    "name": "被害者",
+    "keywords": "victim affected person survivor 被害者 被害者者 被災者",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/victim-person.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><path d=\"M29 20 Q32 16 35 20\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 59 V38 Q16 27 32 27 Q48 27 48 38 V59 Z\" fill=\"#b9cde0\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 7 H42 V13 H23 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 8 L29 12 M32 8 L36 12\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M20 30 L40 50 L21 49 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M40 30 L24 45\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M40 18 Q45 23 40 25 Q36 24 40 18 Z\" fill=\"#5da4ce\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "32 セキュリティ・脅威の人物",
+    "name": "セキュリティスペシャリスト",
+    "keywords": "security specialist expert professional analyst セキュリティスペシャリスト セキュリティ専門家",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/security-specialist.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#536b8c\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/><path d=\"M22 11 H30 V18 H22 Z M34 11 H42 V18 H34 Z M30 14 H34\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M44 29 L61 35 V47 Q61 57 44 63 Q29 57 29 47 V35 Z\" fill=\"#367d63\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M36 45 L42 51 L55 38\" fill=\"none\" stroke=\"#fff\" stroke-width=\"3\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "32 セキュリティ・脅威の人物",
+    "name": "インシデント対応担当者",
+    "keywords": "incident responder csirt response specialist インシデント 対応担当者",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/incident-responder.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-5 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#e8eef8\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M24 29 L32 36 L40 29 M32 36 V57 M39 42 H45\" fill=\"none\" stroke=\"#536b8c\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"44\" r=\"1\" fill=\"#536b8c\"/><circle cx=\"32\" cy=\"51\" r=\"1\" fill=\"#536b8c\"/></g><g transform=\"translate(31 27) scale(0.49)\"><circle cx=\"32\" cy=\"32\" r=\"24\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 16 V32 L43 39\" fill=\"none\" stroke=\"#536b8c\" stroke-width=\"3\"/><path d=\"M32 8 V12 M56 32 H52 M32 56 V52 M8 32 H12\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M7 22 L11 15 L15 22 M11 16 V29\" fill=\"none\" stroke=\"#536b8c\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "32 セキュリティ・脅威の人物",
+    "name": "デジタル鑑識担当者",
+    "keywords": "digital forensics investigator specialist デジタル鑑識 フォレンジック",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/digital-forensics-specialist.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-5 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#e8eef8\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 36 V57 M41 36 V57\" fill=\"none\" stroke=\"#536b8c\" stroke-width=\"2\"/></g><circle cx=\"44\" cy=\"41\" r=\"11\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M51 49 L61 59 M39 43 C35 32 52 31 49 42 M42 44 Q39 36 46 37 V47\" fill=\"none\" stroke=\"#536b8c\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "32 セキュリティ・脅威の人物",
+    "name": "警察官",
+    "keywords": "police officer law enforcement 警察官 警官 捜査官",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/police-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#536b8c\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#e8eef8\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M24 29 L32 36 L40 29 M32 36 V57 M39 42 H45\" fill=\"none\" stroke=\"#536b8c\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"44\" r=\"1\" fill=\"#536b8c\"/><circle cx=\"32\" cy=\"51\" r=\"1\" fill=\"#536b8c\"/><path d=\"M21 5 Q32-1 43 5 L40 10 H24 Z\" fill=\"#e8eef8\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M39 39 L45 42 V49 L39 53 L34 49 V42 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"7\" r=\"1.5\" fill=\"#536b8c\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "33 安全保障・公共組織",
+    "name": "海外諜報機関",
+    "keywords": "foreign intelligence overseas agency espionage 海外諜報機関 外国 情報機関 諜報",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/foreign-intelligence-agency.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(27 27) scale(0.56)\"><circle cx=\"32\" cy=\"32\" r=\"25\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M7 32 H57 M13 17 H51 M13 47 H51 M32 7 C15 22 15 42 32 57 C49 42 49 22 32 7\" fill=\"none\" stroke=\"#626c9d\" stroke-width=\"2\"/></g><path d=\"M9 59 V35 L23 25 H33 L45 35 V59 Z\" fill=\"#8d8172\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M18 26 L24 47 L28 38 L34 47 L40 29 M28 38 V58\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28\" cy=\"19\" r=\"10\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M10 14 L18 9 L21 2 L29 5 L36 2 L40 12 L47 15 Z\" fill=\"#333b47\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M17 18 H26 V24 H17 Z M29 18 H38 V24 H29 Z M26 20 H29\" fill=\"#252c35\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "33 安全保障・公共組織",
+    "name": "国内諜報機関",
+    "keywords": "domestic intelligence agency security 国内諜報機関 情報機関 公安",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/domestic-intelligence-agency.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 20 L32 4 L60 20 Z\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M7 56 H57 M4 61 H60\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"10\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"28\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"46\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(20 22) scale(0.43)\"><path d=\"M32 6 L53 14 V30 C53 43 44 51 32 58 C20 51 11 43 11 30 V14 Z\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M8 10 L15 4 L22 10\" fill=\"none\" stroke=\"#626c9d\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "33 安全保障・公共組織",
+    "name": "捜査機関",
+    "keywords": "investigation investigative agency law enforcement 捜査機関 調査機関",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/investigative-agency.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-1 3) scale(0.84)\"><path d=\"M4 20 L32 4 L60 20 Z\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M7 56 H57 M4 61 H60\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"10\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"28\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"46\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><circle cx=\"45\" cy=\"42\" r=\"12\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M53 51 L62 60 M41 42 H49 M45 38 V46\" fill=\"none\" stroke=\"#626c9d\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "33 安全保障・公共組織",
+    "name": "警察署",
+    "keywords": "police station law enforcement organization 警察署 交番",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/police-station.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"12\" y=\"8\" width=\"40\" height=\"49\" rx=\"3\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"20\" y=\"16\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"37\" y=\"16\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"20\" y=\"29\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"37\" y=\"29\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"27\" y=\"44\" width=\"10\" height=\"13\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 12 L36 21 L46 22 L39 29 L41 39 L32 34 L23 39 L25 29 L18 22 L28 21 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "33 安全保障・公共組織",
+    "name": "政府機関",
+    "keywords": "government agency ministry public administration 政府機関 官庁 省庁 行政",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/government-agency.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 20 L32 4 L60 20 Z\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M7 56 H57 M4 61 H60\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"10\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"28\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"46\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 4 V0 M22 1 H42\" fill=\"none\" stroke=\"#626c9d\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "33 安全保障・公共組織",
+    "name": "大使館",
+    "keywords": "embassy diplomatic mission foreign 大使館 外交 使節",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/embassy.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-2 8) scale(0.83)\"><path d=\"M4 20 L32 4 L60 20 Z\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M7 56 H57 M4 61 H60\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"10\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"28\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"46\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M48 4 V36 M48 5 H61 L57 12 L61 19 H48\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(32 36) scale(0.43)\"><circle cx=\"32\" cy=\"32\" r=\"25\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M7 32 H57 M13 17 H51 M13 47 H51 M32 7 C15 22 15 42 32 57 C49 42 49 22 32 7\" fill=\"none\" stroke=\"#626c9d\" stroke-width=\"2\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "33 安全保障・公共組織",
+    "name": "領事館",
+    "keywords": "consulate consular visa passport 領事館 査証",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/consulate.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-3 2) scale(0.86)\"><rect x=\"12\" y=\"8\" width=\"40\" height=\"49\" rx=\"3\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"20\" y=\"16\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"37\" y=\"16\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"20\" y=\"29\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"37\" y=\"29\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"27\" y=\"44\" width=\"10\" height=\"13\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><rect x=\"38\" y=\"28\" width=\"22\" height=\"31\" rx=\"2\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"49\" cy=\"39\" r=\"6\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M43 49 H55 M43 54 H51\" fill=\"none\" stroke=\"#626c9d\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "33 安全保障・公共組織",
+    "name": "外交官",
+    "keywords": "diplomat ambassador envoy diplomatic 外交官 大使 外交",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/diplomat.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#626c9d\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#626c9d\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#626c9d\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/><rect x=\"36\" y=\"30\" width=\"25\" height=\"31\" rx=\"2\" fill=\"#365c8c\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(40 31) scale(0.26)\"><circle cx=\"32\" cy=\"32\" r=\"25\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M7 32 H57 M13 17 H51 M13 47 H51 M32 7 C15 22 15 42 32 57 C49 42 49 22 32 7\" fill=\"none\" stroke=\"#626c9d\" stroke-width=\"2\"/></g><path d=\"M41 52 H56 M41 57 H53\" fill=\"none\" stroke=\"#fff\" stroke-width=\"2\"/><path d=\"M4 9 V28 M4 10 H16 L12 17 L16 23 H4\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "33 安全保障・公共組織",
+    "name": "国際機関",
+    "keywords": "international organization multinational 国際機関 国際組織",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/international-organization.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"32\" cy=\"32\" r=\"25\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M7 32 H57 M13 17 H51 M13 47 H51 M32 7 C15 22 15 42 32 57 C49 42 49 22 32 7\" fill=\"none\" stroke=\"#626c9d\" stroke-width=\"2\"/><g transform=\"translate(10 51) scale(0.5)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/></g><g transform=\"translate(54 51) scale(0.5)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/></g><g transform=\"translate(32 53) scale(0.5)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M12 48 H52\" fill=\"none\" stroke=\"#626c9d\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "33 安全保障・公共組織",
+    "name": "人道支援団体",
+    "keywords": "humanitarian organization aid relief ngo 人道支援 団体 NGO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/humanitarian-organization.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M32 19 C21 4 3 16 32 43 C61 16 43 4 32 19 Z\" fill=\"#eceefa\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M5 35 L15 48 H28 M59 35 L49 48 H36 M9 58 L19 50 H45 L55 58\" fill=\"none\" stroke=\"#626c9d\" stroke-width=\"3\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "34 医療・ケアの人物と組織",
+    "name": "病院",
+    "keywords": "hospital healthcare medical institution 病院 医療機関",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/hospital.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"6\" y=\"19\" width=\"52\" height=\"40\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"20\" y=\"4\" width=\"24\" height=\"55\" rx=\"3\" fill=\"#e4f5f0\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(21 5) scale(0.34)\"><path d=\"M25 7 H39 V25 H57 V39 H39 V57 H25 V39 H7 V25 H25 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M27 59 V43 H37 V59 M11 29 H16 M11 38 H16 M48 29 H53 M48 38 H53\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "34 医療・ケアの人物と組織",
+    "name": "診療所",
+    "keywords": "clinic medical practice outpatient 診療所 クリニック 医院",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/medical-clinic.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 27 L32 6 L60 27 M10 24 V59 H54 V24\" fill=\"#e4f5f0\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(20 15) scale(0.38)\"><path d=\"M25 7 H39 V25 H57 V39 H39 V57 H25 V39 H7 V25 H25 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><rect x=\"26\" y=\"42\" width=\"13\" height=\"17\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "34 医療・ケアの人物と組織",
+    "name": "救急医療",
+    "keywords": "emergency medical urgent care ambulance 救急医療 救急 救命",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/emergency-medical-care.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3\" y=\"22\" width=\"36\" height=\"29\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M39 31 H51 L61 42 V51 H39 Z\" fill=\"#e4f5f0\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"15\" cy=\"51\" r=\"6\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"49\" cy=\"51\" r=\"6\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(11 24) scale(0.33)\"><path d=\"M25 7 H39 V25 H57 V39 H39 V57 H25 V39 H7 V25 H25 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M19 16 V9 H31 V16\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "34 医療・ケアの人物と組織",
+    "name": "医師",
+    "keywords": "physician doctor medical professional 医師 医者 ドクター",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/physician.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M24 29 L29 39 L25 44 L30 57 M40 29 L35 39 L39 44 L34 57 M22 34 V43 Q22 50 29 47 M42 34 V42\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/><circle cx=\"42\" cy=\"46\" r=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M22 11 H30 V18 H22 Z M34 11 H42 V18 H34 Z M30 14 H34\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M24 28 V39 Q24 48 32 48 Q40 48 40 39 V28\" fill=\"none\" stroke=\"#2d7b88\" stroke-width=\"2.5\"/><circle cx=\"32\" cy=\"50\" r=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "34 医療・ケアの人物と組織",
+    "name": "看護師",
+    "keywords": "nurse nursing medical professional 看護師 看護婦 ナース",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/nurse.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M19 30 V14 C19-3 45-3 45 14 V30 L39 33 H25 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 11 Q24 1 33 3 Q43 3 42 13 L32 7 L26 12 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M15 59 L19 35 Q32 24 45 35 L49 59 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L32 38 L41 29 M32 38 V58 M19 46 H26\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/><path d=\"M20 4 H44 L40 11 H24 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 5 V10 M29 7 H35\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/><rect x=\"38\" y=\"43\" width=\"7\" height=\"9\" rx=\"0\" fill=\"#d4ede9\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "34 医療・ケアの人物と組織",
+    "name": "薬剤師",
+    "keywords": "pharmacist pharmacy medicine 薬剤師 調剤 薬局",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/pharmacist.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-5 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M24 29 L29 39 L25 44 L30 57 M40 29 L35 39 L39 44 L34 57 M22 34 V43 Q22 50 29 47 M42 34 V42\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/><circle cx=\"42\" cy=\"46\" r=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><rect x=\"38\" y=\"34\" width=\"21\" height=\"22\" rx=\"2\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M37 30 H60 V35 H37 Z M43 41 H54 M48 37 V48\" fill=\"#e4f5f0\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "34 医療・ケアの人物と組織",
+    "name": "患者",
+    "keywords": "patient medical inpatient outpatient 患者 入院 外来",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/patient.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#e4f5f0\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 36 V57 M41 36 V57\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/><path d=\"M25 8 H39 V14 H25 Z\" fill=\"#e4f5f0\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M29 8 L35 14 M35 8 L29 14 M21 39 H43 M21 46 H43 M21 53 H43\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "34 医療・ケアの人物と組織",
+    "name": "救急救命士",
+    "keywords": "paramedic emergency technician emt 救急救命士 救命士",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/paramedic.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#e4f5f0\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M24 29 L32 36 L40 29 M32 36 V57 M39 42 H45\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"44\" r=\"1\" fill=\"#317e7d\"/><circle cx=\"32\" cy=\"51\" r=\"1\" fill=\"#317e7d\"/></g><rect x=\"36\" y=\"36\" width=\"25\" height=\"21\" rx=\"2\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M43 36 V30 H54 V36\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(40 38) scale(0.27)\"><path d=\"M25 7 H39 V25 H57 V39 H39 V57 H25 V39 H7 V25 H25 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "34 医療・ケアの人物と組織",
+    "name": "理学療法士",
+    "keywords": "physical therapist physiotherapy rehabilitation 理学療法士 リハビリ",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/physical-therapist.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-8 5) scale(0.85)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M24 29 L29 39 L25 44 L30 57 M40 29 L35 39 L39 44 L34 57 M22 34 V43 Q22 50 29 47 M42 34 V42\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/><circle cx=\"42\" cy=\"46\" r=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><circle cx=\"48\" cy=\"23\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M48 30 L43 41 L53 48 M43 41 L37 55 M48 31 L57 37\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"3\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "34 医療・ケアの人物と組織",
+    "name": "臨床検査技師",
+    "keywords": "clinical laboratory technologist lab technician 臨床検査技師 検査技師",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/clinical-laboratory-technologist.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-7 0) scale(0.92)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#317e7d\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M24 29 L29 39 L25 44 L30 57 M40 29 L35 39 L39 44 L34 57 M22 34 V43 Q22 50 29 47 M42 34 V42\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/><circle cx=\"42\" cy=\"46\" r=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M42 25 L52 31 L45 43 L36 38 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M49 36 Q64 49 49 55 H35 M39 47 H53 M42 55 V60 M34 60 H56\" fill=\"none\" stroke=\"#317e7d\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "35 教育・子育ての人物と組織",
+    "name": "先生・教員",
+    "keywords": "teacher educator instructor professor 先生 教員 教師 講師",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/teacher.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"24\" y=\"4\" width=\"37\" height=\"37\" rx=\"1\" fill=\"#315e4a\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M29 14 H51 M33 10 V18 M30 26 H52 M41 22 V30 M32 41 V59 M55 41 V59\" fill=\"none\" stroke=\"#fff\" stroke-width=\"2\"/><g transform=\"translate(-8 16) scale(0.75)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#8e7345\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#8e7345\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#8e7345\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><path d=\"M23 42 L43 20\" fill=\"none\" stroke=\"#bd8747\" stroke-width=\"3\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "35 教育・子育ての人物と組織",
+    "name": "児童",
+    "keywords": "school child pupil student elementary 児童 小学生 子供 子ども",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/school-child.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"15\" y=\"29\" width=\"34\" height=\"22\" rx=\"5\" fill=\"#b35c4f\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"20\" r=\"10\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M20 13 Q32-2 44 13 H20 M26 30 H38 V48 H26 Z\" fill=\"#f0c348\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28\" cy=\"20\" r=\"1\" fill=\"#8e7345\"/><circle cx=\"36\" cy=\"20\" r=\"1\" fill=\"#8e7345\"/><path d=\"M29 25 Q32 28 35 25\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M24 30 L17 42 M40 30 L47 42 M24 48 H40 V54 H24 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M28 54 V61 M36 54 V61\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"3\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "35 教育・子育ての人物と組織",
+    "name": "保護者",
+    "keywords": "guardian parent carer 保護者 親 父母 保護者者",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/guardian.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-7 0) scale(1)\"><path d=\"M19 30 V14 C19-3 45-3 45 14 V30 L39 33 H25 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 11 Q24 1 33 3 Q43 3 42 13 L32 7 L26 12 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#8e7345\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#8e7345\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/></g><path d=\"M9 59 L12 36 Q25 22 39 36 L43 59 Z\" fill=\"#b47c8d\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(29 27) scale(0.52)\"><rect x=\"15\" y=\"29\" width=\"34\" height=\"22\" rx=\"5\" fill=\"#b35c4f\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"20\" r=\"10\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M20 13 Q32-2 44 13 H20 M26 30 H38 V48 H26 Z\" fill=\"#f0c348\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28\" cy=\"20\" r=\"1\" fill=\"#8e7345\"/><circle cx=\"36\" cy=\"20\" r=\"1\" fill=\"#8e7345\"/><path d=\"M29 25 Q32 28 35 25\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M24 30 L17 42 M40 30 L47 42 M24 48 H40 V54 H24 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M28 54 V61 M36 54 V61\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"3\"/></g><path d=\"M34 40 L43 48\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"3\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "35 教育・子育ての人物と組織",
+    "name": "保育士",
+    "keywords": "childcare worker nursery teacher 保育士 保育 教育",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/childcare-worker.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-5 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#8e7345\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#8e7345\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 36 V57 M41 36 V57\" fill=\"none\" stroke=\"#8e7345\" stroke-width=\"2\"/></g><rect x=\"34\" y=\"43\" width=\"12\" height=\"13\" rx=\"1\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"48\" y=\"43\" width=\"12\" height=\"13\" rx=\"1\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M47 27 L59 40 H35 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "35 教育・子育ての人物と組織",
+    "name": "校長",
+    "keywords": "school principal headteacher headmaster 校長 園長 学校長",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/school-principal.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(0 -1) scale(0.8)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#8e7345\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#8e7345\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#8e7345\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><path d=\"M10 38 H54 L49 59 H15 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M24 44 L32 40 L40 44 L32 48 Z M27 48 V52 H37 V48\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "35 教育・子育ての人物と組織",
+    "name": "学校",
+    "keywords": "school elementary junior high education 学校 小学校 中学校 高校",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/school-building.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"5\" y=\"23\" width=\"54\" height=\"36\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M18 23 V16 L32 5 L46 16 V59 H18 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"22\" r=\"6\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 18 V22 H36 M27 59 V43 H37 V59 M10 32 H14 M50 32 H54\" fill=\"none\" stroke=\"#8e7345\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "35 教育・子育ての人物と組織",
+    "name": "保育園",
+    "keywords": "nursery preschool kindergarten daycare 保育園 幼稚園 こども園",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/nursery-school.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 26 L32 5 L60 26 H54 V59 H10 V26 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"18\" y=\"34\" width=\"11\" height=\"13\" rx=\"1\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"35\" y=\"34\" width=\"11\" height=\"13\" rx=\"1\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 56 H41\" fill=\"none\" stroke=\"#8e7345\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"19\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "35 教育・子育ての人物と組織",
+    "name": "大学",
+    "keywords": "university college campus academy 大学 学園 キャンパス",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/university.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(7 14) scale(0.78)\"><path d=\"M4 20 L32 4 L60 20 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M7 56 H57 M4 61 H60\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"10\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"28\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"46\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M9 10 L32 2 L55 10 L32 19 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M16 13 V21 Q32 30 48 21 V13 M54 10 V25\" fill=\"none\" stroke=\"#8e7345\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "35 教育・子育ての人物と組織",
+    "name": "スクールカウンセラー",
+    "keywords": "school counselor counsellor guidance スクールカウンセラー 学校相談",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/school-counselor.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-6 5) scale(0.86)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#8e7345\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#8e7345\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 36 V57 M41 36 V57\" fill=\"none\" stroke=\"#8e7345\" stroke-width=\"2\"/></g><path d=\"M33 6 H60 V27 H48 L40 35 V27 H33 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M39 14 H54 M39 20 H50\" fill=\"none\" stroke=\"#8e7345\" stroke-width=\"2\"/><g transform=\"translate(49 47) scale(0.72)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "35 教育・子育ての人物と組織",
+    "name": "保護者会",
+    "keywords": "parents association pta school family 保護者会 PTA 父母会",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/parents-association.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(12 19) scale(0.8)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/></g><g transform=\"translate(52 19) scale(0.8)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/></g><g transform=\"translate(32 17) scale(0.8)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/></g><rect x=\"7\" y=\"37\" width=\"50\" height=\"17\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M12 54 V61 M52 54 V61 M26 39 H38 V50 H26 Z\" fill=\"#fff2db\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "36 営業・顧客支援・管理職種",
+    "name": "営業マン",
+    "keywords": "sales representative salesperson salesman account executive 営業マン 営業 営業担当者",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/sales-representative.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#3c7594\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/><path d=\"M19 35 L8 47 M45 35 L54 47\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"3\"/><rect x=\"36\" y=\"43\" width=\"26\" height=\"17\" rx=\"1\" fill=\"#8e6948\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M43 43 V38 H55 V43 M36 49 H62 M47 48 H52 V53 H47 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "36 営業・顧客支援・管理職種",
+    "name": "受付嬢",
+    "keywords": "receptionist front desk concierge 受付嬢 受付 受付係 受付担当者",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/receptionist.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M19 30 V14 C19-3 45-3 45 14 V30 L39 33 H25 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 11 Q24 1 33 3 Q43 3 42 13 L32 7 L26 12 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M17 39 V32 Q32 23 47 32 V39 Z\" fill=\"#c18b9c\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M24 27 L32 34 L40 27\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"4\" y=\"38\" width=\"56\" height=\"23\" rx=\"1\" fill=\"#cbb69b\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M4 38 H60\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"3\"/><rect x=\"10\" y=\"29\" width=\"20\" height=\"11\" rx=\"1\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M40 31 Q45 21 51 31 V35 H39 Z M38 35 H53\" fill=\"#e8f3fb\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "36 営業・顧客支援・管理職種",
+    "name": "カスタマーサクセス担当者",
+    "keywords": "customer success manager csm カスタマーサクセス 顧客支援",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/customer-success-manager.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#3c7594\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><path d=\"M4 32 Q32 2 60 32 Q32 62 4 32 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M24 32 l5 5 11-12\" fill=\"none\" stroke=\"#3c7594\" stroke-width=\"3\"/></g><path d=\"M10 9 H17 M13 5 V13\" fill=\"none\" stroke=\"#3c7594\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "36 営業・顧客支援・管理職種",
+    "name": "コンサルタント",
+    "keywords": "consultant advisor consulting コンサルタント コンサル アドバイザー",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/business-consultant.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-6 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#3c7594\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><rect x=\"34\" y=\"27\" width=\"27\" height=\"25\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M39 46 L44 38 L49 43 L57 33 M45 52 V60 M54 52 V60\" fill=\"none\" stroke=\"#3c7594\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "36 営業・顧客支援・管理職種",
+    "name": "人事担当者",
+    "keywords": "human resources hr personnel 人事担当者 人事 労務",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/human-resources-staff.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#3c7594\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><g transform=\"translate(20 28) scale(1)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#e8f3fb\" stroke=\"#29445f\" stroke-width=\"2\"/></g><g transform=\"translate(46 28) scale(1)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#e8f3fb\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M10 51 H56\" fill=\"none\" stroke=\"#3c7594\" stroke-width=\"2\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "36 営業・顧客支援・管理職種",
+    "name": "採用担当者",
+    "keywords": "recruiter recruitment hiring talent 採用担当者 採用 リクルーター",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/recruiter.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-6 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#3c7594\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><circle cx=\"45\" cy=\"40\" r=\"11\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(45 39) scale(0.5)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#e8f3fb\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M52 48 L61 59\" fill=\"none\" stroke=\"#3c7594\" stroke-width=\"3\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "36 営業・顧客支援・管理職種",
+    "name": "経理担当者",
+    "keywords": "accountant accounting finance bookkeeper 経理担当者 経理 会計",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/accounting-staff.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-6 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#3c7594\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><rect x=\"36\" y=\"29\" width=\"24\" height=\"31\" rx=\"2\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"40\" y=\"33\" width=\"16\" height=\"7\" rx=\"0\" fill=\"#e8f3fb\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"42\" cy=\"46\" r=\"1.5\" fill=\"#3c7594\"/><circle cx=\"49\" cy=\"46\" r=\"1.5\" fill=\"#3c7594\"/><circle cx=\"56\" cy=\"46\" r=\"1.5\" fill=\"#3c7594\"/><circle cx=\"42\" cy=\"53\" r=\"1.5\" fill=\"#3c7594\"/><circle cx=\"49\" cy=\"53\" r=\"1.5\" fill=\"#3c7594\"/><circle cx=\"56\" cy=\"53\" r=\"1.5\" fill=\"#3c7594\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "36 営業・顧客支援・管理職種",
+    "name": "法務担当者",
+    "keywords": "legal counsel lawyer corporate law 法務担当者 法務 法律",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/legal-staff.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#3c7594\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><path d=\"M32 5 V55 M18 59 H46 M11 17 H53 M16 17 L6 37 H26 Z M48 17 L38 37 H58 Z\" fill=\"#e8f3fb\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M6 37 Q16 49 26 37 M38 37 Q48 49 58 37\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"14\" r=\"4\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "36 営業・顧客支援・管理職種",
+    "name": "広報担当者",
+    "keywords": "public relations pr communications spokesperson 広報担当者 広報 宣伝",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/public-relations-staff.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#3c7594\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><path d=\"M7 22 H25 L54 7 V51 L25 36 H7 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M17 36 L22 57 H32 L27 37 M59 15 V42\" fill=\"none\" stroke=\"#3c7594\" stroke-width=\"2\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "36 営業・顧客支援・管理職種",
+    "name": "秘書・役員補佐",
+    "keywords": "secretary executive assistant personal assistant 秘書 役員補佐 補佐",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/executive-assistant.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-6 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#3c7594\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#3c7594\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><rect x=\"34\" y=\"30\" width=\"27\" height=\"27\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M34 38 H61 M41 25 V34 M54 25 V34 M40 46 H45 M50 46 H55\" fill=\"none\" stroke=\"#3c7594\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "37 経営・ガバナンス",
+    "name": "取締役",
+    "keywords": "director board member executive 取締役 役員",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/board-director.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#997044\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><path d=\"M16 6 H39 L50 17 V58 H16 Z\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M39 6 V17 H50 M23 26 H42 M23 33 H42 M23 40 H35\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "37 経営・ガバナンス",
+    "name": "代表取締役",
+    "keywords": "representative director company president 代表取締役 社長",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/representative-director.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-6 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#997044\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(31 25) scale(0.5)\"><path d=\"M16 6 H39 L50 17 V58 H16 Z\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M39 6 V17 H50 M23 26 H42 M23 33 H42 M23 40 H35\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M42 53 L57 36 L61 40 L46 57 H42 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "37 経営・ガバナンス",
+    "name": "取締役会",
+    "keywords": "board of directors governance board meeting 取締役会 経営会議",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/board-of-directors.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(10 23) scale(0.7)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/></g><g transform=\"translate(32 12) scale(0.8)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/></g><g transform=\"translate(54 23) scale(0.7)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M17 32 L47 32 L57 52 H7 Z\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M15 52 V61 M49 52 V61 M27 38 H37 V46 H27 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "37 経営・ガバナンス",
+    "name": "社外取締役",
+    "keywords": "outside independent director board 社外取締役 独立役員",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/outside-director.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-6 0) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#997044\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(34 26) scale(0.43)\"><rect x=\"12\" y=\"8\" width=\"40\" height=\"49\" rx=\"3\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"20\" y=\"16\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"37\" y=\"16\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"20\" y=\"29\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"37\" y=\"29\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"27\" y=\"44\" width=\"10\" height=\"13\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M39 10 H59 V23 M53 4 L59 10 L53 16\" fill=\"none\" stroke=\"#997044\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "37 経営・ガバナンス",
+    "name": "監査役",
+    "keywords": "statutory auditor corporate audit supervisor 監査役 監査委員",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/statutory-auditor.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#997044\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><path d=\"M16 6 H39 L50 17 V58 H16 Z\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M39 6 V17 H50 M23 26 H42 M23 33 H42 M23 40 H35\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M26 36 l5 5 11-12\" fill=\"none\" stroke=\"#997044\" stroke-width=\"3\"/></g><circle cx=\"11\" cy=\"11\" r=\"6\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M4 10 l5 5 11-12\" fill=\"none\" stroke=\"#997044\" stroke-width=\"3\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "37 経営・ガバナンス",
+    "name": "CxO・経営責任者",
+    "keywords": "cxo chief officer executive management CxO 経営責任者 最高責任者",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(3 7) scale(0.9)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#997044\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><rect x=\"2\" y=\"3\" width=\"13\" height=\"10\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"49\" y=\"3\" width=\"13\" height=\"10\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M15 8 H24 M40 8 H49 M8 13 V28 M56 13 V28\" fill=\"none\" stroke=\"#997044\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "37 経営・ガバナンス",
+    "name": "最高経営責任者（CEO）",
+    "keywords": "ceo chief executive officer 最高経営責任者 経営 CEO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-executive-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#997044\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><rect x=\"23\" y=\"5\" width=\"18\" height=\"14\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 19 V32 M11 32 H53 M11 32 V43 M32 32 V43 M53 32 V43\" fill=\"none\" stroke=\"#997044\" stroke-width=\"2\"/><rect x=\"3\" y=\"43\" width=\"16\" height=\"14\" rx=\"3\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"24\" y=\"43\" width=\"16\" height=\"14\" rx=\"3\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"45\" y=\"43\" width=\"16\" height=\"14\" rx=\"3\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M20 3 H35 M24 0 V6 M31 0 V6\" fill=\"none\" stroke=\"#997044\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "37 経営・ガバナンス",
+    "name": "最高財務責任者（CFO）",
+    "keywords": "cfo chief financial officer 最高財務責任者 財務 CFO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-financial-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#997044\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><circle cx=\"26\" cy=\"32\" r=\"19\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"42\" cy=\"42\" r=\"16\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M20 21 L26 30 L32 21 M26 30 V42 M20 33 H32 M37 47 L47 37\" fill=\"none\" stroke=\"#997044\" stroke-width=\"2\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "37 経営・ガバナンス",
+    "name": "最高技術責任者（CTO）",
+    "keywords": "cto chief technology officer 最高技術責任者 技術 CTO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-technology-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#997044\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><circle cx=\"32\" cy=\"32\" r=\"12\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"32\" r=\"4\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 14 v6 M32 44 v6 M14 32 h6 M44 32 h6 M16 16 l5 5 M43 43 l5 5 M48 16 l-5 5 M21 43 l-5 5\" fill=\"none\" stroke=\"#997044\" stroke-width=\"3\"/></g><path d=\"M10 17 H16 M13 14 V20\" fill=\"none\" stroke=\"#997044\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "37 経営・ガバナンス",
+    "name": "最高情報セキュリティ責任者（CISO）",
+    "keywords": "ciso chief information security officer 最高情報セキュリティ責任者 CISO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-information-security-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#997044\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#997044\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><path d=\"M32 6 L53 14 V30 C53 43 44 51 32 58 C20 51 11 43 11 30 V14 Z\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(15 11) scale(0.6)\"><circle cx=\"18\" cy=\"24\" r=\"11\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"18\" cy=\"24\" r=\"4\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M26 32 L49 55 L57 47 L50 40 L46 44 L39 37 L43 33 L36 26 L31 31\" fill=\"#fff1df\" stroke=\"#29445f\" stroke-width=\"2\"/></g></g><path d=\"M10 12 H18 M14 8 V16\" fill=\"none\" stroke=\"#997044\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "38 経営責任者・企業組織",
+    "name": "最高情報責任者（CIO）",
+    "keywords": "cio chief information officer 最高情報責任者 情報システム CIO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-information-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#815b95\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><path d=\"M14 18 V44 C14 52 50 52 50 44 V18\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><ellipse cx=\"32.0\" cy=\"18\" rx=\"18.0\" ry=\"6\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M14 31.0 C14 39.0 50 39.0 50 31.0\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M20 27 H44 M20 34 H44\" fill=\"none\" stroke=\"#815b95\" stroke-width=\"2\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "38 経営責任者・企業組織",
+    "name": "最高執行責任者（COO）",
+    "keywords": "coo chief operating officer 最高執行責任者 業務執行 COO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-operating-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#815b95\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><circle cx=\"32\" cy=\"32\" r=\"12\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"32\" r=\"4\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 14 v6 M32 44 v6 M14 32 h6 M44 32 h6 M16 16 l5 5 M43 43 l5 5 M48 16 l-5 5 M21 43 l-5 5\" fill=\"none\" stroke=\"#815b95\" stroke-width=\"3\"/><path d=\"M24 31 l5 5 11-12\" fill=\"none\" stroke=\"#815b95\" stroke-width=\"3\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "38 経営責任者・企業組織",
+    "name": "最高人事責任者（CHRO）",
+    "keywords": "chro chief human resources officer 最高人事責任者 人事 CHRO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-human-resources-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#815b95\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><rect x=\"23\" y=\"5\" width=\"18\" height=\"14\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 19 V32 M11 32 H53 M11 32 V43 M32 32 V43 M53 32 V43\" fill=\"none\" stroke=\"#815b95\" stroke-width=\"2\"/><rect x=\"3\" y=\"43\" width=\"16\" height=\"14\" rx=\"3\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"24\" y=\"43\" width=\"16\" height=\"14\" rx=\"3\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"45\" y=\"43\" width=\"16\" height=\"14\" rx=\"3\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(32 9) scale(0.55)\"><circle cx=\"0\" cy=\"-7\" r=\"5\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M-10 13 V8 C-10-3 10-3 10 8 V13 Z\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/></g></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "38 経営責任者・企業組織",
+    "name": "最高データ責任者（CDO）",
+    "keywords": "cdo chief data officer 最高データ責任者 データ CDO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-data-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#815b95\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><path d=\"M14 18 V44 C14 52 50 52 50 44 V18\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><ellipse cx=\"32.0\" cy=\"18\" rx=\"18.0\" ry=\"6\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M14 31.0 C14 39.0 50 39.0 50 31.0\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M20 42 L28 32 L36 37 L45 24\" fill=\"none\" stroke=\"#815b95\" stroke-width=\"3\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "38 経営責任者・企業組織",
+    "name": "最高製品責任者（CPO）",
+    "keywords": "cpo chief product officer 最高製品責任者 プロダクト CPO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-product-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#815b95\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><path d=\"M6 20 L32 7 L58 20 V48 L32 61 L6 48 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M6 20 L32 33 L58 20 M32 33 V61 M19 14 L45 27\" fill=\"none\" stroke=\"#815b95\" stroke-width=\"2\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "38 経営責任者・企業組織",
+    "name": "最高法務責任者（CLO）",
+    "keywords": "clo chief legal officer general counsel 最高法務責任者 法務 CLO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-legal-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#815b95\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><path d=\"M32 5 V55 M18 59 H46 M11 17 H53 M16 17 L6 37 H26 Z M48 17 L38 37 H58 Z\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M6 37 Q16 49 26 37 M38 37 Q48 49 58 37\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"14\" r=\"4\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"32\" cy=\"14\" r=\"8\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 13 l5 5 11-12\" fill=\"none\" stroke=\"#815b95\" stroke-width=\"3\"/></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "38 経営責任者・企業組織",
+    "name": "最高リスク管理責任者（CRO）",
+    "keywords": "cro chief risk officer 最高リスク管理責任者 リスク CRO",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/chief-risk-officer.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-4 1) scale(0.94)\"><circle cx=\"32\" cy=\"14\" r=\"9\" fill=\"#f5d1b5\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 12 C20-1 43-2 42 12 L35 7 L28 11 Z\" fill=\"#493b35\" stroke=\"#29445f\" stroke-width=\"2\"/><circle cx=\"28.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><circle cx=\"35.5\" cy=\"14\" r=\"1\" fill=\"#815b95\"/><path d=\"M29 18 Q32 21 35 18\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"1\"/><path d=\"M16 57 V39 C16 23 48 23 48 39 V57 Z\" fill=\"#345b80\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 28 L32 34 L39 28 L36 48 H28 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 33 L35 38 L32 51 L29 38 Z\" fill=\"#815b95\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M23 29 L26 43 L30 39 M41 29 L38 43 L34 39\" fill=\"none\" stroke=\"#d8e8f6\" stroke-width=\"2\"/></g><g transform=\"translate(30 28) scale(0.5)\"><path d=\"M32 6 L53 14 V30 C53 43 44 51 32 58 C20 51 11 43 11 30 V14 Z\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><g transform=\"translate(15 15) scale(0.56)\"><path d=\"M32 5 L60 55 H4 Z\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 23 V37\" fill=\"none\" stroke=\"#815b95\" stroke-width=\"4\"/><circle cx=\"32\" cy=\"46\" r=\"2.5\" fill=\"#815b95\"/></g></g></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "38 経営責任者・企業組織",
+    "name": "事業部",
+    "keywords": "business division department unit 事業部 部門 部署",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/business-division.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"20\" y=\"5\" width=\"24\" height=\"16\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M32 21 V32 M12 32 H52 M12 32 V44 M52 32 V44\" fill=\"none\" stroke=\"#815b95\" stroke-width=\"2\"/><rect x=\"3\" y=\"44\" width=\"19\" height=\"16\" rx=\"3\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"42\" y=\"44\" width=\"19\" height=\"16\" rx=\"3\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M25 11 H39 M8 50 H17 M47 50 H56\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "38 経営責任者・企業組織",
+    "name": "子会社",
+    "keywords": "subsidiary company group affiliate 子会社 グループ会社 関係会社",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/subsidiary-company.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(-3 -1) scale(0.66)\"><rect x=\"12\" y=\"8\" width=\"40\" height=\"49\" rx=\"3\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"20\" y=\"16\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"37\" y=\"16\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"20\" y=\"29\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"37\" y=\"29\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"27\" y=\"44\" width=\"10\" height=\"13\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><g transform=\"translate(35 27) scale(0.45)\"><rect x=\"12\" y=\"8\" width=\"40\" height=\"49\" rx=\"3\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"20\" y=\"16\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"37\" y=\"16\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"20\" y=\"29\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"37\" y=\"29\" width=\"6\" height=\"6\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"27\" y=\"44\" width=\"10\" height=\"13\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M25 21 H48 V30 M43 25 L48 30 L53 25\" fill=\"none\" stroke=\"#815b95\" stroke-width=\"2\"/></g></svg>"
+  },
+  {
+    "vendor": "業務・IT",
+    "category": "38 経営責任者・企業組織",
+    "name": "持株会社",
+    "keywords": "holding company group parent company 持株会社 ホールディングス 親会社",
+    "source": "yydraw:business-icons/v1",
+    "file": "business/holding-company.svg",
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g stroke-linecap=\"round\" stroke-linejoin=\"round\"><g transform=\"translate(12 -1) scale(0.63)\"><path d=\"M4 20 L32 4 L60 20 Z\" fill=\"#f3eafa\" stroke=\"#29445f\" stroke-width=\"2\"/><path d=\"M7 56 H57 M4 61 H60\" fill=\"none\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"10\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"28\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"46\" y=\"24\" width=\"7\" height=\"28\" rx=\"0\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g><path d=\"M32 39 V45 M11 45 H53 M11 45 V50 M53 45 V50\" fill=\"none\" stroke=\"#815b95\" stroke-width=\"2\"/><rect x=\"3\" y=\"50\" width=\"16\" height=\"11\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"24\" y=\"50\" width=\"16\" height=\"11\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/><rect x=\"45\" y=\"50\" width=\"16\" height=\"11\" rx=\"3\" fill=\"#fff\" stroke=\"#29445f\" stroke-width=\"2\"/></g></svg>"
   }
 ]

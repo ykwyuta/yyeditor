@@ -2,12 +2,12 @@ use yy_draw::*;
 #[test]
 fn bundled_catalog_is_complete_static_and_renderable() {
     let entries = catalog::all();
-    assert_eq!(entries.len(), 2140);
+    assert_eq!(entries.len(), 2210);
     for (vendor, count) in [
         ("AWS", 859),
         ("Azure", 714),
         ("Google Cloud", 261),
-        ("業務・IT", 306),
+        ("業務・IT", 376),
     ] {
         assert_eq!(entries.iter().filter(|e| e.vendor == vendor).count(), count);
     }
@@ -60,7 +60,7 @@ fn business_icons_are_unique_categorized_searchable_and_embedded_without_the_cat
             Some(asset),
         );
     }
-    assert_eq!(categories.len(), 31);
+    assert_eq!(categories.len(), 38);
     for (category, count) in &categories {
         assert_eq!(
             *count,
@@ -71,7 +71,7 @@ fn business_icons_are_unique_categorized_searchable_and_embedded_without_the_cat
             }
         );
     }
-    assert_eq!(d.assets.len(), 306);
+    assert_eq!(d.assets.len(), 376);
     let bytes = format::encode(&d).unwrap();
     assert!(bytes.len() < 600_000);
     assert_eq!(format::decode(&bytes).unwrap(), d);
@@ -108,6 +108,25 @@ fn business_icons_are_unique_categorized_searchable_and_embedded_without_the_cat
         ("バックアップ", "full-backup"),
         ("暗号化", "encryption-at-rest"),
         ("クラスタ", "server-cluster"),
+        ("犯罪者", "criminal-person"),
+        ("セキュリティスペシャリスト", "security-specialist"),
+        ("被害者", "victim-person"),
+        ("被害者者", "victim-person"),
+        ("海外諜報機関", "foreign-intelligence-agency"),
+        ("テロリスト", "terrorist-person"),
+        ("病院", "hospital"),
+        ("先生", "teacher"),
+        ("児童", "school-child"),
+        ("保護者", "guardian"),
+        ("医師", "physician"),
+        ("看護師", "nurse"),
+        ("外交官", "diplomat"),
+        ("営業マン", "sales-representative"),
+        ("受付嬢", "receptionist"),
+        ("取締役", "board-director"),
+        ("CxO", "chief-officer"),
+        ("CEO", "chief-executive-officer"),
+        ("CISO", "chief-information-security-officer"),
     ] {
         let entry = entries
             .iter()

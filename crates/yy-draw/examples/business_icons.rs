@@ -21,7 +21,13 @@ fn main() {
     for (cell, (index, entry)) in catalog::all()
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.vendor == "業務・IT" && e.category.starts_with(&category_prefix))
+        .filter(|(_, e)| {
+            e.vendor == "業務・IT"
+                && category_prefix.strip_suffix('+').map_or_else(
+                    || e.category.starts_with(&category_prefix),
+                    |minimum| e.category.as_str() >= minimum,
+                )
+        })
         .skip(page * 100)
         .take(100)
         .enumerate()

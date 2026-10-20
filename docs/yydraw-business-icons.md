@@ -1,11 +1,11 @@
-# yydraw 業務・ITアイコン306種
+# yydraw 業務・ITアイコン376種
 
 システム構成図、業務フロー、プロジェクト計画、戦略・分析資料向けの独自SVGアイコンです。
-左のカテゴリで「業務・IT / 01 …」～「業務・IT / 31 …」を選び、名前または検索語で絞り込めます。
+左のカテゴリで「業務・IT / 01 …」～「業務・IT / 38 …」を選び、名前または検索語で絞り込めます。
 名前と画像を表示し、ドラッグして配置します。配置した図柄だけが文書に保存されます。
 ラベルは他のyyシリーズと同じフォントを使用します。図柄内の製品名も省略せずパスで描き、外部フォントに依存しません。
 
-既存クラウドアイコン1,834種と合わせて2,140種です。公式クラウド素材とは別の独自図柄で、
+既存クラウドアイコン1,834種と合わせて2,210種です。公式クラウド素材とは別の独自図柄で、
 このリポジトリと同じGPL-3.0-or-laterで提供します。製品名のアイコンも公式ロゴではなく、用途を表す独自イラストです。
 
 再生成: `python tools/business-icons/generate.py`。整合性確認: `python tools/business-icons/generate.py --check`。
@@ -470,3 +470,108 @@
 | Claude Code | claude code anthropic coding agent クロードコード コード生成 開発支援 ai |
 | GitHub Copilot | github copilot coding assistant ギットハブ コパイロット 開発支援 ai |
 | Microsoft Copilot | microsoft copilot office assistant マイクロソフト コパイロット ai |
+
+## 32 セキュリティ・脅威の人物
+
+| 名前 | 検索語 |
+| --- | --- |
+| 犯罪者 | criminal offender perpetrator 犯罪者 加害者 犯人 |
+| サイバー攻撃者 | cyber attacker hacker threat actor ハッカー 攻撃者 |
+| 内部不正者 | malicious insider employee threat 内部不正者 内部脅威 不正 |
+| 詐欺師 | fraudster scammer fraud social engineering 詐欺師 詐欺 なりすまし |
+| テロリスト | terrorist terrorism violent actor テロリスト テロ 脅威 |
+| 被害者 | victim affected person survivor 被害者 被害者者 被災者 |
+| セキュリティスペシャリスト | security specialist expert professional analyst セキュリティスペシャリスト セキュリティ専門家 |
+| インシデント対応担当者 | incident responder csirt response specialist インシデント 対応担当者 |
+| デジタル鑑識担当者 | digital forensics investigator specialist デジタル鑑識 フォレンジック |
+| 警察官 | police officer law enforcement 警察官 警官 捜査官 |
+
+## 33 安全保障・公共組織
+
+| 名前 | 検索語 |
+| --- | --- |
+| 海外諜報機関 | foreign intelligence overseas agency espionage 海外諜報機関 外国 情報機関 諜報 |
+| 国内諜報機関 | domestic intelligence agency security 国内諜報機関 情報機関 公安 |
+| 捜査機関 | investigation investigative agency law enforcement 捜査機関 調査機関 |
+| 警察署 | police station law enforcement organization 警察署 交番 |
+| 政府機関 | government agency ministry public administration 政府機関 官庁 省庁 行政 |
+| 大使館 | embassy diplomatic mission foreign 大使館 外交 使節 |
+| 領事館 | consulate consular visa passport 領事館 査証 |
+| 外交官 | diplomat ambassador envoy diplomatic 外交官 大使 外交 |
+| 国際機関 | international organization multinational 国際機関 国際組織 |
+| 人道支援団体 | humanitarian organization aid relief ngo 人道支援 団体 NGO |
+
+## 34 医療・ケアの人物と組織
+
+| 名前 | 検索語 |
+| --- | --- |
+| 病院 | hospital healthcare medical institution 病院 医療機関 |
+| 診療所 | clinic medical practice outpatient 診療所 クリニック 医院 |
+| 救急医療 | emergency medical urgent care ambulance 救急医療 救急 救命 |
+| 医師 | physician doctor medical professional 医師 医者 ドクター |
+| 看護師 | nurse nursing medical professional 看護師 看護婦 ナース |
+| 薬剤師 | pharmacist pharmacy medicine 薬剤師 調剤 薬局 |
+| 患者 | patient medical inpatient outpatient 患者 入院 外来 |
+| 救急救命士 | paramedic emergency technician emt 救急救命士 救命士 |
+| 理学療法士 | physical therapist physiotherapy rehabilitation 理学療法士 リハビリ |
+| 臨床検査技師 | clinical laboratory technologist lab technician 臨床検査技師 検査技師 |
+
+## 35 教育・子育ての人物と組織
+
+| 名前 | 検索語 |
+| --- | --- |
+| 先生・教員 | teacher educator instructor professor 先生 教員 教師 講師 |
+| 児童 | school child pupil student elementary 児童 小学生 子供 子ども |
+| 保護者 | guardian parent carer 保護者 親 父母 保護者者 |
+| 保育士 | childcare worker nursery teacher 保育士 保育 教育 |
+| 校長 | school principal headteacher headmaster 校長 園長 学校長 |
+| 学校 | school elementary junior high education 学校 小学校 中学校 高校 |
+| 保育園 | nursery preschool kindergarten daycare 保育園 幼稚園 こども園 |
+| 大学 | university college campus academy 大学 学園 キャンパス |
+| スクールカウンセラー | school counselor counsellor guidance スクールカウンセラー 学校相談 |
+| 保護者会 | parents association pta school family 保護者会 PTA 父母会 |
+
+## 36 営業・顧客支援・管理職種
+
+| 名前 | 検索語 |
+| --- | --- |
+| 営業マン | sales representative salesperson salesman account executive 営業マン 営業 営業担当者 |
+| 受付嬢 | receptionist front desk concierge 受付嬢 受付 受付係 受付担当者 |
+| カスタマーサクセス担当者 | customer success manager csm カスタマーサクセス 顧客支援 |
+| コンサルタント | consultant advisor consulting コンサルタント コンサル アドバイザー |
+| 人事担当者 | human resources hr personnel 人事担当者 人事 労務 |
+| 採用担当者 | recruiter recruitment hiring talent 採用担当者 採用 リクルーター |
+| 経理担当者 | accountant accounting finance bookkeeper 経理担当者 経理 会計 |
+| 法務担当者 | legal counsel lawyer corporate law 法務担当者 法務 法律 |
+| 広報担当者 | public relations pr communications spokesperson 広報担当者 広報 宣伝 |
+| 秘書・役員補佐 | secretary executive assistant personal assistant 秘書 役員補佐 補佐 |
+
+## 37 経営・ガバナンス
+
+| 名前 | 検索語 |
+| --- | --- |
+| 取締役 | director board member executive 取締役 役員 |
+| 代表取締役 | representative director company president 代表取締役 社長 |
+| 取締役会 | board of directors governance board meeting 取締役会 経営会議 |
+| 社外取締役 | outside independent director board 社外取締役 独立役員 |
+| 監査役 | statutory auditor corporate audit supervisor 監査役 監査委員 |
+| CxO・経営責任者 | cxo chief officer executive management CxO 経営責任者 最高責任者 |
+| 最高経営責任者（CEO） | ceo chief executive officer 最高経営責任者 経営 CEO |
+| 最高財務責任者（CFO） | cfo chief financial officer 最高財務責任者 財務 CFO |
+| 最高技術責任者（CTO） | cto chief technology officer 最高技術責任者 技術 CTO |
+| 最高情報セキュリティ責任者（CISO） | ciso chief information security officer 最高情報セキュリティ責任者 CISO |
+
+## 38 経営責任者・企業組織
+
+| 名前 | 検索語 |
+| --- | --- |
+| 最高情報責任者（CIO） | cio chief information officer 最高情報責任者 情報システム CIO |
+| 最高執行責任者（COO） | coo chief operating officer 最高執行責任者 業務執行 COO |
+| 最高人事責任者（CHRO） | chro chief human resources officer 最高人事責任者 人事 CHRO |
+| 最高データ責任者（CDO） | cdo chief data officer 最高データ責任者 データ CDO |
+| 最高製品責任者（CPO） | cpo chief product officer 最高製品責任者 プロダクト CPO |
+| 最高法務責任者（CLO） | clo chief legal officer general counsel 最高法務責任者 法務 CLO |
+| 最高リスク管理責任者（CRO） | cro chief risk officer 最高リスク管理責任者 リスク CRO |
+| 事業部 | business division department unit 事業部 部門 部署 |
+| 子会社 | subsidiary company group affiliate 子会社 グループ会社 関係会社 |
+| 持株会社 | holding company group parent company 持株会社 ホールディングス 親会社 |
