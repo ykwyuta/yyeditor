@@ -3257,6 +3257,8 @@ mod tests {
         let options: ICoreWebView2EnvironmentOptions = options.into();
         let result: Rc<RefCell<Option<bool>>> = Rc::default();
         let failed: Rc<RefCell<Option<String>>> = Rc::default();
+        let controller: Rc<RefCell<Option<ICoreWebView2Controller>>> = Rc::default();
+        let controller_for_callback = controller.clone();
         let (r, f) = (result.clone(), failed.clone());
         let url = url.to_owned();
         let profile = profile.clone();
@@ -3267,6 +3269,7 @@ mod tests {
                     return Ok(());
                 };
                 let (r, f, url, profile) = (r.clone(), f.clone(), url.clone(), profile.clone());
+                let controller = controller_for_callback.clone();
                 let on_controller = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
                     move |res: Result<()>, c: Option<ICoreWebView2Controller>| {
                         let Some(c) = c.filter(|_| res.is_ok()) else {
@@ -3312,7 +3315,7 @@ mod tests {
                             )?;
                         }
                         // 環境・表示を手放さないよう、終わるまで持っておく
-                        std::mem::forget(c);
+                        *controller.borrow_mut() = Some(c);
                         unsafe { w.Navigate(&HSTRING::from(url.as_str()))? };
                         Ok(())
                     },
@@ -3320,7 +3323,6 @@ mod tests {
                 unsafe {
                     env.CreateCoreWebView2Controller(parent, &on_controller)?;
                 }
-                std::mem::forget(env);
                 Ok(())
             },
         ));
@@ -3339,6 +3341,11 @@ mod tests {
         crate::preview::testing::pump_until(Duration::from_secs(60), || {
             result.borrow().is_some() || failed.borrow().is_some()
         });
+        if let Some(c) = controller.borrow_mut().take() {
+            unsafe {
+                let _ = c.Close();
+            }
+        }
         if let Some(why) = failed.borrow_mut().take() {
             return Err(why);
         }
@@ -3363,25 +3370,32 @@ mod tests {
         let seen2 = seen.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let mut stream = stream;
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match stream.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                // Chromium can open speculative connections without sending a
+                // request. They must not block accepting the actual page load.
+                let seen2 = seen2.clone();
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    while buf.len() < 65536 && !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
                     }
-                }
-                let text = String::from_utf8_lossy(&buf);
-                if let Some(line) = text.lines().next() {
-                    seen2.lock().unwrap().push(line.to_owned());
-                }
-                let body = "<html><head><title>via proxy</title></head><body>ok</body></html>";
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
+                    let text = String::from_utf8_lossy(&buf);
+                    if let Some(line) = text.lines().next() {
+                        seen2.lock().unwrap().push(line.to_owned());
+                    }
+                    let body = "<html><head><title>via proxy</title></head><body>ok</body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
             }
         });
         let parent = unsafe {
