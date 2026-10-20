@@ -2,12 +2,12 @@ use yy_draw::*;
 #[test]
 fn bundled_catalog_is_complete_static_and_renderable() {
     let entries = catalog::all();
-    assert_eq!(entries.len(), 1934);
+    assert_eq!(entries.len(), 2140);
     for (vendor, count) in [
         ("AWS", 859),
         ("Azure", 714),
         ("Google Cloud", 261),
-        ("業務・IT", 100),
+        ("業務・IT", 306),
     ] {
         assert_eq!(entries.iter().filter(|e| e.vendor == vendor).count(), count);
     }
@@ -60,12 +60,131 @@ fn business_icons_are_unique_categorized_searchable_and_embedded_without_the_cat
             Some(asset),
         );
     }
-    assert_eq!(categories.len(), 10);
-    assert!(categories.values().all(|count| *count == 10));
-    assert_eq!(d.assets.len(), 100);
+    assert_eq!(categories.len(), 31);
+    for (category, count) in &categories {
+        assert_eq!(
+            *count,
+            if category.as_str() == "21 メッセージング製品" {
+                6
+            } else {
+                10
+            }
+        );
+    }
+    assert_eq!(d.assets.len(), 306);
     let bytes = format::encode(&d).unwrap();
-    assert!(bytes.len() < 200_000);
+    assert!(bytes.len() < 600_000);
     assert_eq!(format::decode(&bytes).unwrap(), d);
+    for (query, file) in [
+        ("スマートフォン", "smartphone"),
+        ("Android", "android-phone"),
+        ("iPhone", "iphone"),
+        ("Java", "java"),
+        ("Rust", "rust"),
+        ("PostgreSQL", "postgresql"),
+        ("AI", "artificial-intelligence"),
+        ("コールセンター", "call-center"),
+        ("子供", "child"),
+        ("老人", "senior-person"),
+        ("COBOL", "cobol"),
+        ("固定長ファイル", "fixed-length-file"),
+        ("CSV", "csv-file"),
+        ("TSV", "tsv-file"),
+        ("帳票", "business-report"),
+        ("メール", "email"),
+        ("WEB広告", "web-advertising"),
+        ("テレビ", "television"),
+        ("衛星", "satellite"),
+        ("SQLite", "sqlite"),
+        ("MySQL", "mysql"),
+        ("MQ", "ibm-mq"),
+        ("Kafka", "apache-kafka"),
+        ("OpenAI", "openai"),
+        ("Gemini", "gemini"),
+        ("Claude", "claude"),
+        ("Claude Code", "claude-code"),
+        ("キュー", "message-queue"),
+        ("トピック", "message-topic"),
+        ("バックアップ", "full-backup"),
+        ("暗号化", "encryption-at-rest"),
+        ("クラスタ", "server-cluster"),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|e| e.file == format!("business/{file}.svg"))
+            .unwrap();
+        assert!(
+            format!("{} {}", entry.name, entry.keywords)
+                .to_lowercase()
+                .contains(&query.to_lowercase()),
+            "{query} must find {}",
+            entry.name
+        );
+    }
+}
+#[test]
+fn product_artwork_keeps_full_names_instead_of_invented_abbreviations() {
+    for (file, name) in [
+        ("python", "Python"),
+        ("javascript", "JavaScript"),
+        ("typescript", "TypeScript"),
+        ("kotlin", "Kotlin"),
+        ("swift", "Swift"),
+        ("postgresql", "PostgreSQL"),
+        ("mysql", "MySQL"),
+        ("mariadb", "MariaDB"),
+        ("sqlite", "SQLite"),
+        ("sql-server", "SQL Server"),
+        ("oracle-database", "Oracle Database"),
+        ("redis", "Redis"),
+        ("mongodb", "MongoDB"),
+        ("elasticsearch", "Elasticsearch"),
+        ("ibm-mq", "IBM MQ"),
+        ("apache-kafka", "Apache Kafka"),
+        ("openai", "OpenAI"),
+        ("chatgpt", "ChatGPT"),
+        ("openai-api", "OpenAI API"),
+        ("openai-codex", "OpenAI Codex"),
+        ("gemini", "Gemini"),
+        ("google-ai-studio", "Google AI Studio"),
+        ("claude", "Claude"),
+        ("claude-code", "Claude Code"),
+        ("github-copilot", "GitHub Copilot"),
+        ("microsoft-copilot", "Microsoft Copilot"),
+    ] {
+        let e = catalog::all()
+            .iter()
+            .find(|e| e.file == format!("business/{file}.svg"))
+            .unwrap();
+        assert!(e.svg.contains(&format!("<title>{name}</title>")));
+        assert!(!e.svg.contains("..."));
+    }
+}
+#[test]
+fn official_cloud_catalog_is_not_duplicated_by_original_service_icons() {
+    let originals: Vec<_> = catalog::all()
+        .iter()
+        .filter(|e| e.vendor == "業務・IT")
+        .collect();
+    for file in [
+        "amazon-sqs",
+        "amazon-sns",
+        "azure-service-bus",
+        "google-pubsub",
+    ] {
+        assert!(
+            originals
+                .iter()
+                .all(|e| e.file != format!("business/{file}.svg"))
+        );
+    }
+    assert_eq!(
+        originals
+            .iter()
+            .filter(|e| e.category == "31 AIサービス・開発支援")
+            .count(),
+        10
+    );
 }
 #[test]
 fn placement_embeds_only_used_artwork_and_deduplicates_it() {
