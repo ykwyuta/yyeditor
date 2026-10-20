@@ -2574,6 +2574,59 @@ mod tests {
             app.properties();
             APP.with(|a| *a.borrow_mut() = Some(app));
             assert_eq!(with(|a| a.palette_state.items.len()).unwrap(), SHAPES.len());
+            // Shape subcategories use the same native picker and editable nodes.
+            let category = with(|a| {
+                let index = a
+                    .palette_state
+                    .categories
+                    .iter()
+                    .position(|c| c == "基本図形 / 演算子")
+                    .unwrap();
+                SendMessageW(
+                    a.palette_state.category,
+                    CB_SETCURSEL,
+                    Some(WPARAM(index)),
+                    None,
+                );
+                a.palette_state.category
+            })
+            .unwrap();
+            SendMessageW(
+                hwnd,
+                WM_COMMAND,
+                Some(WPARAM(
+                    palette::CATEGORY as usize | ((CBN_SELCHANGE as usize) << 16),
+                )),
+                Some(LPARAM(category.0 as isize)),
+            );
+            assert_eq!(with(|a| a.palette_state.items.len()).unwrap(), 6);
+            let filter = with(|a| a.filter).unwrap();
+            SetWindowTextW(filter, w!("+")).unwrap();
+            with(|a| {
+                assert_eq!(a.palette_state.items.len(), 1);
+                assert!(matches!(a.palette_tools[0], Tool::Shape(Shape::Plus)));
+                SendMessageW(a.palette, LB_SETCURSEL, Some(WPARAM(0)), None);
+                a.choose_palette();
+            });
+            mouse(hwnd, WM_LBUTTONDOWN, screen(Point::new(40., 40.)));
+            mouse(hwnd, WM_LBUTTONUP, screen(Point::new(40., 40.)));
+            with(|a| {
+                assert_eq!(a.tabs[0].doc.nodes[0].shape, Shape::Plus);
+                let bytes = format::encode(&a.tabs[0].doc).unwrap();
+                assert_eq!(format::decode(&bytes).unwrap(), a.tabs[0].doc);
+            });
+            command(hwnd, UNDO);
+            SetWindowTextW(filter, w!("")).unwrap();
+            SendMessageW(category, CB_SETCURSEL, Some(WPARAM(0)), None);
+            SendMessageW(
+                hwnd,
+                WM_COMMAND,
+                Some(WPARAM(
+                    palette::CATEGORY as usize | ((CBN_SELCHANGE as usize) << 16),
+                )),
+                Some(LPARAM(category.0 as isize)),
+            );
+            assert!(with(|a| a.tabs[0].doc.nodes.is_empty()).unwrap());
             for (shape, p) in [
                 (Shape::Rounded, Point::new(40., 40.)),
                 (Shape::Cylinder, Point::new(360., 160.)),
@@ -2808,7 +2861,8 @@ mod tests {
             // Original business/IT icons appear before cloud categories and accept English search.
             let (azure_index, business_index) = with(|a| {
                 let categories = &a.palette_state.categories;
-                assert!(categories[2].starts_with("業務・IT / 01 "));
+                let business_start = 2 + yy_draw::shapes::CATEGORIES.len();
+                assert!(categories[business_start].starts_with("業務・IT / 01 "));
                 let azure =
                     SendMessageW(a.palette_state.category, CB_GETCURSEL, None, None).0 as usize;
                 let business = categories

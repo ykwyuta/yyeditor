@@ -12,6 +12,7 @@ mod pages;
 pub mod ports;
 pub mod render;
 pub mod router;
+pub mod shapes;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -65,7 +66,7 @@ impl Rect {
         }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Shape {
     Rectangle,
     Rounded,
@@ -78,6 +79,57 @@ pub enum Shape {
     Frame,
     Icon,
     Junction,
+    // Append-only: postcard discriminants in existing files must remain stable.
+    RightTriangle,
+    Parallelogram,
+    Trapezoid,
+    Pentagon,
+    Hexagon,
+    Octagon,
+    Star4,
+    Star5,
+    Star6,
+    Star8,
+    Heart,
+    Moon,
+    Sun,
+    Lightning,
+    Donut,
+    Plus,
+    Minus,
+    Multiply,
+    Divide,
+    Equals,
+    NotEqual,
+    LeftBrace,
+    RightBrace,
+    BracePair,
+    LeftBracket,
+    RightBracket,
+    BracketPair,
+    ArrowRight,
+    ArrowLeft,
+    ArrowUp,
+    ArrowDown,
+    ArrowBoth,
+    ArrowUpDown,
+    ArrowFourWay,
+    ArrowBent,
+    ArrowUTurn,
+    Chevron,
+    CalloutRect,
+    CalloutRounded,
+    CalloutOval,
+    CalloutCloud,
+    CalloutThought,
+    FlowProcessDouble,
+    FlowDocument,
+    FlowMultiDocument,
+    FlowTerminator,
+    FlowManualInput,
+    FlowPreparation,
+    FlowOffpage,
+    FlowDelay,
 }
 pub const SHAPES: &[(Shape, &str)] = &[
     (Shape::Rectangle, "矩形"),
@@ -90,6 +142,56 @@ pub const SHAPES: &[(Shape, &str)] = &[
     (Shape::Text, "テキスト"),
     (Shape::Frame, "領域枠"),
     (Shape::Junction, "接続点"),
+    (Shape::RightTriangle, "直角三角形"),
+    (Shape::Parallelogram, "平行四辺形"),
+    (Shape::Trapezoid, "台形"),
+    (Shape::Pentagon, "五角形"),
+    (Shape::Hexagon, "六角形"),
+    (Shape::Octagon, "八角形"),
+    (Shape::Star4, "四角星"),
+    (Shape::Star5, "五角星"),
+    (Shape::Star6, "六角星"),
+    (Shape::Star8, "八角星"),
+    (Shape::Heart, "ハート"),
+    (Shape::Moon, "月"),
+    (Shape::Sun, "太陽"),
+    (Shape::Lightning, "稲妻"),
+    (Shape::Donut, "ドーナツ"),
+    (Shape::Plus, "＋ 加算"),
+    (Shape::Minus, "－ 減算"),
+    (Shape::Multiply, "× 乗算"),
+    (Shape::Divide, "÷ 除算"),
+    (Shape::Equals, "＝ 等号"),
+    (Shape::NotEqual, "≠ 不等号"),
+    (Shape::LeftBrace, "左中かっこ"),
+    (Shape::RightBrace, "右中かっこ"),
+    (Shape::BracePair, "中かっこ対"),
+    (Shape::LeftBracket, "左大かっこ"),
+    (Shape::RightBracket, "右大かっこ"),
+    (Shape::BracketPair, "大かっこ対"),
+    (Shape::ArrowRight, "右矢印"),
+    (Shape::ArrowLeft, "左矢印"),
+    (Shape::ArrowUp, "上矢印"),
+    (Shape::ArrowDown, "下矢印"),
+    (Shape::ArrowBoth, "左右矢印"),
+    (Shape::ArrowUpDown, "上下矢印"),
+    (Shape::ArrowFourWay, "四方向矢印"),
+    (Shape::ArrowBent, "屈折矢印"),
+    (Shape::ArrowUTurn, "Uターン矢印"),
+    (Shape::Chevron, "山形矢印"),
+    (Shape::CalloutRect, "四角形の吹き出し"),
+    (Shape::CalloutRounded, "角丸の吹き出し"),
+    (Shape::CalloutOval, "楕円の吹き出し"),
+    (Shape::CalloutCloud, "雲の吹き出し"),
+    (Shape::CalloutThought, "思考の吹き出し"),
+    (Shape::FlowProcessDouble, "定義済み処理"),
+    (Shape::FlowDocument, "書類"),
+    (Shape::FlowMultiDocument, "複数書類"),
+    (Shape::FlowTerminator, "開始・終了"),
+    (Shape::FlowManualInput, "手入力"),
+    (Shape::FlowPreparation, "準備"),
+    (Shape::FlowOffpage, "他ページへの結合子"),
+    (Shape::FlowDelay, "遅延"),
 ];
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
@@ -229,26 +331,15 @@ impl Document {
             .and_then(|id| self.assets.iter().find(|a| a.id == id))
             .map(|a| a.name.clone())
             .unwrap_or_default();
+        let (width, height) = shapes::default_size(shape);
         self.nodes.push(Node {
             id,
             shape,
             rect: Rect {
                 x: point.x - if shape == Shape::Junction { 4. } else { 0. },
                 y: point.y - if shape == Shape::Junction { 4. } else { 0. },
-                w: if shape == Shape::Junction {
-                    8.
-                } else if shape == Shape::Icon {
-                    80.
-                } else {
-                    144.
-                },
-                h: if shape == Shape::Junction {
-                    8.
-                } else if shape == Shape::Icon {
-                    96.
-                } else {
-                    80.
-                },
+                w: width,
+                h: height,
             },
             label,
             fill: 0xf0f6ff,

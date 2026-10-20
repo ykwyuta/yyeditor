@@ -109,7 +109,14 @@ pub fn encode(doc: &Document) -> Result<Vec<u8>> {
                 .iter()
                 .any(|e| matches!(e,Endpoint::Attached{side,..} if *side>=4))
         });
-    let minor: u16 = if !groups.is_empty() {
+    let new_shapes = doc
+        .nodes
+        .iter()
+        .chain(doc.pages.iter().flat_map(|p| &p.nodes))
+        .any(|n| n.shape.is_extended());
+    let minor: u16 = if new_shapes {
+        5
+    } else if !groups.is_empty() {
         4
     } else if !corners.is_empty() {
         3
@@ -128,7 +135,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document> {
     if bytes.len() < 52 || &bytes[..8] != MAGIC {
         return Err("yydraw 形式ではありません".into());
     }
-    if bytes[8..10] != [1, 0] || u16::from_le_bytes(bytes[10..12].try_into().unwrap()) > 4 {
+    if bytes[8..10] != [1, 0] || u16::from_le_bytes(bytes[10..12].try_into().unwrap()) > 5 {
         return Err("未対応のファイル版です".into());
     }
     let len = u64::from_le_bytes(bytes[12..20].try_into().unwrap());

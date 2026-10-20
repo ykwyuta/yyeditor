@@ -106,6 +106,7 @@ impl App {
         }
         let categories: Vec<_> = ["基本図形".to_owned(), "文書・追加素材".to_owned()]
             .into_iter()
+            .chain(yy_draw::shapes::CATEGORIES.iter().map(|s| (*s).to_owned()))
             .chain(
                 categories
                     .iter()
@@ -150,11 +151,17 @@ impl App {
         };
         let mut items = vec![];
         for (shape, name) in SHAPES {
-            if matches(name, "基本図形") {
+            let path = if category == "基本図形" {
+                "基本図形"
+            } else {
+                yy_draw::shapes::category(*shape)
+            };
+            let searchable = format!("{name} {shape:?} {}", yy_draw::shapes::search_terms(*shape));
+            if matches(&searchable, path) {
                 items.push(Item {
                     tool: Tool::Shape(*shape),
                     label: (*name).into(),
-                    category: "基本図形".into(),
+                    category: yy_draw::shapes::category(*shape).into(),
                     key: format!("shape:{shape:?}"),
                 });
             }

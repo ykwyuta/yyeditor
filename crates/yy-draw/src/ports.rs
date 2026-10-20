@@ -24,6 +24,10 @@ pub fn point_on(shape: Shape, r: Rect, id: u8) -> Point {
     } else {
         [1. / 6., 1. / 3., 2. / 3., 5. / 6.][((id - 4) % 4) as usize]
     };
+    if let Some(geometry) = shapes::geometry(shape) {
+        let p = geometry.port(side, t);
+        return Point::new(r.x + r.w * p.x / 100., r.y + r.h * p.y / 100.);
+    }
     let mut p = match side {
         0 => Point::new(r.x + r.w * t, r.y),
         1 => Point::new(r.x + r.w, r.y + r.h * t),

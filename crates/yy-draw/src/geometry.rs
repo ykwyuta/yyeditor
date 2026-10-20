@@ -88,6 +88,14 @@ pub fn hit(doc: &Document, p: Point, tolerance: f64) -> Option<Id> {
         .find(|n| {
             n.rect.expand(tolerance / 2.).contains(p)
                 && (n.shape != Shape::Frame || !n.rect.expand(-tolerance).contains(p))
+                && shapes::geometry(n.shape).is_none_or(|g| {
+                    (!n.label.is_empty() && g.text_rect(n.rect).contains(p))
+                        || g.contains(Point::new(
+                            (p.x - n.rect.x) / n.rect.w * 100.,
+                            (p.y - n.rect.y) / n.rect.h * 100.,
+                        ))
+                        || g.near_outline(n.rect, p, tolerance / 2.)
+                })
         })
         .map(|n| n.id)
         .or_else(|| {

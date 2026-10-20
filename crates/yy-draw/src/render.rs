@@ -588,6 +588,11 @@ pub fn scene(doc: &Document, options: &Export) -> String {
             Shape::Icon=>{if let Some(a)=doc.assets.iter().find(|a|Some(a.id)==n.asset){s.push_str(&format!("<image x='{x}' y='{y}' width='{w}' height='{}' preserveAspectRatio='xMidYMid meet' href='data:image/svg+xml;base64,{}'/>",(h-24.).max(8.),STANDARD.encode(a.svg.as_bytes())));}},
             Shape::Text=>{}
             Shape::Junction=>s.push_str(&format!("<circle cx='{}' cy='{}' r='{}' fill='#243044'/>",x+w/2.,y+h/2.,w.min(h)/2.)),
+            shape=>{
+                let geometry=shapes::geometry(shape).expect("extended shape geometry");
+                s.push_str(&format!("<path d='{}' fill-rule='evenodd' {attrs}/>",geometry.outline.svg(r)));
+                s.push_str(&format!("<path d='{}' fill='none' stroke='{}' stroke-width='{}'/>",geometry.detail.svg(r),color(n.stroke),n.line_width));
+            },
         }
         let text_rect = if n.shape == Shape::Icon {
             Rect {
@@ -596,6 +601,8 @@ pub fn scene(doc: &Document, options: &Export) -> String {
                 w,
                 h: 24.,
             }
+        } else if let Some(geometry) = shapes::geometry(n.shape) {
+            geometry.text_rect(r)
         } else {
             r
         };
