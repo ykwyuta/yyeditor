@@ -142,6 +142,7 @@ impl App {
                 } else {
                     0.
                 },
+                group: None,
             }
         } else {
             let (uid, id) = self.pending_connector?;

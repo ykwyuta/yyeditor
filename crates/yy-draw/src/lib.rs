@@ -6,6 +6,7 @@ pub mod editing;
 pub mod format;
 pub mod geometry;
 pub mod jobs;
+pub mod layout;
 pub mod library;
 mod pages;
 pub mod ports;
@@ -132,6 +133,9 @@ pub struct Connector {
     /// Stored in the CRNR extension chunk to preserve older postcard layouts.
     #[serde(skip)]
     pub corner_radius: f64,
+    /// Stored separately so the legacy document layout remains readable.
+    #[serde(skip)]
+    pub group: Option<Id>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Asset {
@@ -273,6 +277,7 @@ impl Document {
             dashed: false,
             label: String::new(),
             corner_radius: 0.,
+            group: None,
         });
         id
     }
@@ -307,14 +312,23 @@ impl Document {
         self.connectors.retain(|c| !selected.contains(&c.id));
     }
     pub fn translate(&mut self, ids: &[Id], dx: f64, dy: f64) {
+        let locked_groups: HashSet<_> = self
+            .nodes
+            .iter()
+            .filter(|n| n.locked)
+            .filter_map(|n| n.group)
+            .collect();
         for n in &mut self.nodes {
-            if ids.contains(&n.id) && !n.locked {
+            if ids.contains(&n.id)
+                && !n.locked
+                && !n.group.is_some_and(|g| locked_groups.contains(&g))
+            {
                 n.rect.x += dx;
                 n.rect.y += dy;
             }
         }
         for c in &mut self.connectors {
-            if ids.contains(&c.id) {
+            if ids.contains(&c.id) && !c.group.is_some_and(|g| locked_groups.contains(&g)) {
                 for e in [&mut c.start, &mut c.end] {
                     if let Endpoint::Free(p) = e {
                         p.x += dx;
@@ -351,6 +365,9 @@ impl Document {
             let internal = matches!((c.start,c.end),(Endpoint::Attached{node:a,..},Endpoint::Attached{node:b,..}) if map.contains_key(&a)&&map.contains_key(&b));
             if ids.contains(&c.id) || internal {
                 c.id = self.id();
+                if let Some(group) = c.group {
+                    c.group = Some(*groups.entry(group).or_insert_with(|| self.id()));
+                }
                 for e in [&mut c.start, &mut c.end] {
                     match e {
                         Endpoint::Attached { node, .. } => {
@@ -466,6 +483,11 @@ impl Document {
             }
         }
         for c in &self.connectors {
+            if c.group
+                .is_some_and(|id| id == 0 || id >= self.next_id || ids.contains(&id))
+            {
+                return Err("接続線のグループIDが不正です".into());
+            }
             for e in [c.start, c.end] {
                 match e {
                     Endpoint::Free(p) if !finite(p.x) || !finite(p.y) => {

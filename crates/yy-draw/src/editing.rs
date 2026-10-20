@@ -8,19 +8,34 @@ pub struct MoveSelection {
 impl MoveSelection {
     pub fn new(doc: &Document, ids: &[Id]) -> Self {
         let ids: HashSet<_> = ids.iter().copied().collect();
+        let locked_groups: HashSet<_> = doc
+            .nodes
+            .iter()
+            .filter(|n| n.locked)
+            .filter_map(|n| n.group)
+            .collect();
         Self {
             nodes: doc
                 .nodes
                 .iter()
                 .enumerate()
                 .filter(|(_, n)| ids.contains(&n.id))
-                .map(|(i, n)| (i, n.id, n.rect, n.locked))
+                .map(|(i, n)| {
+                    (
+                        i,
+                        n.id,
+                        n.rect,
+                        n.locked || n.group.is_some_and(|g| locked_groups.contains(&g)),
+                    )
+                })
                 .collect(),
             connectors: doc
                 .connectors
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| ids.contains(&c.id))
+                .filter(|(_, c)| {
+                    ids.contains(&c.id) && !c.group.is_some_and(|g| locked_groups.contains(&g))
+                })
                 .map(|(i, c)| (i, c.clone()))
                 .collect(),
         }

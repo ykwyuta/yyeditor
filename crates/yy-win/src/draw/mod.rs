@@ -1,4 +1,5 @@
 //! Native yydraw shell; the same portable scene is used on screen and during export.
+mod arrange;
 mod association;
 mod colors;
 mod connection_points;
@@ -80,6 +81,12 @@ const ALIGN_LEFT: u16 = 27;
 const ALIGN_TOP: u16 = 28;
 const CENTER_X: u16 = 29;
 const DISTRIBUTE: u16 = 30;
+const ALIGN_RIGHT: u16 = 43;
+const ALIGN_BOTTOM: u16 = 44;
+const CENTER_Y: u16 = 45;
+const DISTRIBUTE_Y: u16 = 46;
+const ALIGN_SELECTION: u16 = 47;
+const ALIGN_PAGE: u16 = 48;
 const HELP: u16 = 31;
 const COPY: u16 = 32;
 const PASTE: u16 = 33;
@@ -210,6 +217,7 @@ struct App {
     line_color: u32,
     rounded_lines: bool,
     corner_radius: f64,
+    layout_reference: layout::Reference,
     pending_connector: Option<(u64, Id)>,
     hover_node: Option<Id>,
     hover_port: Option<Endpoint>,
@@ -375,6 +383,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_INITMENUPOPUP => {
             with(|a| a.update_menu(HMENU(wp.0 as *mut _)));
+            LRESULT(0)
+        }
+        WM_CONTEXTMENU => {
+            arrange::context_menu(hwnd, point(lp));
             LRESULT(0)
         }
         WM_COMMAND => {
@@ -677,6 +689,7 @@ impl App {
                 line_color: 0x345782,
                 rounded_lines: false,
                 corner_radius: 12.,
+                layout_reference: layout::Reference::Selection,
                 pending_connector: None,
                 hover_node: None,
                 hover_port: None,
@@ -1501,6 +1514,21 @@ impl App {
             }
             Tool::Select => {
                 let doc = &self.tabs[self.tab].doc;
+                // A visible resize handle takes precedence over ports and objects
+                // behind it, including the selected object's corner ports.
+                if let [id] = self.tabs[self.tab].selected.as_slice()
+                    && doc.node(*id).is_some_and(|n| {
+                        !n.locked
+                            && Point::new(n.rect.x + n.rect.w, n.rect.y + n.rect.h).distance(q)
+                                < 6. / self.tabs[self.tab].zoom
+                    })
+                {
+                    self.drag = Some(Drag::Resize {
+                        before: doc.clone(),
+                        id: *id,
+                    });
+                    return;
+                }
                 if let Some((id, index)) = doc
                     .connectors
                     .iter()
@@ -1554,30 +1582,32 @@ impl App {
                 let hit = geometry::hit(&self.tabs[self.tab].doc, q, 6. / self.tabs[self.tab].zoom);
                 let tab = self.current();
                 if let Some(id) = hit {
+                    let unit = if key(VK_CONTROL) {
+                        vec![id]
+                    } else {
+                        tab.doc.expanded_selection(&[id])
+                    };
                     if key(VK_SHIFT) {
-                        if tab.selected.contains(&id) {
-                            tab.selected.retain(|v| *v != id);
+                        if unit.iter().all(|id| tab.selected.contains(id)) {
+                            let ids: std::collections::HashSet<_> = unit.into_iter().collect();
+                            tab.selected.retain(|id| !ids.contains(id));
                         } else {
-                            tab.selected.push(id);
+                            let mut ids: std::collections::HashSet<_> =
+                                tab.selected.iter().copied().collect();
+                            tab.selected
+                                .extend(unit.into_iter().filter(|id| ids.insert(*id)));
                         }
                     } else if !tab.selected.contains(&id) {
-                        tab.selected = vec![id];
+                        tab.selected = unit;
                     }
-                    if !key(VK_CONTROL)
-                        && let Some(group) = tab.doc.node(id).and_then(|n| n.group)
-                    {
-                        tab.selected = tab
-                            .doc
-                            .nodes
-                            .iter()
-                            .filter(|n| n.group == Some(group))
-                            .map(|n| n.id)
-                            .collect();
+                    if !key(VK_CONTROL) {
+                        tab.selected = tab.doc.expanded_selection(&tab.selected);
                     }
-                    let resize = tab.doc.node(id).is_some_and(|n| {
-                        Point::new(n.rect.x + n.rect.w, n.rect.y + n.rect.h).distance(q)
-                            < 12. / tab.zoom
-                    });
+                    let resize = tab.selected.len() == 1
+                        && tab.doc.node(id).is_some_and(|n| {
+                            Point::new(n.rect.x + n.rect.w, n.rect.y + n.rect.h).distance(q)
+                                < 12. / tab.zoom
+                        });
                     self.drag = Some(if resize {
                         Drag::Resize {
                             before: self.tabs[self.tab].doc.clone(),
@@ -1734,6 +1764,7 @@ impl App {
                             tab.selected.push(n.id);
                         }
                     }
+                    tab.selected = tab.doc.expanded_selection(&tab.selected);
                 }
                 Drag::Connect {
                     start,
@@ -1815,19 +1846,7 @@ fn menu() -> Result<HMENU> {
                     (SELECT_ALL, "すべて選択\tCtrl+A"),
                 ],
             ),
-            (
-                "配置",
-                vec![
-                    (GROUP, "グループ化"),
-                    (UNGROUP, "グループ解除"),
-                    (FRONT, "最前面"),
-                    (BACK, "最背面"),
-                    (ALIGN_LEFT, "左端を揃える"),
-                    (ALIGN_TOP, "上端を揃える"),
-                    (CENTER_X, "中央を揃える"),
-                    (DISTRIBUTE, "横に等間隔"),
-                ],
-            ),
+            ("配置", arrange::ITEMS.to_vec()),
             (
                 "表示・接続",
                 vec![
@@ -1889,6 +1908,13 @@ fn shortcut(hwnd: HWND, k: u16) -> bool {
             0x43 => COPY,
             0x56 => PASTE,
             0x58 => CUT,
+            0x47 => {
+                if shift {
+                    UNGROUP
+                } else {
+                    GROUP
+                }
+            }
             _ => 0,
         }
     } else {
@@ -1944,6 +1970,9 @@ fn command(hwnd: HWND, id: u16) {
         return;
     }
     if !with(|a| a.apply_properties()).unwrap_or(true) {
+        return;
+    }
+    if arrange::handle(hwnd, id) {
         return;
     }
     if features::handle(hwnd, id) {
@@ -2157,21 +2186,6 @@ fn command(hwnd: HWND, id: u16) {
                 GRID => tab.doc.show_grid = !tab.doc.show_grid,
                 SNAP => tab.doc.snap = !tab.doc.snap,
                 JUMPS => tab.doc.jumps = !tab.doc.jumps,
-                GROUP => {
-                    let group = tab.doc.id();
-                    for n in &mut tab.doc.nodes {
-                        if tab.selected.contains(&n.id) {
-                            n.group = Some(group);
-                        }
-                    }
-                }
-                UNGROUP => {
-                    for n in &mut tab.doc.nodes {
-                        if tab.selected.contains(&n.id) {
-                            n.group = None;
-                        }
-                    }
-                }
                 FRONT | BACK => {
                     let selected = tab.selected.clone();
                     tab.doc.nodes.sort_by_key(|n| {
@@ -2188,41 +2202,6 @@ fn command(hwnd: HWND, id: u16) {
                             !selected.contains(&c.id)
                         }
                     });
-                }
-                ALIGN_LEFT | ALIGN_TOP | CENTER_X | DISTRIBUTE => {
-                    let mut nodes: Vec<_> = tab
-                        .doc
-                        .nodes
-                        .iter_mut()
-                        .filter(|n| tab.selected.contains(&n.id))
-                        .collect();
-                    if !nodes.is_empty() {
-                        let left = nodes.iter().map(|n| n.rect.x).fold(f64::INFINITY, f64::min);
-                        let top = nodes.iter().map(|n| n.rect.y).fold(f64::INFINITY, f64::min);
-                        let right = nodes
-                            .iter()
-                            .map(|n| n.rect.x + n.rect.w)
-                            .fold(f64::NEG_INFINITY, f64::max);
-                        if id == DISTRIBUTE && nodes.len() > 2 {
-                            nodes.sort_by(|a, b| a.rect.x.total_cmp(&b.rect.x));
-                            let total: f64 = nodes.iter().map(|n| n.rect.w).sum();
-                            let gap = (right - left - total) / (nodes.len() - 1) as f64;
-                            let mut x = left;
-                            for n in nodes {
-                                n.rect.x = x;
-                                x += n.rect.w + gap;
-                            }
-                        } else {
-                            for n in nodes {
-                                match id {
-                                    ALIGN_LEFT => n.rect.x = left,
-                                    ALIGN_TOP => n.rect.y = top,
-                                    CENTER_X => n.rect.x = (left + right - n.rect.w) / 2.,
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
                 }
                 40..=42 => {
                     for c in &mut tab.doc.connectors {
@@ -2573,6 +2552,22 @@ mod tests {
             .unwrap();
             let window = TestWindow(hwnd);
             let mut app = App::new(hwnd, Document::default(), None).unwrap();
+            // The canvas coordinates below require the same logical window size
+            // on high-DPI CI desktops as on a 96-DPI desktop.
+            SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                (1200. * app.dpi) as i32,
+                (850. * app.dpi) as i32,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .unwrap();
+            let mut client = RECT::default();
+            GetClientRect(hwnd, &mut client).unwrap();
+            app.width = client.right;
+            app.height = client.bottom;
             app.create_controls().unwrap();
             app.layout();
             app.refresh_tabs();
@@ -3181,6 +3176,120 @@ mod tests {
             assert!(shortcut(hwnd, VK_ESCAPE.0));
             drop(shift);
             assert_eq!(with(|a| a.tabs[0].doc.connectors.len()).unwrap(), count);
+            // Group-aware selection, menu state, both alignment references and Undo.
+            let original_tab = with(|a| {
+                let old = a.tab;
+                let mut d = Document::default();
+                for p in [
+                    Point::new(40., 40.),
+                    Point::new(240., 120.),
+                    Point::new(440., 220.),
+                ] {
+                    d.add_node(Shape::Rectangle, p, None);
+                    let n = d.nodes.last_mut().unwrap();
+                    n.rect.w = 100.;
+                    n.rect.h = 60.;
+                }
+                d.connect(
+                    Endpoint::Attached {
+                        node: d.nodes[0].id,
+                        side: 1,
+                    },
+                    Endpoint::Attached {
+                        node: d.nodes[1].id,
+                        side: 3,
+                    },
+                    true,
+                );
+                a.tabs.push(Tab::new(d, None));
+                a.tab = a.tabs.len() - 1;
+                a.tabs[a.tab].selected =
+                    vec![a.tabs[a.tab].doc.nodes[0].id, a.tabs[a.tab].doc.nodes[1].id];
+                a.properties();
+                a.refresh_tabs();
+                a.invalidate();
+                old
+            })
+            .unwrap();
+            let mut keys = [0; 256];
+            GetKeyboardState(&mut keys).unwrap();
+            let restore = ShiftGuard(keys);
+            keys[VK_CONTROL.0 as usize] |= 0x80;
+            SetKeyboardState(&keys).unwrap();
+            assert!(shortcut(hwnd, 0x47));
+            drop(restore);
+            with(|a| {
+                let t = &a.tabs[a.tab];
+                assert_eq!(t.selected.len(), 3);
+                assert_eq!(t.doc.nodes[0].group, t.doc.connectors[0].group);
+            });
+            with(|a| a.tabs[a.tab].selected.clear());
+            mouse(hwnd, WM_LBUTTONDOWN, screen(Point::new(80., 70.)));
+            mouse(hwnd, WM_LBUTTONUP, screen(Point::new(80., 70.)));
+            assert_eq!(with(|a| a.tabs[a.tab].selected.len()).unwrap(), 3);
+            let shift = ShiftGuard::press();
+            mouse(hwnd, WM_LBUTTONDOWN, screen(Point::new(480., 250.)));
+            mouse(hwnd, WM_LBUTTONUP, screen(Point::new(480., 250.)));
+            drop(shift);
+            assert_eq!(with(|a| a.tabs[a.tab].selected.len()).unwrap(), 4);
+            command(hwnd, ALIGN_BOTTOM);
+            with(|a| {
+                let d = &a.tabs[a.tab].doc;
+                assert_eq!(d.nodes[1].rect.y - d.nodes[0].rect.y, 80.);
+                assert_eq!(
+                    d.nodes[1].rect.y + d.nodes[1].rect.h,
+                    d.nodes[2].rect.y + d.nodes[2].rect.h
+                );
+                let bytes = format::encode(d).unwrap();
+                assert_eq!(format::decode(&bytes).unwrap(), *d);
+                let id = d.nodes[0].id;
+                a.tabs[a.tab].selected = d.expanded_selection(&[id]);
+            });
+            command(hwnd, ALIGN_PAGE);
+            command(hwnd, CENTER_X);
+            with(|a| {
+                let t = &a.tabs[a.tab];
+                let units = t.doc.layout_units(&t.selected);
+                assert_eq!(units[0].bounds.center().x, t.doc.page_bounds().w / 2.);
+                let menu = CreatePopupMenu().unwrap();
+                for &(id, label) in arrange::ITEMS {
+                    AppendMenuW(menu, MF_STRING, id as usize, &HSTRING::from(label)).unwrap();
+                }
+                a.update_menu(menu);
+                assert_ne!(
+                    GetMenuState(menu, DISTRIBUTE as u32, MF_BYCOMMAND) & MF_GRAYED.0,
+                    0
+                );
+                assert_eq!(
+                    GetMenuState(menu, CENTER_X as u32, MF_BYCOMMAND) & MF_GRAYED.0,
+                    0
+                );
+                DestroyMenu(menu).unwrap();
+            });
+            command(hwnd, UNGROUP);
+            with(|a| {
+                let t = &mut a.tabs[a.tab];
+                assert!(t.doc.nodes.iter().all(|n| n.group.is_none()));
+                assert!(t.doc.connectors[0].group.is_none());
+                t.selected = t.doc.nodes.iter().map(|n| n.id).collect();
+            });
+            command(hwnd, DISTRIBUTE);
+            let arranged = with(|a| a.tabs[a.tab].doc.clone()).unwrap();
+            let r: Vec<_> = arranged.nodes.iter().map(|n| n.rect).collect();
+            let mut xs = r.clone();
+            xs.sort_by(|a, b| a.x.total_cmp(&b.x));
+            assert!((xs[1].x - xs[0].x - xs[0].w - (xs[2].x - xs[1].x - xs[1].w)).abs() < 1e-8);
+            command(hwnd, UNDO);
+            command(hwnd, REDO);
+            assert_eq!(with(|a| a.tabs[a.tab].doc.clone()).unwrap(), arranged);
+            with(|a| {
+                a.tabs.pop();
+                a.tab = original_tab;
+                a.layout_reference = layout::Reference::Selection;
+                a.properties();
+                a.refresh_tabs();
+                a.invalidate();
+            });
             // A save snapshot must not clear edits made while its worker is running.
             assert!(save_current(hwnd, false));
             with(|a| {

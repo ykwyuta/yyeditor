@@ -365,30 +365,79 @@ fn selection_svg(doc: &Document, options: &Export) -> String {
         "<svg xmlns='http://www.w3.org/2000/svg' width='{}' height='{}' viewBox='{} {} {} {}'>",
         r.w, r.h, r.x, r.y, r.w, r.h
     );
+    s.push_str(&selection_elements(doc, &options.selected, options.bounds));
+    s.push_str("</svg>");
+    s
+}
+fn selection_elements(doc: &Document, ids: &[Id], clip: Rect) -> String {
+    let mut s = String::new();
+    let selected: HashSet<_> = ids.iter().copied().collect();
+    let mut groups = std::collections::HashMap::<Id, (usize, usize)>::new();
+    for (id, group) in doc
+        .nodes
+        .iter()
+        .map(|n| (n.id, n.group))
+        .chain(doc.connectors.iter().map(|c| (c.id, c.group)))
+    {
+        if let Some(group) = group {
+            let count = groups.entry(group).or_default();
+            count.0 += 1;
+            count.1 += usize::from(selected.contains(&id));
+        }
+    }
+    let complete: HashSet<_> = groups
+        .into_iter()
+        .filter_map(|(g, (all, count))| (all == count && count > 1).then_some(g))
+        .collect();
+    if !complete.is_empty() {
+        for u in doc
+            .layout_units(ids)
+            .into_iter()
+            .filter(|u| u.group.is_some_and(|g| complete.contains(&g)))
+        {
+            let b = u.bounds.expand(5.);
+            if !router::overlap(b, clip) {
+                continue;
+            }
+            s.push_str(&format!("<rect x='{}' y='{}' width='{}' height='{}' fill='none' stroke='#3974d7' stroke-width='1.5' stroke-dasharray='6 3'/>",b.x,b.y,b.w,b.h));
+        }
+    }
     for n in doc
         .nodes
         .iter()
-        .filter(|n| options.selected.contains(&n.id))
+        .filter(|n| selected.contains(&n.id) && router::overlap(n.rect.expand(6.), clip))
     {
         let b = n.rect.expand(3.);
-        s.push_str(&format!("<rect x='{}' y='{}' width='{}' height='{}' fill='none' stroke='#3974d7' stroke-dasharray='4 3'/><rect x='{}' y='{}' width='7' height='7' fill='white' stroke='#3974d7'/>",b.x,b.y,b.w,b.h,n.rect.x+n.rect.w-3.5,n.rect.y+n.rect.h-3.5));
+        s.push_str(&format!("<rect x='{}' y='{}' width='{}' height='{}' fill='none' stroke='#3974d7' stroke-dasharray='4 3'/>",b.x,b.y,b.w,b.h));
+        if !n.group.is_some_and(|g| complete.contains(&g)) {
+            s.push_str(&format!(
+                "<rect x='{}' y='{}' width='7' height='7' fill='white' stroke='#3974d7'/>",
+                n.rect.x + n.rect.w - 3.5,
+                n.rect.y + n.rect.h - 3.5
+            ));
+        }
     }
-    for c in doc
-        .connectors
-        .iter()
-        .filter(|c| options.selected.contains(&c.id))
-    {
-        for p in [doc.endpoint(c.start), doc.endpoint(c.end)]
+    let nodes: std::collections::HashMap<_, _> = doc.nodes.iter().map(|n| (n.id, n)).collect();
+    let endpoint = |e| match e {
+        Endpoint::Free(p) => p,
+        Endpoint::Attached { node, side } => nodes
+            .get(&node)
+            .map_or(Point::default(), |n| ports::point(n, side)),
+    };
+    for c in doc.connectors.iter().filter(|c| selected.contains(&c.id)) {
+        for p in [endpoint(c.start), endpoint(c.end)]
             .into_iter()
             .chain(c.waypoints.iter().copied())
         {
+            if !clip.expand(5.).contains(p) {
+                continue;
+            }
             s.push_str(&format!(
                 "<circle cx='{}' cy='{}' r='4' fill='white' stroke='#3974d7'/>",
                 p.x, p.y
             ));
         }
     }
-    s.push_str("</svg>");
     s
 }
 fn check_size(w: u32, h: u32) -> Result<()> {
@@ -508,14 +557,6 @@ pub fn scene(doc: &Document, options: &Export) -> String {
                 0x243044,
             );
         }
-        if options.selected.contains(&c.id) {
-            for p in points {
-                s.push_str(&format!(
-                    "<circle cx='{}' cy='{}' r='4' fill='#fff' stroke='#3974d7'/>",
-                    p.x, p.y
-                ));
-            }
-        }
         s.push_str("</g>");
     }
     for n in &doc.nodes {
@@ -566,10 +607,9 @@ pub fn scene(doc: &Document, options: &Export) -> String {
             &n.label,
             0x243044,
         );
-        if options.selected.contains(&n.id) {
-            let e = r.expand(3.);
-            s.push_str(&format!("<rect x='{}' y='{}' width='{}' height='{}' fill='none' stroke='#3974d7' stroke-width='1' stroke-dasharray='4 3'/><rect x='{}' y='{}' width='7' height='7' fill='white' stroke='#3974d7'/>",e.x,e.y,e.w,e.h,r.x+r.w-3.5,r.y+r.h-3.5));
-        }
+    }
+    if !options.selected.is_empty() {
+        s.push_str(&selection_elements(doc, &options.selected, options.bounds));
     }
     s.push_str("</svg>");
     s

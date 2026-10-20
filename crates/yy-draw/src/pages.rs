@@ -129,6 +129,9 @@ impl Document {
         for c in &source.connectors {
             let mut c = c.clone();
             c.id = self.id();
+            if let Some(group) = c.group {
+                c.group = Some(*groups.entry(group).or_insert_with(|| self.id()));
+            }
             for e in [&mut c.start, &mut c.end] {
                 *e = match *e {
                     Endpoint::Attached { node, side } => map.get(&node).map_or_else(
@@ -236,6 +239,11 @@ impl Document {
             .iter()
             .chain(self.pages.iter().flat_map(|p| &p.nodes))
             .any(|n| n.group.is_some_and(|id| all.contains(&id)))
+            || self
+                .connectors
+                .iter()
+                .chain(self.pages.iter().flat_map(|p| &p.connectors))
+                .any(|c| c.group.is_some_and(|id| all.contains(&id)))
         {
             return Err("グループの ID が他の要素と重複しています".into());
         }

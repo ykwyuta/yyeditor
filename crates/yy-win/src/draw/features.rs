@@ -113,6 +113,11 @@ impl App {
                 (GRID, doc.show_grid),
                 (SNAP, doc.snap),
                 (JUMPS, doc.jumps),
+                (
+                    ALIGN_SELECTION,
+                    self.layout_reference == layout::Reference::Selection,
+                ),
+                (ALIGN_PAGE, self.layout_reference == layout::Reference::Page),
                 (60, self.export_scope == 60),
                 (61, self.export_scope == 61),
                 (62, self.export_scope == 62),
@@ -124,6 +129,102 @@ impl App {
                     menu,
                     u32::from(id),
                     (MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED }).0,
+                );
+            }
+            let units = doc
+                .layout_units(&self.tabs[self.tab].selected)
+                .iter()
+                .filter(|u| !u.locked)
+                .count();
+            let selection = &self.tabs[self.tab].selected;
+            let grouped = doc
+                .nodes
+                .iter()
+                .any(|n| selection.contains(&n.id) && n.group.is_some())
+                || doc
+                    .connectors
+                    .iter()
+                    .any(|c| selection.contains(&c.id) && c.group.is_some());
+            for (id, enabled) in [
+                (GROUP, selection.len() >= 2),
+                (UNGROUP, grouped),
+                (
+                    ALIGN_LEFT,
+                    units
+                        >= if self.layout_reference == layout::Reference::Page {
+                            1
+                        } else {
+                            2
+                        },
+                ),
+                (
+                    CENTER_X,
+                    units
+                        >= if self.layout_reference == layout::Reference::Page {
+                            1
+                        } else {
+                            2
+                        },
+                ),
+                (
+                    ALIGN_RIGHT,
+                    units
+                        >= if self.layout_reference == layout::Reference::Page {
+                            1
+                        } else {
+                            2
+                        },
+                ),
+                (
+                    ALIGN_TOP,
+                    units
+                        >= if self.layout_reference == layout::Reference::Page {
+                            1
+                        } else {
+                            2
+                        },
+                ),
+                (
+                    CENTER_Y,
+                    units
+                        >= if self.layout_reference == layout::Reference::Page {
+                            1
+                        } else {
+                            2
+                        },
+                ),
+                (
+                    ALIGN_BOTTOM,
+                    units
+                        >= if self.layout_reference == layout::Reference::Page {
+                            1
+                        } else {
+                            2
+                        },
+                ),
+                (
+                    DISTRIBUTE,
+                    units
+                        >= if self.layout_reference == layout::Reference::Page {
+                            2
+                        } else {
+                            3
+                        },
+                ),
+                (
+                    DISTRIBUTE_Y,
+                    units
+                        >= if self.layout_reference == layout::Reference::Page {
+                            2
+                        } else {
+                            3
+                        },
+                ),
+            ] {
+                let _ = EnableMenuItem(
+                    menu,
+                    id as u32,
+                    MF_BYCOMMAND | if enabled { MF_ENABLED } else { MF_GRAYED },
                 );
             }
             let _ = EnableMenuItem(

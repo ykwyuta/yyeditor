@@ -47,9 +47,23 @@ pub fn encode(doc: &Document) -> Result<Vec<u8>> {
             data: postcard::to_allocvec(&corners).map_err(|e| e.to_string())?,
         });
     }
+    let groups: Vec<_> = doc
+        .connectors
+        .iter()
+        .chain(doc.pages.iter().flat_map(|p| &p.connectors))
+        .filter_map(|c| c.group.map(|group| (c.id, group)))
+        .collect();
+    if !groups.is_empty() {
+        chunks.push(Chunk {
+            kind: *b"GRPS",
+            flags: 1,
+            id: 0,
+            data: postcard::to_allocvec(&groups).map_err(|e| e.to_string())?,
+        });
+    }
     for chunk in &doc.extra_chunks {
         if chunk.flags & 1 != 0
-            || (chunk.id == 0 && matches!(&chunk.kind, b"DOCS" | b"ASTS" | b"CRNR"))
+            || (chunk.id == 0 && matches!(&chunk.kind, b"DOCS" | b"ASTS" | b"CRNR" | b"GRPS"))
         {
             return Err("未知の必須チャンクは保存できません".into());
         }
@@ -95,7 +109,9 @@ pub fn encode(doc: &Document) -> Result<Vec<u8>> {
                 .iter()
                 .any(|e| matches!(e,Endpoint::Attached{side,..} if *side>=4))
         });
-    let minor: u16 = if !corners.is_empty() {
+    let minor: u16 = if !groups.is_empty() {
+        4
+    } else if !corners.is_empty() {
         3
     } else if extended {
         2
@@ -112,7 +128,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document> {
     if bytes.len() < 52 || &bytes[..8] != MAGIC {
         return Err("yydraw 形式ではありません".into());
     }
-    if bytes[8..10] != [1, 0] || u16::from_le_bytes(bytes[10..12].try_into().unwrap()) > 3 {
+    if bytes[8..10] != [1, 0] || u16::from_le_bytes(bytes[10..12].try_into().unwrap()) > 4 {
         return Err("未対応のファイル版です".into());
     }
     let len = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
@@ -143,6 +159,7 @@ fn decode_chunks(body: &[u8]) -> Result<Document> {
     let mut doc = None;
     let mut assets = None;
     let mut corners = Vec::<(Id, f64)>::new();
+    let mut groups = Vec::<(Id, Id)>::new();
     let mut extras = vec![];
     let mut ranges = vec![];
     let mut ids = std::collections::HashSet::new();
@@ -170,6 +187,9 @@ fn decode_chunks(body: &[u8]) -> Result<Document> {
             }
             (b"CRNR", 0) => {
                 corners = postcard::from_bytes(data).map_err(|e| e.to_string())?;
+            }
+            (b"GRPS", 0) => {
+                groups = postcard::from_bytes(data).map_err(|e| e.to_string())?;
             }
             _ => {
                 if flags & 1 != 0 {
@@ -212,6 +232,22 @@ fn decode_chunks(body: &[u8]) -> Result<Document> {
     }
     if !styles.is_empty() {
         return Err("角の設定に対応する接続線がありません".into());
+    }
+    let mut group_map = std::collections::HashMap::new();
+    for (id, group) in groups {
+        if group_map.insert(id, group).is_some() {
+            return Err("グループの保存情報が重複しています".into());
+        }
+    }
+    for c in doc
+        .connectors
+        .iter_mut()
+        .chain(doc.pages.iter_mut().flat_map(|p| &mut p.connectors))
+    {
+        c.group = group_map.remove(&c.id);
+    }
+    if !group_map.is_empty() {
+        return Err("グループ情報に対応する接続線がありません".into());
     }
     Ok(doc)
 }
