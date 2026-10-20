@@ -39,11 +39,10 @@ pub fn png_dib(png: &[u8]) -> Result<Vec<u8>> {
     for px in image.data().chunks_exact(4) {
         let a = u32::from(px[3]);
         let straight = |v: u8| {
-            if a == 0 {
-                0
-            } else {
-                ((u32::from(v) * 255 + a / 2) / a).min(255) as u8
-            }
+            (u32::from(v) * 255 + a / 2)
+                .checked_div(a)
+                .unwrap_or(0)
+                .min(255) as u8
         };
         data.extend_from_slice(&[straight(px[2]), straight(px[1]), straight(px[0]), px[3]]);
     }
