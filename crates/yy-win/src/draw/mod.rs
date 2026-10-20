@@ -2552,15 +2552,15 @@ mod tests {
             .unwrap();
             let window = TestWindow(hwnd);
             let mut app = App::new(hwnd, Document::default(), None).unwrap();
-            // The canvas coordinates below require the same logical window size
-            // on high-DPI CI desktops as on a 96-DPI desktop.
+            // Exercise the canvas on a 1024 x 768 logical desktop as well as
+            // on high-DPI desktops, without requiring a larger CI monitor.
             SetWindowPos(
                 hwnd,
                 None,
                 0,
                 0,
-                (1200. * app.dpi) as i32,
-                (850. * app.dpi) as i32,
+                (1024. * app.dpi) as i32,
+                (768. * app.dpi) as i32,
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             )
             .unwrap();
@@ -2871,25 +2871,25 @@ mod tests {
             let count = with(|a| a.tabs[0].doc.nodes.len()).unwrap();
             mouse(palette, WM_LBUTTONDOWN, Point::new(16., 20.));
             assert!(with(|a| a.palette_state.drag.is_some()).unwrap());
-            mouse(hwnd, WM_MOUSEMOVE, screen(Point::new(440., 40.)));
+            mouse(hwnd, WM_MOUSEMOVE, screen(Point::new(320., 40.)));
             assert!(with(|a| a.palette_state.drag.as_ref().unwrap().active).unwrap());
             with(|a| a.paint().unwrap());
-            mouse(hwnd, WM_LBUTTONUP, screen(Point::new(440., 40.)));
+            mouse(hwnd, WM_LBUTTONUP, screen(Point::new(320., 40.)));
             assert_eq!(with(|a| a.tabs[0].doc.nodes.len()).unwrap(), count + 1);
             command(hwnd, UNDO);
             with(|a| {
                 SendMessageW(a.palette, LB_SETCURSEL, Some(WPARAM(0)), None);
                 a.choose_palette();
             });
-            mouse(hwnd, WM_LBUTTONDOWN, screen(Point::new(440., 40.)));
-            mouse(hwnd, WM_LBUTTONUP, screen(Point::new(440., 40.)));
+            mouse(hwnd, WM_LBUTTONDOWN, screen(Point::new(320., 40.)));
+            mouse(hwnd, WM_LBUTTONUP, screen(Point::new(320., 40.)));
             assert_eq!(
                 with(|a| a.tabs[0].doc.nodes.last().unwrap().shape).unwrap(),
                 Shape::Icon
             );
             // The moving layer is prepared once, then the same GPU texture follows
             // pointer motion without a new full-scene worker for every mouse event.
-            mouse(hwnd, WM_LBUTTONDOWN, screen(Point::new(480., 60.)));
+            mouse(hwnd, WM_LBUTTONDOWN, screen(Point::new(360., 60.)));
             with(|a| a.paint().unwrap());
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             loop {
@@ -2910,7 +2910,7 @@ mod tests {
                 mouse(
                     hwnd,
                     WM_MOUSEMOVE,
-                    screen(Point::new(480. + i as f64 * 2., 60. + i as f64)),
+                    screen(Point::new(360. + i as f64 * 2., 60. + i as f64)),
                 );
                 with(|a| a.paint().unwrap());
             }
@@ -2932,7 +2932,20 @@ mod tests {
                 )
             })
             .unwrap();
-            mouse(hwnd, WM_LBUTTONDOWN, screen(corner));
+            let click = screen(corner);
+            with(|a| {
+                let (l, t, w, h) = a.viewport();
+                assert!(
+                    click.x >= l as f64
+                        && click.x < (l as u32 + w) as f64
+                        && click.y >= t as f64
+                        && click.y < (t as u32 + h) as f64,
+                    "resize handle {click:?} outside viewport {:?}, dpi {}, corner {corner:?}",
+                    a.viewport(),
+                    a.dpi,
+                );
+            });
+            mouse(hwnd, WM_LBUTTONDOWN, click);
             assert!(with(|a| matches!(a.drag, Some(Drag::Resize { .. }))).unwrap());
             for offset in [Point::new(32., 16.), Point::new(16., 32.)] {
                 mouse(
