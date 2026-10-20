@@ -39,6 +39,10 @@ pub fn all() -> &'static [Entry] {
             serde_json::from_str::<Vec<Entry>>(include_str!("../assets/business-icons.json"))
                 .expect("bundled business/IT catalog JSON"),
         );
+        entries.extend(
+            serde_json::from_str::<Vec<Entry>>(include_str!("../assets/friendly-icons.json"))
+                .expect("bundled friendly illustration catalog JSON"),
+        );
         entries
     })
 }

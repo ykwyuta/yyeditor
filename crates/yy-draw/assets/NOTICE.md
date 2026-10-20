@@ -32,11 +32,14 @@ Rebuild with python tools/cloud-icons/fetch.py. Original archives remain in targ
 and are not needed at runtime. Only placed artwork is embedded in user documents.
 Additional packs may be imported locally by the user.
 
-## Original business/IT icons
+## Original business/IT and friendly illustration icons
 
-`business-icons.json` is original yydraw artwork, licensed GPL-3.0-or-later with
-the repository. Its 376 icons illustrate business and IT concepts. Product-named
-icons are original concept illustrations, not official product or provider logos.
-They are independent of the third-party cloud catalog above. Rebuild with
-`python tools/business-icons/generate.py`; the categorized inventory and search
-terms are in `docs/yydraw-business-icons.md`.
+`business-icons.json` (376 icons) and `friendly-icons.json` (220 icons) are
+original yydraw artwork, licensed GPL-3.0-or-later with the repository. They
+illustrate business/IT concepts and approachable everyday/presentation scenes.
+Product-named icons are original concept illustrations, not official product or
+provider logos. They are independent of the third-party cloud catalog above.
+Rebuild with `python tools/business-icons/generate.py` and
+`python tools/friendly-icons/generate.py`; the categorized inventories and
+search terms are in `docs/yydraw-business-icons.md` and
+`docs/yydraw-friendly-icons.md`.

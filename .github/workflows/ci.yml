@@ -70,7 +70,9 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: business icon catalog
-        run: python tools/business-icons/generate.py --check
+        run: |
+          python tools/business-icons/generate.py --check
+          python tools/friendly-icons/generate.py --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: WebView2 runtime
@@ -110,6 +112,7 @@ jobs:
           Copy-Item crates/yy-draw/assets/NOTICE.md dist/yydraw-cloud-icons-NOTICE.md
           Copy-Item crates/yy-draw/assets/catalog-sources.json dist/yydraw-cloud-icons-sources.json
           Copy-Item docs/yydraw-business-icons.md dist/yydraw-business-icons.md
+          Copy-Item docs/yydraw-friendly-icons.md dist/yydraw-friendly-icons.md
           # エージェントは x86_64 と aarch64 の両方を入れる
           foreach ($a in 'x86_64', 'aarch64') {
             if (-not (Test-Path "dist/agents/yy-agent-$a-linux")) { throw "yy-agent-$a-linux がありません" }

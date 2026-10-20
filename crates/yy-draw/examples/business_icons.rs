@@ -13,6 +13,10 @@ fn main() {
         .map(|v| v.parse().unwrap())
         .unwrap_or(0);
     let category_prefix = std::env::args().nth(3).unwrap_or_default();
+    let (vendor, category_prefix) = category_prefix
+        .strip_prefix("イラスト")
+        .map(|rest| ("イラスト", rest.trim_start_matches(['/', ' '])))
+        .unwrap_or(("業務・IT", category_prefix.as_str()));
     let mut doc = Document {
         font_size: 11.,
         ..Default::default()
@@ -22,9 +26,9 @@ fn main() {
         .iter()
         .enumerate()
         .filter(|(_, e)| {
-            e.vendor == "業務・IT"
+            e.vendor == vendor
                 && category_prefix.strip_suffix('+').map_or_else(
-                    || e.category.starts_with(&category_prefix),
+                    || e.category.starts_with(category_prefix),
                     |minimum| e.category.as_str() >= minimum,
                 )
         })

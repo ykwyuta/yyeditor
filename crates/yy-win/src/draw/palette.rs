@@ -116,7 +116,13 @@ impl App {
             .chain(
                 categories
                     .iter()
-                    .filter(|s| !s.starts_with("業務・IT / "))
+                    .filter(|s| s.starts_with("イラスト / "))
+                    .cloned(),
+            )
+            .chain(
+                categories
+                    .iter()
+                    .filter(|s| !s.starts_with("業務・IT / ") && !s.starts_with("イラスト / "))
                     .cloned(),
             )
             .collect();

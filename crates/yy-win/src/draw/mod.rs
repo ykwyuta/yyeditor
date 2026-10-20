@@ -2858,20 +2858,40 @@ mod tests {
                 assert!(expected >= 3);
                 assert!(expected < 714);
             });
-            // Original business/IT icons appear before cloud categories and accept English search.
-            let (azure_index, business_index) = with(|a| {
+            // Original business/IT and friendly illustration icons appear before cloud categories.
+            let (azure_index, business_index, friendly_index) = with(|a| {
                 let categories = &a.palette_state.categories;
                 let business_start = 2 + yy_draw::shapes::CATEGORIES.len();
                 assert!(categories[business_start].starts_with("業務・IT / 01 "));
+                let friendly = categories
+                    .iter()
+                    .position(|c| c.starts_with("イラスト / 01 "))
+                    .unwrap();
+                let aws = categories
+                    .iter()
+                    .position(|c| c.starts_with("AWS / "))
+                    .unwrap();
+                assert!(friendly > business_start && friendly < aws);
                 let azure =
                     SendMessageW(a.palette_state.category, CB_GETCURSEL, None, None).0 as usize;
                 let business = categories
                     .iter()
                     .position(|c| c.starts_with("業務・IT / 03 "))
                     .unwrap();
-                (azure, business)
+                (azure, business, friendly)
             })
             .unwrap();
+            SetWindowTextW(filter, w!("")).unwrap();
+            SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(friendly_index)), None);
+            SendMessageW(
+                hwnd,
+                WM_COMMAND,
+                Some(WPARAM(
+                    palette::CATEGORY as usize | ((CBN_SELCHANGE as usize) << 16),
+                )),
+                None,
+            );
+            assert_eq!(with(|a| a.palette_tools.len()).unwrap(), 10);
             SetWindowTextW(filter, w!("")).unwrap();
             SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(business_index)), None);
             SendMessageW(
