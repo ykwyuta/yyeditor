@@ -7,6 +7,8 @@ Windows x64向けDBクライアントの初期実装です。提案全体の進�
 
 リポジトリ直下から実行します。既存yyシリーズとは別のCargoワークスペース・lockfileです。
 
+WindowsのビルドにはVisual Studio 2022のC++ビルドツールを使用します。固定しているDuckDB 1.4.1の同梱fmtは、Visual Studio 2026で削除された`stdext::checked_array_iterator`を使用するため、専用CIも`windows-2022`を指定しています。DuckDB側の[修正](https://github.com/duckdb/duckdb/pull/23261)を含む版への更新と検証後に、新しいツールチェーンへ移行します。
+
 ```powershell
 cargo build --manifest-path apps/yydbmanager/Cargo.toml --release -p yydbmanager --locked
 ./apps/yydbmanager/target/release/yydbmanager.exe

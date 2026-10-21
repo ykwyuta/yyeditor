@@ -36,7 +36,10 @@ env:
 jobs:
   windows:
     name: yydbmanager Windows
-    runs-on: windows-latest
+    # DuckDB 1.4.1 bundles fmt using stdext::checked_array_iterator, removed in
+    # VS 2026. Keep the supported VS 2022 toolchain until DuckDB is upgraded.
+    # Upstream fix: https://github.com/duckdb/duckdb/pull/23261
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +48,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "apps/yydbmanager -> target"
-          key: yydbmanager-windows
+          key: yydbmanager-windows-vs2022
       - name: Format
         run: cargo fmt --manifest-path apps/yydbmanager/Cargo.toml --all -- --check
       - name: Lint

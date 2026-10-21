@@ -146,13 +146,34 @@ fn unified_patch_applies_to_exact_bytes_with_git() {
     let out = run(&["diff", "left", "right", "--format", "unified"], dir);
     assert_eq!(out.status.code(), Some(1));
     fs::write(dir.join("change.patch"), out.stdout).unwrap();
-    // git apply chooses the right-hand name; place the original under that name.
-    fs::write(dir.join("right"), a).unwrap();
-    let status = Command::new("git")
-        .args(["apply", "--no-index", "change.patch"])
-        .current_dir(dir)
-        .status()
-        .expect("git required for integration test");
-    assert!(status.success());
-    assert_eq!(fs::read_to_string(dir.join("right")).unwrap(), b);
+    for autocrlf in ["true", "false", "input"] {
+        // Simulate host settings without modifying the user's Git configuration.
+        // Exact-byte patch verification must explicitly disable Git's EOL conversion.
+        // git apply chooses the right-hand name; put the original under that name.
+        fs::write(dir.join("right"), a).unwrap();
+        let status = Command::new("git")
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_0", "core.autocrlf")
+            .env("GIT_CONFIG_VALUE_0", autocrlf)
+            .env("GIT_CONFIG_KEY_1", "core.eol")
+            .env("GIT_CONFIG_VALUE_1", "crlf")
+            .args([
+                "-c",
+                "core.autocrlf=false",
+                "-c",
+                "core.eol=lf",
+                "apply",
+                "--no-index",
+                "change.patch",
+            ])
+            .current_dir(dir)
+            .status()
+            .expect("git required for integration test");
+        assert!(status.success(), "core.autocrlf={autocrlf}");
+        assert_eq!(
+            fs::read(dir.join("right")).unwrap(),
+            b.as_bytes(),
+            "core.autocrlf={autocrlf}"
+        );
+    }
 }
