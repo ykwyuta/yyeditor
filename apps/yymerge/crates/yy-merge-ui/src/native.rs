@@ -59,12 +59,19 @@ const PLAN_SAVE: u16 = 128;
 const PLAN_APPLY: u16 = 129;
 const PLAN_ROLLBACK: u16 = 130;
 const PLAN_RESUME: u16 = 131;
+const RULE_RESET: u16 = 132;
+const RULE_SPACE: u16 = 133;
+const RULE_TRAILING: u16 = 134;
+const RULE_CASE: u16 = 135;
+const RULE_EOL: u16 = 136;
 const HELP_MD: &str = include_str!("../../../help/help.md");
 const SS_LEFTNOWORDWRAP: u32 = 12;
 thread_local! {static APP:RefCell<Option<App>>=const{RefCell::new(None)};}
 struct Loaded {
     inputs: Vec<Snapshot>,
     diff: Diff,
+    rules: yy_merge_core::rules::Rules,
+    ignored: Vec<yy_merge_core::rules::IgnoredLine>,
     merged: Option<Merge>,
     comparison: Option<super::comparison::Prepared>,
     merge_comparison: Option<super::comparison::MergePrepared>,
@@ -214,7 +221,12 @@ fn load(g: &Gui, c: &Cancellation) -> Result<Loaded> {
         Snapshot::open(left, g.encoding.as_deref(), c)?,
         Snapshot::open(right, g.encoding.as_deref(), c)?,
     ];
-    let diff = yy_merge_core::compare(&inputs[0].text, &inputs[1].text, c)?;
+    let rules = g.rules.core();
+    if g.base.is_some() && rules.active() {
+        return Err("比較規則は2方向比較専用です。マージは厳密比較で行います。".into());
+    }
+    let compared = yy_merge_core::rules::compare(&inputs[0].text, &inputs[1].text, rules, c)?;
+    let diff = compared.diff;
     let merged = if let Some(base) = &g.base {
         inputs.push(Snapshot::open(base, g.encoding.as_deref(), c)?);
         if inputs
@@ -261,6 +273,8 @@ fn load(g: &Gui, c: &Cancellation) -> Result<Loaded> {
     Ok(Loaded {
         inputs,
         diff,
+        rules,
+        ignored: compared.ignored,
         merged,
         comparison,
         merge_comparison,
@@ -339,7 +353,16 @@ fn refresh(a: &mut App) {
         folders_view::refresh(a);
         return;
     }
-    text(a.hwnd, "yymerge — 比較 / マージ");
+    text(
+        a.hwnd,
+        if a.options.git_merge {
+            "yymerge — Gitマージ（LOCAL / REMOTE / BASE / MERGED）"
+        } else if a.options.git_diff {
+            "yymerge — Git差分（LOCAL / REMOTE）"
+        } else {
+            "yymerge — 比較 / マージ"
+        },
+    );
     unsafe {
         SendMessageW(a.list, LB_RESETCONTENT, None, None);
         SendMessageW(a.list, LB_SETHORIZONTALEXTENT, Some(WPARAM(0)), None);
@@ -381,8 +404,9 @@ fn refresh(a: &mut App) {
                         "4ペイン同期"
                     },
                     a.options
-                        .output
+                        .git_merged_target
                         .as_ref()
+                        .or(a.options.output.as_ref())
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "[結果を保存] で指定".into())
                 ),
@@ -404,16 +428,41 @@ fn refresh(a: &mut App) {
                     );
                 }
             }
-            let same = data.diff.edits.is_empty()
+            for ignored in &data.ignored {
+                let label = format!(
+                    "≈ 規則で無視  左 {} / 右 {}",
+                    ignored.left + 1,
+                    ignored.right + 1
+                );
+                unsafe {
+                    SendMessageW(
+                        a.list,
+                        LB_ADDSTRING,
+                        None,
+                        Some(LPARAM(HSTRING::from(label).as_ptr() as isize)),
+                    );
+                }
+            }
+            let same = a.options.git_left_missing == a.options.git_right_missing
+                && data.diff.edits.is_empty()
                 && data.inputs[0].encoding == data.inputs[1].encoding
                 && data.inputs[0].bom == data.inputs[1].bom;
+            let identical = data.inputs[0].text == data.inputs[1].text && same;
             a.exit = i32::from(!same);
             text(
                 a.status,
                 &format!(
-                    "{} | {} 差分 | 左右同期 | 左 {} / 右 {} | 改行・BOMも比較対象",
-                    if same { "一致" } else { "相違あり" },
+                    "{} | {} 差分 / ≈ 無視 {} 行対 | {} | 左 {} / 右 {} | 文字コード・BOMは厳密判定",
+                    if identical {
+                        "元データ一致"
+                    } else if same {
+                        "規則上は同値（元データは異なります）"
+                    } else {
+                        "相違あり"
+                    },
                     data.diff.edits.len(),
+                    data.ignored.len(),
+                    data.rules.label(),
                     data.inputs[0].encoding,
                     data.inputs[1].encoding
                 ),
@@ -421,14 +470,43 @@ fn refresh(a: &mut App) {
         }
         for (i, label) in a.labels.iter().enumerate() {
             let s = match i {
-                0 => format!("LEFT: {} [読取専用]", data.inputs[0].path.display()),
-                1 => format!("RIGHT: {} [読取専用]", data.inputs[1].path.display()),
+                0 if a.options.git_left_missing => "LOCAL（Git側に存在しません / 読取専用）".into(),
+                1 if a.options.git_right_missing => {
+                    "REMOTE（Git側に存在しません / 読取専用）".into()
+                }
+                0 => format!(
+                    "{}: {} [読取専用]",
+                    if a.options.git_diff {
+                        "LOCAL（変更前）"
+                    } else if a.options.git_merge {
+                        "LOCAL（自分側）"
+                    } else {
+                        "LEFT"
+                    },
+                    data.inputs[0].path.display()
+                ),
+                1 => format!(
+                    "{}: {} [読取専用]",
+                    if a.options.git_diff {
+                        "REMOTE（変更後）"
+                    } else if a.options.git_merge {
+                        "REMOTE（相手側）"
+                    } else {
+                        "RIGHT"
+                    },
+                    data.inputs[1].path.display()
+                ),
                 2 => data
                     .inputs
                     .get(2)
                     .map(|s| format!("BASE（共通祖先）: {}", s.path.display()))
                     .unwrap_or_default(),
-                _ => "RESULT: マージ結果 [編集可能 / Ctrl+Z で編集取消]".into(),
+                _ => if a.options.git_merge {
+                    "MERGED: マージ結果 [保存して閉じるとGitへ反映]"
+                } else {
+                    "RESULT: マージ結果 [編集可能 / Ctrl+Z で編集取消]"
+                }
+                .into(),
             };
             text(*label, &s);
         }
@@ -436,6 +514,7 @@ fn refresh(a: &mut App) {
     unsafe {
         SendMessageW(a.list, LB_SETCURSEL, Some(WPARAM(a.selected)), None);
     }
+    update_rule_menu(a);
 }
 fn count(a: &App) -> usize {
     a.loaded
@@ -449,7 +528,7 @@ fn count(a: &App) -> usize {
                         .filter(|p| matches!(p, Part::Conflict(_)))
                         .count()
                 })
-                .unwrap_or(d.diff.edits.len())
+                .unwrap_or(d.diff.edits.len() + d.ignored.len())
         })
         .unwrap_or(0)
 }
@@ -617,6 +696,12 @@ fn jump(a: &mut App) {
                     .edits
                     .get(a.selected)
                     .map(|e| vec![(0, e.base.start), (1, e.replacement.start)])
+                    .or_else(|| {
+                        a.selected
+                            .checked_sub(d.diff.edits.len())
+                            .and_then(|n| d.ignored.get(n))
+                            .map(|row| vec![(0, row.left), (1, row.right)])
+                    })
                     .unwrap_or_default()
             }
         })
@@ -748,7 +833,63 @@ fn choose_file(save: bool, title: &str) -> Option<PathBuf> {
         s.map(PathBuf::from)
     }
 }
+fn git_blocked(id: u16) -> bool {
+    matches!(id, OPEN | OPEN_MERGE) || (OPEN_FOLDERS..=RULE_EOL).contains(&id)
+}
+fn git_exit(a: &App) -> i32 {
+    if a.receiver.is_some() {
+        return 130;
+    }
+    let Some(data) = &a.loaded else { return 2 };
+    if !a.saved || a.editors.len() != 4 || data.merged.as_ref().is_none_or(|m| m.unresolved() != 0)
+    {
+        return 130;
+    }
+    let result = (|| {
+        let path = a.options.output.as_ref().ok_or("Git result path missing")?;
+        let bytes = data.inputs[2].encode(&a.editors[3].text())?;
+        if yy_merge_core::files::read_bounded(path, &Cancellation::default())? != bytes {
+            return Err("saved Git result changed".into());
+        }
+        for input in &data.inputs {
+            input.verify(&Cancellation::default())?;
+        }
+        Ok::<(), String>(())
+    })();
+    if result.is_ok() { 0 } else { 2 }
+}
+fn set_rule(a: &mut App, id: u16) -> Result<()> {
+    if a.folder_mode
+        || a.options.base.is_some()
+        || a.options.git_merge
+        || a.options.git_diff
+        || a.receiver.is_some()
+    {
+        return Err("比較規則は処理中でない通常の2方向比較で設定してください。".into());
+    }
+    match id {
+        RULE_RESET => a.options.rules = Default::default(),
+        RULE_SPACE => a.options.rules.ignore_space ^= true,
+        RULE_TRAILING => a.options.rules.ignore_trailing_space ^= true,
+        RULE_CASE => a.options.rules.ignore_case ^= true,
+        RULE_EOL => a.options.rules.ignore_eol ^= true,
+        _ => {}
+    }
+    if a.options.left.is_some() && a.options.right.is_some() {
+        begin(a);
+    } else {
+        refresh(a);
+    }
+    layout(a);
+    Ok(())
+}
 fn command(id: u16) -> Result<()> {
+    if (RULE_RESET..=RULE_EOL).contains(&id) {
+        return app(|a| set_rule(a, id)).unwrap_or(Ok(()));
+    }
+    if app(|a| (a.options.git_merge || a.options.git_diff) && git_blocked(id)).unwrap_or(false) {
+        return Err("Gitマージ中は比較対象を切り替えられません。この画面を閉じてから新しい比較を開いてください。".into());
+    }
     if let Some(result) = folders_view::command(id) {
         return result;
     }
@@ -813,8 +954,14 @@ fn command(id: u16) -> Result<()> {
         };
         app(|a| {
             a.folder_mode = false;
+            let rules = if base.is_none() {
+                a.options.rules.clone()
+            } else {
+                Default::default()
+            };
             a.options = Gui {
                 base,
+                rules,
                 left: Some(left),
                 right: Some(right),
                 encoding: a.options.encoding.clone(),
@@ -844,7 +991,10 @@ fn command(id: u16) -> Result<()> {
             return Ok(());
         };
         let overwrite = path.exists();
-        if overwrite && !confirm(&format!("{} を置き換えますか？", path.display())) {
+        if overwrite
+            && !app(|a| a.options.git_merge).unwrap_or(false)
+            && !confirm(&format!("{} を置き換えますか？", path.display()))
+        {
             return Ok(());
         }
         return app(|a| {
@@ -928,8 +1078,52 @@ fn command(id: u16) -> Result<()> {
     })
     .unwrap_or(Ok(()))
 }
+fn update_rule_menu(a: &App) {
+    let ready = !a.folder_mode
+        && a.options.base.is_none()
+        && !a.options.git_merge
+        && !a.options.git_diff
+        && a.receiver.is_none();
+    let rules = a.options.rules.core();
+    unsafe {
+        let menu = GetMenu(a.hwnd);
+        for (id, checked) in [
+            (RULE_RESET, !rules.active()),
+            (RULE_SPACE, rules.ignore_space),
+            (RULE_TRAILING, rules.ignore_trailing_space),
+            (RULE_CASE, rules.ignore_case),
+            (RULE_EOL, rules.ignore_eol),
+        ] {
+            let _ = EnableMenuItem(
+                menu,
+                id as u32,
+                MF_BYCOMMAND | if ready { MF_ENABLED } else { MF_GRAYED },
+            );
+            CheckMenuItem(
+                menu,
+                id as u32,
+                (MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED }).0,
+            );
+        }
+    }
+}
 fn layout(a: &mut App) {
     folders_view::update_menu(a);
+    update_rule_menu(a);
+    if a.options.git_merge || a.options.git_diff {
+        unsafe {
+            let menu = GetMenu(a.hwnd);
+            for id in [OPEN, OPEN_MERGE]
+                .into_iter()
+                .chain(OPEN_FOLDERS..=PLAN_RESUME)
+            {
+                let _ = EnableMenuItem(menu, id as u32, MF_BYCOMMAND | MF_GRAYED);
+            }
+            if let Some(button) = a.buttons.first() {
+                let _ = EnableWindow(*button, false);
+            }
+        }
+    }
     unsafe {
         let mut r = RECT::default();
         let _ = GetClientRect(a.hwnd, &mut r);
@@ -1076,6 +1270,16 @@ fn menu() -> Result<HMENU> {
                     (SHOW_FILES, "ファイル比較に戻る"),
                     (REFRESH_FOLDERS, "フォルダー比較を再実行"),
                     (OPEN_FOLDER_FILE, "選択したファイルを比較…"),
+                ],
+            ),
+            (
+                "比較規則(&R)",
+                vec![
+                    (RULE_RESET, "厳密比較に戻す"),
+                    (RULE_SPACE, "空白・タブを無視"),
+                    (RULE_TRAILING, "行末の空白・タブを無視"),
+                    (RULE_CASE, "大文字・小文字を無視"),
+                    (RULE_EOL, "LFとCRLFの違いを無視"),
                 ],
             ),
             (
@@ -1444,6 +1648,7 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
                 app(|a| a.receiver = None);
                 let result = result.and_then(|data| app(|a| install(a, data)).unwrap_or(Ok(())));
                 if let Err(e) = result {
+                    app(|a| a.exit = 2);
                     text(app(|a| a.status).unwrap_or_default(), &e);
                     if app(|a| a.smoke.is_some()).unwrap_or(false) {
                         app(|a| {
@@ -1501,9 +1706,15 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
                 if let Some(code) = folders_view::exit_code(a) {
                     a.exit = code;
                 }
+                if a.options.git_merge {
+                    a.exit = git_exit(a);
+                }
                 a.cancel.cancel();
                 a.projection_cancel.cancel();
-                if a.loaded.as_ref().is_some_and(|d| d.merged.is_some()) && !a.saved {
+                if !a.options.git_merge
+                    && a.loaded.as_ref().is_some_and(|d| d.merged.is_some())
+                    && !a.saved
+                {
                     a.exit = 130;
                 }
             });
@@ -1698,6 +1909,7 @@ fn smoke(a: &mut App) -> Result<()> {
     let dir = a.smoke.clone().unwrap();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     folders_view::smoke(a, &dir)?;
+    rules_smoke(a, &dir)?;
     for (width, height) in [(680, 420), (1920, 1080), (1000, 700), (1280, 820)] {
         unsafe {
             win(SetWindowPos(
@@ -1904,6 +2116,7 @@ fn smoke_tick(a: &mut App) -> Result<bool> {
             return Err("alignment changed an input document".into());
         }
     }
+    git_completion_smoke(a)?;
     std::fs::write(a.smoke.as_ref().unwrap().join("ui-smoke.txt"),"PASS: four-pane ancestor alignment, different-height synchronized scroll, debounced manual edit projection, stale generation rejected, undo preserved, original bytes preserved, resize, conflict resolution, guarded save, help\n").map_err(|e|e.to_string())?;
     a.saved = true;
     a.exit = 0;
@@ -1970,4 +2183,142 @@ fn comparison_smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     a.editors[0] = old_left;
     a.editors[1] = old_right;
     Ok(())
+}
+
+fn git_completion_smoke(a: &mut App) -> Result<()> {
+    let options = a.options.clone();
+    let path = a.smoke.as_ref().unwrap().join("git-staged-result.txt");
+    a.options.git_merge = true;
+    a.options.output = Some(path.clone());
+    a.saved = false;
+    if git_exit(a) != 130 {
+        return Err("unsaved Git merge was accepted".into());
+    }
+    layout(a);
+    unsafe {
+        if GetMenuState(GetMenu(a.hwnd), OPEN as u32, MF_BYCOMMAND) & MF_GRAYED.0 == 0 {
+            return Err("Git merge input switch remained enabled".into());
+        }
+    }
+    for id in [OPEN, OPEN_MERGE, OPEN_FOLDERS, PLAN_APPLY] {
+        if !git_blocked(id) {
+            return Err("Git merge command guard missing".into());
+        }
+    }
+    let data = a.loaded.as_ref().unwrap();
+    let bytes = data.inputs[2].encode(&a.editors[3].text())?;
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    a.saved = true;
+    if git_exit(a) != 0 {
+        return Err("saved resolved Git merge was rejected".into());
+    }
+    std::fs::write(&path, b"external edit").map_err(|e| e.to_string())?;
+    if git_exit(a) != 2 {
+        return Err("externally modified Git result was accepted".into());
+    }
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    a.editors[3].document.insert_text("extra", false);
+    if git_exit(a) == 0 {
+        return Err("unsaved editor change was accepted as Git completion".into());
+    }
+    a.editors[3].document.undo();
+    a.options = options;
+    a.saved = false;
+    layout(a);
+    std::fs::write(a.smoke.as_ref().unwrap().join("git-tool-smoke.txt"),"PASS: Git role locking, saved/current result verification, unsaved and externally changed results rejected\n").map_err(|e|e.to_string())
+}
+
+fn await_rule_smoke(a: &mut App) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(result) = a.receiver.as_ref().and_then(|r| r.try_recv().ok()) {
+            a.receiver = None;
+            return install(a, result?);
+        }
+        if Instant::now() > deadline {
+            return Err("rule worker timeout".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+fn rules_smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
+    let options = a.options.clone();
+    let loaded = a.loaded.take();
+    let editors = std::mem::take(&mut a.editors);
+    let history = std::mem::take(&mut a.history);
+    let redo = std::mem::take(&mut a.redo);
+    let flags = (a.selected, a.manual, a.saved, a.edited, a.exit);
+    let warning = a.alignment_warning.take();
+    let left = dir.join("rules-left.txt");
+    let right = dir.join("rules-right.txt");
+    std::fs::write(&left, b"Alpha \t\r\n").map_err(|e| e.to_string())?;
+    std::fs::write(&right, b"alpha\n").map_err(|e| e.to_string())?;
+    a.options = Gui {
+        left: Some(left.clone()),
+        right: Some(right),
+        ..Default::default()
+    };
+    begin(a);
+    await_rule_smoke(a)?;
+    if a.exit != 1 {
+        return Err("strict rule smoke was unexpectedly equal".into());
+    }
+    for id in [RULE_CASE, RULE_TRAILING, RULE_EOL] {
+        set_rule(a, id)?;
+        await_rule_smoke(a)?;
+    }
+    let data = a.loaded.as_ref().unwrap();
+    if a.exit != 0
+        || data.ignored.len() != 1
+        || !data.diff.edits.is_empty()
+        || a.editors[0].text() != "Alpha \t\r\n"
+    {
+        return Err("rule-equivalent display lost original data or state".into());
+    }
+    if !a.editors[0]
+        .aligned
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .any(|r| r.decoration.background == Some(yy_config::Color::rgb(232, 241, 253)))
+    {
+        return Err("ignored rule row was not decorated".into());
+    }
+    unsafe {
+        if GetMenuState(GetMenu(a.hwnd), RULE_CASE as u32, MF_BYCOMMAND) & MF_CHECKED.0 == 0 {
+            return Err("rule menu checkbox missing".into());
+        }
+        if SendMessageW(a.list, LB_GETCOUNT, None, None).0 != 1 {
+            return Err("ignored rule row was hidden from navigation".into());
+        }
+    }
+    a.selected = 0;
+    jump(a);
+    set_rule(a, RULE_RESET)?;
+    await_rule_smoke(a)?;
+    if a.exit != 1 || !a.loaded.as_ref().unwrap().ignored.is_empty() {
+        return Err("strict comparison reset did not recompare".into());
+    }
+    if std::fs::read(&left).map_err(|e| e.to_string())? != b"Alpha \t\r\n" {
+        return Err("rule processing wrote input bytes".into());
+    }
+    let mut invalid = options.clone();
+    invalid.rules.ignore_case = true;
+    if load(&invalid, &Cancellation::default()).is_ok() {
+        return Err("merge accepted normalized rules".into());
+    }
+    a.options = options;
+    a.loaded = loaded;
+    a.editors = editors;
+    a.history = history;
+    a.redo = redo;
+    (a.selected, a.manual, a.saved, a.edited, a.exit) = flags;
+    a.alignment_warning = warning;
+    if set_rule(a, RULE_CASE).is_ok() {
+        return Err("merge rule menu accepted normalization".into());
+    }
+    refresh(a);
+    layout(a);
+    std::fs::write(dir.join("rules-smoke.txt"),"PASS: background rule toggles, equivalent status, ignored row decoration/navigation, original text/bytes retained, reset to exact, merge rules rejected\n").map_err(|e|e.to_string())
 }

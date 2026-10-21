@@ -221,10 +221,112 @@ yymerge sync resume C:/review/run-001 --execute
 - フォルダー全体を一度に確定するトランザクションではありません。変更検出時にも実行済み分は残り、明示的な復元が必要です。実行・復元中は他のアプリによる編集を止めてください。悪意ある同時のパス差し替えや、電源断・ディスク故障・破損したネットワーク共有からの完全復旧までは保証しません。
 - 記録にはフルパス、指紋、元ファイルを含みます。自分で作成した信頼できる記録だけを読み込み、内容を書き換えずに保持してください。
 
-Git専用アダプター、ルール設定、表・構造化データ・画像・バイナリー比較、ZIP / SFTP / Office / PDFは未実装です。未対応コマンドは引数エラーとして扱います。
+比較プロファイル保存・正規表現等の高度な規則、表・構造化データ・画像・バイナリー比較、ZIP / SFTP / Office / PDFは未実装です。未対応コマンドは引数エラーとして扱います。
 
 ## ヘルプとライセンス {#help}
 
 F1または[ヘルプ]メニューで本書を表示します。他のYYシリーズと共通のMarkdownヘルプを埋め込み、WebView2が使えない場合はテキスト表示へ切り替えます。`YY_HELP_TEXT_ONLY=1`でテキスト表示を指定できます。
 
 本体はGPL-3.0-or-later、共通フォントはUDEV Gothic（SIL Open Font License 1.1）です。配布物のCOPYING、COPYING.EXCEPTION、フォントとヘルプ用ライブラリーのライセンスを参照してください。
+
+
+## Gitの外部diff／mergeツールとして使う {#git-tool}
+
+Gitから渡されるLOCAL／REMOTEを2方向比較へ、BASE／LOCAL／REMOTEを祖先付きマージへ対応させます。Git用画面は必ず閉じるまで待機し、別の比較への切替を無効にします。通常のyymerge画面は従来どおり利用できます。Windows GUIには`yymerge.exe`と`yymergew.exe`の両方が必要です。
+
+### 設定例を作る・登録する・解除する
+
+`git-tool config`は設定例を標準出力に表示するだけで、Gitの設定を書き換えません。PowerShell 7で、実際に配置したyymerge.exeから設定例を生成する例です。Git設定ファイルの保存先は存在する専用フォルダーにしてください。
+
+```powershell
+& 'C:/Tools/yymerge/yymerge.exe' git-tool config |
+    Set-Content -Encoding utf8 'C:/Tools/yymerge/yymerge.gitconfig'
+# このリポジトリで使う場合だけ、利用者が明示的に登録する
+git config --local --add include.path 'C:/Tools/yymerge/yymerge.gitconfig'
+git difftool --tool=yymerge --no-prompt
+git mergetool --tool=yymerge --no-prompt
+```
+
+`git-tool config --executable C:/Tools/yymerge/yymerge.exe`で実行ファイルのパスを指定することもできます。実行ファイルのパスはGitが使うシェルとGit設定の両方に合わせて引用します。空白・日本語・アポストロフィを含むパスも対象です。`$LOCAL`等の変数はGit側で展開させる必要があるため、設定例を手で引用し直すことは避けてください。
+
+解除は、登録したものと同じスコープとパスで行います。他のinclude設定を一括削除しません。
+
+```powershell
+git config --local --fixed-value --unset-all include.path 'C:/Tools/yymerge/yymerge.gitconfig'
+```
+
+生成した設定には`mergetool.yymerge.trustExitCode = true`と`hideResolved = false`を含めます。成功判定はファイルの更新時刻だけに頼りません。Git自体の`git mergetool`は、成功後に通常の動作として結果をindexへ登録します。yymergeアダプターはstage・commit・pushを実行しません。
+
+### マージの保存と終了判定
+
+Git用画面はLOCALを自分側、REMOTEを相手側、BASEを共通祖先、MERGEDを結果として表示します。左右の選択や手動編集の確定は通常の3方向マージと同じです。未解決0件で保存し、画面を閉じた場合だけ成功を返します。画面を開いた、競合マーカーが見つからない、ファイルの更新時刻が変わった、といった理由だけでは成功にしません。
+
+画面を開いている間はGitのMERGEDを変更しません。保存済みの現在の結果と入力を検査し、正常終了した後でMERGEDへ反映します。途中でGitや他のアプリがMERGEDの内容変更・削除・新規作成を行った場合は、その変更を上書きせず失敗します。保存せず閉じた場合、未解決の場合、GUI起動失敗、読み取り・符号化・保存失敗の場合もMERGEDを変更しません。保存後にさらに編集した内容を破棄して閉じる場合も、今回のマージは成功にしません。GUIで保存した結果があるのに反映できなかった場合は、その結果を保持し、コンソールに`retained at`の復旧用パスを表示します。MERGEDと保存結果を確認してから利用してください。
+
+生成設定は`--verify-index`を指定し、Git indexのstage 1・2・3に通常ファイルのBASE・LOCAL・REMOTEが存在することを確認します。add/add（祖先なし）、削除対変更、シンボリックリンク、submoduleはこの初期マージアダプターの対象外で、成功扱いにしません。Gitが祖先なしの代わりに空の一時BASEを用意しても、存在する空の祖先と混同しません。実際にstage 1にある空のファイルは有効な祖先です。
+
+### GUIを使わない利用
+
+`--headless`ではCLIの同じ厳密比較・祖先付きマージを使い、Linuxでも利用できます。自動統合できない場合は終了コード1でMERGEDを保持し、競合マーカーを出力する指定は設けていません。自動化用のGit設定例を作る場合は`git-tool config --headless`を明示します。
+
+```powershell
+yymerge git-tool diff --local=before.txt --remote=after.txt --headless
+yymerge git-tool merge --base=base.txt --local=local.txt --remote=remote.txt --merged=result.txt --headless
+```
+
+Gitからの呼び出しには、生成設定と同じ`--verify-index`を使用してください。上の直接呼び出しは、利用者が明示的に揃えた3つの通常ファイルを扱う例です。存在しないファイルを空ファイルで補いません。diffでGitが渡す`/dev/null`（Windowsでは`nul`）だけは欠落の役割として受け取り、空の表示用文書を用意し、GUIとCLIで欠落を明示します。実在する空ファイルは欠落表示にしません。
+
+| 操作 | 終了コード |
+|---|---|
+| `git-tool diff` | 0: 比較・閲覧が完了。相違があってもGit用アダプターでは成功。2: エラー、130: 中止 |
+| `git-tool merge` | 0: 解決結果をMERGEDへ保存。1: headlessの未解決・対象外のindex状態、2: エラー、130: 保存せず終了／中止 |
+| `git-tool config` | 0: 設定例を出力。引数誤りは64 |
+
+通常の`yymerge diff`が差分ありを1で返す仕様は変わりません。Git用diffが0を返すのは、Gitの`--trust-exit-code`を使っても相違だけで閲覧を失敗と扱わないためです。入力上限32 MiB、文字コード・BOMの一致条件等は通常の比較・マージと共通です。
+
+公式資料: [git-difftool](https://git-scm.com/docs/git-difftool)、[git-mergetool](https://git-scm.com/docs/git-mergetool)。
+
+
+## 2方向の比較規則 {#comparison-rules}
+
+既定は厳密比較です。通常の2方向比較では[比較規則]メニューの項目を選ぶと入力をバックグラウンドで再比較します。[厳密比較に戻す]で全規則を解除します。設定は現在のウィンドウ内で保持し、永続的なプロファイル保存はまだ行いません。通常の2方向比較で別のファイルを開くと規則を引き継ぎ、3方向マージを開く場合は厳密比較へ戻します。
+
+| GUI／CLI | 対象 |
+|---|---|
+| 空白・タブを無視／`--ignore-space` | 各行のASCII空白（U+0020）とタブ。引用符の内側も対象 |
+| 行末の空白・タブを無視／`--ignore-trailing-space` | LF／CRLFの直前、または改行のない最終行末のASCII空白・タブ |
+| 大文字・小文字を無視／`--ignore-case` | Unicodeの小文字変換結果を比較。ロケール依存変換・完全なcase folding・Unicode正規化は行わない |
+| LFとCRLFの違いを無視／`--ignore-eol` | LFとCRLFを同等に扱う。改行の有無や行数の違いは保持 |
+
+空白無視で全角空白・改行・NBSPを消しません。行末空白無視で行内の空白は消しません。改行無視は単独CRを行区切りに変換せず、終端改行の欠落も同等にしません。空白だけの行をなくす機能ではなく、空ファイルと空白だけの最終行も区別します。`--ignore-space`と行末空白無視を併用した場合は、より広い空白無視が有効です。例えば`Ä`／`ä`は大小文字無視で同値になりますが、`ß`／`SS`は同値になりません。
+
+```powershell
+yymerge diff before.txt after.txt --ignore-case --ignore-trailing-space --ignore-eol
+yymerge diff before.txt after.txt --ignore-space --format json --report comparison.json
+yymerge gui --left before.txt --right after.txt --ignore-case --ignore-eol --wait
+```
+
+規則は原文と独立した行ごとの比較キーに適用します。表示・選択・コピーするテキストと行番号は原文のままで、原本や保存結果を正規化しません。無視した行対は青い背景と「≈ 規則で無視」の一覧に残し、F7／Shift+F7や一覧の選択で移動できます。一覧では実際の差分、無視した行対の順に表示します。
+
+ステータスは次のように区別します。
+
+- **元データ一致**: 文字コード・BOM・改行を含めて一致。
+- **規則上は同値（元データは異なります）**: 指定した規則では同値だが元のデータには差がある。
+- **相違あり**: 規則適用後にも差がある。文字コードやBOMの差もここに含む。
+
+CLIは規則適用後に同値なら0、差が残れば1、読取失敗・上限超過等で判定が終わらなければ2を返します。0を返しても元バイトが一致しているとは限りません。JSONでは判定と適用規則を明示します。
+
+| JSONの項目 | 意味 |
+|---|---|
+| `identical` | 元データの一致。規則で一致に変わることはない |
+| `equivalent` | 規則上同値か。文字コード・BOMも一致する場合だけtrue |
+| `status` | `Identical`／`EquivalentUnderRules`／`Different` |
+| `rules` | `ignore_space`／`ignore_trailing_space`／`ignore_case`／`ignore_eol`の適用状態 |
+| `ignored_line_pairs` | 元の行は違うが比較キーが一致した行対。`left`／`right`は0始まりの元行番号 |
+| `diff` | 指定規則での比較。規則を使った場合のEqualは比較キーの同値を表す |
+
+文字コードとBOMはこれらの規則では無視しません。無視した行対の数は、文字コード等のメタデータ差を含む「全ての元差分の数」ではありません。元の厳密な比較結果が必要な場合は規則を解除して再比較してください。
+
+規則は通常の2方向表示専用です。3方向マージ、Git専用画面、フォルダー比較、同期の計画・実行・再開・復元は厳密な判定を継続します。規則を指定したGUIでBASEも指定すると拒否します。`merge`や`sync`コマンドへ無視フラグを渡すこともできません。正規化結果を適用可能なパッチと混同しないよう、`--format unified`と無視フラグの併用は拒否します。既存のレポートを置き換えることもありません。
+
+原文32 MiB／ファイル、合計100万行等の既存上限に加え、比較キーも32 MiB／ファイルまでです。Unicode変換でキーが拡大した場合も上限を超えたところで未完了を返します。[停止]で中止できます。正規表現、空行の無視、数値許容差、プロファイルの保存・読み込みは未対応です。

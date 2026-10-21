@@ -53,3 +53,16 @@ yymerge sync rollback C:/work/yymerge-run-001 --execute
 ```
 
 `run-dir`は存在しない新規フォルダーで、入力の外・同じファイルシステムに指定します。祖先付き統合のデモには未解決項目があるため、そのままでは実行できません。GUIでも[計画を確認して実行]と[実行記録から復元]を利用できます。
+
+
+Git連携を試す場合は、作業用Gitリポジトリーを用意し、[Git連携ヘルプ](../../apps/yymerge/help/help.md#git-tool)に沿って`git-tool config`の設定例を登録します。普段使うリポジトリーやglobal設定を書き換える必要はありません。`git-tool config --headless`ならGUIを使わず、解決できる3方向の変更だけを反映し、競合は失敗として残します。自動検証は`apps/yymerge/app/tests/git_tools.rs`の一時リポジトリーで行います。
+
+
+比較規則は、次のように原文が異なる2ファイルで確認できます。
+
+```powershell
+yymerge diff before.txt after.txt --ignore-case --ignore-trailing-space --ignore-eol --format json
+yymerge gui --left before.txt --right after.txt --ignore-case --ignore-trailing-space --ignore-eol --wait
+```
+
+例えば左を`Alpha`＋行末空白＋CRLF、右を`alpha`＋LFとすると、原本を変えず「規則上は同値」となり、無視した元行の対も確認できます。[厳密比較に戻す]で差分が再び表示されます。パッチ・自動マージ・同期へ無視規則は適用しません。

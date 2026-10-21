@@ -2,6 +2,7 @@
 pub mod alignment;
 pub mod files;
 pub mod folders;
+pub mod rules;
 pub mod sync_plan;
 pub mod sync_run;
 
@@ -80,6 +81,12 @@ pub fn compare(left: &str, right: &str, cancel: &Cancellation) -> Result<Diff> {
     }
     let a = lines(left);
     let b = lines(right);
+    compare_tokens(&a, &b, cancel)
+}
+// Rules use separate per-line keys so empty keys and embedded newlines cannot
+// collapse records. Merge always calls the exact public compare entry point.
+pub(crate) fn compare_tokens(a: &[&str], b: &[&str], cancel: &Cancellation) -> Result<Diff> {
+    cancel.check()?;
     if a.len() + b.len() > MAX_LINES {
         return Err("comparison incomplete: line limit".into());
     }

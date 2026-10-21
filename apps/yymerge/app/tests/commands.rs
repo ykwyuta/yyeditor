@@ -585,3 +585,182 @@ fn sync_resume_continues_pending_copy_and_refuses_after_rollback() {
     );
     assert_eq!(fs::read(dir.join("right/file")).unwrap(), b"original");
 }
+
+#[test]
+fn comparison_rules_report_equivalence_without_claiming_original_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::write(dir.join("left"), b"Alpha \t\r\nkeep\r\n").unwrap();
+    fs::write(dir.join("right"), b"alpha\nkeep\n").unwrap();
+    assert_eq!(run(&["diff", "left", "right"], dir).status.code(), Some(1));
+    let result = run(
+        &[
+            "diff",
+            "left",
+            "right",
+            "--ignore-case",
+            "--ignore-trailing-space",
+            "--ignore-eol",
+            "--format",
+            "json",
+        ],
+        dir,
+    );
+    assert_eq!(result.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["identical"], false);
+    assert_eq!(report["equivalent"], true);
+    assert_eq!(report["status"], "EquivalentUnderRules");
+    assert_eq!(report["ignored_line_pairs"].as_array().unwrap().len(), 2);
+    assert_eq!(report["ignored_line_pairs"][1]["left"], 1);
+    assert_eq!(report["rules"]["ignore_case"], true);
+    fs::write(dir.join("right"), b"alpha\nchanged\n").unwrap();
+    let result = run(
+        &[
+            "diff",
+            "left",
+            "right",
+            "--ignore-case",
+            "--ignore-trailing-space",
+            "--ignore-eol",
+            "--format",
+            "json",
+        ],
+        dir,
+    );
+    assert_eq!(result.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["status"], "Different");
+    assert_eq!(report["ignored_line_pairs"].as_array().unwrap().len(), 1);
+    assert_eq!(fs::read(dir.join("left")).unwrap(), b"Alpha \t\r\nkeep\r\n");
+}
+#[test]
+fn display_rules_never_generate_normalized_patches_or_change_merge_and_sync_semantics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    for (name, bytes) in [
+        ("base", b"base\n".as_slice()),
+        ("left", b"A\n"),
+        ("right", b"a\n"),
+        ("result", b"keep me"),
+        ("patch", b"keep patch"),
+    ] {
+        fs::write(dir.join(name), bytes).unwrap();
+    }
+    assert_eq!(
+        run(&["diff", "left", "right", "--ignore-case"], dir)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(
+            &[
+                "diff",
+                "left",
+                "right",
+                "--ignore-case",
+                "--format",
+                "unified",
+                "--report",
+                "patch",
+                "--overwrite"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert_eq!(fs::read(dir.join("patch")).unwrap(), b"keep patch");
+    assert_eq!(
+        run(
+            &[
+                "merge", "--base", "base", "--left", "left", "--right", "right", "--output",
+                "result"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(1)
+    );
+    assert_eq!(fs::read(dir.join("result")).unwrap(), b"keep me");
+    assert_eq!(
+        run(
+            &[
+                "merge",
+                "--base",
+                "base",
+                "--left",
+                "left",
+                "--right",
+                "right",
+                "--output",
+                "result",
+                "--ignore-case"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(64)
+    );
+    let gui = run(
+        &[
+            "gui",
+            "--base",
+            "base",
+            "--left",
+            "left",
+            "--right",
+            "right",
+            "--output",
+            "result",
+            "--ignore-case",
+            "--wait",
+        ],
+        dir,
+    );
+    assert_eq!(gui.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&gui.stderr).contains("two-way"));
+    for root in ["l-dir", "r-dir"] {
+        fs::create_dir(dir.join(root)).unwrap();
+    }
+    fs::write(dir.join("l-dir/file"), b"A\n").unwrap();
+    fs::write(dir.join("r-dir/file"), b"a\n").unwrap();
+    let plan = run(
+        &["sync", "plan", "--left", "l-dir", "--right", "r-dir"],
+        dir,
+    );
+    assert_eq!(plan.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    assert_eq!(report["items"][0]["action"], "ReplaceFile");
+    assert_eq!(fs::read(dir.join("r-dir/file")).unwrap(), b"a\n");
+}
+#[test]
+fn rules_keep_bom_encoding_and_final_newline_differences_visible() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::write(dir.join("left"), b"\xef\xbb\xbfA\n").unwrap();
+    fs::write(dir.join("right"), b"a\n").unwrap();
+    let result = run(
+        &["diff", "left", "right", "--ignore-case", "--format", "json"],
+        dir,
+    );
+    assert_eq!(result.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["equivalent"], false);
+    assert_ne!(report["left_bom"], report["right_bom"]);
+    fs::write(dir.join("left"), b"A\r\n").unwrap();
+    fs::write(dir.join("right"), b"a").unwrap();
+    assert_eq!(
+        run(
+            &["diff", "left", "right", "--ignore-case", "--ignore-eol"],
+            dir
+        )
+        .status
+        .code(),
+        Some(1)
+    );
+}

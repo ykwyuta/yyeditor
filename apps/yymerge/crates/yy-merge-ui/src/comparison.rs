@@ -260,6 +260,8 @@ pub fn prepare(left: &str, right: &str, diff: &Diff, cancel: &Cancellation) -> R
             .right
             .map(|n| segments(right, rs[n], rs.get(n + 1).copied().unwrap_or(right.len())))
             .unwrap_or_default();
+        let ignored = row.kind == RowKind::Equal
+            && row.left.zip(row.right).is_some_and(|(a, b)| ll[a] != rr[b]);
         for index in 0..la.len().max(ra.len()) {
             append(
                 &mut l,
@@ -281,6 +283,15 @@ pub fn prepare(left: &str, right: &str, diff: &Diff, cancel: &Cancellation) -> R
                 },
                 row.kind,
             );
+            if ignored {
+                for rows in [&mut l, &mut r] {
+                    if let Some(last) = rows.last_mut()
+                        && last.source.is_some()
+                    {
+                        last.decoration.background = Some(Color::rgb(232, 241, 253));
+                    }
+                }
+            }
         }
         if row.kind != RowKind::Equal {
             let a = row.left.map(|n| ll[n]).unwrap_or("");
@@ -447,5 +458,40 @@ mod tests {
             expected
         );
         assert!(p.right.rows[1].source.is_none());
+    }
+}
+
+#[cfg(test)]
+mod rule_display_tests {
+    use super::*;
+    #[test]
+    fn normalized_equal_rows_keep_original_offsets_and_visible_ignored_decoration() {
+        let left = "ALPHA \t\r\nkeep\n";
+        let right = "alpha\nkeep\n";
+        let c = Cancellation::new();
+        let result = yy_merge_core::rules::compare(
+            left,
+            right,
+            yy_merge_core::rules::Rules {
+                ignore_case: true,
+                ignore_trailing_space: true,
+                ignore_eol: true,
+                ..Default::default()
+            },
+            &c,
+        )
+        .unwrap();
+        let p = prepare(left, right, &result.diff, &c).unwrap();
+        assert_eq!(p.left.rows[0].source, Some(0));
+        assert_eq!(p.right.rows[0].source, Some(0));
+        assert_eq!(p.left.rows[1].source, Some(9));
+        assert_eq!(p.right.rows[1].source, Some(6));
+        assert_eq!(
+            p.left.rows[0].decoration.background,
+            Some(Color::rgb(232, 241, 253))
+        );
+        assert_eq!(p.left.rows[1].decoration.background, None);
+        assert!(p.left_marks.is_empty());
+        assert!(p.right_marks.is_empty());
     }
 }

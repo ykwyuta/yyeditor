@@ -111,6 +111,33 @@ pub fn save(
     overwrite: bool,
     cancel: &Cancellation,
 ) -> Result<()> {
+    save_checked(path, bytes, inputs, overwrite, None, cancel)
+}
+/// Replace a known output only while it still has the captured bytes/existence.
+pub fn save_if_unchanged(
+    path: &Path,
+    bytes: &[u8],
+    inputs: &[&Snapshot],
+    expected: &Option<Vec<u8>>,
+    cancel: &Cancellation,
+) -> Result<()> {
+    save_checked(
+        path,
+        bytes,
+        inputs,
+        expected.is_some(),
+        Some(expected),
+        cancel,
+    )
+}
+fn save_checked(
+    path: &Path,
+    bytes: &[u8],
+    inputs: &[&Snapshot],
+    overwrite: bool,
+    expected: Option<&Option<Vec<u8>>>,
+    cancel: &Cancellation,
+) -> Result<()> {
     cancel.check()?;
     if bytes.len() as u64 > MAX_BYTES {
         return Err("output exceeds the initial 32 MiB limit".into());
@@ -124,7 +151,7 @@ pub fn save(
     let target = parent.join(path.file_name().ok_or("output file name required")?);
     let previous = match fs::symlink_metadata(&target) {
         Ok(meta) => {
-            if meta.file_type().is_symlink() || !meta.is_file() {
+            if crate::folders::is_link(&target, meta.file_type())? || !meta.is_file() {
                 return Err("output must be a regular file, not a link".into());
             }
             if inputs
@@ -141,10 +168,28 @@ pub fn save(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.to_string()),
     };
+    if expected.is_some_and(|expected| expected != &previous) {
+        return Err("output changed since the tool was started".into());
+    }
+    let permissions = if previous.is_some() {
+        Some(
+            fs::metadata(&target)
+                .map_err(|e| e.to_string())?
+                .permissions(),
+        )
+    } else {
+        None
+    };
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
     temp.write_all(bytes)
         .and_then(|_| temp.as_file().sync_all())
         .map_err(|e| e.to_string())?;
+    if let Some(permissions) = permissions {
+        temp.as_file()
+            .set_permissions(permissions)
+            .and_then(|_| temp.as_file().sync_all())
+            .map_err(|e| e.to_string())?;
+    }
     for input in inputs {
         input.verify(cancel)?;
     }
@@ -201,5 +246,42 @@ mod tests {
         }
         fs::write(&p, b"a\0b").unwrap();
         assert!(Snapshot::open(&p, None, &Cancellation::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod conditional_save_tests {
+    use super::*;
+    #[test]
+    fn expected_output_existence_and_bytes_are_guarded_and_existing_permissions_survive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("MERGED");
+        let c = Cancellation::new();
+        fs::write(&path, b"old").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        save_if_unchanged(&path, b"resolved", &[], &Some(b"old".to_vec()), &c).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        assert!(save_if_unchanged(&path, b"overwritten", &[], &Some(b"old".to_vec()), &c).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"resolved");
+        assert!(save_if_unchanged(&path, b"overwritten", &[], &None, &c).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"resolved");
+        fs::remove_file(&path).unwrap();
+        assert!(
+            save_if_unchanged(&path, b"overwritten", &[], &Some(b"resolved".to_vec()), &c).is_err()
+        );
+        assert!(!path.exists());
+        save_if_unchanged(&path, b"new", &[], &None, &c).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
     }
 }

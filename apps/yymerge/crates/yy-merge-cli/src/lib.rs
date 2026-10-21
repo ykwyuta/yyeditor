@@ -1,5 +1,6 @@
 //! Headless commands share the GUI's exact comparison and merge model.
 pub use clap::Parser as ArgumentParser;
+pub mod git_tool;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{ffi::OsString, io::Write, path::PathBuf};
 use yy_merge_core::{
@@ -39,6 +40,11 @@ pub struct Cli {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Git external diff/merge adapters and configuration examples.
+    GitTool {
+        #[command(subcommand)]
+        command: git_tool::GitCommand,
+    },
     /// Compare text files. Exit 0 identical, 1 different, 2 incomplete/error.
     Diff {
         left: PathBuf,
@@ -51,6 +57,8 @@ pub enum Command {
         encoding: Option<String>,
         #[arg(long)]
         overwrite: bool,
+        #[command(flatten)]
+        rules: RuleArgs,
     },
     /// Merge using an explicit common ancestor. Inputs are never overwritten.
     Merge {
@@ -152,7 +160,34 @@ impl From<PlanMode> for yy_merge_core::sync_plan::Mode {
     }
 }
 #[derive(Clone, Debug, Default, clap::Args)]
+pub struct RuleArgs {
+    /// Ignore ASCII space and tab within a line (preserve line boundaries).
+    #[arg(long)]
+    pub ignore_space: bool,
+    /// Ignore ASCII spaces and tabs at the end of each line.
+    #[arg(long)]
+    pub ignore_trailing_space: bool,
+    /// Compare Unicode lowercase keys (no locale-dependent case folding).
+    #[arg(long)]
+    pub ignore_case: bool,
+    /// Treat CRLF and LF terminators as equivalent; keep final-newline differences.
+    #[arg(long)]
+    pub ignore_eol: bool,
+}
+impl RuleArgs {
+    pub fn core(&self) -> yy_merge_core::rules::Rules {
+        yy_merge_core::rules::Rules {
+            ignore_space: self.ignore_space,
+            ignore_trailing_space: self.ignore_trailing_space,
+            ignore_case: self.ignore_case,
+            ignore_eol: self.ignore_eol,
+        }
+    }
+}
+#[derive(Clone, Debug, Default, clap::Args)]
 pub struct Gui {
+    #[command(flatten)]
+    pub rules: RuleArgs,
     #[arg(long, requires = "right")]
     pub left: Option<PathBuf>,
     #[arg(long, requires = "left")]
@@ -165,6 +200,16 @@ pub struct Gui {
     pub encoding: Option<String>,
     #[arg(long)]
     pub wait: bool,
+    #[arg(long, hide=true, requires_all=["base","left","right","output"])]
+    pub git_merge: bool,
+    #[arg(long,hide=true,requires_all=["left","right"],conflicts_with="git_merge")]
+    pub git_diff: bool,
+    #[arg(long, hide = true, requires = "git_diff")]
+    pub git_left_missing: bool,
+    #[arg(long, hide = true, requires = "git_diff")]
+    pub git_right_missing: bool,
+    #[arg(long, hide = true, requires = "git_merge")]
+    pub git_merged_target: Option<PathBuf>,
     #[arg(long, hide = true)]
     pub ui_smoke_test: Option<PathBuf>,
 }
@@ -194,7 +239,19 @@ pub fn entry(
     };
     install_interrupt();
     let result = match cli.command {
-        Command::Gui(g) => gui(g),
+        Command::Gui(g) => {
+            if g.base.is_some() && g.rules.core().active() {
+                Err(
+                    "comparison rules are for two-way views only; merge always uses exact inputs"
+                        .into(),
+                )
+            } else {
+                gui(g)
+            }
+        }
+        Command::GitTool { command } => {
+            git_tool::run(command, gui, &mut std::io::stdout().lock(), &CANCEL)
+        }
         command => execute(command, &mut std::io::stdout().lock(), &CANCEL),
     };
     match result {
@@ -229,14 +286,30 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             report,
             encoding,
             overwrite,
+            rules,
         } => {
+            let rules = rules.core();
+            if matches!(format, Format::Unified) && rules.active() {
+                return Err(
+                    "unified patches require exact comparison; remove ignore options".into(),
+                );
+            }
             let a = Snapshot::open(&left, encoding.as_deref(), cancel)?;
             let b = Snapshot::open(&right, encoding.as_deref(), cancel)?;
-            let diff = yy_merge_core::compare(&a.text, &b.text, cancel)?;
-            let same = diff.edits.is_empty() && a.encoding == b.encoding && a.bom == b.bom;
+            let compared = yy_merge_core::rules::compare(&a.text, &b.text, rules, cancel)?;
+            let diff = compared.diff;
+            let same = a.text == b.text && a.encoding == b.encoding && a.bom == b.bom;
+            let equivalent = diff.edits.is_empty() && a.encoding == b.encoding && a.bom == b.bom;
+            let status = if same {
+                "Identical"
+            } else if equivalent {
+                "EquivalentUnderRules"
+            } else {
+                "Different"
+            };
             let text=match format {
-                Format::Json=>serde_json::to_string_pretty(&serde_json::json!({"identical":same,"left_encoding":a.encoding.name(),"right_encoding":b.encoding.name(),"left_bom":a.bom,"right_bom":b.bom,"diff":diff})).map_err(|e|e.to_string())?+"\n",
-                Format::Text=>format!("{}: {} <> {} ({} changed regions; {} / {})\n",if same{"identical"}else{"different"},left.display(),right.display(),diff.edits.len(),a.encoding,b.encoding),
+                Format::Json=>serde_json::to_string_pretty(&serde_json::json!({"identical":same,"equivalent":equivalent,"status":status,"rules":rules,"ignored_line_pairs":compared.ignored,"left_encoding":a.encoding.name(),"right_encoding":b.encoding.name(),"left_bom":a.bom,"right_bom":b.bom,"diff":diff})).map_err(|e|e.to_string())?+"\n",
+                Format::Text=>format!("{}: {} <> {} ({} changed regions; {} ignored line pairs; {}; {} / {})\n",if same {"identical"} else if equivalent {"equivalent under rules"} else {"different"},left.display(),right.display(),diff.edits.len(),compared.ignored.len(),rules.label(),a.encoding,b.encoding),
                 Format::Unified=>{
                     if a.encoding.name()!="UTF-8" || b.encoding.name()!="UTF-8" || !a.bom.is_empty() || !b.bom.is_empty() || a.text.contains('\r') || b.text.contains('\r') {return Err("unified output currently requires UTF-8 without BOM and LF newlines; use --format json for other encodings/EOL".into());}
                     if same {String::new()}else{
@@ -255,7 +328,7 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             a.verify(cancel)?;
             b.verify(cancel)?;
             emit(&text, report, &[&a, &b], overwrite, stdout, cancel)?;
-            Ok(i32::from(!same))
+            Ok(i32::from(!equivalent))
         }
         Command::Merge {
             base,
@@ -374,6 +447,7 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             emit(&text, report, &[], overwrite, stdout, cancel)?;
             Ok(i32::from(!same))
         }
+        Command::GitTool { .. } => Err("Git adapter must be dispatched with the GUI host".into()),
         Command::Gui(_) => Err("GUI must be dispatched by the application".into()),
         Command::Sync {
             command:

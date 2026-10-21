@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 yy-merge-core.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 clap = { version = "4", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -14,6 +15,3 @@ windows = { version = "0.62", features = ["Win32_System_Console", "Win32_Foundat
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[dev-dependencies]
-tempfile.workspace = true
