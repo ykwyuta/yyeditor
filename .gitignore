@@ -1,4 +1,5 @@
 /target
 /apps/yydbmanager/target
+/apps/yymerge/target
 /apps/yydbmanager/crates/*/target/
 *.big

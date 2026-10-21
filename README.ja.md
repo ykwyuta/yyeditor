@@ -19,6 +19,7 @@
 | **yybrowser** | 独自のプロキシ設定、広告ブロック、ブックマークを備えたタブブラウザ |
 | **yydraw** | 方眼紙・基本図形・クラウドアイコンで構成図を作成。交差線のアーチ、独自形式の保存、SVG・PNG 出力 |
 | **yy-agent** | SSH 接続先でファイル操作を行う Linux 用の補助プログラム |
+| **yymerge** | 厳密なテキスト比較・3方向マージ。Windows GUI、CLI、独立CIを備える初期実装（[実装範囲](apps/yymerge/README.md)） |
 
 開発環境、ビルド、テスト、内部構成については [DEVELOPER.ja.md](DEVELOPER.ja.md) を参照してください。
 

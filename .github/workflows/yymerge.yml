@@ -1,0 +1,102 @@
+name: yymerge
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "apps/yymerge/**"
+      - "demo/yymerge/**"
+      - "crates/**"
+      - "apps/yyeditor/build.rs"
+      - "tools/gen-icon/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/yymerge.yml"
+  pull_request:
+    paths:
+      - "apps/yymerge/**"
+      - "demo/yymerge/**"
+      - "crates/**"
+      - "apps/yyeditor/build.rs"
+      - "tools/gen-icon/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/yymerge.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/yymerge -> target"
+          key: yymerge-windows
+      - name: Format
+        run: cargo fmt --manifest-path apps/yymerge/Cargo.toml --all -- --check
+      - name: Lint
+        run: cargo clippy --manifest-path apps/yymerge/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - name: Core and CLI tests, including Git patch application
+        run: cargo test --manifest-path apps/yymerge/Cargo.toml --workspace --locked
+      - name: Build independent executables
+        run: cargo build --manifest-path apps/yymerge/Cargo.toml --release --workspace --locked
+      - name: Native UI, resize, conflict resolution, save, help and text fallback
+        shell: pwsh
+        run: |
+          $taskExe = (Resolve-Path apps/yymerge/target/release/yymergew.exe).Path
+          foreach ($taskTextHelp in @('0', '1')) {
+            if ($taskTextHelp -eq '1') { $env:YY_HELP_TEXT_ONLY = '1' }
+            else { Remove-Item Env:YY_HELP_TEXT_ONLY -ErrorAction SilentlyContinue }
+            $taskUi = Start-Process -FilePath $taskExe -ArgumentList '--ui-smoke-test',"ui-smoke-$taskTextHelp" -WindowStyle Hidden -PassThru
+            if (-not $taskUi.WaitForExit(60000)) { $taskUi.Kill(); throw 'yymerge UI smoke timed out' }
+            if ($taskUi.ExitCode -ne 0) { throw "yymerge UI smoke failed: $($taskUi.ExitCode)" }
+            Get-Content "ui-smoke-$taskTextHelp/ui-smoke.txt"
+          }
+          Remove-Item Env:YY_HELP_TEXT_ONLY
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/yymerge | Out-Null
+          Copy-Item apps/yymerge/target/release/yymerge.exe,apps/yymerge/target/release/yymergew.exe dist/yymerge/
+          Copy-Item apps/yymerge/README.md,apps/yymerge/NOTICE.md dist/yymerge/
+          Copy-Item -Recurse apps/yymerge/help dist/yymerge/
+          Copy-Item COPYING,COPYING.EXCEPTION,crates/yy-win/fonts/LICENSE-UDEVGothic.txt dist/yymerge/
+          Copy-Item crates/yy-preview/assets/LICENSE-*.txt dist/yymerge/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yymerge-windows-x64
+          path: dist/yymerge/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yymerge-ui-verification
+          path: ui-smoke-*/
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/yymerge -> target"
+          key: yymerge-linux-headless
+      - name: Headless lint
+        run: cargo clippy --manifest-path apps/yymerge/Cargo.toml --workspace --all-targets --no-default-features --locked -- -D warnings
+      - name: Exact comparison, encodings, merge, folder and process tests
+        run: cargo test --manifest-path apps/yymerge/Cargo.toml --workspace --no-default-features --locked
+      - name: Build console without UI
+        run: cargo build --manifest-path apps/yymerge/Cargo.toml -p yymerge --no-default-features --bin yymerge --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yymerge-linux-x64-cli
+          path: apps/yymerge/target/release/yymerge

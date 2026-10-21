@@ -7,11 +7,17 @@ on:
       - "apps/yydbmanager/**"
       - "demo/yydbmanager/**"
       - ".github/workflows/yydbmanager.yml"
+      - "apps/yymerge/**"
+      - "demo/yymerge/**"
+      - ".github/workflows/yymerge.yml"
   pull_request:
     paths-ignore:
       - "apps/yydbmanager/**"
       - "demo/yydbmanager/**"
       - ".github/workflows/yydbmanager.yml"
+      - "apps/yymerge/**"
+      - "demo/yymerge/**"
+      - ".github/workflows/yymerge.yml"
 
 env:
   CARGO_TERM_COLOR: always

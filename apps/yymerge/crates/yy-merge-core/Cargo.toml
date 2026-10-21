@@ -1,0 +1,10 @@
+[package]
+name = "yy-merge-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+tempfile.workspace = true
+yy-encoding = { path = "../../../../crates/yy-encoding" }

@@ -10,6 +10,10 @@ pub struct Editor {
     pub viewport: Viewport,
     pub composition: Option<Composition>,
     pub dpi: u32,
+    /// Optional marked byte ranges (for embedders such as yymerge).
+    pub marks: Vec<std::ops::Range<u64>>,
+    pub follow_caret: bool,
+    pub scroll_x: f32,
     high_surrogate: Option<u16>,
     page: usize,
     syntax: Option<yy_syntax::SyntaxIndex>,
@@ -29,6 +33,9 @@ impl Editor {
             viewport: Viewport::default(),
             composition: None,
             dpi,
+            marks: vec![],
+            follow_caret: true,
+            scroll_x: 0.,
             high_surrogate: None,
             page: 20,
             syntax: yy_syntax::Registry::builtin()
@@ -37,6 +44,13 @@ impl Editor {
                 .map(yy_syntax::SyntaxIndex::new),
             syntax_version: 0,
         })
+    }
+    /// Select syntax explicitly; None renders plain text. Existing SQL default is preserved.
+    pub fn set_language(&mut self, language: Option<&str>) {
+        self.syntax = language
+            .and_then(|name| yy_syntax::Registry::builtin().get(name).ok())
+            .map(yy_syntax::SyntaxIndex::new);
+        self.syntax_version = 0;
     }
     pub fn text(&self) -> String {
         String::from_utf8_lossy(
@@ -65,12 +79,14 @@ impl Editor {
         let metrics = self.renderer.metrics();
         let cfg = RowConfig::default();
         self.page = ((h as f32 * 96. / self.dpi as f32) / metrics.line_height).max(1.) as usize;
-        self.viewport.ensure_visible(
-            self.document.snapshot(),
-            &cfg,
-            self.document.selections().primary().head,
-            self.page,
-        );
+        if self.follow_caret {
+            self.viewport.ensure_visible(
+                self.document.snapshot(),
+                &cfg,
+                self.document.selections().primary().head,
+                self.page,
+            );
+        }
         let rows = yy_layout::rows_from(
             self.document.snapshot(),
             &cfg,
@@ -113,9 +129,9 @@ impl Editor {
             line_digits: 4,
             line_exact: true,
             show_line_numbers: true,
-            scroll_x: 0.,
+            scroll_x: self.scroll_x,
             selections: &selections,
-            matches: &[],
+            matches: &self.marks,
             carets: &carets,
             caret_visible: true,
             overwrite: false,
@@ -141,7 +157,8 @@ impl Editor {
             row + 1,
         );
         if let Some(r) = rows.get(row) {
-            let x = x as f32 * 96. / self.dpi as f32 - self.renderer.gutter_width(4, true);
+            let x = x as f32 * 96. / self.dpi as f32 - self.renderer.gutter_width(4, true)
+                + self.scroll_x;
             let at = self.renderer.hit_test(r, x);
             let anchor = if extend {
                 self.document.selections().primary().anchor

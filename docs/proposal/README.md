@@ -25,6 +25,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | R17 | 独立した Windows 常駐アプリ yyclip でクリップボード履歴を記録・復元する | [16-clipboard-history](16-clipboard-history.md) |
 | R18 | 独立した構成図アプリ yydraw（方眼紙・基本図形・クラウドアイコン・線の交差アーチ、共通フォント、独自バイナリ保存、SVG・PNG 出力）**（提案）** | [21-draw](21-draw.md) |
 | R19 | 独立したDB管理アプリ yydbmanager（7種類のDB、SQL編集・実行、結果格子、ER図、実行計画の可視化、全形式の入出力、SQLite・DuckDB同梱、専用CI）**（提案）** | [22-dbmanager](22-dbmanager.md) |
+| R20 | 独立した高機能diff／mergeアプリ yymerge（2／3方向比較・マージ、フォルダー統合、CLI、Git連携、多形式比較、共通UI・ヘルプ・アイコン、専用CI）**（初期実装中。[実装範囲](../../apps/yymerge/README.md)）** | [23-merge](23-merge.md) |
 
 > 依頼文の「encdic」は、IBM メインフレーム系の **EBCDIC**（日本では EBCDIK / IBM CCSID 930・939・1390・1399、富士通 JEF、日立 KEIS などの EBCDIC 系漢字コード）を指すものと解釈しています。
 
@@ -83,6 +84,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | [20-adblock.md](20-adblock.md) | yybrowser の広告ブロック：有名なフィルタリスト（EasyList など）の自動更新、要求の遮断、広告の枠の非表示、プロファイル・サイトごとの入切 |
 | [21-draw.md](21-draw.md) | 構成図（yydraw）：方眼紙、基本図形・クラウドアイコン、接続線の交差アーチ、共通フォント、独自バイナリ保存、SVG・PNG 出力 |
 | [22-dbmanager.md](22-dbmanager.md) | DB管理（yydbmanager）：7種類のDB、共通フォントと既存編集・格子・図資産の再利用、SSMS風の実行計画、CSV・TSV・任意区切り・Parquet・COBOL固定長の入出力、同梱エンジン、独立CI |
+| [23-merge.md](23-merge.md) | 差分比較・マージ（yymerge）：2／3方向とフォルダーの比較・統合、多形式対応、CLIとGit連携、共通UI・ヘルプ・アイコン、独立CI、性能・正確性の評価 |
 
 ## 4. 性能・品質目標（抜粋）
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-exclude = ["apps/yydbmanager"]
+exclude = ["apps/yydbmanager", "apps/yymerge"]
 members = [
     "crates/yy-ui-win",
     "crates/yy-draw",

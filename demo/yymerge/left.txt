@@ -1,0 +1,4 @@
+アプリケーション設定
+server=production
+timeout=30
+theme=dark

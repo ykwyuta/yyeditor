@@ -27,6 +27,7 @@ FILES = ((0x06, 0xB6, 0xD4), (0x0E, 0x74, 0x90))
 BROWSER = ((0xF4, 0x3F, 0x5E), (0x9F, 0x12, 0x39))  # ローズ（ほかの色と重ならない）
 DRAW = ((0x63, 0x66, 0xF1), (0x37, 0x30, 0xA3))
 DATABASE = ((0x14, 0xB8, 0xA6), (0x0F, 0x76, 0x6E))
+MERGE = ((0x84, 0xCC, 0x16), (0x3F, 0x62, 0x12))
 PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
@@ -68,6 +69,11 @@ def draw_symbol(d, kind, x, y, w, h, t, ot):
             d.rectangle([cx - t / 2, y0 + (ah * 0.6 if up else 0), cx + t / 2, y1 - (0 if up else ah * 0.6)], fill=WHITE)
             tip, base = (y0, y0 + ah) if up else (y1, y1 - ah)
             d.polygon([(cx, tip), (cx - ah * 0.65, base), (cx + ah * 0.65, base)], fill=WHITE)
+    elif kind == "merge":
+        width = max(1, round(ot))
+        for start in (x + w * .12, x + w * .88):
+            d.line([(start, y), (start, y + h * .22), (x + w * .5, y + h * .60), (x + w * .5, y + h)], fill=WHITE, width=width)
+        d.polygon([(x + w * .5, y + h), (x + w * .35, y + h * .75), (x + w * .65, y + h * .75)], fill=WHITE)
     elif kind == "database":
         # 円柱でデータベースを示す。YYロゴは他アプリと共通。
         left, right = x + w * 0.13, x + w * 0.87
@@ -136,6 +142,7 @@ def render(size, kind="editor"):
         "browser": BROWSER,
         "draw": DRAW,
         "database": DATABASE,
+        "merge": MERGE,
     }[kind]
     n = size * SCALE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
@@ -220,8 +227,9 @@ def main():
         ("yybrowser", "browser"),
         ("yydraw", "draw"),
         ("yydbmanager", "database"),
+        ("yymerge", "merge"),
     ]:
-        res = root / "apps" / app / ("app/res" if app == "yydbmanager" else "res")
+        res = root / "apps" / app / ("app/res" if app in ("yydbmanager", "yymerge") else "res")
         res.mkdir(parents=True, exist_ok=True)
         images = [render(s, kind) for s in SIZES]
         write_ico(res / f"{app}.ico", images)

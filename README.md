@@ -19,6 +19,7 @@ This repository contains the following applications and their shared libraries.
 | **yybrowser** | A tabbed browser with its own proxy settings, ad blocking, and bookmarks |
 | **yydraw** | Architecture diagrams with a grid, basic shapes, cloud service icons, line bridges, binary storage, and SVG / PNG export |
 | **yy-agent** | A Linux helper for file operations on SSH hosts |
+| **yymerge** | Exact text comparison and three-way merge with a Windows GUI, headless CLI, and separate CI; initial implementation ([details](apps/yymerge/README.md)) |
 
 For development prerequisites, builds, tests, and internal architecture, see [DEVELOPER.md](DEVELOPER.md).
 
