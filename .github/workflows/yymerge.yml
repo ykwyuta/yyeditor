@@ -48,7 +48,7 @@ jobs:
         run: cargo test --manifest-path apps/yymerge/Cargo.toml --workspace --locked
       - name: Build independent executables
         run: cargo build --manifest-path apps/yymerge/Cargo.toml --release --workspace --locked
-      - name: Native UI, resize, conflict resolution, save, help and text fallback
+      - name: Native UI, folders, resize, conflict resolution, save, help and text fallback
         shell: pwsh
         run: |
           $taskExe = (Resolve-Path apps/yymerge/target/release/yymergew.exe).Path
@@ -59,6 +59,10 @@ jobs:
             if (-not $taskUi.WaitForExit(60000)) { $taskUi.Kill(); throw 'yymerge UI smoke timed out' }
             if ($taskUi.ExitCode -ne 0) { throw "yymerge UI smoke failed: $($taskUi.ExitCode)" }
             Get-Content "ui-smoke-$taskTextHelp/ui-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/folders-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/sync-plan-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/sync-run-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/sync-resume-smoke.txt"
           }
           Remove-Item Env:YY_HELP_TEXT_ONLY
       - name: Package
@@ -66,7 +70,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/yymerge | Out-Null
           Copy-Item apps/yymerge/target/release/yymerge.exe,apps/yymerge/target/release/yymergew.exe dist/yymerge/
-          Copy-Item apps/yymerge/README.md,apps/yymerge/NOTICE.md dist/yymerge/
+          Copy-Item apps/yymerge/README.md,apps/yymerge/NOTICE.md,apps/yymerge/LICENSE-BLAKE3-CC0.txt dist/yymerge/
           Copy-Item -Recurse apps/yymerge/help dist/yymerge/
           Copy-Item COPYING,COPYING.EXCEPTION,crates/yy-win/fonts/LICENSE-UDEVGothic.txt dist/yymerge/
           Copy-Item crates/yy-preview/assets/LICENSE-*.txt dist/yymerge/

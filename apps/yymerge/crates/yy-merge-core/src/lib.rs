@@ -1,6 +1,9 @@
 //! Exact, bounded comparisons. Neither heuristics nor normalized text feed auto-merge.
+pub mod alignment;
 pub mod files;
 pub mod folders;
+pub mod sync_plan;
+pub mod sync_run;
 
 use serde::Serialize;
 use std::{

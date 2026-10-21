@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+yy-config = { path = "../../../../crates/yy-config" }
 yy-merge-core.workspace = true
 yy-merge-cli.workspace = true
 yy-ui-win = { path = "../../../../crates/yy-ui-win", features = ["help"] }

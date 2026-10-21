@@ -4,13 +4,14 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use yy_encoding::{Encoding, EscapeMode, decode_all, encode_all};
 
 #[derive(Clone)]
 pub struct Snapshot {
     pub path: PathBuf,
-    pub text: String,
+    pub text: Arc<str>,
     pub encoding: Encoding,
     pub bom: Vec<u8>,
     bytes: Vec<u8>,
@@ -80,7 +81,7 @@ impl Snapshot {
         }
         Ok(Self {
             path: fs::canonicalize(path).map_err(|e| e.to_string())?,
-            text,
+            text: text.into(),
             encoding,
             bom: bytes[..bom_len].to_vec(),
             bytes,

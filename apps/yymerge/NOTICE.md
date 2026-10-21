@@ -16,3 +16,6 @@ WinMerge, Beyond Compare or Araxis Merge code or assets are included.
 
 See Cargo.lock for exact Rust dependency versions. Major dependencies include
 clap, serde, serde_json, tempfile, windows and the shared yy-encoding components.
+
+BLAKE3 is used under CC0-1.0; see LICENSE-BLAKE3-CC0.txt.
+Copyright belongs to the BLAKE3 authors (see the dependency source and Cargo.lock).

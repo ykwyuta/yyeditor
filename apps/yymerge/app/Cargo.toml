@@ -18,6 +18,7 @@ yy-merge-ui = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+serde_json.workspace = true
 
 [[bin]]
 name = "yymerge"

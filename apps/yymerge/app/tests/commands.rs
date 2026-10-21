@@ -136,6 +136,87 @@ fn folder_links_are_never_followed_and_return_incomplete() {
     );
 }
 #[test]
+fn three_way_folders_report_deletion_conflicts_and_protect_the_ancestor() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path();
+    for root in ["base", "left", "right"] {
+        fs::create_dir(dir.join(root)).unwrap();
+    }
+    for (path, value) in [
+        ("base/conflict", "original"),
+        ("right/conflict", "changed"),
+        ("base/empty", ""),
+        ("left/empty", ""),
+        ("right/empty", ""),
+        ("left/new", "same"),
+        ("right/new", "same"),
+    ] {
+        fs::write(dir.join(path), value).unwrap();
+    }
+    let result = run(
+        &[
+            "folders",
+            "left",
+            "right",
+            "--base",
+            "base",
+            "--recursive",
+            "--format",
+            "json",
+        ],
+        dir,
+    );
+    assert_eq!(result.status.code(), Some(1));
+    let rows: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let row = |name| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["path"] == name)
+            .unwrap()
+    };
+    assert_eq!(row("conflict")["status"], "DeleteModifyConflict");
+    assert!(row("conflict")["left"].is_null());
+    assert_eq!(row("empty")["status"], "Unchanged");
+    assert_eq!(row("new")["status"], "SameAddition");
+    assert_eq!(
+        run(
+            &[
+                "folders",
+                "left",
+                "right",
+                "--base",
+                "base",
+                "--report",
+                "base/report"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert!(!dir.join("base/report").exists());
+    fs::remove_file(dir.join("right/conflict")).unwrap();
+    fs::write(dir.join("left/conflict"), "original").unwrap();
+    fs::write(dir.join("right/conflict"), "original").unwrap();
+    for root in ["left", "right"] {
+        fs::remove_file(dir.join(root).join("new")).unwrap();
+    }
+    assert_eq!(
+        run(&["folders", "left", "right", "--base", "base"], dir)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(&["folders", "left", "right", "--base", "missing"], dir)
+            .status
+            .code(),
+        Some(2)
+    );
+}
+#[test]
 fn unified_patch_applies_to_exact_bytes_with_git() {
     let d = tempfile::tempdir().unwrap();
     let dir = d.path();
@@ -176,4 +257,331 @@ fn unified_patch_applies_to_exact_bytes_with_git() {
             "core.autocrlf={autocrlf}"
         );
     }
+}
+
+#[test]
+fn sync_plans_are_preview_only_guard_reports_and_never_execute_changes() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path();
+    for root in ["base", "left", "right"] {
+        fs::create_dir(dir.join(root)).unwrap();
+    }
+    for (path, data) in [
+        ("left/new", "left"),
+        ("right/orphan", "right"),
+        ("base/both", "base"),
+        ("left/both", "left"),
+        ("right/both", "right"),
+    ] {
+        fs::write(dir.join(path), data).unwrap();
+    }
+    let result = run(
+        &[
+            "sync",
+            "plan",
+            "--left",
+            "left",
+            "--right",
+            "right",
+            "--mode",
+            "mirror-right",
+        ],
+        dir,
+    );
+    assert_eq!(result.status.code(), Some(0));
+    let plan: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(plan["preview_only"], true);
+    assert!(plan["summary"]["operations"].as_u64().unwrap() > 0);
+    let orphan = plan["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == "orphan")
+        .unwrap();
+    assert_eq!(orphan["action"], "DeleteFile");
+    assert!(orphan["comparison"].is_null());
+    assert_eq!(
+        fs::read_to_string(dir.join("right/orphan")).unwrap(),
+        "right"
+    );
+    assert_eq!(fs::read_to_string(dir.join("right/both")).unwrap(), "right");
+    assert!(!dir.join("right/new").exists());
+    let result = run(
+        &[
+            "sync", "plan", "--left", "left", "--right", "right", "--base", "base", "--mode",
+            "merge",
+        ],
+        dir,
+    );
+    assert_eq!(result.status.code(), Some(1));
+    let plan: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(
+        plan["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["action"] == "NeedsMerge")
+    );
+    assert_eq!(
+        run(
+            &[
+                "sync",
+                "plan",
+                "--left",
+                "left",
+                "--right",
+                "right",
+                "--base",
+                "base",
+                "--mode",
+                "merge",
+                "--output",
+                "base/plan.json"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert!(!dir.join("base/plan.json").exists());
+    fs::write(dir.join("plan.json"), "existing").unwrap();
+    assert_eq!(
+        run(
+            &[
+                "sync",
+                "plan",
+                "--left",
+                "left",
+                "--right",
+                "right",
+                "--output",
+                "plan.json"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("plan.json")).unwrap(),
+        "existing"
+    );
+    assert_eq!(
+        run(
+            &[
+                "sync",
+                "plan",
+                "--left",
+                "left",
+                "--right",
+                "right",
+                "--output",
+                "plan.json",
+                "--overwrite"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(
+            &[
+                "sync", "plan", "--left", "left", "--right", "right", "--mode", "merge"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(64)
+    );
+    assert_eq!(
+        run(&["sync", "apply", "plan.json", "--execute"], dir)
+            .status
+            .code(),
+        Some(64)
+    );
+}
+
+#[test]
+fn sync_apply_requires_opt_in_rejects_stale_plans_and_restores_originals() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path();
+    fs::create_dir(dir.join("left")).unwrap();
+    fs::create_dir(dir.join("right")).unwrap();
+    fs::write(dir.join("left/new"), b"new").unwrap();
+    fs::write(dir.join("left/file"), b"updated").unwrap();
+    fs::write(dir.join("right/file"), b"original").unwrap();
+    fs::write(dir.join("right/old"), b"old").unwrap();
+    let make = || {
+        run(
+            &[
+                "sync",
+                "plan",
+                "--left",
+                "left",
+                "--right",
+                "right",
+                "--mode",
+                "mirror-right",
+                "--output",
+                "plan.json",
+                "--overwrite",
+            ],
+            dir,
+        )
+    };
+    assert_eq!(make().status.code(), Some(0));
+    assert_eq!(
+        run(&["sync", "apply", "plan.json"], dir).status.code(),
+        Some(0)
+    );
+    assert_eq!(fs::read(dir.join("right/file")).unwrap(), b"original");
+    for args in [
+        vec!["sync", "apply", "plan.json", "--execute"],
+        vec!["sync", "apply", "plan.json", "--run-dir", "run"],
+        vec!["sync", "rollback", "run"],
+    ] {
+        assert_eq!(run(&args, dir).status.code(), Some(64));
+    }
+    fs::write(dir.join("left/new"), b"new edit").unwrap();
+    assert_eq!(
+        run(
+            &[
+                "sync",
+                "apply",
+                "plan.json",
+                "--execute",
+                "--run-dir",
+                "run"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert!(!dir.join("run").exists());
+    assert_eq!(make().status.code(), Some(0));
+    let applied = run(
+        &[
+            "sync",
+            "apply",
+            "plan.json",
+            "--execute",
+            "--run-dir",
+            "run",
+        ],
+        dir,
+    );
+    assert_eq!(
+        applied.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&applied.stdout).unwrap();
+    assert!(report["error"].is_null());
+    assert_eq!(fs::read(dir.join("right/file")).unwrap(), b"updated");
+    assert!(!dir.join("right/old").exists());
+    assert!(dir.join("run/journal.jsonl").exists());
+    let restored = run(&["sync", "rollback", "run", "--execute"], dir);
+    assert_eq!(
+        restored.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(fs::read(dir.join("right/file")).unwrap(), b"original");
+    assert_eq!(fs::read(dir.join("right/old")).unwrap(), b"old");
+    assert!(!dir.join("right/new").exists());
+    assert_eq!(
+        run(&["sync", "rollback", "run", "--execute"], dir)
+            .status
+            .code(),
+        Some(0)
+    );
+}
+
+#[test]
+fn sync_resume_continues_pending_copy_and_refuses_after_rollback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir(dir.join("left")).unwrap();
+    fs::create_dir(dir.join("right")).unwrap();
+    fs::write(dir.join("left/file"), b"new").unwrap();
+    fs::write(dir.join("right/file"), b"original").unwrap();
+    assert_eq!(
+        run(
+            &[
+                "sync",
+                "plan",
+                "--left",
+                "left",
+                "--right",
+                "right",
+                "--output",
+                "plan.json"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(
+            &[
+                "sync",
+                "apply",
+                "plan.json",
+                "--execute",
+                "--run-dir",
+                "run"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let path = dir.join("run/journal.jsonl");
+    let log = fs::read_to_string(&path).unwrap();
+    fs::write(&path, log.strip_suffix("\"Finished\"\n").unwrap()).unwrap();
+    fs::rename(dir.join("right/file"), dir.join("run/staging/0")).unwrap();
+    assert_eq!(run(&["sync", "resume", "run"], dir).status.code(), Some(64));
+    assert!(!dir.join("right/file").exists());
+    let resumed = run(&["sync", "resume", "run", "--execute"], dir);
+    assert_eq!(
+        resumed.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(report["completed"], 1);
+    assert_eq!(fs::read(dir.join("right/file")).unwrap(), b"new");
+    assert_eq!(fs::read(dir.join("run/backups/0")).unwrap(), b"original");
+    assert_eq!(
+        run(&["sync", "resume", "run", "--execute"], dir)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(&["sync", "rollback", "run", "--execute"], dir)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(&["sync", "resume", "run", "--execute"], dir)
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(fs::read(dir.join("right/file")).unwrap(), b"original");
 }

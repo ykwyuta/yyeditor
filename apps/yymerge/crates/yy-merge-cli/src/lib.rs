@@ -73,6 +73,9 @@ pub enum Command {
     Folders {
         left: PathBuf,
         right: PathBuf,
+        /// Common ancestor folder: classify additions, deletions and changes in three trees.
+        #[arg(long)]
+        base: Option<PathBuf>,
         #[arg(long)]
         recursive: bool,
         #[arg(long, value_enum, default_value = "text")]
@@ -84,6 +87,69 @@ pub enum Command {
     },
     /// Start yymergew; --wait returns its comparison/merge result.
     Gui(Gui),
+    /// Review, execute and restore journalled folder synchronization.
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
+}
+#[derive(Subcommand)]
+pub enum SyncCommand {
+    /// Continue an interrupted run after verifying all inputs and prepared candidates.
+    Resume {
+        run_dir: PathBuf,
+        #[arg(long, required = true)]
+        execute: bool,
+    },
+    /// Validate a saved plan. Actual writes require --execute and a fresh backup directory.
+    Apply {
+        plan: PathBuf,
+        #[arg(long, requires = "run_dir")]
+        execute: bool,
+        #[arg(long, requires = "execute")]
+        run_dir: Option<PathBuf>,
+    },
+    /// Restore a run, preserving created files and refusing to replace edited results.
+    Rollback {
+        run_dir: PathBuf,
+        #[arg(long, required = true)]
+        execute: bool,
+    },
+    /// Recompare inputs and emit a read-only JSON operation proposal.
+    Plan {
+        #[arg(long)]
+        left: PathBuf,
+        #[arg(long)]
+        right: PathBuf,
+        #[arg(long, required_if_eq("mode", "merge"))]
+        base: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "update-right")]
+        mode: PlanMode,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, requires = "output")]
+        overwrite: bool,
+    },
+}
+#[derive(Clone, Copy, ValueEnum)]
+pub enum PlanMode {
+    UpdateRight,
+    UpdateLeft,
+    MirrorRight,
+    MirrorLeft,
+    Merge,
+}
+impl From<PlanMode> for yy_merge_core::sync_plan::Mode {
+    fn from(mode: PlanMode) -> Self {
+        use yy_merge_core::sync_plan::Mode as M;
+        match mode {
+            PlanMode::UpdateRight => M::UpdateRight,
+            PlanMode::UpdateLeft => M::UpdateLeft,
+            PlanMode::MirrorRight => M::MirrorRight,
+            PlanMode::MirrorLeft => M::MirrorLeft,
+            PlanMode::Merge => M::Merge,
+        }
+    }
 }
 #[derive(Clone, Debug, Default, clap::Args)]
 pub struct Gui {
@@ -147,6 +213,7 @@ fn emit(
     stdout: &mut impl Write,
     cancel: &Cancellation,
 ) -> Result<()> {
+    cancel.check()?;
     if let Some(path) = path {
         save(&path, text.as_bytes(), inputs, overwrite, cancel)
     } else {
@@ -231,6 +298,7 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
         Command::Folders {
             left,
             right,
+            base,
             recursive,
             format,
             report,
@@ -243,21 +311,56 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
                         .unwrap_or(std::path::Path::new(".")),
                 )
                 .map_err(|e| e.to_string())?;
-                for root in [&left, &right] {
+                for root in [&left, &right].into_iter().chain(base.as_ref()) {
                     if parent.starts_with(std::fs::canonicalize(root).map_err(|e| e.to_string())?) {
-                        return Err("folder report must be outside both input trees".into());
+                        return Err("folder report must be outside all input trees".into());
                     }
                 }
+            }
+            if let Some(base) = base {
+                let entries = folders::three::compare(&base, &left, &right, recursive, cancel)?;
+                let code = if entries.iter().any(|e| e.incomplete()) {
+                    2
+                } else {
+                    i32::from(
+                        entries
+                            .iter()
+                            .any(|e| e.status != folders::three::Status::Unchanged),
+                    )
+                };
+                let text = match format {
+                    FolderFormat::Json => {
+                        serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())? + "\n"
+                    }
+                    FolderFormat::Text => entries
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                "{:?}\t{}{}\n",
+                                e.status,
+                                e.path.display(),
+                                e.detail
+                                    .as_ref()
+                                    .map(|d| format!("\t{d}"))
+                                    .unwrap_or_default()
+                            )
+                        })
+                        .collect(),
+                };
+                emit(&text, report, &[], overwrite, stdout, cancel)?;
+                return Ok(code);
             }
             let entries = folders::compare(&left, &right, recursive, cancel)?;
             let same = entries
                 .iter()
                 .all(|e| matches!(e.status, folders::Status::Equal));
-            if entries
-                .iter()
-                .any(|e| matches!(e.status, folders::Status::SkippedLink))
-            {
-                return Err("folder comparison incomplete: links/reparse points skipped".into());
+            if entries.iter().any(|e| {
+                matches!(
+                    e.status,
+                    folders::Status::SkippedLink | folders::Status::Error
+                )
+            }) {
+                return Err("folder comparison incomplete: links/reparse points skipped or files could not be read".into());
             }
             let text = match format {
                 FolderFormat::Json => {
@@ -272,6 +375,81 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             Ok(i32::from(!same))
         }
         Command::Gui(_) => Err("GUI must be dispatched by the application".into()),
+        Command::Sync {
+            command:
+                SyncCommand::Apply {
+                    plan,
+                    execute,
+                    run_dir,
+                },
+        } => {
+            let plan = yy_merge_core::sync_run::read_plan(&plan, cancel)?;
+            if !execute {
+                yy_merge_core::sync_run::validate(&plan, cancel)?;
+                stdout.write_all(b"Plan validated; no files changed. Use --execute --run-dir <new-directory> to apply.\n").map_err(|e| e.to_string())?;
+                return Ok(0);
+            }
+            let report = yy_merge_core::sync_run::apply(
+                plan,
+                &run_dir.ok_or("missing run directory")?,
+                cancel,
+            )?;
+            stdout
+                .write_all(report.json()?.as_bytes())
+                .map_err(|e| e.to_string())?;
+            Ok(report.exit_code())
+        }
+        Command::Sync {
+            command:
+                SyncCommand::Resume {
+                    run_dir,
+                    execute: _,
+                },
+        } => {
+            let report = yy_merge_core::sync_run::resume(&run_dir, cancel)?;
+            stdout
+                .write_all(report.json()?.as_bytes())
+                .map_err(|e| e.to_string())?;
+            Ok(report.exit_code())
+        }
+        Command::Sync {
+            command:
+                SyncCommand::Rollback {
+                    run_dir,
+                    execute: _,
+                },
+        } => {
+            let report = yy_merge_core::sync_run::rollback(&run_dir, cancel)?;
+            stdout
+                .write_all(report.json()?.as_bytes())
+                .map_err(|e| e.to_string())?;
+            Ok(report.exit_code())
+        }
+        Command::Sync {
+            command:
+                SyncCommand::Plan {
+                    left,
+                    right,
+                    base,
+                    mode,
+                    output,
+                    overwrite,
+                },
+        } => {
+            let plan = yy_merge_core::sync_plan::build(
+                &left,
+                &right,
+                base.as_deref(),
+                mode.into(),
+                cancel,
+            )?;
+            if let Some(path) = &output {
+                plan.validate_report_path(path)?;
+            }
+            let code = plan.exit_code();
+            emit(&plan.report()?, output, &[], overwrite, stdout, cancel)?;
+            Ok(code)
+        }
     }
 }
 

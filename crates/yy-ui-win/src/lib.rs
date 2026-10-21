@@ -1,6 +1,7 @@
 //! Reusable yy series native painting and bundled font.
 #![cfg(windows)]
 #![allow(unsafe_code)]
+pub mod aligned;
 pub mod clipboard;
 pub mod editor;
 pub mod font;

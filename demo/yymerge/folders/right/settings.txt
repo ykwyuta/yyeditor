@@ -1,0 +1,2 @@
+server=production
+timeout=60

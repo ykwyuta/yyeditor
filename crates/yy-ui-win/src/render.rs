@@ -56,6 +56,12 @@ pub struct Frame<'a> {
     /// 対応する括弧の範囲
     pub brackets: &'a [std::ops::Range<u64>],
 }
+/// Optional per-display-row decorations. Numbers refer to the source document.
+#[derive(Clone, Copy, Default)]
+pub struct RowDecoration {
+    pub line_number: Option<u64>,
+    pub background: Option<Color>,
+}
 
 /// 16 進数表示の 1 画面分（行は 16 バイト）。
 pub struct HexFrame<'a> {
@@ -498,7 +504,19 @@ impl Renderer {
     }
 
     fn ensure_target(&mut self, hwnd: HWND, width: u32, height: u32) -> Result<()> {
-        if self.target.is_some() {
+        if let Some(target) = &self.target {
+            if let Some(rt) = &target.hwnd_rt {
+                let size = D2D_SIZE_U {
+                    width: width.max(1),
+                    height: height.max(1),
+                };
+                let current = unsafe { rt.GetPixelSize() };
+                // Direct2D stretches a stale back buffer to fit the HWND. Keep
+                // physical pixels in sync before any DIP-based text is drawn.
+                if current.width != size.width || current.height != size.height {
+                    unsafe { rt.Resize(&size) }.context("ID2D1HwndRenderTarget::Resize")?;
+                }
+            }
             return Ok(());
         }
         unsafe {
@@ -942,7 +960,18 @@ impl Renderer {
     /// 呼び出し側は再描画を要求すること。
     pub fn draw(&mut self, hwnd: HWND, width: u32, height: u32, frame: &Frame) -> Result<bool> {
         self.ensure_target(hwnd, width, height)?;
-        self.draw_frame(frame)
+        self.draw_frame(frame, &[])
+    }
+    pub fn draw_decorated(
+        &mut self,
+        hwnd: HWND,
+        width: u32,
+        height: u32,
+        frame: &Frame,
+        decorations: &[RowDecoration],
+    ) -> Result<bool> {
+        self.ensure_target(hwnd, width, height)?;
+        self.draw_frame(frame, decorations)
     }
 
     /// 16 進数表示を描画する（等幅フォントの桁で位置を決める）。
@@ -1481,6 +1510,15 @@ impl Renderer {
     ///
     /// 描画の自動テストと、描画結果の確認用。ウィンドウ用の描画ターゲットには影響しない。
     pub fn render_offscreen(&mut self, width: u32, height: u32, frame: &Frame) -> Result<Vec<u8>> {
+        self.render_offscreen_decorated(width, height, frame, &[])
+    }
+    pub fn render_offscreen_decorated(
+        &mut self,
+        width: u32,
+        height: u32,
+        frame: &Frame,
+        decorations: &[RowDecoration],
+    ) -> Result<Vec<u8>> {
         use windows::Win32::Graphics::Imaging::*;
         use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
         unsafe {
@@ -1511,7 +1549,7 @@ impl Renderer {
                 .context("CreateWicBitmapRenderTarget")?;
             let saved = self.target.replace(Target::new(rt, None, &self.colors)?);
             self.cache.clear();
-            let result = self.draw_frame(frame);
+            let result = self.draw_frame(frame, decorations);
             self.target = saved;
             self.cache.clear();
             result?;
@@ -1524,7 +1562,7 @@ impl Renderer {
         }
     }
 
-    fn draw_frame(&mut self, frame: &Frame) -> Result<bool> {
+    fn draw_frame(&mut self, frame: &Frame, decorations: &[RowDecoration]) -> Result<bool> {
         self.set_version(frame.version);
         for c in self.cache.values_mut() {
             c.used = false;
@@ -1682,10 +1720,34 @@ impl Renderer {
         let target = self.target.as_ref().unwrap();
         let rt = &target.rt;
         let b = &target.brushes;
+        let mut row_brushes: Vec<(Color, ID2D1SolidColorBrush)> = Vec::new();
+        for style in decorations {
+            if let Some(color) = style.background
+                && !row_brushes.iter().any(|(c, _)| *c == color)
+            {
+                row_brushes.push((color, unsafe {
+                    rt.CreateSolidColorBrush(&color_f(color), None)
+                }?));
+            }
+        }
         let result = unsafe {
             rt.BeginDraw();
             rt.SetTransform(&windows_numerics::Matrix3x2::identity());
             rt.Clear(Some(&color_f(self.colors.background)));
+            for (i, style) in decorations.iter().enumerate() {
+                if let Some(color) = style.background {
+                    let brush = &row_brushes.iter().find(|(c, _)| *c == color).unwrap().1;
+                    rt.FillRectangle(
+                        &D2D_RECT_F {
+                            left: gutter,
+                            top: i as f32 * lh,
+                            right: size.width,
+                            bottom: (i + 1) as f32 * lh,
+                        },
+                        brush,
+                    );
+                }
+            }
 
             if frame.show_line_numbers {
                 rt.FillRectangle(
@@ -1702,11 +1764,19 @@ impl Renderer {
                     if i > 0 && row.line_start {
                         line += 1;
                     }
-                    if !row.line_start {
-                        continue;
-                    }
+                    let number = if let Some(style) = decorations.get(i) {
+                        let Some(number) = style.line_number else {
+                            continue;
+                        };
+                        number
+                    } else {
+                        if !row.line_start {
+                            continue;
+                        }
+                        line + 1
+                    };
                     let y = i as f32 * lh;
-                    let text: Vec<u16> = (line + 1).to_string().encode_utf16().collect();
+                    let text: Vec<u16> = number.to_string().encode_utf16().collect();
                     let brush = if frame.line_exact {
                         &b.line_number
                     } else {
@@ -2007,6 +2077,75 @@ mod tests {
     fn pixel(p: &[u8], width: u32, x: u32, y: u32) -> [u8; 3] {
         let i = ((y * width + x) * 4) as usize;
         [p[i + 2], p[i + 1], p[i]]
+    }
+
+    /// Resizing must resize the back buffer, rather than stretching old pixels.
+    #[test]
+    fn editor_window_resize_preserves_pixel_scale_and_dpi() {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        struct Window(HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let window = Window(unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("yy editor resize regression"),
+                WS_POPUP,
+                0,
+                0,
+                320,
+                180,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        });
+        let mut editor = crate::editor::Editor::new("12345 日本語\nsecond line\n", 96).unwrap();
+        let metrics = editor.renderer.metrics();
+        for (width, height, dpi) in [
+            (320, 180, 96),
+            (1600, 900, 96),
+            (680, 420, 144),
+            (1920, 1080, 192),
+            (900, 500, 96),
+        ] {
+            unsafe {
+                MoveWindow(window.0, 0, 0, width, height, false).unwrap();
+            }
+            editor.dpi = dpi;
+            editor.renderer.set_dpi(dpi);
+            let mut rect = RECT::default();
+            unsafe {
+                GetClientRect(window.0, &mut rect).unwrap();
+            }
+            editor
+                .paint(window.0, rect.right as u32, rect.bottom as u32)
+                .unwrap();
+            let target = editor.renderer.target.as_ref().unwrap();
+            let pixels = unsafe { target.rt.GetPixelSize() };
+            assert_eq!(
+                (pixels.width, pixels.height),
+                (rect.right as u32, rect.bottom as u32),
+                "back buffer must match client pixels at {dpi} DPI"
+            );
+            let dips = unsafe { target.rt.GetSize() };
+            assert!((dips.width - rect.right as f32 * 96. / dpi as f32).abs() < 0.1);
+            assert!((dips.height - rect.bottom as f32 * 96. / dpi as f32).abs() < 0.1);
+            assert_eq!(editor.renderer.metrics().char_width, metrics.char_width);
+            assert_eq!(editor.renderer.metrics().line_height, metrics.line_height);
+        }
     }
 
     /// 行番号欄・本文・不正バイトが実際に描画されることを画素で確認する。
