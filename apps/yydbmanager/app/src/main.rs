@@ -5,6 +5,15 @@ use yy_db_core::{Database, DbKind, Options};
 fn execute() -> yy_db_core::Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     #[cfg(windows)]
+    if args.first().is_some_and(|a| a == "--open-plan") {
+        let path = PathBuf::from(
+            args.get(1)
+                .ok_or("--open-plan に計画ファイルを指定してください")?,
+        );
+        yy_db_ui::run_plan(path).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(windows)]
     if args.first().is_some_and(|a| a == "--ui-smoke-test") {
         let dir = PathBuf::from(args.get(1).ok_or("出力フォルダーを指定してください")?);
         yy_db_ui::smoke(dir.clone()).map_err(|e| e.to_string())?;

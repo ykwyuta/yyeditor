@@ -5,10 +5,12 @@ on:
     branches: [main, master, "claude/**"]
     paths-ignore:
       - "apps/yydbmanager/**"
+      - "demo/yydbmanager/**"
       - ".github/workflows/yydbmanager.yml"
   pull_request:
     paths-ignore:
       - "apps/yydbmanager/**"
+      - "demo/yydbmanager/**"
       - ".github/workflows/yydbmanager.yml"
 
 env:

@@ -9,3 +9,5 @@
 !sql/*.sql
 !sql/performance/
 !sql/performance/*.sql
+!sql/plan-files/
+!sql/plan-files/*.sql

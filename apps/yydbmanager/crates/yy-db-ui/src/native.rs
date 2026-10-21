@@ -34,6 +34,8 @@ use yy_ui_win::{
 mod document_tabs;
 #[path = "er_view.rs"]
 mod er_view;
+#[path = "performance.rs"]
+mod performance;
 #[path = "plan_view.rs"]
 mod plan_view;
 
@@ -73,6 +75,7 @@ const HELP_PLANS: u16 = 130;
 const HELP_TROUBLE: u16 = 131;
 const HELP_YAML: u16 = 132;
 const HELP_PERFORMANCE: u16 = 133;
+const HELP_PLAN_FILES: u16 = 134;
 #[path = "connection_dialog.rs"]
 mod connection_dialog;
 #[path = "help.rs"]
@@ -188,6 +191,7 @@ struct App {
     editors: Vec<Editor>,
     sql_index: usize,
     documents: document_tabs::State,
+    performance: performance::State,
     grid: GridPainter,
     results: Vec<Arc<ResultSet>>,
     result_index: usize,
@@ -308,6 +312,7 @@ fn smoke_tick(a: &mut App) -> yy_db_core::Result<bool> {
             if !a.tree_items.iter().any(|e| e.1.name == "employee" && e.2) {
                 return Err("ツリーの列取得に失敗しました".into());
             }
+            performance::smoke(a, &smoke.directory)?;
             if let Some(path) = std::env::var_os("YYDBMANAGER_PLAN_FIXTURE") {
                 document_tabs::select(a, false);
                 plan_view::present(a, read_plan(&PathBuf::from(path))?)?;
@@ -550,40 +555,41 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Event>) {
 }
 
 pub fn run(initial: Option<PathBuf>) -> Result<()> {
-    run_inner(initial, None)
+    run_inner(initial, None, false)
+}
+pub fn run_plan(path: PathBuf) -> Result<()> {
+    run_inner(Some(path), None, true)
 }
 pub fn smoke(directory: PathBuf) -> Result<()> {
     std::fs::create_dir_all(&directory).map_err(|e| {
         windows::core::Error::new(windows::Win32::Foundation::E_FAIL, e.to_string())
     })?;
     let _ = std::fs::remove_file(directory.join("ui-smoke.txt"));
-    run_inner(None, Some(directory))
+    run_inner(None, Some(directory), false)
 }
 struct Smoke {
     directory: PathBuf,
     stage: u8,
     started: Instant,
 }
-fn run_inner(initial: Option<PathBuf>, smoke: Option<PathBuf>) -> Result<()> {
+fn run_inner(initial: Option<PathBuf>, smoke: Option<PathBuf>, force_plan: bool) -> Result<()> {
     let initial_er = initial
         .as_ref()
         .filter(|p| {
-            p.extension().is_some_and(|e| {
-                ["yyer", "yaml", "yml"]
-                    .iter()
-                    .any(|ext| e.eq_ignore_ascii_case(ext))
-            })
+            !force_plan && {
+                p.extension().is_some_and(|e| {
+                    ["yyer", "yaml", "yml"]
+                        .iter()
+                        .any(|ext| e.eq_ignore_ascii_case(ext))
+                })
+            }
         })
         .map(|p| yy_db_core::schema::ErDocument::load(p))
         .transpose()
         .map_err(|e| windows::core::Error::new(E_FAIL, e))?;
     let plan_path = initial
         .as_ref()
-        .filter(|p| {
-            p.extension().is_some_and(|e| {
-                e.eq_ignore_ascii_case("sqlplan") || e.eq_ignore_ascii_case("yyplan")
-            })
-        })
+        .filter(|p| force_plan || yy_db_core::plan_file::is_plan_path(p))
         .cloned();
     let initial_plan = plan_path
         .as_ref()
@@ -916,6 +922,7 @@ fn run_inner(initial: Option<PathBuf>, smoke: Option<PathBuf>) -> Result<()> {
             connection_label: "未接続".into(),
             pending_label: "SQLite :memory:".into(),
             connection_kind: DbKind::Sqlite,
+            performance: performance::State::default(),
             editor_painted: (0, 0),
             grid_painted: (0, 0),
             plan_view: plan_view::View::new(grid_hwnd, properties, dpi)?,
@@ -1091,6 +1098,7 @@ fn build_menu() -> Result<HMENU> {
                 vec![
                     (HELP_USAGE, "使い方\tF1"),
                     (HELP_PLANS, "実行計画の取得と読み方…"),
+                    (HELP_PLAN_FILES, "実行計画ファイルの形式と取得方法…"),
                     (HELP_PERFORMANCE, "DB別の性能分析ビュー…"),
                     (HELP_ORACLE, "Oracleの権限と実測取得の準備…"),
                     (HELP_DB2, "Db2の権限と実測収集の準備…"),
@@ -1171,7 +1179,7 @@ fn tree_context(hwnd: HWND, mut point: POINT) {
                 );
             }
         }
-        let Some(entries) = with_app(|a| {
+        let Some((entries, diagnostic_kind)) = with_app(|a| {
             let item = HTREEITEM(
                 send_message(
                     tree,
@@ -1197,7 +1205,12 @@ fn tree_context(hwnd: HWND, mut point: POINT) {
             if a.cancellation.is_some() && profile.is_none_or(|p| p.name == a.connection_label) {
                 entries.push((CATALOG_REFRESH, "オブジェクト一覧を更新"));
             }
-            entries
+            (
+                entries,
+                tree_profile(a, item)
+                    .and_then(|i| a.profiles.get(i))
+                    .map(|p| p.kind),
+            )
         }) else {
             return;
         };
@@ -1206,6 +1219,13 @@ fn tree_context(hwnd: HWND, mut point: POINT) {
         };
         for (id, label) in entries {
             let _ = AppendMenuW(menu, MF_STRING, id as usize, &HSTRING::from(label));
+        }
+        if let Some(kind) = diagnostic_kind
+            && let Err(error) = performance::append_menu(menu, kind)
+        {
+            let _ = DestroyMenu(menu);
+            message(&format!("性能分析メニューを作成できません: {error}"));
+            return;
         }
         let id = TrackPopupMenu(
             menu,
@@ -1939,8 +1959,14 @@ fn file_dialog_title(save: bool, extension: &str, title: Option<&str>) -> Option
             CLSCTX_INPROC_SERVER,
         )
         .ok()?;
-        let name = HSTRING::from(format!("*.{extension}"));
-        let pattern = HSTRING::from(if extension == "yyer.yaml" {
+        let name = HSTRING::from(if extension == "plan" && !save {
+            "実行計画（全DB）".to_owned()
+        } else {
+            format!("*.{extension}")
+        });
+        let pattern = HSTRING::from(if extension == "plan" && !save {
+            "*.yyplan;*.sqlplan;*.xml;*.json;*.csv;*.db2plan;*.plan;*.txt".to_owned()
+        } else if extension == "yyer.yaml" {
             "*.yyer.yaml;*.yaml;*.yml;*.yyer".to_owned()
         } else {
             format!("*.{extension}")
@@ -1969,22 +1995,12 @@ fn file_dialog_title(save: bool, extension: &str, title: Option<&str>) -> Option
     }
 }
 fn read_plan(path: &std::path::Path) -> yy_db_core::Result<Plan> {
-    if std::fs::metadata(path).map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
-        return Err("計画ファイルは32MiBまでです".into());
-    }
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let plan = if text.trim_start().starts_with('{') {
-        serde_json::from_str::<Plan>(&text).map_err(|e| e.to_string())?
-    } else {
-        Plan::parse(DbKind::SqlServer, &text, false)?
-    };
-    if plan.version != 1 {
-        return Err("未対応の計画ファイルの版です".into());
-    }
-    yy_db_core::plan_visual::validate(&plan)?;
-    Ok(plan)
+    yy_db_core::plan_file::load(path)
 }
 fn command(id: u16) {
+    if performance::command(id) {
+        return;
+    }
     if let Some(section) = help::section(id) {
         if let Err(error) = help::show(section) {
             message(&format!("ヘルプを表示できません: {error}"));
@@ -2133,7 +2149,7 @@ fn command(id: u16) {
         SAVE_SQL => file_dialog(true, "sql"),
         IMPORT => file_dialog(false, extension),
         EXPORT => file_dialog(true, extension),
-        OPEN_PLAN => file_dialog(false, "sqlplan"),
+        OPEN_PLAN => file_dialog_title(false, "plan", Some("実行計画を開く（接続不要・全DB）")),
         SAVE_PLAN => file_dialog(true, "yyplan"),
         SAVE_SVG => file_dialog(true, "svg"),
         SAVE_DRAW => file_dialog(true, "yydraw"),
@@ -2211,14 +2227,15 @@ fn command(id: u16) {
                 document_tabs::select(a, false);
                 let text = std::fs::read_to_string(path.unwrap()).map_err(|e| e.to_string())?;
                 a.editors[a.sql_index] = Editor::new(&text, a.dpi).map_err(|e| e.to_string())?;
+                a.performance.clear_tab(a.sql_index);
                 invalidate(a.editor_hwnd);
             }
             SAVE_SQL => std::fs::write(path.unwrap(), a.editors[a.sql_index].text())
                 .map_err(|e| e.to_string())?,
             OPEN_PLAN => {
-                document_tabs::select(a, false);
                 let path = path.unwrap();
                 let plan = read_plan(&path)?;
+                document_tabs::select(a, false);
                 plan_view::present(a, plan)?;
                 invalidate(a.grid_hwnd);
             }
@@ -2252,6 +2269,7 @@ fn command(id: u16) {
                 };
                 let kind = DbKind::ALL[index.min(6)];
                 let target = text(a.target);
+                a.performance.pending = Some((kind, target.clone()));
                 let profile_index = unsafe {
                     send_message(a.profile_combo, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as usize
                 };
@@ -2276,6 +2294,7 @@ fn command(id: u16) {
                 }));
             }
             RUN | ESTIMATE | ACTUAL => {
+                a.performance.check(a.sql_index)?;
                 let sql = a.editors[a.sql_index].execution_text();
                 send = Some(if id == RUN {
                     Command::Run(sql)
@@ -2667,6 +2686,7 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
                     }
                     match event {
                         Event::Connected(c, kind) => {
+                            a.performance.connected = a.performance.pending.take();
                             a.cancellation = Some(c);
                             a.connection_kind = kind;
                             a.connection_label = a.pending_label.clone();

@@ -1,4 +1,4 @@
-param([string]$Executable='apps/yydbmanager/target/debug/yydbmanager.exe', [string]$OutputDirectory='target/yydbmanager-shell', [string]$PlanFile='', [switch]$HelpOnly)
+param([string]$Executable='apps/yydbmanager/target/debug/yydbmanager.exe', [string]$OutputDirectory='target/yydbmanager-shell', [string]$PlanFile='', [switch]$HelpOnly, [switch]$ForcePlan)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
@@ -23,6 +23,8 @@ public static class DbShellTest {
  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h,uint cmd);
  [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
  [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr h);
+ [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr h,int index);
+ [DllImport("user32.dll")] public static extern uint GetMenuItemID(IntPtr h,int index);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern bool SetWindowText(IntPtr h,string value);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h,System.Text.StringBuilder s,int n);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string cls,string title);
@@ -51,6 +53,7 @@ $taskProcess=$null
 $taskOldClipboard=Get-Clipboard -Raw
 $taskStart=@{FilePath=$Executable;WindowStyle='Hidden';PassThru=$true}
 if($PlanFile){$taskStart.ArgumentList=@('"'+(Resolve-Path $PlanFile).Path+'"')}
+if($ForcePlan){$taskStart.ArgumentList=@('--open-plan',('"'+(Resolve-Path $PlanFile).Path+'"'))}
 $taskOldDpi=[DbShellTest]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))
 function Wait-Frame {
     for($i=0;$i -lt 100;$i++){ $taskProcess.Refresh(); $taskFrame=[DbShellTest]::FindProcessWindow($taskProcess.Id); if($taskFrame -ne [IntPtr]::Zero -and [DbShellTest]::SendMessage($taskFrame,0x802A,0,0).ToInt64() -eq 1){return $taskFrame};if($taskProcess.HasExited){throw 'App exited before showing a window'};Start-Sleep -Milliseconds 50 }
@@ -99,7 +102,8 @@ try {
         @{Id=130;Title='実行計画の取得と読み方';Needle='全starts'},
         @{Id=131;Title='実測取得のトラブルシューティング';Needle='自動再実行はしません'},
         @{Id=132;Title='ERモデルYAMLファイル仕様';Needle='format_version'},
-        @{Id=133;Title='DB別の性能分析ビュー';Needle='累積値は差分で比較する'}
+        @{Id=133;Title='DB別の性能分析ビュー';Needle='累積値は差分で比較する'},
+        @{Id=134;Title='実行計画ファイルの形式と取得方法';Needle='Db2の8列DEL'}
     )
     foreach($taskTopic in $taskHelpTopics) {
         if($taskTopic.Id -eq 127){[DbShellTest]::PostMessage($taskWindow,0x100,0x70,0)|Out-Null}
@@ -111,9 +115,9 @@ try {
         $taskHelpLength=[DbShellTest]::SendMessage($taskHelpEdit,0xE,0,0).ToInt32()+1
         $taskHelpText=[Text.StringBuilder]::new($taskHelpLength)
         [DbShellTest]::ReadMessage($taskHelpEdit,0xD,$taskHelpLength,$taskHelpText)|Out-Null
-        if(!$taskHelpText.ToString().Contains($taskTopic.Needle) -or $taskHelpText.ToString().Contains('{{DB2_SETUP_SQL}}')){throw "Help content missing: $($taskTopic.Title)"}
+        if(!$taskHelpText.ToString().Contains($taskTopic.Needle) -or $taskHelpText.ToString() -match '\{\{(?:DB2_SETUP_SQL|DB2_PLAN_EXPORT|ORACLE_PLAN_EXPORT)\}\}'){throw "Help content missing: $($taskTopic.Title)"}
         if([DbShellTest]::SendMessage($taskHelpEdit,0xBA,0,0).ToInt64() -lt 10){throw "Help multiline display failed: topic=$($taskTopic.Id), length=$taskHelpLength, lines=$([DbShellTest]::SendMessage($taskHelpEdit,0xBA,0,0))"}
-        if($taskTopic.Id -in @(132,133) -and !$env:YY_HELP_TEXT_ONLY){
+        if($taskTopic.Id -in @(132,133,134) -and !$env:YY_HELP_TEXT_ONLY){
             for($i=0;$i -lt 100 -and [DbShellTest]::IsWindowVisible($taskHelpEdit);$i++){Start-Sleep -Milliseconds 50}
         }
         Snapshot $taskHelp "help-$($taskTopic.Id)"
@@ -492,9 +496,29 @@ try {
     $taskMenuLabels=''
     for($i=0;$i -lt [DbShellTest]::GetMenuItemCount($taskPopupMenu);$i++){$taskLabel=[Text.StringBuilder]::new(256);[DbShellTest]::GetMenuString($taskPopupMenu,$i,$taskLabel,256,0x400)|Out-Null;$taskMenuLabels+=$taskLabel.ToString()}
     if(!$taskMenuLabels.Contains('オブジェクト一覧を更新')){throw "Explorer refresh entry missing: $taskMenuLabels"}
+    $taskPerformanceMenu=[IntPtr]::Zero
+    for($i=0;$i -lt [DbShellTest]::GetMenuItemCount($taskPopupMenu);$i++) {
+        $taskLabel=[Text.StringBuilder]::new(256)
+        [DbShellTest]::GetMenuString($taskPopupMenu,$i,$taskLabel,256,0x400)|Out-Null
+        if($taskLabel.ToString().Contains('性能分析SQL（SQLite）')){$taskPerformanceMenu=[DbShellTest]::GetSubMenu($taskPopupMenu,$i)}
+    }
+    if($taskPerformanceMenu -eq [IntPtr]::Zero -or [DbShellTest]::GetMenuItemCount($taskPerformanceMenu) -ne 7){throw 'SQLite diagnostic submenu missing'}
+    $taskPerformanceCommand=[DbShellTest]::GetMenuItemID($taskPerformanceMenu,0)
     Snapshot $taskPopup 'explorer-context'
     [DbShellTest]::PostMessage($taskWindow,0x1F,0,0)|Out-Null
     Start-Sleep -Milliseconds 80
+    $taskDiagnosticTabs=[DbShellTest]::GetDlgItem($taskWindow,117)
+    $taskDiagnosticBefore=[DbShellTest]::SendMessage($taskDiagnosticTabs,0x1304,0,0).ToInt64()
+    [DbShellTest]::SendNotifyMessage($taskWindow,0x111,$taskPerformanceCommand,0)|Out-Null
+    for($i=0;$i -lt 100 -and [DbShellTest]::SendMessage($taskDiagnosticTabs,0x1304,0,0).ToInt64() -eq $taskDiagnosticBefore;$i++){Start-Sleep -Milliseconds 20}
+    if([DbShellTest]::SendMessage($taskDiagnosticTabs,0x1304,0,0).ToInt64() -ne $taskDiagnosticBefore+1){throw 'Diagnostic SQL did not create a tab'}
+    $taskDiagnosticStatus=[Text.StringBuilder]::new(2048)
+    [DbShellTest]::ReadMessage([DbShellTest]::GetDlgItem($taskWindow,205),0xD,2048,$taskDiagnosticStatus)|Out-Null
+    if(!$taskDiagnosticStatus.ToString().Contains('未実行')){throw 'Diagnostic template selection executed SQL'}
+    Snapshot $taskWindow 'diagnostic-template'
+    [DbShellTest]::SendNotifyMessage($taskWindow,0x111,102,0)|Out-Null
+    for($i=0;$i -lt 150 -and [DbShellTest]::SendMessage([DbShellTest]::GetDlgItem($taskWindow,118),0x1304,0,0).ToInt64() -eq 0;$i++){Start-Sleep -Milliseconds 20}
+    if([DbShellTest]::SendMessage([DbShellTest]::GetDlgItem($taskWindow,118),0x1304,0,0).ToInt64() -ne 1){throw 'Diagnostic SQL could not be executed explicitly on its connection'}
     [DbShellTest]::ShowWindow($taskWindow,4)|Out-Null
     Snapshot $taskWindow 'normal'
     [DbShellTest]::ShowWindow($taskWindow,3)|Out-Null

@@ -5,6 +5,7 @@ on:
     branches: [master, main]
     paths:
       - "apps/yydbmanager/**"
+      - "demo/yydbmanager/**"
       - "apps/yyeditor/build.rs"
       - "tools/gen-icon/**"
       - "crates/**"
@@ -14,6 +15,7 @@ on:
   pull_request:
     paths:
       - "apps/yydbmanager/**"
+      - "demo/yydbmanager/**"
       - "apps/yyeditor/build.rs"
       - "tools/gen-icon/**"
       - "crates/**"

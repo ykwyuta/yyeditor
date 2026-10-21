@@ -27,6 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "exact_values.parquet",
         "postgres-demo.yyer.yaml",
         "sqlite-demo.yyer.yaml",
+        "duckdb-plan.json",
+        "sqlite-plan.csv",
     ] {
         if output.join(name).exists() {
             return Err(format!(
@@ -67,6 +69,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "12345678901234567890123.12345678"
         );
         db.explain("SELECT c.name, SUM(o.total_amount) FROM customers c JOIN orders o ON o.customer_id=c.customer_id GROUP BY c.name",false,&cancel)?;
+        if kind == DbKind::DuckDb {
+            let profile = stage.path().join("duckdb-plan.json");
+            db.execute(&format!("PRAGMA enable_profiling='json'; PRAGMA profiling_output='{}'; SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id; PRAGMA disable_profiling;",profile.display().to_string().replace('\\',"/").replace('\'',"''")), &cancel)?;
+            assert!(yy_db_core::plan_file::load(&profile)?.actual);
+        } else {
+            let result = db.execute("EXPLAIN QUERY PLAN SELECT order_id, ordered_on FROM orders WHERE customer_id=1 ORDER BY ordered_on", &cancel)?;
+            let path = stage.path().join("sqlite-plan.csv");
+            let mut csv = csv::Writer::from_path(&path)?;
+            csv.write_record(result[0].columns.iter().map(|c| &c.name))?;
+            for row in result[0].page(0, 10000)? {
+                csv.write_record(row.iter().map(|v| v.display()))?;
+            }
+            csv.flush()?;
+            assert_eq!(yy_db_core::plan_file::load(&path)?.kind, DbKind::Sqlite);
+        }
         let performance = if kind == DbKind::DuckDb {
             "duckdb.sql"
         } else {

@@ -6,6 +6,7 @@ Windows向けDBクライアント。説明は実行ファイルに埋め込ま�
 
 - [使い方・接続・SQL・ER設計](#usage)
 - [実行計画の取得と読み方](#plans)
+- [実行計画ファイルを持ち込む・DB別の取得方法](#plan-files)
 - [DB別の性能分析ビュー・待機・重いSQL](#performance)
 - [Oracleの権限と実測取得の準備](#oracle)
 - [Db2の権限と実測収集の準備](#db2)
@@ -16,6 +17,22 @@ Windows向けDBクライアント。説明は実行ファイルに埋め込ま�
 ## DB別の性能分析ビュー {#performance}
 
 ### 調査の進め方
+
+右側のオブジェクトエクスプローラーで保存した接続先を右クリックし、「性能分析SQL（DB名）」から調べたい内容を選べます。その接続先の種類に合うSQLだけを表示します。接続先配下のオブジェクトからも利用できます。未接続の保存済み接続先でもテンプレートを開けます。
+
+選択すると、対象接続先・SQLの用途・必要権限等のコメントを付けて新しいSQLタブを作成します。既存のSQLやER図は保持します。SQLは編集でき、テンプレート選択時には接続の切り替えやSQL実行をしません。対象接続先へ接続し、内容を確認してF5で実行してください。他の接続先のままでは実行を止め、対象接続先を案内します。接続設定を変更した場合はメニューからテンプレートを作り直します。別のSQLファイルをそのタブへ開いた場合はテンプレートの対象指定を解除します。
+
+| DB | 右クリックから選べる分析 |
+|---|---|
+| SQL Server | 実行中の要求・ブロック元、重いSQL、サーバー全体の待機 |
+| PostgreSQL | 現在の処理・長いトランザクション・ブロック元、pg_stat_statements、DB全体の統計 |
+| MySQL | 重いSQL・走査行数・一時テーブル、InnoDBロック待ち、実行中の接続 |
+| Oracle | アクティブセッション・待機・ブロック元、子カーソル別の重いSQL |
+| Db2 LUW | 接続ごとのCPU・活動・待機、パッケージキャッシュ、ロック待ち |
+| DuckDB | 現在のメモリー・一時領域、一時ファイル、スレッド数等の設定 |
+| SQLite | ページ数・サイズ・空きページ、他接続の変更検知、ジャーナルモード |
+
+これらは特定の業務テーブルに依存しない監視用のSELECT／参照用PRAGMAです。権限付与・統計リセット・監視設定の変更は含めません。SQLiteとDuckDBにはサーバー型DBと同じセッション待機ビューはないため、利用できる情報に合わせた項目を表示します。
 
 「ヘルプ → DB別の性能分析ビュー…」から開けます。この節のSQLは、接続後SQLタブへコピーして必要な文だけ選択し、実行します。ヘルプ表示によるSQL実行、権限付与、設定変更はありません。実行計画の可視化は[実行計画の取得と読み方](#plans)も参照してください。
 
@@ -351,6 +368,128 @@ F1または「ヘルプ → 使い方」でこの説明を開けます。
 目次・見出しリンクから各節へ移動できます。必要な箇所を選択してCtrl+Cでコピーできます。EscまたはCtrl+Wでヘルプを閉じます。
 WebView2が使えない環境では同じ本文を読み取り専用のテキストで表示します。
 DBに接続していない状態や、ネットワークに接続していない状態でも読めます。
+
+## 実行計画ファイルを持ち込む {#plan-files}
+
+### 開き方と対応形式
+
+DBへ接続せずに「実行計画 → 実行計画を開く…」から持ち込んだファイルを選択します。現在選択している接続先のDB種類には依存せず、内容から判別します。読み込みだけでSQLを実行することはありません。拡大縮小、ノードのプロパティ・原文表示、SVG出力、`.yyplan`での保存も使用できます。`.yyplan`はDB種類と推定／実測、取り込んだノードと原文を保持するので、共有や再保存に向いています。
+
+| DB | 取り込める形式 | 主な情報・制限 |
+|---|---|---|
+| SQL Server | SSMSの`.sqlplan`／Showplan XML | 推定・実測、演算子、コスト、実測行数、XMLの統計 |
+| PostgreSQL | EXPLAINのFORMAT JSON | 推定・実測、子計画、ループ数、BUFFERS等。TEXT／YAML／XMLは対象外 |
+| MySQL | EXPLAIN FORMAT=JSON（v1／v2）、FORMAT=TREE／EXPLAIN ANALYZEのTREE | JSONの推定値、TREEの実測値。表罫線や列名を含むコンソール画面のコピーは対象外 |
+| Oracle | 下記のPLAN_TABLEを出力した見出し付きCSV | 推定計画。所定の列を含むV$SQL_PLAN_STATISTICS_ALLのCSVなら実測値も参照可能 |
+| Db2 LUW | 下記のDb2の8列DEL（`.db2plan`）、同じ列名の見出し付きCSV | EXPLAIN表から抽出した推定計画。db2exfmtのテキストやVisual Explain専用形式は対象外 |
+| DuckDB | JSONプロファイル、演算子ツリーのJSON | プロファイルの演算子別行数・秒数。罫線付きのEXPLAIN表示は対象外 |
+| SQLite | EXPLAIN QUERY PLANの見出し付きCSV、行オブジェクト配列のJSON | id／parent／detailで復元。ASCIIツリーやEXPLAINのバイトコードは対象外。実測時間はありません |
+| 全DB共通 | yydbmanagerの`.yyplan` | 従来保存したファイルも読み込めます |
+
+文字コードはUTF-8（BOM有無どちらも可）、またはBOM付きUTF-16 LE／BEです。ファイルは32MiB、ノードは1万件までです。CSVはカンマ区切り・引用符は二重引用符・見出しは大文字小文字を区別しません。改行入り・カンマ入りの項目はCSVの引用符で囲みます。NULLは空欄または`NULL`で表します。重複ノードID、存在しない親、循環、数値の不正はエラーとして扱います。空ファイルや未対応形式では対応形式の説明を確認し、取得し直してください。
+
+コマンドラインからは`yydbmanager.exe --open-plan "C:\plans\mysql.txt"`で拡張子を問わず開けます。`.yyplan`／`.sqlplan`／`.json`／`.xml`／`.csv`／`.db2plan`／`.plan`は、単にファイルを引数で渡しても計画として開きます。`.txt`は通常のSQLテキストとも区別するため、メニューまたは`--open-plan`を使ってください。Windowsへの拡張子関連付けの自動登録は行いません。
+
+以下の取得操作は**元DBに接続できる環境**で行います。持ち込み先のyydbmanagerには接続設定もODBCドライバーも不要です。例の接続先・ファイルパス・テーブル名・SQLは置き換えてください。ANALYZE／実測／プロファイルは実際に対象SQLを実行します。SQLを実行したくない場合は推定計画を使います。
+
+### SQL Server：SSMSで保存
+
+SSMSで推定計画（Ctrl+L）を表示、または「実際の実行プランを含める」（Ctrl+M）を有効にして対象SQLを実行します。計画の背景を右クリックし「実行プランに名前を付けて保存」で`.sqlplan`に保存します。画像や結果一覧のCSVではなく、Showplan XMLを持ち込みます。取得には対象SQLの参照権限等と、参照するDBのSHOWPLAN権限が必要です。実測統計のないXMLを実測値付きには変換しません。
+
+公式：[XML形式での実行計画の保存](https://learn.microsoft.com/en-us/sql/relational-databases/performance/save-an-execution-plan-in-xml-format)。
+
+### PostgreSQL：psqlのJSON出力
+
+psqlで次を実行します。`\o`の出力先はpsqlを動かしているPCです。データを更新しないSELECTの例ですが、ANALYZEはそのSELECTを実行します。推定のみならオプションから`ANALYZE, BUFFERS,`を削除します。
+
+```sql
+\encoding UTF8
+\pset format unaligned
+\pset tuples_only on
+\o postgresql-plan.json
+EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id;
+\o
+```
+
+JSON本体だけを保存します。列名`QUERY PLAN`、行数フッター、端末のプロンプト、SQL文は含めません。通常のSQLを実行できる権限が必要です。追加拡張は不要です。
+
+公式：[EXPLAINのFORMAT／ANALYZE](https://www.postgresql.org/docs/17/sql-explain.html)、[psqlの出力設定](https://www.postgresql.org/docs/17/app-psql.html)。
+
+### MySQL：mysqlクライアントのJSON／TREE出力
+
+PowerShellで、ヘッダーとエスケープを抑制して保存します。`-p`はパスワード入力用です。MySQL 8.4の例です。
+
+```powershell
+mysql --default-character-set=utf8mb4 --batch --raw --skip-column-names -h 127.0.0.1 -P 23306 -u yy_demo -p yydemo -e "EXPLAIN FORMAT=JSON SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id" | Set-Content -Encoding utf8 mysql-plan.json
+mysql --default-character-set=utf8mb4 --batch --raw --skip-column-names -h 127.0.0.1 -P 23306 -u yy_demo -p yydemo -e "EXPLAIN ANALYZE SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id" | Set-Content -Encoding utf8 mysql-actual.txt
+```
+
+2行目は対象SQLを実行します。JSON v2は取得側MySQLの対応版で`explain_json_format_version`を設定した場合も取り込めます。TREEは各ノードが`->`で始まる原文を保存します。`\n`等が文字として並ぶ場合は`--raw`を確認してください。MySQLの通常の表形式EXPLAINやHTMLをJSONに拡張子だけ変更しても開けません。権限は対象SQLの実行に必要なものと、ビュー等へのSHOW VIEW権限を確認します。
+
+公式：[MySQL EXPLAIN](https://dev.mysql.com/doc/refman/8.4/en/explain.html)、[mysqlのbatch／rawオプション](https://dev.mysql.com/doc/refman/8.4/en/mysql-command-options.html)。
+
+### Oracle：SQL*PlusからPLAN_TABLEのCSVを保存
+
+対象SQLのEXPLAINに必要な権限と、利用可能なPLAN_TABLEを準備します。SQL*Plus 12.2以降のCSV出力を使用します。日本語を含む場合はSQL*Plus起動前に`NLS_LANG=.AL32UTF8`を設定します。以下をUTF-8の`export-oracle.sql`として保存し、対象ユーザーで接続したSQL*Plusから`@export-oracle.sql`を実行します。SPOOLはSQL*Plusを動かしている環境のファイルへ書き込みます。
+
+```sql
+{{ORACLE_PLAN_EXPORT}}
+```
+
+このスクリプトは対象SELECTを実行せず、PLAN_TABLEの作業用STATEMENT_IDだけを削除・作成します。既存の作業と衝突しないSTATEMENT_IDを使います。例は専用接続で使用し、末尾でロールバックします。CSVにSQL文・メッセージ・行数フッターを混ぜないでください。必須列は`ID,PARENT_ID,OPERATION,CARDINALITY,COST`、任意列は`OPTIONS,OBJECT_OWNER,OBJECT_NAME`と述語等です。取り込んだ追加列もプロパティに保持します。
+
+既に実測統計を収集したカーソルがある場合は、同じCSV設定で`V$SQL_PLAN_STATISTICS_ALL`をSQL_IDとCHILD_NUMBERで1計画に絞り、`ID,PARENT_ID,OPERATION,OPTIONS,OBJECT_OWNER,OBJECT_NAME,CARDINALITY,COST,LAST_STARTS,LAST_OUTPUT_ROWS,LAST_ELAPSED_TIME`等をSELECTして保存できます。該当するV_$ビューのSELECT権限が必要です。LAST_ELAPSED_TIMEはマイクロ秒からミリ秒へ変換して表示します。統計収集の設定は[Oracleの準備](#oracle)を参照してください。DBMS_XPLAN.DISPLAYの罫線付きテキストは直接取り込めません。
+
+実測CSVは`LAST_OUTPUT_ROWS`と`LAST_STARTS`の両方が必要です。LAST_STARTSが全行0の場合は未収集としてエラーにします。計測のある計画内で実行されなかった枝の0行は保持します。
+
+公式：[SQL*Plus SET MARKUP等](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqpug/SET-system-variable-summary.html)、[PLAN_TABLE](https://docs.oracle.com/en/database/oracle/oracle-database/19/refrn/PLAN_TABLE.html)、[V$SQL_PLAN_STATISTICS_ALL](https://docs.oracle.com/en/database/oracle/oracle-database/19/refrn/V-SQL_PLAN_STATISTICS_ALL.html)。
+
+### Db2 LUW：EXPLAIN表から8列DELを保存
+
+Db2の8列DELは、下記のSELECTを`EXPORT ... OF DEL`で出力した**見出しなしの8列CSV**です。拡張子`.db2plan`を使います。Db2 for z/OSのファイルやdb2exfmtの帳票ではありません。対象ユーザーのEXPLAIN表・必要なEXPLAIN権限・表の参照権限を準備します。EXPLAIN表がなければ管理者と[Db2の準備](#db2)を確認してください。
+
+下記を`export-db2.sql`として保存し、Db2 CLPで`db2 -stvf export-db2.sql`を実行します。DB名`YYDEMO`と対象SELECTを変更してください。出力ファイルはCLPを動かしている環境に作成します。
+
+```sql
+{{DB2_PLAN_EXPORT}}
+```
+
+8列の順序は`OPERATOR_ID,PARENT_ID,OPERATOR_TYPE,OBJECT_NAME,ESTIMATED_ROWS,TOTAL_COST,IO_COST,CPU_COST`です。同名の見出しを付けた通常の`.csv`も開けます。別の列順や一般のDb2データDELを`.db2plan`に変更しても対応しません。QUERYNOは作業と衝突しない値に変更し、複数ステートメントや異なるEXPLAIN時刻の行を混ぜないでください。例は最新の対象ステートメントを全キーで結合し、共有ノードに複数の親がある場合は最小TARGET_IDを表示上の親に選びます。そのため一般のDAGの全接続を再現する形式ではありません。実測情報を保持して共有する場合は、yydbmanagerで取得した`.yyplan`を利用してください。
+
+公式：[Db2 EXPORT](https://www.ibm.com/docs/en/db2/11.5.x?topic=commands-export)、[EXPLAIN表](https://www.ibm.com/docs/en/db2/11.5.x?topic=information-explain-tables)。
+
+### DuckDB：JSONプロファイルを保存
+
+DuckDB CLI等で対象DBへ接続し、次を実行します。この例はSELECTを実行し、そのプロファイルをDuckDBを動かしている環境へ保存します。全結果を取得し終えてからファイルをコピーしてください。途中で次のSQLをプロファイルすると上書きされるため、対象SQLの直後に収集を停止します。普段の接続とは別の調査用接続で実行してください。
+
+```sql
+PRAGMA enable_profiling='json';
+PRAGMA profiling_output='duckdb-plan.json';
+SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id;
+PRAGMA disable_profiling;
+```
+
+JSONの`children`／`operator_name`から演算子を復元します。CLIが表として表示したJSONのセルや、EXPLAINの罫線付き結果をそのまま保存したファイルは対象外です。演算子の時間は秒です。推定行数や実測行数がない場合は欠測として扱います。追加のサーバー権限設定は不要です。
+
+公式：[DuckDBのプロファイリング](https://duckdb.org/docs/stable/dev/profiling)。
+
+### SQLite：CLIでEXPLAIN QUERY PLANをCSV／JSON保存
+
+sqlite3 CLIで対象ファイルを開き、次を実行します。`.explain off`で図式表示を抑止することが必要です。`.once`は次の1クエリだけをファイルへ出力します。CSVは`id,parent,notused,detail`の見出しを含めます。
+
+```sql
+.explain off
+.headers on
+.mode csv
+.once sqlite-plan.csv
+EXPLAIN QUERY PLAN SELECT order_id, ordered_on FROM orders
+WHERE customer_id=1 ORDER BY ordered_on;
+```
+
+JSONで保存する場合は`.mode json`と`.once sqlite-plan.json`に変更します。`[{"id":3,"parent":0,"notused":0,"detail":"SCAN orders"}]`のような行配列を取り込みます。`parent=0`は根として扱います。これらはアクセス方法で、CPUや実測時間・行数を取得するものではありません。SQLiteの通常のファイル参照権限があれば使用できます。
+
+公式：[SQLite CLIの出力形式と.once](https://www.sqlite.org/cli.html)、[EXPLAIN QUERY PLAN](https://www.sqlite.org/eqp.html)。
 
 ## 実行計画の取得と読み方 {#plans}
 

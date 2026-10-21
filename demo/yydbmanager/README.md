@@ -136,6 +136,8 @@ yydbmanagerでSQLiteまたはDuckDBの接続先を新規作成し、ファイル
 
 ## DB別の性能分析を試す
 
+DBへ接続せず実行計画だけを試す場合は、[plansの各DBサンプル](plans/README.md)を「実行計画 → 実行計画を開く…」で開いてください。取得元で使うCLI／SQLは[sql/plan-files](sql/plan-files/)にあります。形式と取得手順はアプリの「ヘルプ → 実行計画ファイルの形式と取得方法…」で説明しています。
+
 アプリの「ヘルプ → DB別の性能分析ビュー…」に、各ビューの用途、時間・読み取り数の単位、必要権限、収集設定、累積値の差分の読み方を掲載しています。[ヘルプ原稿](../../apps/yydbmanager/help/help.md#performance)も参照できます。
 
 `sql/02-join-and-plan.sql`や`sql/03-index-selectivity.sql`を数回実行した後、接続DBに合う次のファイルをSQLタブで開き、文ごとに実行してください。

@@ -54,6 +54,16 @@ Db2の実測は既存の稼働中の`YYDBMANAGER_ACTIVITY`イベントモニタ�
 
 SQLの編集・Undo/Redo・選択・IME・ハイライト・描画はyyeditorの共通資産、結果の描画はyysheetの格子、ER・計画はyydrawの図モデルと描画を利用しています。
 
+## 性能分析SQLをメニューから開く
+
+性能分析のSQLを自分で書かずに始める場合は、右側の接続先を右クリックし「性能分析SQL（DB名）」から選択します。全7DBに対応し、そのDBで利用できる監視SQLを必要権限の説明とともに新しいSQLタブへ表示します。内容を編集・確認してから対象接続先へ接続し、F5で実行してください。既存のSQLは上書きせず、メニュー選択だけでは実行しません。詳しい指標・権限は「ヘルプ → DB別の性能分析ビュー…」で確認できます。
+
+## 他の環境の実行計画ファイルを開く
+
+「実行計画 → 実行計画を開く…」で、DB接続やODBCドライバーなしで表示できます。SQL Server Showplan XML、PostgreSQL EXPLAIN JSON、MySQL EXPLAIN JSON／TREE、DuckDB JSON、Oracle PLAN_TABLE CSV、Db2の指定8列DEL、SQLite EXPLAIN QUERY PLAN CSV／JSON、全DBの`.yyplan`に対応しています。UTF-8またはBOM付きUTF-16、32MiB・1万ノードまでです。
+
+DBごとの取得SQLとCLIの操作は「ヘルプ → 実行計画ファイルの形式と取得方法…」にあります。[持ち込み用サンプル](../../demo/yydbmanager/plans/README.md)も接続なしで開けます。`yydbmanager.exe --open-plan "C:\plans\mysql.txt"`による起動にも対応します。画面をコピーした罫線付きテキスト等は対象外です。
+
 ## ER図をゼロから作成する
 
 1. 「ファイル → ERモデルを新規作成…」で対象DBを選びます。DB接続は不要です。

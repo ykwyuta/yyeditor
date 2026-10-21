@@ -420,19 +420,46 @@ pub(super) fn action(hwnd: HWND, id: u16) {
     }
     if id == RAW_VIEW {
         if let Some(raw) = with_app(|a| a.plan.as_ref().map(|p| p.raw.clone())).flatten() {
-            detail_dialog(parent, "実行計画の原文（XML / JSON）", &raw, font, dpi);
+            detail_dialog(
+                parent,
+                "実行計画の原文（XML / JSON / CSV / TREE）",
+                &raw,
+                font,
+                dpi,
+            );
         }
         return;
     }
     if id == RAW_SAVE {
         let source = with_app(|a| {
-            a.plan
-                .as_ref()
-                .map(|p| (p.raw.clone(), p.kind == DbKind::SqlServer))
+            a.plan.as_ref().map(|p| {
+                let raw = p.raw.trim_start();
+                let extension = if p.kind == DbKind::SqlServer {
+                    "sqlplan"
+                } else if raw.starts_with("->") {
+                    "txt"
+                } else if raw.starts_with('{') || raw.starts_with('[') {
+                    "json"
+                } else if p.kind == DbKind::Db2
+                    && raw
+                        .split(',')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .trim_matches('"')
+                        .parse::<u64>()
+                        .is_ok()
+                {
+                    "db2plan"
+                } else {
+                    "csv"
+                };
+                (p.raw.clone(), extension)
+            })
         })
         .flatten();
-        if let Some((raw, xml)) = source
-            && let Some(path) = file_dialog(true, if xml { "sqlplan" } else { "json" })
+        if let Some((raw, extension)) = source
+            && let Some(path) = file_dialog(true, extension)
             && let Err(e) = std::fs::write(path, raw)
         {
             message(&e.to_string());
