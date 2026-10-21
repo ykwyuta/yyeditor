@@ -91,6 +91,12 @@ pub fn validate_svg(svg: &str) -> Result<()> {
 pub struct Renderer {
     fonts: Arc<usvg::fontdb::Database>,
     cache: Arc<Mutex<Option<Prepared>>>,
+    symbols: Arc<Mutex<std::collections::HashMap<Id, CachedSymbol>>>,
+}
+struct CachedSymbol {
+    source: String,
+    tree: Arc<usvg::Tree>,
+    raster: Option<((u64, u32, u32), tiny_skia::Pixmap)>,
 }
 struct Prepared {
     doc: Document,
@@ -107,6 +113,7 @@ impl Renderer {
         Self {
             fonts: Arc::new(fonts),
             cache: Arc::new(Mutex::new(None)),
+            symbols: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
     fn options(&self) -> usvg::Options<'static> {
@@ -256,6 +263,209 @@ impl Renderer {
         self.raster(doc, options, scale)?
             .encode_png()
             .map_err(|e| e.to_string())
+    }
+    /// Flat diagram viewport: reuse independently parsed icon SVGs while geometry moves.
+    /// Other shapes, routed/rounded/arrows/dashed lines and grid use the general renderer.
+    /// This preserves the full SVG/PNG export path and its document-level semantics.
+    pub fn raster_flat_icons(
+        &self,
+        doc: &Document,
+        options: &Export,
+        scale: f64,
+    ) -> Result<tiny_skia::Pixmap> {
+        if options.grid
+            || doc
+                .nodes
+                .iter()
+                .any(|n| n.shape != Shape::Icon || !n.label.is_empty())
+            || doc.connectors.iter().any(|c| {
+                c.orthogonal
+                    || c.arrow_start
+                    || c.arrow_end
+                    || c.dashed
+                    || c.corner_radius != 0.
+                    || c.jump != Jump::Never
+                    || !c.label.is_empty()
+                    || !matches!(c.start, Endpoint::Free(_))
+                    || !matches!(c.end, Endpoint::Free(_))
+            })
+        {
+            return self.raster(doc, options, scale);
+        }
+        if !scale.is_finite() || scale <= 0. {
+            return Err("出力倍率が不正です".into());
+        }
+        let w = (options.bounds.w * scale).ceil();
+        let h = (options.bounds.h * scale).ceil();
+        if w > 32768. || h > 32768. {
+            return Err("画像の最大辺は 32768 px です".into());
+        }
+        check_size(w as u32, h as u32)?;
+        let mut pixmap =
+            tiny_skia::Pixmap::new(w as u32, h as u32).ok_or("画像のメモリを確保できません")?;
+        if let Some(bg) = options.background {
+            pixmap.fill(tiny_skia::Color::from_rgba8(
+                (bg >> 16) as u8,
+                (bg >> 8) as u8,
+                bg as u8,
+                255,
+            ));
+        }
+        let transform = tiny_skia::Transform::from_scale(scale as f32, scale as f32)
+            .post_translate(
+                (-options.bounds.x * scale) as f32,
+                (-options.bounds.y * scale) as f32,
+            );
+        let mut paint = tiny_skia::Paint::default();
+        let clip = options.bounds.expand(8. / scale);
+        for c in &doc.connectors {
+            let (Endpoint::Free(start), Endpoint::Free(end)) = (c.start, c.end) else {
+                unreachable!()
+            };
+            let points = std::iter::once(start)
+                .chain(c.waypoints.iter().copied())
+                .chain(std::iter::once(end));
+            let mut builder = tiny_skia::PathBuilder::new();
+            builder.move_to(start.x as f32, start.y as f32);
+            let mut visible = false;
+            let mut last = start;
+            for p in points.skip(1) {
+                visible |= router::overlap(
+                    Rect {
+                        x: last.x.min(p.x),
+                        y: last.y.min(p.y),
+                        w: (last.x - p.x).abs().max(1.),
+                        h: (last.y - p.y).abs().max(1.),
+                    },
+                    clip,
+                );
+                builder.line_to(p.x as f32, p.y as f32);
+                last = p;
+            }
+            if !visible {
+                continue;
+            }
+            if let Some(path) = builder.finish() {
+                paint.set_color_rgba8(
+                    (c.color >> 16) as u8,
+                    (c.color >> 8) as u8,
+                    c.color as u8,
+                    255,
+                );
+                let stroke = tiny_skia::Stroke {
+                    width: c.width as f32,
+                    ..Default::default()
+                };
+                pixmap.stroke_path(&path, &paint, &stroke, transform, None);
+            }
+        }
+        let assets = doc
+            .assets
+            .iter()
+            .map(|a| (a.id, a))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut cache = self.symbols.lock().unwrap();
+        cache.retain(|id, _| assets.contains_key(id));
+        for n in doc.nodes.iter().filter(|n| router::overlap(n.rect, clip)) {
+            let Some(asset) = n.asset.and_then(|id| assets.get(&id)) else {
+                continue;
+            };
+            if !cache
+                .get(&asset.id)
+                .is_some_and(|entry| entry.source == asset.svg)
+            {
+                let tree =
+                    usvg::Tree::from_str(&asset.svg, &self.options()).map_err(|e| e.to_string())?;
+                cache.insert(
+                    asset.id,
+                    CachedSymbol {
+                        source: asset.svg.clone(),
+                        tree: Arc::new(tree),
+                        raster: None,
+                    },
+                );
+            }
+            let tree = cache[&asset.id].tree.clone();
+            let tw = tree.size().width() as f64;
+            let th = tree.size().height() as f64;
+            let height = (n.rect.h - 24.).max(8.);
+            let fit = (n.rect.w / tw).min(height / th);
+            let x = (n.rect.x - options.bounds.x + (n.rect.w - tw * fit) / 2.) * scale;
+            let y = (n.rect.y - options.bounds.y + (height - th * fit) / 2.) * scale;
+            let t = tiny_skia::Transform::from_scale((fit * scale) as f32, (fit * scale) as f32)
+                .post_translate(x as f32, y as f32);
+            let raster_scale = fit * scale;
+            // Tiny-skia snaps translated bitmap patterns to integer pixels. Rasterize
+            // the fractional phase into the cached symbol, then blit at integer pixels.
+            let phase_x = (x - x.floor()) as f32;
+            let phase_y = (y - y.floor()) as f32;
+            let raster_key = (raster_scale.to_bits(), phase_x.to_bits(), phase_y.to_bits());
+            let rw = (tw * raster_scale).ceil();
+            let rh = (th * raster_scale).ceil();
+            // Bound the bitmap cache to 64 MiB. Oversized table cards use vectors.
+            let bytes = (rw + 2.) * (rh + 2.) * 4.;
+            let cached = cache[&asset.id]
+                .raster
+                .as_ref()
+                .is_some_and(|(key, _)| *key == raster_key);
+            if !cached
+                && rw > 0.
+                && rh > 0.
+                && rw <= 8192.
+                && rh <= 8192.
+                && bytes <= 16. * 1024. * 1024.
+            {
+                let used = cache
+                    .values()
+                    .filter_map(|v| v.raster.as_ref())
+                    .map(|(_, p)| p.data().len())
+                    .sum::<usize>();
+                if used + bytes as usize > 64 * 1024 * 1024 {
+                    for v in cache.values_mut() {
+                        v.raster = None;
+                    }
+                }
+                if let Some(mut symbol) = tiny_skia::Pixmap::new(rw as u32 + 2, rh as u32 + 2) {
+                    resvg::render(
+                        &tree,
+                        tiny_skia::Transform::from_scale(raster_scale as f32, raster_scale as f32)
+                            .post_translate(1. + phase_x, 1. + phase_y),
+                        &mut symbol.as_mut(),
+                    );
+                    cache.get_mut(&asset.id).unwrap().raster = Some((raster_key, symbol));
+                }
+            }
+            if let Some((_, image)) = cache[&asset.id]
+                .raster
+                .as_ref()
+                .filter(|(key, _)| *key == raster_key)
+            {
+                let paint = tiny_skia::PixmapPaint {
+                    quality: tiny_skia::FilterQuality::Nearest,
+                    ..Default::default()
+                };
+                pixmap.draw_pixmap(
+                    x.floor() as i32 - 1,
+                    y.floor() as i32 - 1,
+                    image.as_ref(),
+                    &paint,
+                    tiny_skia::Transform::identity(),
+                    None,
+                );
+            } else {
+                resvg::render(&tree, t, &mut pixmap.as_mut());
+            }
+        }
+        if !options.selected.is_empty() {
+            let overlay = usvg::Tree::from_str(&selection_svg(doc, options), &self.options())
+                .map_err(|e| e.to_string())?;
+            resvg::render(
+                &overlay,
+                tiny_skia::Transform::from_scale(scale as f32, scale as f32),
+                &mut pixmap.as_mut(),
+            );
+        }
+        Ok(pixmap)
     }
 }
 // Resvg visits every path, including offscreen paths. Keep compositing groups intact,
@@ -648,5 +858,96 @@ fn label(s: &mut String, family: &str, size: f64, r: Rect, text: &str, c: u32) {
     let top = r.y + r.h / 2. - (lines.len().saturating_sub(1) as f64) * size * 0.65 + size * 0.35;
     for (i, line) in lines.iter().enumerate() {
         s.push_str(&format!("<text x='{}' y='{}' font-family='{}' font-size='{size}' text-anchor='middle' fill='{}'>{}</text>",r.x+r.w/2.,top+i as f64*size*1.3,escape(family),color(c),escape(line)));
+    }
+}
+#[cfg(test)]
+mod flat_tests {
+    use super::*;
+    #[test]
+    fn icon_cache_handles_motion_source_changes_zoom_and_offscreen_assets() {
+        let renderer = Renderer::new(None);
+        let mut doc = Document {
+            snap: false,
+            jumps: false,
+            ..Default::default()
+        };
+        doc.assets.push(Asset{id:1,name:"square".into(),source:String::new(),svg:"<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20'><rect width='20' height='20' fill='red'/></svg>".into()});
+        doc.next_id = 2;
+        doc.add_node(Shape::Icon, Point::new(10., 10.), Some(1));
+        doc.nodes[0].label.clear();
+        doc.nodes[0].rect.w = 20.;
+        doc.nodes[0].rect.h = 44.;
+        let options = Export {
+            bounds: Rect {
+                x: 0.,
+                y: 0.,
+                w: 120.,
+                h: 80.,
+            },
+            background: Some(0xffffff),
+            grid: false,
+            text: false,
+            selected: vec![],
+        };
+        let image = renderer.raster_flat_icons(&doc, &options, 1.).unwrap();
+        assert_eq!(image.pixel(15, 15).unwrap().red(), 255);
+        assert_eq!(image.pixel(15, 15).unwrap().green(), 0);
+        doc.nodes[0].rect.x = 80.;
+        doc.assets[0].svg = doc.assets[0].svg.replace("red", "blue");
+        let moved = renderer.raster_flat_icons(&doc, &options, 1.).unwrap();
+        assert_eq!(moved.pixel(15, 15).unwrap().green(), 255);
+        assert_eq!(moved.pixel(85, 15).unwrap().blue(), 255);
+        assert_eq!(moved.pixel(85, 15).unwrap().red(), 0);
+        for scale in [0.5, 1.25, 2.] {
+            let flat = renderer.raster_flat_icons(&doc, &options, scale).unwrap();
+            let full = renderer.raster(&doc, &options, scale).unwrap();
+            // Fractional transforms can round an antialiased edge by one channel level.
+            let difference = flat
+                .data()
+                .iter()
+                .zip(full.data())
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap_or(0);
+            assert!(
+                difference <= 1,
+                "scale {scale}: maximum channel difference {difference}; {:?}",
+                flat.data()
+                    .chunks_exact(4)
+                    .zip(full.data().chunks_exact(4))
+                    .enumerate()
+                    .filter(|(_, (a, b))| a != b)
+                    .take(6)
+                    .map(|(i, (a, b))| (i % flat.width() as usize, i / flat.width() as usize, a, b))
+                    .collect::<Vec<_>>()
+            );
+        }
+        doc.assets.push(Asset {
+            id: 3,
+            name: "unseen".into(),
+            source: String::new(),
+            svg: "invalid SVG".into(),
+        });
+        doc.next_id = 4;
+        doc.add_node(Shape::Icon, Point::new(10000., 10000.), Some(3));
+        doc.nodes[1].label.clear();
+        assert!(renderer.raster_flat_icons(&doc, &options, 1.).is_ok());
+        let pan = Export {
+            bounds: Rect {
+                x: 9990.,
+                y: 9990.,
+                w: 120.,
+                h: 80.,
+            },
+            ..options.clone()
+        };
+        assert!(renderer.raster_flat_icons(&doc, &pan, 1.).is_err());
+        doc.nodes.pop();
+        doc.nodes[0].shape = Shape::Rectangle;
+        let fallback = renderer.raster_flat_icons(&doc, &options, 1.).unwrap();
+        assert_eq!(
+            fallback.data(),
+            renderer.raster(&doc, &options, 1.).unwrap().data()
+        );
     }
 }

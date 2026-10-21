@@ -1,0 +1,11 @@
+[package]
+name = "yydbmanager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "../../yyeditor/build.rs"
+
+[dependencies]
+yy-db-core.workspace = true
+yy-db-ui.workspace = true
+serde_json.workspace = true

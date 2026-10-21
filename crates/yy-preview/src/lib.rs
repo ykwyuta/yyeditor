@@ -8,6 +8,7 @@
 //! リソース要求を横取りして返す）。文書と同じフォルダの画像などは `https://yy-doc.local/`
 //! （文書のフォルダを割り当てた仮想ホスト）から読む。
 
+pub mod help;
 pub mod live;
 mod markdown;
 pub mod security;

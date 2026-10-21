@@ -24,6 +24,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | R16 | 同じクレートを使った別のアプリとしてのスプレッドシート（50 億セル〔1000 列 × 500 万行・100 列 × 5000 万行〕を数秒で並べ替え・絞り込み・集計、メモリ 8 GB まで、独自形式と RFC 4180 の CSV、Excel 互換の一部の関数と表示形式、色・罫線）**（実装中）** | [15-spreadsheet](15-spreadsheet.md) |
 | R17 | 独立した Windows 常駐アプリ yyclip でクリップボード履歴を記録・復元する | [16-clipboard-history](16-clipboard-history.md) |
 | R18 | 独立した構成図アプリ yydraw（方眼紙・基本図形・クラウドアイコン・線の交差アーチ、共通フォント、独自バイナリ保存、SVG・PNG 出力）**（提案）** | [21-draw](21-draw.md) |
+| R19 | 独立したDB管理アプリ yydbmanager（7種類のDB、SQL編集・実行、結果格子、ER図、実行計画の可視化、全形式の入出力、SQLite・DuckDB同梱、専用CI）**（提案）** | [22-dbmanager](22-dbmanager.md) |
 
 > 依頼文の「encdic」は、IBM メインフレーム系の **EBCDIC**（日本では EBCDIK / IBM CCSID 930・939・1390・1399、富士通 JEF、日立 KEIS などの EBCDIC 系漢字コード）を指すものと解釈しています。
 
@@ -81,6 +82,7 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | [19-browser.md](19-browser.md) | タブブラウザ（yybrowser）：OS と別のプロキシ（直接・指定・PAC・SOCKS）、プロファイルごとのデータ、最低限のタブブラウザの機能 |
 | [20-adblock.md](20-adblock.md) | yybrowser の広告ブロック：有名なフィルタリスト（EasyList など）の自動更新、要求の遮断、広告の枠の非表示、プロファイル・サイトごとの入切 |
 | [21-draw.md](21-draw.md) | 構成図（yydraw）：方眼紙、基本図形・クラウドアイコン、接続線の交差アーチ、共通フォント、独自バイナリ保存、SVG・PNG 出力 |
+| [22-dbmanager.md](22-dbmanager.md) | DB管理（yydbmanager）：7種類のDB、共通フォントと既存編集・格子・図資産の再利用、SSMS風の実行計画、CSV・TSV・任意区切り・Parquet・COBOL固定長の入出力、同梱エンジン、独立CI |
 
 ## 4. 性能・品質目標（抜粋）
 

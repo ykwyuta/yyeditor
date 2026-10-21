@@ -1,0 +1,27 @@
+[
+  {
+    "database": "PostgreSQL",
+    "status": "passed",
+    "summary": "PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit: connect, DDL/DML, exact DECIMAL(31,8), Unicode, NULL, metadata, bound import, CSV and Parquet OK, estimated plan OK, actual plan OK"
+  },
+  {
+    "database": "MySQL",
+    "status": "passed",
+    "summary": "8.4.11: connect, DDL/DML, exact DECIMAL(31,8), Unicode, NULL, metadata, bound import, CSV and Parquet OK, estimated plan OK"
+  },
+  {
+    "database": "SQL Server",
+    "status": "passed",
+    "summary": "Microsoft SQL Server 2022 (RTM-CU27-GDR) (KB5126934) - 16.0.4305.5 (X64) \n\tOct  2 2026 17:28:11 \n\tCopyright (C) 2022 Microsoft Corporation\n\tDeveloper Edition (64-bit) on Linux (Ubuntu 22.04.5 LTS) <X64>: connect, DDL/DML, exact DECIMAL(31,8), Unicode, NULL, metadata, bound import, CSV and Parquet OK, estimated plan OK, actual plan OK"
+  },
+  {
+    "database": "Oracle",
+    "status": "passed",
+    "summary": "Oracle AI Database 26ai Free Release 23.26.3.0.0 - Develop, Learn, and Run for Free: connect, DDL/DML, exact DECIMAL(31,8), Unicode, NULL, metadata, bound import, CSV and Parquet OK, estimated plan OK"
+  },
+  {
+    "database": "IBM Db2",
+    "status": "passed",
+    "summary": "DB2 v12.1.5.0: connect, DDL/DML, exact DECIMAL(31,8), Unicode, NULL, metadata, bound import, CSV and Parquet OK, estimated plan OK"
+  }
+]

@@ -1,0 +1,156 @@
+name: yydbmanager
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "apps/yydbmanager/**"
+      - "apps/yyeditor/build.rs"
+      - "tools/gen-icon/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/yydbmanager.yml"
+  pull_request:
+    paths:
+      - "apps/yydbmanager/**"
+      - "apps/yyeditor/build.rs"
+      - "tools/gen-icon/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/yydbmanager.yml"
+  workflow_dispatch:
+    inputs:
+      docker_databases:
+        description: Run real connections to all five remote databases
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  windows:
+    name: yydbmanager Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/yydbmanager -> target"
+          key: yydbmanager-windows
+      - name: Format
+        run: cargo fmt --manifest-path apps/yydbmanager/Cargo.toml --all -- --check
+      - name: Lint
+        run: cargo clippy --manifest-path apps/yydbmanager/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - name: Test embedded engines, plans and transfer
+        run: cargo test --manifest-path apps/yydbmanager/Cargo.toml --workspace --locked
+      - name: Build standalone app
+        run: cargo build --manifest-path apps/yydbmanager/Cargo.toml --release -p yydbmanager --locked
+      - name: Package and offline smoke test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/yydbmanager | Out-Null
+          Copy-Item apps/yydbmanager/target/release/yydbmanager.exe dist/yydbmanager/
+          Copy-Item apps/yydbmanager/README.md,apps/yydbmanager/NOTICE.md dist/yydbmanager/
+          Copy-Item crates/yy-win/fonts/LICENSE-UDEVGothic.txt dist/yydbmanager/
+          Copy-Item COPYING,COPYING.EXCEPTION dist/yydbmanager/
+          Copy-Item crates/yy-preview/assets/LICENSE-*.txt dist/yydbmanager/
+          $taskResult = Start-Process -FilePath ./dist/yydbmanager/yydbmanager.exe -ArgumentList '--smoke-test','smoke-output' -WindowStyle Hidden -PassThru -Wait
+          if ($taskResult.ExitCode -ne 0) { throw "Embedded engine smoke test failed: $($taskResult.ExitCode)" }
+          Get-Content smoke-output/smoke-test.txt
+          $taskUiResult = Start-Process -FilePath ./dist/yydbmanager/yydbmanager.exe -ArgumentList '--ui-smoke-test','ui-smoke-output' -WindowStyle Hidden -PassThru -Wait
+          if ($taskUiResult.ExitCode -ne 0) { throw "Native UI smoke test failed: $($taskUiResult.ExitCode)" }
+          $env:YYDBMANAGER_PLAN_FIXTURE = (Resolve-Path apps/yydbmanager/tests/fixtures/sqlserver-hash-sort.sqlplan).Path
+          $taskPlanResult = Start-Process -FilePath ./dist/yydbmanager/yydbmanager.exe -ArgumentList '--ui-smoke-test','plan-ui-output' -WindowStyle Hidden -PassThru -Wait
+          if ($taskPlanResult.ExitCode -ne 0) { throw "Plan UI regression failed: $($taskPlanResult.ExitCode)" }
+          Get-Content plan-ui-output/plan-view-smoke.txt
+          foreach ($taskDb in @('postgresql','mysql','oracle','db2','duckdb','sqlite')) {
+            $env:YYDBMANAGER_PLAN_FIXTURE = (Resolve-Path "apps/yydbmanager/tests/fixtures/$taskDb-complex.yyplan").Path
+            $taskCrossPlan = Start-Process -FilePath ./dist/yydbmanager/yydbmanager.exe -ArgumentList '--ui-smoke-test',"$taskDb-plan-ui-output" -WindowStyle Hidden -PassThru -Wait
+            if ($taskCrossPlan.ExitCode -ne 0) { throw "$taskDb plan UI regression failed: $($taskCrossPlan.ExitCode)" }
+          }
+      - name: Windows shell and resize regression
+        shell: pwsh
+        run: ./apps/yydbmanager/tests/windows-shell.ps1 -Executable ./dist/yydbmanager/yydbmanager.exe -OutputDirectory shell-output -PlanFile apps/yydbmanager/tests/fixtures/sqlserver-hash-sort.sqlplan
+      - name: SQL/ER tabs, column spreadsheet, 7 DB type dropdowns and DDL generation
+        shell: pwsh
+        run: ./apps/yydbmanager/tests/windows-shell.ps1 -Executable ./dist/yydbmanager/yydbmanager.exe -OutputDirectory er-shell-output -PlanFile ui-smoke-output/edited-er.yyer.yaml
+      - name: Help without WebView2
+        shell: pwsh
+        run: |
+          $env:YY_HELP_TEXT_ONLY = '1'
+          try { ./apps/yydbmanager/tests/windows-shell.ps1 -Executable ./dist/yydbmanager/yydbmanager.exe -OutputDirectory text-help-output -HelpOnly }
+          finally { Remove-Item Env:YY_HELP_TEXT_ONLY }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yydbmanager-windows-x64
+          path: dist/yydbmanager/
+  core:
+    name: yydbmanager Linux core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: ODBC build dependency
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/yydbmanager -> target"
+          key: yydbmanager-linux
+      - name: Test
+        run: cargo test --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --locked
+  docker-live:
+    name: yydbmanager real DB (${{ matrix.name }})
+    if: github.event_name == 'workflow_dispatch' && inputs.docker_databases
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {service: postgres, name: PostgreSQL}
+          - {service: mysql, name: MySQL}
+          - {service: sqlserver, name: SQL Server}
+          - {service: oracle, name: Oracle}
+          - {service: db2, name: IBM Db2}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start isolated database
+        run: docker compose -p yydbmanager-validation -f apps/yydbmanager/tests/docker/compose.yml up -d ${{ matrix.service }}
+      - name: Build validation runner
+        run: docker build -t yydbmanager-validation-runner -f apps/yydbmanager/tests/docker/runner.Dockerfile .
+      - name: Prepare Db2 ODBC instance profile
+        if: matrix.service == 'db2'
+        shell: pwsh
+        run: ./apps/yydbmanager/tests/docker/prepare-db2.ps1 -OutputDirectory '${{ runner.temp }}/db-build'
+      - name: Real connection, types, import, export and plans
+        env:
+          YYDB_FILTER: ${{ matrix.name }}
+        run: |
+          mkdir -p "${{ runner.temp }}/db-build"
+          docker run --rm --network yydbmanager-validation_default \
+            -v "$GITHUB_WORKSPACE:/workspace" -v "${{ runner.temp }}/db-build:/build" \
+            -e YYDB_CONNECTIONS=/workspace/apps/yydbmanager/tests/docker/connections.json \
+            -e YYDB_REPORT_DIR=/build/reports -e YYDB_EXPECT_DATABASES=1 -e YYDB_COMPLEX_PLANS=1 \
+            -e YYDB_DATABASE_FILTER="$YYDB_FILTER" -e CARGO_BUILD_JOBS=2 -e CXXFLAGS=-g0 \
+            yydbmanager-validation-runner \
+            cargo test --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --test docker_live --locked -- --ignored --nocapture
+      - name: Collect service logs
+        if: always()
+        run: |
+          mkdir -p "${{ runner.temp }}/db-build/reports"
+          docker compose -p yydbmanager-validation -f apps/yydbmanager/tests/docker/compose.yml logs --no-color > "${{ runner.temp }}/db-build/reports/service.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yydbmanager-real-db-${{ matrix.service }}
+          path: ${{ runner.temp }}/db-build/reports/
+      - name: Stop validation database
+        if: always()
+        run: docker compose -p yydbmanager-validation -f apps/yydbmanager/tests/docker/compose.yml down -v

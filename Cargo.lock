@@ -4247,6 +4247,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "yy-ui-win"
+version = "0.1.0"
+dependencies = [
+ "webview2-com",
+ "windows",
+ "windows-numerics",
+ "yy-buffer",
+ "yy-config",
+ "yy-core",
+ "yy-layout",
+ "yy-preview",
+ "yy-sheet",
+ "yy-syntax",
+]
+
+[[package]]
 name = "yy-win"
 version = "0.1.0"
 dependencies = [
@@ -4282,6 +4298,7 @@ dependencies = [
  "yy-sheet",
  "yy-syntax",
  "yy-term",
+ "yy-ui-win",
 ]
 
 [[package]]

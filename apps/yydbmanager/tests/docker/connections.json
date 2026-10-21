@@ -1,0 +1,7 @@
+[
+  {"kind":"PostgreSql","connection":"Driver={PostgreSQL Unicode};Server=postgres;Port=5432;Database=yytest;Uid=yytest;Pwd=Yydb_Test_2026!;"},
+  {"kind":"MySql","connection":"Driver={MariaDB Unicode};Server=mysql;Port=3306;Database=yytest;Uid=yytest;Pwd=Yydb_Test_2026!;CHARSET=utf8mb4;"},
+  {"kind":"SqlServer","connection":"Driver={ODBC Driver 18 for SQL Server};Server=sqlserver,1433;Database=master;Uid=sa;Pwd=Yydb_Test_2026!;Encrypt=yes;TrustServerCertificate=yes;"},
+  {"kind":"Oracle","connection":"Driver={Oracle Instant Client};DBQ=//oracle:1521/FREEPDB1;Uid=system;Pwd=Yydb_Test_2026!;"},
+  {"kind":"Db2","connection":"Driver={IBM DB2 ODBC DRIVER};Database=YYTEST;Hostname=db2;Port=50000;Protocol=TCPIP;Uid=db2inst1;Pwd=Yydb_Test_2026!;"}
+]

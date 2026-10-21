@@ -3,7 +3,13 @@ name: CI
 on:
   push:
     branches: [main, master, "claude/**"]
+    paths-ignore:
+      - "apps/yydbmanager/**"
+      - ".github/workflows/yydbmanager.yml"
   pull_request:
+    paths-ignore:
+      - "apps/yydbmanager/**"
+      - ".github/workflows/yydbmanager.yml"
 
 env:
   CARGO_TERM_COLOR: always

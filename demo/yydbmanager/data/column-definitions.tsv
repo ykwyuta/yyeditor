@@ -1,0 +1,4 @@
+customer_id	顧客ID	INTEGER	false		false
+name	顧客名	VARCHAR(100)	false		true
+region	地域	VARCHAR(20)	true		true
+registered_on	登録日	DATE	true		false

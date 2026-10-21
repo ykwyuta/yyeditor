@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "kind": "Sqlite",
+  "actual": false,
+  "raw": "[{\"id\":8,\"parent\":null,\"operator\":\"SCAN a\",\"object\":\"a\",\"estimated_rows\":null,\"actual_rows\":null,\"cost\":null,\"properties\":{\"Detail\":\"SCAN a\"}},{\"id\":12,\"parent\":null,\"operator\":\"BLOOM FILTER ON b (id=?)\",\"object\":\"\",\"estimated_rows\":null,\"actual_rows\":null,\"cost\":null,\"properties\":{\"Detail\":\"BLOOM FILTER ON b (id=?)\"}},{\"id\":22,\"parent\":null,\"operator\":\"SEARCH b USING AUTOMATIC COVERING INDEX (id=?)\",\"object\":\"b\",\"estimated_rows\":null,\"actual_rows\":null,\"cost\":null,\"properties\":{\"Detail\":\"SEARCH b USING AUTOMATIC COVERING INDEX (id=?)\"}},{\"id\":29,\"parent\":null,\"operator\":\"USE TEMP B-TREE FOR GROUP BY\",\"object\":\"\",\"estimated_rows\":null,\"actual_rows\":null,\"cost\":null,\"properties\":{\"Detail\":\"USE TEMP B-TREE FOR GROUP BY\"}},{\"id\":67,\"parent\":null,\"operator\":\"USE TEMP B-TREE FOR ORDER BY\",\"object\":\"\",\"estimated_rows\":null,\"actual_rows\":null,\"cost\":null,\"properties\":{\"Detail\":\"USE TEMP B-TREE FOR ORDER BY\"}}]",
+  "nodes": [
+    {
+      "id": 8,
+      "parent": null,
+      "operator": "SCAN a",
+      "object": "a",
+      "estimated_rows": null,
+      "actual_rows": null,
+      "cost": null,
+      "properties": {
+        "Detail": "SCAN a",
+        "Query.Text": "SELECT a.grp, SUM(b.amount) AS total FROM a JOIN b ON a.id=b.id GROUP BY a.grp ORDER BY total DESC"
+      }
+    },
+    {
+      "id": 12,
+      "parent": null,
+      "operator": "BLOOM FILTER ON b (id=?)",
+      "object": "",
+      "estimated_rows": null,
+      "actual_rows": null,
+      "cost": null,
+      "properties": {
+        "Detail": "BLOOM FILTER ON b (id=?)",
+        "Query.Text": "SELECT a.grp, SUM(b.amount) AS total FROM a JOIN b ON a.id=b.id GROUP BY a.grp ORDER BY total DESC"
+      }
+    },
+    {
+      "id": 22,
+      "parent": null,
+      "operator": "SEARCH b USING AUTOMATIC COVERING INDEX (id=?)",
+      "object": "b",
+      "estimated_rows": null,
+      "actual_rows": null,
+      "cost": null,
+      "properties": {
+        "Detail": "SEARCH b USING AUTOMATIC COVERING INDEX (id=?)",
+        "Query.Text": "SELECT a.grp, SUM(b.amount) AS total FROM a JOIN b ON a.id=b.id GROUP BY a.grp ORDER BY total DESC"
+      }
+    },
+    {
+      "id": 29,
+      "parent": null,
+      "operator": "USE TEMP B-TREE FOR GROUP BY",
+      "object": "",
+      "estimated_rows": null,
+      "actual_rows": null,
+      "cost": null,
+      "properties": {
+        "Detail": "USE TEMP B-TREE FOR GROUP BY",
+        "Query.Text": "SELECT a.grp, SUM(b.amount) AS total FROM a JOIN b ON a.id=b.id GROUP BY a.grp ORDER BY total DESC"
+      }
+    },
+    {
+      "id": 67,
+      "parent": null,
+      "operator": "USE TEMP B-TREE FOR ORDER BY",
+      "object": "",
+      "estimated_rows": null,
+      "actual_rows": null,
+      "cost": null,
+      "properties": {
+        "Detail": "USE TEMP B-TREE FOR ORDER BY",
+        "Query.Text": "SELECT a.grp, SUM(b.amount) AS total FROM a JOIN b ON a.id=b.id GROUP BY a.grp ORDER BY total DESC"
+      }
+    }
+  ]
+}
