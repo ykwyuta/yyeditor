@@ -66,3 +66,22 @@ yymerge gui --left before.txt --right after.txt --ignore-case --ignore-trailing-
 ```
 
 例えば左を`Alpha`＋行末空白＋CRLF、右を`alpha`＋LFとすると、原本を変えず「規則上は同値」となり、無視した元行の対も確認できます。[厳密比較に戻す]で差分が再び表示されます。パッチ・自動マージ・同期へ無視規則は適用しません。
+
+同じ規則を再利用する場合はJSONへ保存できます。GUIでも[比較規則]から保存・読み込みできます。
+
+```powershell
+yymerge rules-profile save review.json --ignore-case --ignore-trailing-space --ignore-eol
+yymerge rules-profile show review.json
+yymerge diff before.txt after.txt --rules-profile review.json --format json
+yymerge gui --left before.txt --right after.txt --rules-profile review.json --wait
+```
+
+個別の無視フラグとの併用はできません。既存JSONの置換には`--overwrite`を指定します。新しいウィンドウに自動適用される設定ではなく、明示指定した規則を使います。
+
+ブラウザーで共有・印刷する比較結果は、単一HTMLで保存できます。
+
+```powershell
+yymerge diff before.txt after.txt --rules-profile review.json --format html --report review.html
+```
+
+GUIは[ファイル] → [2方向比較をHTMLレポートに保存…]を使います。左右の原文と行番号、改行種別、適用規則を表示し、青の「≈」は規則で無視した差分です。全文とフルパスを含みます。上限32 MiBを超える場合はエラーになり、既存のHTMLは保持します。

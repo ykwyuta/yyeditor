@@ -2,6 +2,8 @@
 pub mod alignment;
 pub mod files;
 pub mod folders;
+pub mod profile;
+pub mod report;
 pub mod rules;
 pub mod sync_plan;
 pub mod sync_run;

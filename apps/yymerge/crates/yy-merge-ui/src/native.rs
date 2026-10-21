@@ -24,6 +24,8 @@ use yy_ui_win::editor::Editor;
 
 #[path = "folders_view.rs"]
 mod folders_view;
+#[path = "report_view.rs"]
+mod report_view;
 
 const FRAME: PCWSTR = w!("YYMergeFrame");
 const PANE: PCWSTR = w!("YYMergePane");
@@ -64,6 +66,9 @@ const RULE_SPACE: u16 = 133;
 const RULE_TRAILING: u16 = 134;
 const RULE_CASE: u16 = 135;
 const RULE_EOL: u16 = 136;
+const PROFILE_OPEN: u16 = 137;
+const PROFILE_SAVE: u16 = 138;
+const REPORT_HTML: u16 = 139;
 const HELP_MD: &str = include_str!("../../../help/help.md");
 const SS_LEFTNOWORDWRAP: u32 = 12;
 thread_local! {static APP:RefCell<Option<App>>=const{RefCell::new(None)};}
@@ -138,6 +143,7 @@ struct App {
     options: Gui,
     loaded: Option<Loaded>,
     receiver: Option<mpsc::Receiver<Result<Loaded>>>,
+    report_job: Option<report_view::Job>,
     projection_receiver: Option<mpsc::Receiver<Projection>>,
     projection_cancel: Arc<Cancellation>,
     projection_due: Option<Instant>,
@@ -814,6 +820,9 @@ fn resolve(a: &mut App, choice: Option<Choice>) -> Result<()> {
     Ok(())
 }
 fn choose_file(save: bool, title: &str) -> Option<PathBuf> {
+    choose_file_ext(save, title, None)
+}
+fn choose_file_ext(save: bool, title: &str, extension: Option<&str>) -> Option<PathBuf> {
     unsafe {
         let d: IFileDialog = CoCreateInstance(
             if save {
@@ -826,6 +835,9 @@ fn choose_file(save: bool, title: &str) -> Option<PathBuf> {
         )
         .ok()?;
         d.SetTitle(&HSTRING::from(title)).ok()?;
+        if let Some(extension) = extension {
+            d.SetDefaultExtension(&HSTRING::from(extension)).ok()?;
+        }
         d.Show(app(|a| a.hwnd)).ok()?;
         let p = d.GetResult().ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
         let s = p.to_string().ok();
@@ -834,7 +846,7 @@ fn choose_file(save: bool, title: &str) -> Option<PathBuf> {
     }
 }
 fn git_blocked(id: u16) -> bool {
-    matches!(id, OPEN | OPEN_MERGE) || (OPEN_FOLDERS..=RULE_EOL).contains(&id)
+    matches!(id, OPEN | OPEN_MERGE) || (OPEN_FOLDERS..=REPORT_HTML).contains(&id)
 }
 fn git_exit(a: &App) -> i32 {
     if a.receiver.is_some() {
@@ -858,7 +870,7 @@ fn git_exit(a: &App) -> i32 {
     })();
     if result.is_ok() { 0 } else { 2 }
 }
-fn set_rule(a: &mut App, id: u16) -> Result<()> {
+fn rules_ready(a: &App) -> Result<()> {
     if a.folder_mode
         || a.options.base.is_some()
         || a.options.git_merge
@@ -867,6 +879,55 @@ fn set_rule(a: &mut App, id: u16) -> Result<()> {
     {
         return Err("比較規則は処理中でない通常の2方向比較で設定してください。".into());
     }
+    Ok(())
+}
+fn recompare_rules(a: &mut App) {
+    if a.options.left.is_some() && a.options.right.is_some() {
+        begin(a);
+    } else {
+        refresh(a);
+    }
+    layout(a);
+}
+fn profile_file(a: &mut App, path: &std::path::Path, save: bool) -> Result<()> {
+    rules_ready(a)?;
+    let cancel = Cancellation::default();
+    if save {
+        let data = a.loaded.as_ref();
+        // A failed attempt to open another pair can leave the previous view visible.
+        // Never export over an input that was selected but could not be loaded.
+        for (index, input) in [&a.options.left, &a.options.right].into_iter().enumerate() {
+            if let Some(path) = input {
+                let canonical = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+                if data
+                    .and_then(|d| d.inputs.get(index))
+                    .is_none_or(|s| s.path != canonical)
+                {
+                    return Err(
+                        "入力の比較が正常に完了してからプロファイルを保存してください。".into(),
+                    );
+                }
+            }
+        }
+        let inputs: Vec<_> = data.into_iter().flat_map(|d| &d.inputs).collect();
+        yy_merge_core::files::save(
+            path,
+            yy_merge_core::profile::Profile::new(a.options.rules.core())
+                .json()?
+                .as_bytes(),
+            &inputs,
+            true, // FileSaveDialog confirms replacement before this helper is called.
+            &cancel,
+        )?;
+    } else {
+        let (profile, _) = yy_merge_core::profile::Profile::open(path, &cancel)?;
+        a.options.rules = yy_merge_cli::RuleArgs::from_core(profile.rules);
+        recompare_rules(a);
+    }
+    Ok(())
+}
+fn set_rule(a: &mut App, id: u16) -> Result<()> {
+    rules_ready(a)?;
     match id {
         RULE_RESET => a.options.rules = Default::default(),
         RULE_SPACE => a.options.rules.ignore_space ^= true,
@@ -875,15 +936,26 @@ fn set_rule(a: &mut App, id: u16) -> Result<()> {
         RULE_EOL => a.options.rules.ignore_eol ^= true,
         _ => {}
     }
-    if a.options.left.is_some() && a.options.right.is_some() {
-        begin(a);
-    } else {
-        refresh(a);
-    }
-    layout(a);
+    recompare_rules(a);
     Ok(())
 }
 fn command(id: u16) -> Result<()> {
+    if id == REPORT_HTML {
+        return report_view::command();
+    }
+    if matches!(id, PROFILE_OPEN | PROFILE_SAVE) {
+        app(|a| rules_ready(a)).unwrap_or(Ok(()))?;
+        let save = id == PROFILE_SAVE;
+        let title = if save {
+            "比較プロファイルを保存（JSON）"
+        } else {
+            "比較プロファイルを読み込む（JSON）"
+        };
+        if let Some(path) = choose_file_ext(save, title, Some("json")) {
+            return app(|a| profile_file(a, &path, save)).unwrap_or(Ok(()));
+        }
+        return Ok(());
+    }
     if (RULE_RESET..=RULE_EOL).contains(&id) {
         return app(|a| set_rule(a, id)).unwrap_or(Ok(()));
     }
@@ -911,6 +983,9 @@ fn command(id: u16) -> Result<()> {
             a.cancel.cancel();
             a.projection_cancel.cancel();
             a.projection_due = None;
+            if let Some(job) = &a.report_job {
+                job.cancel.cancel();
+            }
         });
         return Ok(());
     }
@@ -1105,9 +1180,17 @@ fn update_rule_menu(a: &App) {
                 (MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED }).0,
             );
         }
+        for id in [PROFILE_OPEN, PROFILE_SAVE] {
+            let _ = EnableMenuItem(
+                menu,
+                id as u32,
+                MF_BYCOMMAND | if ready { MF_ENABLED } else { MF_GRAYED },
+            );
+        }
     }
 }
 fn layout(a: &mut App) {
+    report_view::update_menu(a);
     folders_view::update_menu(a);
     update_rule_menu(a);
     if a.options.git_merge || a.options.git_diff {
@@ -1256,6 +1339,7 @@ fn menu() -> Result<HMENU> {
                     (OPEN_FOLDERS, "フォルダー比較を開く…"),
                     (OPEN_THREE_FOLDERS, "3方向フォルダー比較を開く…"),
                     (SAVE, "結果を保存…\tCtrl+S"),
+                    (REPORT_HTML, "2方向比較をHTMLレポートに保存…"),
                     (EXIT, "終了"),
                 ],
             ),
@@ -1280,6 +1364,8 @@ fn menu() -> Result<HMENU> {
                     (RULE_TRAILING, "行末の空白・タブを無視"),
                     (RULE_CASE, "大文字・小文字を無視"),
                     (RULE_EOL, "LFとCRLFの違いを無視"),
+                    (PROFILE_OPEN, "比較プロファイルを読み込む…"),
+                    (PROFILE_SAVE, "現在の規則をプロファイルに保存…"),
                 ],
             ),
             (
@@ -1497,6 +1583,7 @@ pub fn run(options: Gui) -> Result<i32> {
             options,
             loaded: None,
             receiver: None,
+            report_job: None,
             projection_receiver: None,
             projection_cancel: Arc::default(),
             projection_due: None,
@@ -1632,6 +1719,22 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
             LRESULT(0)
         }
         WM_TIMER => {
+            if let Some(result) = app(report_view::tick).flatten() {
+                match result {
+                    Ok(path) => text(
+                        app(|a| a.status).unwrap_or_default(),
+                        &format!(
+                            "HTMLレポートを保存しました（保存開始時の比較）: {}",
+                            path.display()
+                        ),
+                    ),
+                    Err(e) if e == "cancelled" => text(
+                        app(|a| a.status).unwrap_or_default(),
+                        "HTMLレポートの保存を中止しました",
+                    ),
+                    Err(e) => error(&e),
+                }
+            }
             app(folders_view::tick);
             app(projection_tick);
             let event = app(|a| {
@@ -1711,6 +1814,9 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
                 }
                 a.cancel.cancel();
                 a.projection_cancel.cancel();
+                if let Some(job) = &a.report_job {
+                    job.cancel.cancel();
+                }
                 if !a.options.git_merge
                     && a.loaded.as_ref().is_some_and(|d| d.merged.is_some())
                     && !a.saved
@@ -2295,11 +2401,43 @@ fn rules_smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     }
     a.selected = 0;
     jump(a);
+    report_view::smoke(a, dir)?;
+    let profile_path = dir.join("比較規則.json");
+    profile_file(a, &profile_path, true)?;
+    if profile_file(a, &left, true).is_ok() {
+        return Err("profile export overwrote a comparison input".into());
+    }
+    let failed_input = dir.join("rules-binary-input");
+    std::fs::write(&failed_input, b"\0binary").map_err(|e| e.to_string())?;
+    a.options.left = Some(failed_input.clone());
+    if profile_file(a, &failed_input, true).is_ok()
+        || std::fs::read(&failed_input).map_err(|e| e.to_string())? != b"\0binary"
+    {
+        return Err("profile export overwrote an input that failed to load".into());
+    }
+    a.options.left = Some(left.clone());
     set_rule(a, RULE_RESET)?;
     await_rule_smoke(a)?;
     if a.exit != 1 || !a.loaded.as_ref().unwrap().ignored.is_empty() {
         return Err("strict comparison reset did not recompare".into());
     }
+    profile_file(a, &profile_path, false)?;
+    await_rule_smoke(a)?;
+    if a.exit != 0 || a.loaded.as_ref().unwrap().ignored.len() != 1 {
+        return Err("profile import did not restore equivalent comparison".into());
+    }
+    let prior_rules = a.options.rules.core();
+    let invalid_profile = dir.join("invalid-profile.json");
+    std::fs::write(&invalid_profile, b"{\"version\":999}").map_err(|e| e.to_string())?;
+    if profile_file(a, &invalid_profile, false).is_ok()
+        || a.options.rules.core() != prior_rules
+        || a.receiver.is_some()
+        || a.exit != 0
+    {
+        return Err("invalid profile changed current comparison".into());
+    }
+    set_rule(a, RULE_RESET)?;
+    await_rule_smoke(a)?;
     if std::fs::read(&left).map_err(|e| e.to_string())? != b"Alpha \t\r\n" {
         return Err("rule processing wrote input bytes".into());
     }
@@ -2318,7 +2456,10 @@ fn rules_smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     if set_rule(a, RULE_CASE).is_ok() {
         return Err("merge rule menu accepted normalization".into());
     }
+    if profile_file(a, &profile_path, false).is_ok() {
+        return Err("merge imported display profile".into());
+    }
     refresh(a);
     layout(a);
-    std::fs::write(dir.join("rules-smoke.txt"),"PASS: background rule toggles, equivalent status, ignored row decoration/navigation, original text/bytes retained, reset to exact, merge rules rejected\n").map_err(|e|e.to_string())
+    std::fs::write(dir.join("rules-smoke.txt"),"PASS: background rule toggles, equivalent status, ignored row decoration/navigation, original text/bytes retained, reset to exact, profile save/import/recompare, invalid profile preserves state, input overwrite blocked, merge rules/profiles rejected\n").map_err(|e|e.to_string())
 }

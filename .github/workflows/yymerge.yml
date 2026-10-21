@@ -65,6 +65,7 @@ jobs:
             Get-Content "ui-smoke-$taskTextHelp/sync-resume-smoke.txt"
             Get-Content "ui-smoke-$taskTextHelp/git-tool-smoke.txt"
             Get-Content "ui-smoke-$taskTextHelp/rules-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/html-report-smoke.txt"
           }
           Remove-Item Env:YY_HELP_TEXT_ONLY
       - name: Package

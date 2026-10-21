@@ -40,6 +40,11 @@ pub struct Cli {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Save or validate a portable comparison-rules profile.
+    RulesProfile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
     /// Git external diff/merge adapters and configuration examples.
     GitTool {
         #[command(subcommand)]
@@ -102,6 +107,19 @@ pub enum Command {
     },
 }
 #[derive(Subcommand)]
+pub enum ProfileCommand {
+    /// Save selected rules as versioned UTF-8 JSON. Existing files require --overwrite.
+    Save {
+        path: PathBuf,
+        #[command(flatten)]
+        rules: RuleArgs,
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Validate and print a profile without comparing or modifying any files.
+    Show { path: PathBuf },
+}
+#[derive(Subcommand)]
 pub enum SyncCommand {
     /// Continue an interrupted run after verifying all inputs and prepared candidates.
     Resume {
@@ -161,6 +179,9 @@ impl From<PlanMode> for yy_merge_core::sync_plan::Mode {
 }
 #[derive(Clone, Debug, Default, clap::Args)]
 pub struct RuleArgs {
+    /// Read rules from a versioned JSON profile; cannot combine with ignore flags.
+    #[arg(long, conflicts_with_all = ["ignore_space", "ignore_trailing_space", "ignore_case", "ignore_eol"])]
+    pub rules_profile: Option<PathBuf>,
     /// Ignore ASCII space and tab within a line (preserve line boundaries).
     #[arg(long)]
     pub ignore_space: bool,
@@ -175,6 +196,26 @@ pub struct RuleArgs {
     pub ignore_eol: bool,
 }
 impl RuleArgs {
+    pub fn from_core(rules: yy_merge_core::rules::Rules) -> Self {
+        Self {
+            ignore_space: rules.ignore_space,
+            ignore_trailing_space: rules.ignore_trailing_space,
+            ignore_case: rules.ignore_case,
+            ignore_eol: rules.ignore_eol,
+            rules_profile: None,
+        }
+    }
+    fn resolve(
+        &self,
+        cancel: &Cancellation,
+    ) -> Result<(yy_merge_core::rules::Rules, Option<Snapshot>)> {
+        if let Some(path) = &self.rules_profile {
+            let (profile, snapshot) = yy_merge_core::profile::Profile::open(path, cancel)?;
+            Ok((profile.rules, Some(snapshot)))
+        } else {
+            Ok((self.core(), None))
+        }
+    }
     pub fn core(&self) -> yy_merge_core::rules::Rules {
         yy_merge_core::rules::Rules {
             ignore_space: self.ignore_space,
@@ -218,6 +259,7 @@ pub enum Format {
     Text,
     Unified,
     Json,
+    Html,
 }
 #[derive(Clone, Copy, ValueEnum)]
 pub enum FolderFormat {
@@ -239,16 +281,19 @@ pub fn entry(
     };
     install_interrupt();
     let result = match cli.command {
-        Command::Gui(g) => {
-            if g.base.is_some() && g.rules.core().active() {
+        Command::Gui(mut g) => (|| {
+            let (rules, _) = g.rules.resolve(&CANCEL)?;
+            let has_profile = g.rules.rules_profile.is_some();
+            g.rules = RuleArgs::from_core(rules);
+            if (g.base.is_some() || g.git_diff || g.git_merge) && (rules.active() || has_profile) {
                 Err(
-                    "comparison rules are for two-way views only; merge always uses exact inputs"
+                    "comparison rules/profiles are for ordinary two-way views only; merge and Git views use exact inputs"
                         .into(),
                 )
             } else {
                 gui(g)
             }
-        }
+        })(),
         Command::GitTool { command } => {
             git_tool::run(command, gui, &mut std::io::stdout().lock(), &CANCEL)
         }
@@ -279,6 +324,32 @@ fn emit(
 }
 pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation) -> Result<i32> {
     match command {
+        Command::RulesProfile { command } => {
+            use yy_merge_core::profile::Profile;
+            match command {
+                ProfileCommand::Save {
+                    path,
+                    rules,
+                    overwrite,
+                } => {
+                    let (rules, input) = rules.resolve(cancel)?;
+                    let inputs: Vec<_> = input.iter().collect();
+                    emit(
+                        &Profile::new(rules).json()?,
+                        Some(path),
+                        &inputs,
+                        overwrite,
+                        stdout,
+                        cancel,
+                    )?;
+                }
+                ProfileCommand::Show { path } => {
+                    let (profile, _) = Profile::open(&path, cancel)?;
+                    emit(&profile.json()?, None, &[], false, stdout, cancel)?;
+                }
+            }
+            Ok(0)
+        }
         Command::Diff {
             left,
             right,
@@ -288,7 +359,7 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             overwrite,
             rules,
         } => {
-            let rules = rules.core();
+            let (rules, profile_input) = rules.resolve(cancel)?;
             if matches!(format, Format::Unified) && rules.active() {
                 return Err(
                     "unified patches require exact comparison; remove ignore options".into(),
@@ -297,7 +368,7 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             let a = Snapshot::open(&left, encoding.as_deref(), cancel)?;
             let b = Snapshot::open(&right, encoding.as_deref(), cancel)?;
             let compared = yy_merge_core::rules::compare(&a.text, &b.text, rules, cancel)?;
-            let diff = compared.diff;
+            let diff = &compared.diff;
             let same = a.text == b.text && a.encoding == b.encoding && a.bom == b.bom;
             let equivalent = diff.edits.is_empty() && a.encoding == b.encoding && a.bom == b.bom;
             let status = if same {
@@ -308,6 +379,7 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
                 "Different"
             };
             let text=match format {
+                Format::Html=>yy_merge_core::report::html(&a,&b,rules,&compared,cancel)?,
                 Format::Json=>serde_json::to_string_pretty(&serde_json::json!({"identical":same,"equivalent":equivalent,"status":status,"rules":rules,"ignored_line_pairs":compared.ignored,"left_encoding":a.encoding.name(),"right_encoding":b.encoding.name(),"left_bom":a.bom,"right_bom":b.bom,"diff":diff})).map_err(|e|e.to_string())?+"\n",
                 Format::Text=>format!("{}: {} <> {} ({} changed regions; {} ignored line pairs; {}; {} / {})\n",if same {"identical"} else if equivalent {"equivalent under rules"} else {"different"},left.display(),right.display(),diff.edits.len(),compared.ignored.len(),rules.label(),a.encoding,b.encoding),
                 Format::Unified=>{
@@ -327,7 +399,9 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             };
             a.verify(cancel)?;
             b.verify(cancel)?;
-            emit(&text, report, &[&a, &b], overwrite, stdout, cancel)?;
+            let mut inputs = vec![&a, &b];
+            inputs.extend(profile_input.iter());
+            emit(&text, report, &inputs, overwrite, stdout, cancel)?;
             Ok(i32::from(!equivalent))
         }
         Command::Merge {
@@ -530,6 +604,58 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn gui_resolves_profiles_before_dispatch_and_blocks_non_two_way_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.json");
+        std::fs::write(
+            &path,
+            yy_merge_core::profile::Profile::new(yy_merge_core::rules::Rules {
+                ignore_case: true,
+                ..Default::default()
+            })
+            .json()
+            .unwrap(),
+        )
+        .unwrap();
+        let args = vec![
+            "yymerge".into(),
+            "gui".into(),
+            "--rules-profile".into(),
+            path.clone().into_os_string(),
+        ];
+        assert_eq!(
+            entry(args.clone(), |g| {
+                assert!(g.rules.ignore_case);
+                assert!(g.rules.rules_profile.is_none());
+                Ok(0)
+            }),
+            0
+        );
+        for git in [false, true] {
+            // Even an exact profile is forbidden in dedicated Git and merge views.
+            std::fs::write(
+                &path,
+                yy_merge_core::profile::Profile::new(Default::default())
+                    .json()
+                    .unwrap(),
+            )
+            .unwrap();
+            let mut args = args.clone();
+            args.extend(["--left", "left", "--right", "right"].map(OsString::from));
+            if git {
+                args.push("--git-diff".into());
+            } else {
+                args.extend(["--base", "base"].map(OsString::from));
+            }
+            assert_eq!(
+                entry(args, |_| panic!("invalid profile mode launched GUI")),
+                2
+            );
+        }
+        std::fs::write(&path, "{}").unwrap();
+        assert_eq!(entry(args, |_| panic!("invalid profile launched GUI")), 2);
+    }
     #[test]
     fn merge_preserves_output_on_conflict_and_reports_status() {
         let d = tempfile::tempdir().unwrap();

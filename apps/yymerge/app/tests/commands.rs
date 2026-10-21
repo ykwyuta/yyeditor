@@ -11,6 +11,294 @@ fn run(args: &[&str], dir: &Path) -> Output {
         .unwrap()
 }
 #[test]
+fn html_reports_share_rule_status_escape_source_and_protect_all_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    fs::write(
+        path.join("left"),
+        "<svg onload=\"alert('x')\">\r\nALPHA \t\r\n",
+    )
+    .unwrap();
+    fs::write(path.join("right"), "<svg onload=\"alert('x')\">\nalpha\n").unwrap();
+    let strict = run(&["diff", "left", "right", "--format", "html"], path);
+    assert_eq!(strict.status.code(), Some(1));
+    let text = String::from_utf8(strict.stdout).unwrap();
+    assert!(text.contains("data-status=\"Different\""));
+    assert!(text.contains("&lt;svg onload=&quot;alert(&#39;x&#39;)&quot;&gt;"));
+    assert!(!text.contains("<svg"));
+    assert!(text.contains("data-eol=\"CRLF\""));
+    assert!(text.contains("data-eol=\"LF\""));
+    assert_eq!(
+        run(
+            &[
+                "rules-profile",
+                "save",
+                "rules.json",
+                "--ignore-case",
+                "--ignore-trailing-space",
+                "--ignore-eol"
+            ],
+            path
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let args = [
+        "diff",
+        "left",
+        "right",
+        "--rules-profile",
+        "rules.json",
+        "--format",
+        "html",
+        "--report",
+        "review.html",
+    ];
+    assert_eq!(run(&args, path).status.code(), Some(0));
+    let report = fs::read_to_string(path.join("review.html")).unwrap();
+    assert!(report.contains("EquivalentUnderRules"));
+    assert!(report.contains("<tr class=ignored>"));
+    assert!(report.contains("ALPHA \t"));
+    assert_eq!(run(&args, path).status.code(), Some(2));
+    assert_eq!(
+        fs::read_to_string(path.join("review.html")).unwrap(),
+        report
+    );
+    for target in ["left", "right", "rules.json"] {
+        let before = fs::read(path.join(target)).unwrap();
+        assert_eq!(
+            run(
+                &[
+                    "diff",
+                    "left",
+                    "right",
+                    "--rules-profile",
+                    "rules.json",
+                    "--format",
+                    "html",
+                    "--report",
+                    target,
+                    "--overwrite"
+                ],
+                path
+            )
+            .status
+            .code(),
+            Some(2)
+        );
+        assert_eq!(fs::read(path.join(target)).unwrap(), before);
+    }
+    fs::write(
+        path.join("right"),
+        "\u{feff}<svg onload=\"alert('x')\">\nalpha\n",
+    )
+    .unwrap();
+    let out = run(
+        &[
+            "diff",
+            "left",
+            "right",
+            "--ignore-case",
+            "--ignore-trailing-space",
+            "--ignore-eol",
+            "--format",
+            "html",
+        ],
+        path,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("data-status=\"Different\""));
+    assert!(text.contains("BOM: [239, 187, 191]"));
+}
+#[test]
+fn html_output_expansion_refuses_partial_stdout_and_preserves_existing_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    fs::write(path.join("large"), "<".repeat(9 * 1024 * 1024)).unwrap();
+    fs::write(path.join("review.html"), "keep").unwrap();
+    for args in [
+        vec!["diff", "large", "large", "--format", "html"],
+        vec![
+            "diff",
+            "large",
+            "large",
+            "--format",
+            "html",
+            "--report",
+            "review.html",
+            "--overwrite",
+        ],
+    ] {
+        let out = run(&args, path);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(out.stdout.is_empty());
+        assert!(
+            String::from_utf8(out.stderr)
+                .unwrap()
+                .contains("HTML report incomplete")
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(path.join("review.html")).unwrap(),
+        "keep"
+    );
+}
+#[test]
+fn profiles_round_trip_cli_rules_and_preserve_inputs_and_existing_reports() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path();
+    fs::write(dir.join("left"), "ALPHA \t\r\n").unwrap();
+    fs::write(dir.join("right"), "alpha\n").unwrap();
+    let profile = "比較 規則.json";
+    let save = [
+        "rules-profile",
+        "save",
+        profile,
+        "--ignore-case",
+        "--ignore-trailing-space",
+        "--ignore-eol",
+    ];
+    assert_eq!(run(&save, dir).status.code(), Some(0));
+    let bytes = fs::read(dir.join(profile)).unwrap();
+    assert_eq!(run(&save, dir).status.code(), Some(2));
+    assert_eq!(fs::read(dir.join(profile)).unwrap(), bytes);
+    let show = run(&["rules-profile", "show", profile], dir);
+    assert_eq!(show.status.code(), Some(0));
+    assert_eq!(show.stdout, bytes);
+    let out = run(
+        &[
+            "diff",
+            "left",
+            "right",
+            "--rules-profile",
+            profile,
+            "--format",
+            "json",
+        ],
+        dir,
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["status"], "EquivalentUnderRules");
+    assert_eq!(json["identical"], false);
+    assert_eq!(json["ignored_line_pairs"].as_array().unwrap().len(), 1);
+    assert_eq!(run(&["diff", "left", "right"], dir).status.code(), Some(1));
+    assert_eq!(
+        run(
+            &[
+                "diff",
+                "left",
+                "right",
+                "--rules-profile",
+                profile,
+                "--ignore-case"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(64)
+    );
+    assert_eq!(
+        run(
+            &[
+                "diff",
+                "left",
+                "right",
+                "--rules-profile",
+                profile,
+                "--report",
+                profile,
+                "--overwrite"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert_eq!(
+        run(
+            &[
+                "rules-profile",
+                "save",
+                profile,
+                "--rules-profile",
+                profile,
+                "--overwrite"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert_eq!(fs::read(dir.join(profile)).unwrap(), bytes);
+    assert_eq!(fs::read(dir.join("left")).unwrap(), b"ALPHA \t\r\n");
+    fs::write(dir.join("report"), "keep").unwrap();
+    assert_eq!(
+        run(
+            &[
+                "diff",
+                "left",
+                "right",
+                "--rules-profile",
+                profile,
+                "--format",
+                "unified",
+                "--report",
+                "report",
+                "--overwrite"
+            ],
+            dir
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert_eq!(fs::read_to_string(dir.join("report")).unwrap(), "keep");
+    assert_eq!(
+        run(&["rules-profile", "save", profile, "--overwrite"], dir)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(&["diff", "left", "right", "--rules-profile", profile], dir)
+            .status
+            .code(),
+        Some(1)
+    );
+}
+#[test]
+fn invalid_profiles_never_fall_back_to_strict_or_replace_reports() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path();
+    fs::write(dir.join("left"), "same\n").unwrap();
+    fs::write(dir.join("report"), "keep").unwrap();
+    for invalid in ["{}", "{\"version\":2,\"rules\":{}}", "not JSON"] {
+        fs::write(dir.join("profile"), invalid).unwrap();
+        for args in [
+            vec!["rules-profile", "show", "profile"],
+            vec![
+                "diff",
+                "left",
+                "left",
+                "--rules-profile",
+                "profile",
+                "--report",
+                "report",
+                "--overwrite",
+            ],
+        ] {
+            assert_eq!(run(&args, dir).status.code(), Some(2));
+        }
+        assert_eq!(fs::read_to_string(dir.join("report")).unwrap(), "keep");
+    }
+}
+#[test]
 fn exit_codes_json_unicode_eol_and_usage() {
     let d = tempfile::tempdir().unwrap();
     let dir = d.path();
