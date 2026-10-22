@@ -45,6 +45,13 @@ fn app(dir: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 fn setup() -> (tempfile::TempDir, PathBuf, String) {
+    // Keep the alias on the binary's filesystem so it can be hard-linked.
+    // Copying while another test forks can leave an inherited writable fd in
+    // that child and make exec fail with ETXTBSY, even after fs::copy returns.
+    #[cfg(unix)]
+    let tmp =
+        tempfile::tempdir_in(Path::new(env!("CARGO_BIN_EXE_yymerge")).parent().unwrap()).unwrap();
+    #[cfg(not(unix))]
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().to_path_buf();
     ok(&dir, &["init", "-q", "-b", "master"], None);
@@ -78,6 +85,9 @@ fn setup() -> (tempfile::TempDir, PathBuf, String) {
     } else {
         "yymerge"
     });
+    #[cfg(unix)]
+    fs::hard_link(env!("CARGO_BIN_EXE_yymerge"), &exe).unwrap();
+    #[cfg(not(unix))]
     fs::copy(env!("CARGO_BIN_EXE_yymerge"), &exe).unwrap();
     let config = Command::new(&exe)
         .args(["git-tool", "config", "--headless"])

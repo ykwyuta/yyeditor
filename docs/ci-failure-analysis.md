@@ -1,0 +1,31 @@
+# CI失敗の分析と再発防止
+
+調査日: 2026-10-23。2026-10-19〜23の通常CI・yymerge・yydbmanagerから、失敗した13実行のログと関係する修正を確認した。以下は確認した範囲の分類であり、全期間の失敗を網羅するものではない。ルートの[AGENTS.md](../AGENTS.md)を今後の作業ルールとする。
+
+## 確認した失敗と原因
+
+| 分類 | 根拠となる実行 | 確認した内容と対応 |
+| --- | --- | --- |
+| Linuxの実行ファイル競合（2回） | [39854093445](https://github.com/ykwyuta/yyeditor/actions/runs/39854093445)、[39870809817](https://github.com/ykwyuta/yyeditor/actions/runs/39870809817) | `git_tools::setup`でコピーしたバイナリを直後に起動し、`ExecutableFileBusy / Text file busy`。書き込みFDが他の並列子プロセスに継承される競合が原因として考えられる。コピーを避け、バイナリと同一ファイルシステムの一時フォルダーにハードリンクを作る方式へ修正。引用符・空白・日本語を含む実行パスの検証は残す。FD継承そのものをトレースしたわけではないため、機序は推定とする。 |
+| ダイアログ終了とモデル反映の競合 | [39863141760](https://github.com/ykwyuta/yyeditor/actions/runs/39863141760) | yydbmanagerの空ER作成後、古いステータスを読んで失敗。コード上、親のEnableWindowはモデル反映前に行われる。ダイアログ破棄・期待ステータス・SQL欄と結果欄の非表示まで期限付きで待つよう`4ca4c4a`で修正。[修正後の実行](https://github.com/ykwyuta/yyeditor/actions/runs/39870549669)は成功。 |
+| C++依存とランナー更新の非互換（3回） | [39561826514](https://github.com/ykwyuta/yyeditor/actions/runs/39561826514)、[39571971646](https://github.com/ykwyuta/yyeditor/actions/runs/39571971646)、[39588987697](https://github.com/ykwyuta/yyeditor/actions/runs/39588987697) | DuckDB 1.4.1同梱fmtが`stdext::checked_array_iterator`を参照し、VS 2026/MSVC 14.51でコンパイル失敗。現行workflowはVS 2022の`windows-2022`へ固定し、キャッシュキーにも反映済み。対応理由と上流修正へのリンクを維持する。 |
+| 新しいClippy lint（2回） | [39341455214](https://github.com/ykwyuta/yyeditor/actions/runs/39341455214)、[39342671301](https://github.com/ykwyuta/yyeditor/actions/runs/39342671301) | Rust 1.99の`manual_checked_ops`が描画の除算を検出し、`-D warnings`で失敗。CIと同じツールチェーンで全ターゲットを検査し、計算を修正する。警告抑止を対策にしない。 |
+| 小さいCI画面での描画座標（2回） | [39359636143](https://github.com/ykwyuta/yyeditor/actions/runs/39359636143)、[39361113888](https://github.com/ykwyuta/yyeditor/actions/runs/39361113888) | yydrawのリサイズハンドル試験が`Drag::Resize`へ入らない。修正`9954858`はハンドルを小さいビューポート内へ収めている。ウィンドウサイズ・DPI・ズームに従う座標を使う。前者はWebView2が利用できない失敗も併発しており、その起動失敗の詳細原因まではログだけでは断定しない。 |
+| Git設定による改行変換 | [39588987713](https://github.com/ykwyuta/yyeditor/actions/runs/39588987713) | Windowsのパッチ適用結果がCRLF、期待値がLFで不一致。現在の試験は一時Git設定を隔離し改行を固定する。正確なバイト比較を弱めない。 |
+| Windowsの短縮パス | [39247604422](https://github.com/ykwyuta/yyeditor/actions/runs/39247604422) | yyclip履歴で`runneradmin`と`RUNNER~1`を表示文字列として比較し不一致。同じファイルの異なるパス表記を正規化する修正`ef321ca`を確認。 |
+| 非対話端末と永続セッション | [39246090686](https://github.com/ykwyuta/yyeditor/actions/runs/39246090686) | tmuxで新規作成の衝突を期待して成功扱いになり、screenで作成済みセッションを確認できず失敗。修正`f76c9e3`でCI依存と端末試験条件を見直している。現在はPTYと入力エコーを避けた完了マーカーを使い、実セッションの状態を待つ。 |
+
+## 再発の共通点
+
+「ローカルで一度通る」「親画面が操作可能」「ファイルコピーが返った」という中間状態を、CI上でも処理が完了している根拠にしていたケースがある。また、OS固有の改行・パス、ランナーのC++環境、Rust stableのlint更新が検証条件から抜けていた。
+
+対策は成功条件そのものの改善と環境の明示である。UIは完成した状態、Gitは結果バイト、プロセスは安全に公開済みの実行ファイルを確認する。単なるsleep延長、無条件リトライ、失敗試験のスキップでは原因が残る。
+
+## 今回のローカル検証
+
+- yydbmanager: `windows-shell.ps1`をCIと同じ編集済みER YAMLで実行し、ER新規作成、7 DBの型選択、列の一括編集、Excelコピー、Undo、サイズ変更、ヘルプ、接続設定の保存・再読込まで成功。
+- yymerge: WindowsのGit連携2試験が成功。LinuxはRust 1.99.0の既存Dockerイメージ、ソースとCargoレジストリを読み取り専用、ビルド用ボリュームを分離、外部ネットワークなしでヘッドレス全91試験が成功。
+- yymergeのWindows・Linux両方でClippyが成功。Linuxの並列Git連携2試験は10回連続実行も成功した。Linux Clippyのコンポーネント取得時だけネットワークを有効にし、依存解決はキャッシュを使用した。
+- WindowsのGit Bash試験を通常のサンドボックスで実行した際は`NtCreateDirectoryObject ... Access denied`となったが、制限外の同じ試験は成功した。これはGit連携の期待終了コードを変更する理由にはしない。
+
+最新コミットのGitHub Actions完了結果は、修正の報告時に実行URLとともに確認する。ローカル成功だけから全CI成功とは記載しない。
