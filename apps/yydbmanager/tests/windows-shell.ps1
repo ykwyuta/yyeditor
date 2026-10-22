@@ -222,10 +222,23 @@ try {
     if([DbShellTest]::SendMessage($taskDbList,0x18B,0,0).ToInt64() -ne 7){throw 'New ER model does not offer all database kinds'}
     [DbShellTest]::SendMessage($taskDbList,0x186,4,0)|Out-Null
     [DbShellTest]::SendNotifyMessage($taskNewER,0x111,1,0)|Out-Null
-    for($i=0;$i -lt 100 -and ![DbShellTest]::IsWindowEnabled($taskWindow);$i++){Start-Sleep -Milliseconds 20}
-    $taskNewStatus=[Text.StringBuilder]::new(2048)
-    [DbShellTest]::GetWindowText([DbShellTest]::GetDlgItem($taskWindow,205),$taskNewStatus,2048)|Out-Null
-    if(!$taskNewStatus.ToString().Contains('空のERモデル')){throw 'Blank ER model was not created without a database connection'}
+    # The modal dialog enables its owner before the command installs the model
+    # and lays out the ER canvas. Wait for the resulting UI, not just EnableWindow.
+    $taskNewReady=$false
+    for($i=0;$i -lt 250;$i++) {
+        $taskNewStatus=[Text.StringBuilder]::new(2048)
+        [DbShellTest]::GetWindowText([DbShellTest]::GetDlgItem($taskWindow,205),$taskNewStatus,2048)|Out-Null
+        if(![DbShellTest]::IsWindow($taskNewER) -and
+           [DbShellTest]::IsWindowEnabled($taskWindow) -and
+           $taskNewStatus.ToString().Contains('空のERモデル') -and
+           ![DbShellTest]::IsWindowVisible([DbShellTest]::GetDlgItem($taskWindow,203)) -and
+           ![DbShellTest]::IsWindowVisible([DbShellTest]::GetDlgItem($taskWindow,118))) {
+            $taskNewReady=$true
+            break
+        }
+        Start-Sleep -Milliseconds 20
+    }
+    if(!$taskNewReady){throw "Blank ER model was not created without a database connection. Status: $taskNewStatus`n$([DbShellTest]::Describe($taskProcess.Id))"}
     [DbShellTest]::ShowWindow($taskWindow,4)|Out-Null
     $taskDocumentTabs=[DbShellTest]::GetDlgItem($taskWindow,117)
     $taskDocumentCount=[DbShellTest]::SendMessage($taskDocumentTabs,0x1304,0,0).ToInt64()
