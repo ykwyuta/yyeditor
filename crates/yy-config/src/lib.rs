@@ -690,6 +690,12 @@ pub struct RemoteHost {
     pub identity_file: Option<String>,
     /// 踏み台（`[ユーザー@]ホスト[:ポート]` のカンマ区切り。`none` で ~/.ssh/config の指定も使わない）
     pub proxy_jump: Option<String>,
+    /// 踏み台上で次ホストへ中継するコマンド（%h、%p、%%）。未指定ならdirect-tcpip。
+    pub jump_command: Option<String>,
+    /// SFTPサブシステム名（既定sftp）。sftp_serverとは排他。
+    pub sftp_subsystem: Option<String>,
+    /// SFTPサーバーを起動するリモートコマンド。PTYは使わない。
+    pub sftp_server: Option<String>,
     /// この接続先に使うプロキシ（`none` で共通のプロキシも使わない）
     pub proxy: Option<String>,
     /// この接続先でエージェントを置くフォルダ（ホームが noexec の場合など）
@@ -888,6 +894,10 @@ mod tests {
             proxy_jump = "bastion,admin@gw:2022"
             [remote.host.lab]
             proxy = "none"
+            jump_command = "nc -- %h %p"
+            sftp_server = "/usr/lib/openssh/sftp-server"
+            [remote.host.gateway]
+            sftp_subsystem = "gateway-sftp"
             "#,
         )
         .unwrap();
@@ -905,6 +915,18 @@ mod tests {
         assert_eq!(h.proxy_jump.as_deref(), Some("bastion,admin@gw:2022"));
         assert_eq!(c.remote.proxy, "socks5://socks.example.co.jp:1080");
         assert_eq!(c.remote.host["lab"].proxy.as_deref(), Some("none"));
+        assert_eq!(
+            c.remote.host["lab"].jump_command.as_deref(),
+            Some("nc -- %h %p")
+        );
+        assert_eq!(
+            c.remote.host["lab"].sftp_server.as_deref(),
+            Some("/usr/lib/openssh/sftp-server")
+        );
+        assert_eq!(
+            c.remote.host["gateway"].sftp_subsystem.as_deref(),
+            Some("gateway-sftp")
+        );
         assert!(
             Config::from_toml(
                 "[remote.host.x]

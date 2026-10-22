@@ -14,6 +14,7 @@ yyeditor は、数 GB のファイルもすぐに開ける Windows 向けの軽�
 - [ターミナルのマクロ・文法・変数](#terminal-macros)
 - [3270（メインフレーム）](#tn3270)
 - [ファイル転送（yysftp）](#transfer)
+- [SSHゲートウェイ経由のファイル転送](#sftp-gateway)
 - [スプレッドシート（yysheet）](#yysheet)
 - [タブと比較](#tabs)
 - [編集](#editing)
@@ -362,7 +363,7 @@ terminal_session_prefix = "yyterm-" # 有効にする場合は必須
 転送には、SFTP は接続先の sftp-server、SCP は接続先の scp を使います。
 
 - **エージェントを使うか**（転送メニュー「接続先にエージェントを置いて使う」、設定の `use_agent`。既定は
-  使わない）: 使わなければ接続先に何も置かず、一覧も SFTP で読みます（どの OS の接続先でも使えます）。
+  使わない）: 使わなければ接続先に何も置かず、SFTPモードでは一覧もSFTPで読みます。SCPモードではPOSIXシェルとGNUコマンドで一覧を読み、SFTPサブシステムを要求しません。
   使うと、yyeditor と同じエージェントを接続先に置いて、一覧・ファイル操作をエージェントで行い
   （sftp-server を止めている接続先でも一覧を表示できます）、送り終えた内容をファイル全体の SHA-256 で
   照合します（一致しなければ途中のファイルを捨てて 1 回送り直します）。エージェントは Linux の接続先で
@@ -398,6 +399,50 @@ terminal_session_prefix = "yyterm-" # 有効にする場合は必須
 - **起動の引数**: `yysftp.exe [ssh://接続先/パス | ユーザー@ホスト:/パス | ユーザー@ホスト]`。
   `yysftp.exe --download ssh://接続先/フォルダ --to 保存先のフォルダ` は、起動したらそのフォルダのダウンロードを
   転送の一覧に入れます（エディタ・ターミナルの「zip にしてダウンロード」で zip が 100 MB を超えたときに使います）。
+
+### SSHゲートウェイを経由したファイル転送 {#sftp-gateway}
+
+SSHGW／特権アクセス管理製品には、SSHトンネルを通す方式と、ゲートウェイ自身がSFTPを中継する方式があります。製品名だけでは接続方式を決められません。管理者が許可した経路に合わせ、ヘルプ → 設定ファイルを開くで共通の`config.toml`の`[remote.host.名前]`を編集し、yysftpを再起動してください。SFTPで利用する場合は`[transfer]`の`use_agent = false`（既定）で接続先エージェントを使わず、`protocol = "sftp"`を指定します。SCPで利用する場合は後述の条件を確認してください。WinSCPの「接続→トンネル」は`proxy_jump`、「環境→SFTP→SFTPサーバー」は`sftp_server`に相当します。
+
+**SecureCube Access Check／Access Check Essential**: 製品がSSHを終端して接続先へ中継する構成では、まず製品の転送用接続口へ直接接続します。通常のOpenSSH踏み台と同じ`proxy_jump`、`jump_command`や、ゲートウェイ自身の`/usr/lib/openssh/sftp-server`を実行する構成だとは仮定しないでください。ゲートウェイのOSがRHELであっても、中継先のOSや利用できるコマンドは別です。接続先選択を含むログイン名・ポート・認証手順は、その環境の利用者向け手順で確認します。公開資料だけから製品固有のログイン名の書式を決めることはできません。
+
+標準版の[公式カタログ](https://www.nri-secure.co.jp/hubfs/NRIS/PDF/ac_pamphlet_jp.pdf)はSFTP・SCPを掲載しています。一方、[Essentialの公式FAQ](https://www.nri-secure.co.jp/service/solution/accesscheck/access-check-essential)の中継プロトコルはSSH・RDP・SCPで、SFTPは掲載されていません。SCPで利用する環境では`[transfer]`に`protocol = "scp"`、`use_agent = false`を指定してください。転送メニューからSCPを選ぶこともできます。SCP選択時は既存の一覧用接続を作り直します。
+
+SCPの一覧・ファイル操作には、中継先でPTYなしのexec要求を受け付けるPOSIXシェルとGNU `find`、`stat`、`realpath`、`mkdir`、`mv`、`rm`、`rmdir`、転送には従来の`scp`、`wc`、`cat`、`tail`等が必要です。SFTPとエージェントは使いません。名前・メタデータはNUL区切りで取得し、空白や日本語を含む名前を扱います。これは[WinSCPのSCPが一覧等にUnixシェルを必要とする方式](https://winscp.net/eng/docs/requirements#scp_requirements)を参考にした実装です。SCPコマンドだけを許可し、一覧用コマンドやexecを禁止する製品ポリシーでは、一覧付き画面を利用できません。SFTPへの自動切替やポリシーの迂回はしません。製品実機での互換性は未検証です。
+
+**SSHトンネル方式**では、接続先とゲートウェイのホスト鍵・認証をそれぞれ確認します。内部ホスト名はゲートウェイ側で解決します。
+
+```toml
+[remote.host.gateway]
+hostname = "gateway.example.com"
+user = "gateway-user"
+port = 22
+
+[remote.host.internal]
+hostname = "internal.example.local"
+user = "server-user"
+proxy_jump = "gateway"
+```
+
+yysftpで`internal`へ接続します。ゲートウェイが`direct-tcpip`を許可せず、代わりに**リモート中継コマンド**を提供する場合だけ、`[remote.host.gateway]`へ`jump_command = "nc -- %h %p"`等を追加します。実際のコマンドは管理者に確認してください。ゲートウェイ上でPTYなしのexecを行い、標準入出力で次のSSH接続を中継します。ローカルの外部プログラムは起動しません。`%h`は次ホスト（POSIXシェルの1引数として自動引用）、`%p`はポート、`%%`は`%`です。`%h`をさらに引用符で囲まないでください。多段接続では各踏み台に個別指定できます。未指定なら従来どおり`direct-tcpip`を使い、失敗時に別方式へ自動切替はしません。
+
+**SFTPプロキシ方式**では、ゲートウェイのアドレスへ直接接続し、製品指定のユーザー名を設定します。`@`を含む複合ユーザー名もそのまま送信します。以下のユーザー名の構造は例であり、製品共通の文法ではありません。
+
+```toml
+[remote.host.sftp-via-gateway]
+hostname = "gateway.example.com"
+user = "operator@server-user@internal.example.local"
+# 通常は以下の指定は不要。製品が別のサブシステム名を指定する場合だけ変更
+# sftp_subsystem = "vendor-sftp"
+```
+
+標準の`sftp`サブシステムが使えず、接続先でSFTPサーバーのバイナリをexecする方式が必要なら、対象の`[remote.host.名前]`へ`sftp_server = "/usr/lib/openssh/sftp-server"`等を指定します。これは接続先で実行するコマンド全体です。パスはOS・製品に合わせて変更してください。PTYは要求せず、標準出力をSFTPのバイナリ通信専用にします。`sftp_server`と`sftp_subsystem`は同時指定できません。未指定なら`sftp`サブシステムです。これらの設定はフォルダー一覧と転送キューのアップロード・ダウンロードで共通に使います。SCPへは適用されません。
+
+認証時のパスワード・ワンタイムパスワード・接続先選択がkeyboard-interactiveの質問として届く場合、表示される質問に順番に答えてください。秘密値を`config.toml`や起動コマンドへ書く必要はありません。SFTP起動要求を拒否された場合は、許可・起動設定を確認するエラーを表示します。起動要求へのSSH応答は20秒で時間切れになります。
+
+接続できないときは[接続の記録]で、SSH認証の失敗か、踏み台の中継の拒否か、SFTP起動の拒否かを確認します。ゲートウェイが対話シェルのメニューだけを提供し、SFTP・exec中継・ポート転送をすべて禁止している場合、この設定だけでは転送できません。管理者にSFTP用の許可された接続方式を確認してください。任意のシェルメニューを自動操作する機能や製品固有プロトコルには対応していません。
+
+参照した公式仕様: [WinSCPのSSHトンネル](https://winscp.net/eng/docs/ui_login_tunnel)、[SFTPサーバーの起動設定](https://winscp.net/eng/docs/ui_login_sftp)、[プロキシ](https://winscp.net/eng/docs/ui_login_proxy)。WinSCPの設定ファイルを直接読み込む機能ではありません。
 
 ## スプレッドシート（yysheet） {#yysheet}
 

@@ -367,6 +367,8 @@ impl TestServer {
             agent_dir: None,
             forwards: Vec::new(),
             forward_errors: Vec::new(),
+            jump_command: None,
+            sftp: Default::default(),
         }
     }
 }

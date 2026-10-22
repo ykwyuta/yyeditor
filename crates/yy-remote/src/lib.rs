@@ -18,6 +18,7 @@ pub mod rpc;
 pub mod scp;
 pub mod session;
 pub mod sftp;
+pub mod shellfs;
 pub mod ssh_config;
 pub mod transfer;
 pub mod uri;
@@ -50,6 +51,10 @@ pub trait Transport: Send + Sync {
             io::ErrorKind::Unsupported,
             format!("この接続ではサブシステム {name} を起動できません"),
         ))
+    }
+    /// 設定された方法でSFTPを起動する。転送・一覧のすべてでこの入口を使う。
+    fn sftp(&self) -> io::Result<Process> {
+        self.subsystem("sftp")
     }
     fn shell(&self, _term: &str, _size: (u16, u16), _command: Option<&[u8]>) -> io::Result<Shell> {
         Err(io::Error::new(

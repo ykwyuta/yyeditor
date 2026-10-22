@@ -5,7 +5,7 @@
 //! エクスプローラーからドラッグ＆ドロップするか「アップロード」で送り、選んだ項目は
 //! 「ダウンロード」で受け取る。
 //!
-//! 一覧・フォルダの操作は SFTP（`yy_remote::sftp`）、転送はレジュームできる転送の仕組み
+//! 一覧・フォルダの操作は SFTP または SCP用シェル、転送はレジュームできる転送の仕組み
 //! （`yy_remote::xfer`。SFTP・SCP）を使う。接続（組み込みの SSH・踏み台・プロキシ・ホスト鍵・
 //! 保存したパスワード・接続の記録）、同梱フォント、設定、ダイアログはエディタ・ターミナルと共通。
 
@@ -177,10 +177,10 @@ struct Node {
     loaded: bool,
 }
 
-/// 接続先ごとの一覧用の SFTP。
+/// 接続先ごとの一覧用の接続。
 struct Browser {
     target: Target,
-    /// 一覧・ファイル操作（エージェントか SFTP）
+    /// 一覧・ファイル操作（エージェント、SFTPまたはSCP用シェル）
     fs: Arc<dyn RemoteFs>,
     transport: Arc<dyn yy_remote::Transport>,
     home: Vec<u8>,
@@ -812,7 +812,11 @@ impl App {
                         if crate::remote::use_agent() {
                             "使う"
                         } else {
-                            "使わない（SFTP）"
+                            if self.protocol == Protocol::Scp {
+                                "使わない（シェル）"
+                            } else {
+                                "使わない（SFTP）"
+                            }
                         }
                     )
                 }
@@ -1185,13 +1189,23 @@ fn local_time(secs: u64) -> String {
 
 // ---- 接続と移動 -------------------------------------------------------------------
 
-/// `target` の一覧・ファイル操作（エージェントを使う設定ならエージェント、でなければ SFTP。
+/// `target` の一覧・ファイル操作（エージェント、SFTPまたはSCP用シェル）。
 /// なければ接続する。接続中はアプリの状態を借りない）。
 fn browser(target: &Target) -> std::result::Result<(Arc<dyn RemoteFs>, Vec<u8>), String> {
     if let Some(b) = with(|a| a.browser(target).map(|b| (b.fs.clone(), b.home.clone()))).flatten() {
         return Ok(b);
     }
-    let fs = crate::remote::fs(target, &set_status)?;
+    let scp = with(|a| a.protocol == Protocol::Scp).unwrap_or(false);
+    let fs: Arc<dyn RemoteFs> = if scp && !crate::remote::use_agent() {
+        let t = crate::remote::transport(target, &set_status)?;
+        crate::remote::wait(&set_status, move |_| {
+            yy_remote::shellfs::ShellFs::connect(t)
+        })
+        .map(|fs| Arc::new(fs) as Arc<dyn RemoteFs>)
+        .map_err(|e| e.to_string())?
+    } else {
+        crate::remote::fs(target, &set_status)?
+    };
     // 転送に使う接続（エージェントのセッションの接続か、同じ SSH の接続）
     let t = crate::remote::transport(target, &set_status)?;
     let home = fs.home().to_vec();
@@ -1589,7 +1603,11 @@ fn command(hwnd: HWND, id: u16) {
                 };
                 a.update_menu();
                 a.set_status("");
+                a.browsers.clear();
             });
+            if with(|a| a.loc.is_some()) == Some(true) {
+                refresh();
+            }
         }
         ID_UPLOAD => {
             let files = pick_files(hwnd);

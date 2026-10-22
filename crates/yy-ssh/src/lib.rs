@@ -226,7 +226,7 @@ impl SshConnector {
         rt: &Runtime,
         config: &Arc<client::Config>,
         spec: &HostSpec,
-        via: Option<&Handle<Client>>,
+        via: Option<(&Handle<Client>, &HostSpec)>,
         routes: forward::Routes,
         prompter: &dyn Prompter,
         log: &ConnectLog,
@@ -261,20 +261,34 @@ impl SshConnector {
         let mut handle = rt.block_on(async {
             let connect = async {
                 let stream: Box<dyn Stream> = match (via, proxied.take()) {
-                    (Some(jump), _) => {
-                        let ch = jump
-                            .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0)
-                            .await
-                            .map_err(|e| {
-                                io::Error::new(
-                                    io::ErrorKind::ConnectionRefused,
-                                    format!("踏み台から {host}:{port} に接続できませんでした: {e}"),
-                                )
-                            })?;
-                        log.note(format!(
+                    (Some((jump, hop)), _) => {
+                        if let Some(template) = &hop.jump_command {
+                            let command = yy_remote::ssh_config::jump_command(template, host, port)
+                                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+                            let ch = jump.channel_open_session().await.map_err(ssh_error)?;
+                            ch.exec(true, command.into_bytes())
+                                .await
+                                .map_err(ssh_error)?;
+                            // PTYは要求しない。次ホストの鍵確認・認証はこのストリーム上で行う。
+                            log.note("踏み台のリモート中継コマンドを使います（PTYなし）");
+                            Box::new(ch.into_stream()) as Box<dyn Stream>
+                        } else {
+                            let ch = jump
+                                .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0)
+                                .await
+                                .map_err(|e| {
+                                    io::Error::new(
+                                        io::ErrorKind::ConnectionRefused,
+                                        format!(
+                                            "踏み台から {host}:{port} に接続できませんでした: {e}"
+                                        ),
+                                    )
+                                })?;
+                            log.note(format!(
                             "踏み台の上で {host}:{port} へのチャネル（direct-tcpip）を開きました"
                         ));
-                        Box::new(ch.into_stream())
+                            Box::new(ch.into_stream())
+                        }
                     }
                     (None, Some(tcp)) => Box::new(tcp),
                     (None, None) => {
@@ -364,7 +378,7 @@ impl Connector for SshConnector {
         // 接続先（最後のホップ）の -R の振り分け表
         let routes = forward::Routes::default();
         for (i, hop) in hops.iter().enumerate() {
-            let via = handles.last().map(|h| h.as_ref());
+            let via = handles.last().map(|h| (h.as_ref(), hops[i - 1]));
             let r = if i + 1 == hops.len() {
                 routes.clone()
             } else {
@@ -391,6 +405,7 @@ impl Connector for SshConnector {
             handle,
             jumps: handles,
             routes,
+            sftp: spec.sftp.clone(),
         }))
     }
 }
@@ -848,6 +863,7 @@ struct SshTransport {
     jumps: Vec<Arc<Handle<Client>>>,
     /// `-R` の振り分け表
     routes: forward::Routes,
+    sftp: yy_remote::ssh_config::SftpStart,
 }
 
 impl Drop for SshTransport {
@@ -873,6 +889,7 @@ enum Start {
     Exec(Vec<u8>),
     /// サブシステム（`sftp` など）
     Subsystem(String),
+    Sftp(yy_remote::ssh_config::SftpStart),
     /// 端末つき（`command` がなければログインシェル）
     Shell {
         term: String,
@@ -895,10 +912,48 @@ impl SshTransport {
     fn open(&self, start: Start, merge_stderr: bool) -> io::Result<Opened> {
         let rt = runtime()?;
         let channel = rt.block_on(async {
-            let ch = self.handle.channel_open_session().await?;
+            let mut ch = self.handle.channel_open_session().await?;
+            let mut pending = std::collections::VecDeque::new();
             match start {
                 Start::Exec(command) => ch.exec(true, command).await?,
                 Start::Subsystem(name) => ch.request_subsystem(true, name).await?,
+                Start::Sftp(mode) => {
+                    match mode {
+                    yy_remote::ssh_config::SftpStart::Subsystem(name) => {
+                        ch.request_subsystem(true, name).await?
+                    }
+                    yy_remote::ssh_config::SftpStart::Command(command) => {
+                        ch.exec(true, command.into_bytes()).await?
+                    }
+                    }
+                    // ゲートウェイによる要求拒否をSFTPパケットと取り違えない。
+                    // 応答より先に届くバナー・データは失わず、後段へ渡す。
+                    let accepted = tokio::time::timeout(CONNECT_TIMEOUT, async {
+                        let mut bytes = 0;
+                        loop {
+                            match ch.wait().await {
+                                Some(ChannelMsg::Success) => return Ok(()),
+                                Some(ChannelMsg::Failure) => return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                                    "SFTP起動要求が拒否されました。ゲートウェイのSFTP許可とsftp_subsystem / sftp_server設定を確認してください")),
+                                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => return Err(io::Error::new(io::ErrorKind::UnexpectedEof,"SFTP起動要求への応答前にチャネルが閉じられました")),
+                                Some(msg) => {
+                                    match &msg {
+                                        ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => bytes += data.len(),
+                                        _ => {},
+                                    }
+                                    if bytes > STDERR_LIMIT || pending.len() >= 256 {
+                                        return Err(io::Error::new(io::ErrorKind::InvalidData,"SFTP起動応答前の出力が多すぎます"));
+                                    }
+                                    pending.push_back(msg);
+                                }
+                            }
+                        }
+                    }).await.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut,"SFTP起動要求への応答がありません（20秒）")));
+                    if let Err(e) = accepted {
+                        let _ = ch.close().await;
+                        return Err(russh::Error::IO(e));
+                    }
+                },
                 Start::Shell {
                     term,
                     cols,
@@ -913,9 +968,9 @@ impl SshTransport {
                     }
                 }
             }
-            Ok::<_, russh::Error>(ch)
+            Ok::<_, russh::Error>((ch, pending))
         });
-        let channel = channel.map_err(ssh_error)?;
+        let (channel, mut pending) = channel.map_err(ssh_error)?;
         let (mut read_half, write_half) = channel.split();
         // 出力は数を限った受け渡し口に流す（読む側が遅ければ SSH のウィンドウで送信を止める）
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -923,7 +978,10 @@ impl SshTransport {
         rt.spawn(async move {
             let mut exit = Exit::default();
             let mut out = Some(out_tx);
-            while let Some(msg) = read_half.wait().await {
+            while let Some(msg) = match pending.pop_front() {
+                Some(msg) => Some(msg),
+                None => read_half.wait().await,
+            } {
                 match msg {
                     ChannelMsg::Data { data } => {
                         if let Some(tx) = &out
@@ -984,6 +1042,14 @@ impl SshTransport {
 }
 
 impl Transport for SshTransport {
+    fn sftp(&self) -> io::Result<Process> {
+        let o = self.open(Start::Sftp(self.sftp.clone()), false)?;
+        Ok(Process::new(
+            Box::new(o.writer),
+            Box::new(o.reader),
+            o.finish,
+        ))
+    }
     fn exec(&self, command: &[u8]) -> io::Result<Process> {
         let o = self.open(Start::Exec(command.to_vec()), false)?;
         Ok(Process::new(

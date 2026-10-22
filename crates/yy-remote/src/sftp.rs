@@ -381,7 +381,7 @@ impl Drop for Sftp {
 impl Sftp {
     /// `sftp` サブシステムを起動して始める。
     pub fn connect(t: &dyn Transport) -> io::Result<Sftp> {
-        Sftp::start(t.subsystem("sftp")?)
+        Sftp::start(t.sftp()?)
     }
 
     /// 起動したサブシステム（または sftp-server）と、初期化のやり取りをする。
