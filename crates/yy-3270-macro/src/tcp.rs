@@ -271,6 +271,7 @@ impl Host for TcpHost {
             Ok(())
         };
         match op {
+            Op::TerminalKey(_) => return Err("VT key operations require an SSH terminal".into()),
             Op::Key(k) => {
                 if locked && !matches!(k, Key::Reset | Key::Attn | Key::SysReq) {
                     return Err("キーボードがロックされています".into());

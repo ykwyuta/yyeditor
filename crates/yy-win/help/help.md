@@ -11,6 +11,7 @@ yyeditor は、数 GB のファイルもすぐに開ける Windows 向けの軽�
 - [ワークスペース](#workspace)
 - [ソース管理（Git）](#git)
 - [ターミナル（yyterm）](#terminal)
+- [ターミナルのマクロ・文法・変数](#terminal-macros)
 - [3270（メインフレーム）](#tn3270)
 - [ファイル転送（yysftp）](#transfer)
 - [スプレッドシート（yysheet）](#yysheet)
@@ -526,6 +527,121 @@ column_width = 8.43     # 既定の列幅（半角の文字数）
 layout_catalog = ""     # 固定長のレイアウトカタログのルート（空なら %APPDATA%\yyeditor\layouts）
 use_agent = false       # 接続先のファイルの読み書きにエージェントを使う（false なら SFTP）
 ```
+
+## ターミナルのマクロ・文法・変数 {#terminal-macros}
+
+yyterm（yyterminal）のマクロは、人が編集できる**UTF-8のRhaiテキストファイル（`.rhai`）**です。接続中のSSHタブと3270端末タブで使用できます。ローカルシェルと3287プリンターのタブは対象外です。
+
+- **実行**: 対象タブを表示し、[マクロ] → [マクロを実行]（Ctrl+Shift+F5）でファイルを選びます。開始したタブに結び付くため、実行中に別タブへ切り替えても送信先は変わりません。同時に実行できるのは1つです。
+- **停止**: [マクロを止める]、または対象タブでCtrl+Break／Pause。文字待ち・待機・繰り返しも停止できます。実行中は対象タブへの利用者の入力を送りません。
+- **記録とテキスト出力**: [操作の記録を開始・終了]（Ctrl+Shift+F6）で記録を開始し、もう一度選ぶと保存先を選べます。UTF-8の`.rhai`として保存し、yyeditorで開きます。他のエディターでも編集できます。手書きのマクロも同じ形式で実行します。
+- マクロの既定フォルダーは`%APPDATA%\yyeditor\macros`です。[マクロのフォルダを開く]から開けます。SSHと3270で共通の`[tn3270.macro]`設定（`folder`、`output`、`timeout`）を使用します。出力の既定先はドキュメントの`yyterm\macros-out`、文字待ちの既定上限は30秒です。
+
+SSHの記録は、実際に送ったUTF-8文字・改行・制御シーケンスを`type("…")`として保存します。ESC等は`\x1b`、改行は`\r` / `\n`のように読める形へ変換します。入力の間隔やホストのプロンプトは推定しないため、記録後に必要な`wait_text`を追加してください。SSHのパスワード欄は3270の非表示フィールドのようには識別できず、**記録中の手入力はパスワードも含めて保存されます**。秘密値は記録せず、編集時に`password("名前")`へ置き換えてください。3270では従来どおり非表示フィールドの値を記録せず、`password`に置き換えます。
+
+### 変数と基本文法
+
+変数は`let 名前 = 値;`、定数は`const 名前 = 値;`です。文字列・整数・真偽値、配列`[値, …]`、マップ`#{名前: 値, …}`を使えます。変数は`=`で再代入でき、`+=`なども使えます。文末は`;`、処理のまとまりは`{ … }`です。コメントは`// …`または`/* … */`。文字列には`\"`、`\\`、`\n`、`\r`、`\t`、`\x1b`等のエスケープを使えます。
+
+```rhai
+// SSHの例。変数はローカルのマクロ内の値で、シェル変数ではありません。
+const prompt = "$ ";                 // 接続先のプロンプトに合わせて変更
+let directory = ask("調べるディレクトリー（スペースを含まないもの）");
+if directory == () { throw "取り消しました"; }
+wait_text(prompt, 30);
+send_line("ls -ld -- " + directory); // 送信文字列はそのまま。シェルの引用は必要に応じて記述
+wait_text(prompt, 30);
+let report = text_open("ssh-screen.txt");
+for line in screen_lines() {
+    report.write_line(line);
+}
+report.close();
+```
+
+シェル側の応答が来る前から同じプロンプトが画面に残っている場合、`wait_text`はその既存表示にも一致します。コマンドごとに異なる完了マーカーを出してそれを待つと、前の表示と区別できます。
+
+```rhai
+let marker = "YY_MACRO_FINISHED_01";
+// コマンド文字列にマーカー全文を含めず、入力エコーとの誤一致を避ける
+send_line("pwd; printf '%s%s\\n' YY_MACRO_ FINISHED_01");
+wait_text(marker, 30);
+```
+
+| 文法 | 例 |
+| --- | --- |
+| 条件分岐 | `if count > 0 { log(count); } else { log("なし"); }` |
+| 比較・論理演算 | `==`、`!=`、`<`、`<=`、`>`、`>=`、`&&`、`||`、`!` |
+| 四則演算・文字列結合 | `n + 1`、`n - 1`、`n * 2`、`n / 2`、`"cd " + path` |
+| 回数の繰り返し | `for n in 0..3 { log(n); }`（0、1、2） |
+| 配列の繰り返し | `for value in ["one", "two"] { send_line("echo " + value); }` |
+| 条件付き・無限ループ | `while count < 3 { count += 1; }`、`loop { … }` |
+| ループ制御 | `break;`、`continue;` |
+| 関数 | `fn command(value) { return "echo " + value; }` |
+| 配列・マップの参照 | `items[0]`、`position.row`、`position["col"]` |
+| エラー | `throw "説明";`、`try { … } catch (error) { log(error); }` |
+| 空値と取消 | `()`。`ask`の取消結果も`()` |
+
+`screen_text()`等で得た文字列や`ask`の結果を変数に入れ、加工して送信できます。`${名前}`のような独自の自動置換は行いません。文字列の結合等で送信内容を組み立てます。スクリプトはホストのシェルへ文字を送るもので、Rhaiから直接OSプログラムを起動したり任意のネットワーク接続を作ったりはできません。モジュールの`import`は提供しません。
+
+### 共通命令（SSH／3270）
+
+行・桁は1始まりで、長さは端末の表示セル数です。全角文字の継続セルは重複して返しません。SSHでは最新の可視画面が対象で、利用者がスクロールバックを動かしても取得対象は変わりません。端末の非表示属性の文字は空白になります。
+
+| 命令 | 動作 |
+| --- | --- |
+| `type(text)` / `input(text)` / `send(text)` | 改行を加えず文字列を送る。SSHではUTF-8をそのまま送信し、ブラケット付き貼り付けにはしない |
+| `send_line(text)` | 文字列を送ってEnterキーを送る。シェルの引用・変数展開は接続先の規則に従う |
+| `key(name)` | 指定のキーを送る。下表参照。キーを送っただけではホストの応答を待たない |
+| `tab()` / `home()` | Tab / Homeキーを送る |
+| `wait_text(text[, seconds])` | 画面内の行に文字列が現れるまで待つ |
+| `wait_text_at(row, col, text[, seconds])` | 指定セル位置の文字列を待つ |
+| `wait_unlocked([seconds])` | 3270のロック解除を待つ。SSHはロック状態を持たず即時復帰するので、応答待ちには`wait_text`を使う |
+| `wait_change(seconds)` | 画面・状態の世代が変わるまで待ち、変われば`true`、上限まで変わらなければ`false` |
+| `text_at(row, col, length)` / `row(row)` | セル範囲／1行の文字列を取得。画面外は空 |
+| `screen_lines()` / `screen_text()` | 行の配列／改行で連結した画面文字列を取得 |
+| `rows()` / `cols()` | 画面の行数／桁数 |
+| `cursor()` | `#{row, col}`を返す |
+| `locked()` | 3270のキーボードロック状態。SSHは`false` |
+| `password(name)` | 資格情報から秘密値を直接送信。値を変数に返さず、診断ログに残さない。なければ入力を尋ねる |
+| `ask(question)` | 文字列を尋ねて返す。取消は`()` |
+| `message(value)` | メッセージを表示 |
+| `log(value)` / `print(value)` / `debug(value)` | 実行の記録へ出力。SSHの`log`はステータスにも表示 |
+| `sleep(milliseconds)` | ミリ秒単位で待つ。停止可能 |
+| `text.trim()` | 前後の空白を除去し、変更した文字列も返す。`text_at(1, 1, 20).trim()`等で使用 |
+
+`wait_text` / `wait_text_at` / `wait_unlocked`の秒指定を省略すると設定の`timeout`を使います。0以下なら現在の画面を調べて真偽値を返します。正の時間での上限超過、切断、停止、使用できない操作は行番号付きのエラーとなり、通常はそこで終了します。
+
+| キー | SSH | 3270 |
+| --- | --- | --- |
+| `Enter`、`Tab`、`BackTab`、`Home`、`Up`、`Down`、`Left`、`Right`、`Backspace`、`Delete`、`Insert` | 対応 | 対応 |
+| `Escape`（`Esc`）、`End`、`PageUp`（`PgUp`）、`PageDown`（`PgDn`）、`Space`、1文字 | 対応 | 文字は`type`で入力 |
+| `F1`〜`F12`、`PF1`〜`PF12` | 対応 | `PF1`〜`PF12`を使用 |
+| `Ctrl+C`、`Ctrl+Space`、`Alt+a`、`Shift+Tab`等 | `Ctrl` / `Control`、`Alt`、`Shift`を`+`で組み合わせる | この文字列表記は非対応 |
+| `PF13`〜`PF24`、`PA1`〜`PA3`、`Clear`、`SysReq`、`Attn`、`Reset`、`EraseEOF`、`EraseInput`、`Dup`、`FieldMark` | 非対応 | 対応 |
+| `NewLine` | Enterとして送信 | 3270の改行キー |
+
+SSHのカーソルキーは、その時点の端末のアプリケーションカーソルモード等に従って符号化します。秘密値の資格情報キーはSSHが`ssh-macro/名前`、3270が既存の`tn3270/名前`です。診断ログは共通の`%APPDATA%\yyeditor\logs\tn3270-macro.log`に残します。SSHの送信本文は診断ログへ記録せず、明示的な操作記録は別扱いです。
+
+### ファイルへの出力（既存命令）
+
+| 命令 | 動作 |
+| --- | --- |
+| `csv_open(relative_path)` | CSV用ファイルを開き、UTF-8 BOMを付ける。既存ファイルは置換 |
+| `text_open(relative_path)` | テキストファイルを開く。UTF-8、BOMなし。既存ファイルは置換 |
+| `file.write_row([values…])` | CSVの引用・引用符の二重化を行い、CRLFで1行書く |
+| `file.write_line(text)` | 文字列とCRLFを書き込む |
+| `file.close()` | 出力を閉じる |
+| `file.path` | 実際の出力パス |
+
+出力先は設定されたマクロ出力フォルダー配下の相対パスです。`csv_open` / `text_open`はマクロの実行結果の出力で、操作の記録を`.rhai`へ保存する機能とは別です。
+
+### 3270専用の既存命令
+
+- `move_to(row, col)`: 3270カーソルを移動。SSHではローカル表示のカーソル位置を変更せず、使用不可のエラーを返します。
+- `fields()`: フィールド情報の配列。`field_at(row, col)`: そのセルのフィールド情報または`()`. フィールドの情報は`row`、`col`、`len`、`protected`、`numeric`、`hidden`、`text`です。非表示フィールドの本文は渡しません。SSHでは`fields()`は空配列、`field_at`は`()`。
+- `transfer_get(host_file, local_file[, options])` / `transfer_put(local_file, host_file[, options])`: IND$FILE転送。`#{ok, message}`を返します。`host`は`tso`（既定）/ `cms` / `cics`、`mode`は`text`（既定）/ `ascii` / `binary`、`recfm`は`F` / `V` / `U`、数値指定は`lrecl` / `space`、追記は`append: true`です。SSHでSFTP転送を行う命令ではなく、使用不可のエラーになります。
+- `print_screen()`: 3270の画面を設定したプリンター出力先へ送ります。SSHでは使用不可です。SSH画面を保存する場合は`screen_lines()`と`text_open`を使用してください。
+- `on_connect`: 3270ホストの既存設定です。SSHマクロは上記メニューから明示的に実行します。
 
 ## 3270（メインフレーム） {#tn3270}
 

@@ -154,6 +154,8 @@ impl Snapshot {
 /// スクリプトがホストに頼む操作。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {
+    /// VT/SSH key name, interpreted using the terminal's current keyboard modes.
+    TerminalKey(String),
     Key(Key),
     /// 文字を入力する（入力の規則を守る）
     Type(String),
@@ -187,6 +189,9 @@ pub enum Answer {
 
 /// スクリプトから見たホスト（yyterm のタブ、テストの模擬ホスト）。
 pub trait Host: Send + Sync {
+    fn is_stream(&self) -> bool {
+        false
+    }
     fn snapshot(&self) -> Result<Snapshot, String>;
     /// 画面・状態が変わるたびに増える数。
     fn generation(&self) -> u64;
@@ -653,7 +658,19 @@ fn engine(host: Arc<dyn Host>, opts: Options) -> Engine {
         Op::Type(text.to_string())
     )
     .map(|_| ()));
+    reg!("send", |h, text: ImmutableString| act(
+        h,
+        Op::Type(text.to_string())
+    )
+    .map(|_| ()));
+    reg!("send_line", |h, text: ImmutableString| {
+        act(h, Op::Type(text.to_string()))?;
+        act(h, Op::Key(Key::Enter)).map(|_| ())
+    });
     reg!("key", |h, name: ImmutableString| {
+        if h.is_stream() {
+            return act(h, Op::TerminalKey(name.to_string())).map(|_| ());
+        }
         let k = parse_key(&name).ok_or_else(|| {
             format!("キー「{name}」はありません（Enter・PF1〜PF24・PA1〜PA3・Clear など）")
         })?;
