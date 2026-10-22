@@ -1,10 +1,13 @@
 //! Exact, bounded comparisons. Neither heuristics nor normalized text feed auto-merge.
 pub mod alignment;
+pub mod comparison_session;
 pub mod files;
+pub mod folder_session;
 pub mod folders;
 pub mod profile;
 pub mod report;
 pub mod rules;
+pub mod session;
 pub mod sync_plan;
 pub mod sync_run;
 
@@ -243,7 +246,7 @@ pub(crate) fn compare_tokens(a: &[&str], b: &[&str], cancel: &Cancellation) -> R
     Ok(Diff { rows, edits })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum Choice {
     Left,
     Right,

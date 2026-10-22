@@ -12,6 +12,9 @@ fn main() {
                 ("--base", g.base),
                 ("--output", g.output),
                 ("--git-merged-target", g.git_merged_target),
+                ("--session", g.session),
+                ("--comparison-session", g.comparison_session),
+                ("--folder-session", g.folder_session),
             ] {
                 if let Some(value) = value {
                     command.arg(name).arg(value);

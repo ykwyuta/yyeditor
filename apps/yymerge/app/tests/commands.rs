@@ -11,6 +11,585 @@ fn run(args: &[&str], dir: &Path) -> Output {
         .unwrap()
 }
 #[test]
+fn folder_sessions_capture_setup_protect_roots_and_do_not_store_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    for side in ["left", "right", "base"] {
+        fs::create_dir_all(path.join(side).join("nested")).unwrap();
+    }
+    fs::write(path.join("left/new.csv"), "changed").unwrap();
+    let args = [
+        "folder-session",
+        "create",
+        "--left",
+        "left",
+        "--right",
+        "right",
+        "--base",
+        "base",
+        "--recursive",
+        "--path-contains",
+        ".csv",
+        "--status",
+        "different",
+        "--output",
+        "folders.json",
+    ];
+    let out = run(&args, path);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let before = fs::read(path.join("folders.json")).unwrap();
+    let out = run(&["folder-session", "inspect", "folders.json"], path);
+    assert_eq!(out.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["kind"], "yymerge-folder-session");
+    assert_eq!(value["recursive"], true);
+    assert_eq!(value["status"], "different");
+    assert_eq!(value["path_contains"], ".csv");
+    assert_eq!(value["results_restored"], false);
+    assert_eq!(value["sync_plan_restored"], false);
+    assert_eq!(run(&args, path).status.code(), Some(2));
+    assert_eq!(fs::read(path.join("folders.json")).unwrap(), before);
+    for target in ["left/work.json", "right/nested/work.json", "base/work.json"] {
+        assert_eq!(
+            run(
+                &[
+                    "folder-session",
+                    "create",
+                    "--left",
+                    "left",
+                    "--right",
+                    "right",
+                    "--base",
+                    "base",
+                    "--output",
+                    target,
+                    "--overwrite"
+                ],
+                path
+            )
+            .status
+            .code(),
+            Some(2)
+        );
+        assert!(!path.join(target).exists());
+    }
+    fs::write(path.join("right/new.csv"), "changed").unwrap();
+    assert_eq!(
+        run(&["folder-session", "inspect", "folders.json"], path)
+            .status
+            .code(),
+        Some(0)
+    );
+    fs::rename(path.join("base"), path.join("moved-base")).unwrap();
+    let out = run(&["folder-session", "inspect", "folders.json"], path);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert_eq!(fs::read(path.join("folders.json")).unwrap(), before);
+}
+#[test]
+fn folder_sessions_invalid_json_and_gui_conflicting_modes_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    fs::write(path.join("bad.json"), "{}").unwrap();
+    let out = run(&["folder-session", "inspect", "bad.json"], path);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    for flags in [
+        &["--session", "merge.json"][..],
+        &["--comparison-session", "compare.json"][..],
+        &["--left", "left", "--right", "right"][..],
+        &["--ignore-case"][..],
+        &["--encoding", "UTF-8"][..],
+    ] {
+        let mut args = vec!["gui", "--folder-session", "bad.json"];
+        args.extend(flags);
+        assert_eq!(run(&args, path).status.code(), Some(64));
+    }
+}
+#[test]
+fn comparison_sessions_preserve_rules_protect_inputs_and_validate_before_inspection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    fs::write(path.join("left"), "猫 Alpha\r\n").unwrap();
+    fs::write(path.join("right"), "猫 alpha\n").unwrap();
+    let args = [
+        "comparison-session",
+        "create",
+        "--left",
+        "left",
+        "--right",
+        "right",
+        "--output",
+        "work.json",
+        "--ignore-case",
+        "--ignore-eol",
+    ];
+    let out = run(&args, path);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let before = fs::read(path.join("work.json")).unwrap();
+    let out = run(&["comparison-session", "inspect", "work.json"], path);
+    assert_eq!(out.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["kind"], "yymerge-comparison-session");
+    assert_eq!(value["inputs_verified"], true);
+    assert_eq!(value["rules"]["ignore_case"], true);
+    assert_eq!(value["differences"], 0);
+    assert_eq!(value["ignored"], 1);
+    assert!(!value["left"].as_str().unwrap().is_empty());
+    assert_eq!(run(&args, path).status.code(), Some(2));
+    assert_eq!(fs::read(path.join("work.json")).unwrap(), before);
+    for target in ["left", "right"] {
+        let out = run(
+            &[
+                "comparison-session",
+                "create",
+                "--left",
+                "left",
+                "--right",
+                "right",
+                "--output",
+                target,
+                "--overwrite",
+            ],
+            path,
+        );
+        assert_eq!(out.status.code(), Some(2));
+    }
+    assert_eq!(
+        fs::read_to_string(path.join("left")).unwrap(),
+        "猫 Alpha\r\n"
+    );
+    fs::write(path.join("left"), "changed").unwrap();
+    let out = run(&["comparison-session", "inspect", "work.json"], path);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert_eq!(fs::read(path.join("work.json")).unwrap(), before);
+}
+#[test]
+fn comparison_sessions_profiles_legacy_encodings_and_gui_exclusions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    fs::write(path.join("left"), [0x94, 0x4c, b'A']).unwrap();
+    fs::write(path.join("right"), [0x94, 0x4c, b'a']).unwrap();
+    let out = run(
+        &["rules-profile", "save", "rules.json", "--ignore-case"],
+        path,
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let profile = fs::read(path.join("rules.json")).unwrap();
+    let create = |target| {
+        run(
+            &[
+                "comparison-session",
+                "create",
+                "--left",
+                "left",
+                "--right",
+                "right",
+                "--encoding",
+                "CP932",
+                "--rules-profile",
+                "rules.json",
+                "--output",
+                target,
+                "--overwrite",
+            ],
+            path,
+        )
+    };
+    assert_eq!(create("rules.json").status.code(), Some(2));
+    assert_eq!(fs::read(path.join("rules.json")).unwrap(), profile);
+    assert_eq!(create("work.json").status.code(), Some(0));
+    let out = run(&["comparison-session", "inspect", "work.json"], path);
+    assert_eq!(out.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["differences"], 0);
+    fs::write(path.join("bad.json"), "{}").unwrap();
+    let out = run(&["comparison-session", "inspect", "bad.json"], path);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    for options in [
+        &["--session", "merge.json"][..],
+        &["--left", "left", "--right", "right"][..],
+        &["--encoding", "CP932"][..],
+        &["--ignore-case"][..],
+        &["--rules-profile", "rules.json"][..],
+    ] {
+        let mut args = vec!["gui", "--comparison-session", "work.json"];
+        args.extend(options);
+        assert_eq!(run(&args, path).status.code(), Some(64));
+    }
+}
+#[test]
+fn folder_filters_report_visible_rows_and_keep_the_global_exit_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    for root in ["left", "right"] {
+        fs::create_dir_all(path.join(root).join("日本語")).unwrap();
+        fs::write(path.join(root).join("same.txt"), "same").unwrap();
+        fs::write(path.join(root).join("日本語/Data.CSV"), root).unwrap();
+    }
+    fs::write(path.join("left/only-left.txt"), "left").unwrap();
+    let out = run(
+        &[
+            "folders",
+            "left",
+            "right",
+            "--recursive",
+            "--path-contains",
+            "日本語\\DATA.csv",
+            "--status",
+            "different",
+            "--format",
+            "json",
+        ],
+        path,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["version"], 1);
+    assert_eq!(value["matched_count"], 1);
+    assert_eq!(value["total_count"], 4);
+    assert_eq!(value["total_differences"], 2);
+    assert_eq!(value["entries"][0]["status"], "Different");
+    assert_eq!(value["filter"]["status"], "different");
+    let out = run(
+        &[
+            "folders",
+            "left",
+            "right",
+            "--recursive",
+            "--status",
+            "equal",
+            "--path-contains",
+            "same.txt",
+            "--format",
+            "json",
+        ],
+        path,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["entries"].as_array().unwrap().len(), 1);
+    let out = run(
+        &[
+            "folders",
+            "left",
+            "right",
+            "--recursive",
+            "--path-contains",
+            "no-match",
+            "--format",
+            "json",
+        ],
+        path,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["matched_count"], 0);
+    assert_eq!(value["total_differences"], 2);
+    let out = run(
+        &[
+            "folders",
+            "left",
+            "right",
+            "--recursive",
+            "--format",
+            "json",
+        ],
+        path,
+    );
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&out.stdout)
+            .unwrap()
+            .is_array()
+    );
+    let out = run(&["folders", "left", "right", "--status", "left-only"], path);
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("LeftOnly\tonly-left.txt")
+    );
+    assert_eq!(
+        run(
+            &["folders", "left", "right", "--status", "not-a-status"],
+            path
+        )
+        .status
+        .code(),
+        Some(64)
+    );
+}
+#[test]
+fn three_way_folder_review_and_presence_filters_do_not_restrict_sync_planning() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    for root in ["base", "left", "right"] {
+        fs::create_dir(path.join(root)).unwrap();
+    }
+    for (root, value) in [("base", "base"), ("left", "left"), ("right", "right")] {
+        fs::write(path.join(root).join("both.txt"), value).unwrap();
+        fs::write(path.join(root).join("same.txt"), "same").unwrap();
+    }
+    fs::write(path.join("left/added.txt"), "new").unwrap();
+    let out = run(
+        &[
+            "folders", "left", "right", "--base", "base", "--status", "review", "--format", "json",
+        ],
+        path,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["matched_count"], 1);
+    assert_eq!(value["total_differences"], 2);
+    assert_eq!(value["entries"][0]["status"], "BothChanged");
+    let out = run(
+        &[
+            "folders",
+            "left",
+            "right",
+            "--base",
+            "base",
+            "--status",
+            "left-only",
+            "--format",
+            "json",
+        ],
+        path,
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["entries"][0]["status"], "LeftAdded");
+    let out = run(
+        &[
+            "folders",
+            "left",
+            "right",
+            "--base",
+            "base",
+            "--path-contains",
+            "missing",
+            "--format",
+            "json",
+        ],
+        path,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["matched_count"],
+        0
+    );
+    let out = run(
+        &[
+            "sync", "plan", "--left", "left", "--right", "right", "--base", "base", "--mode",
+            "merge",
+        ],
+        path,
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        value["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["path"] == "added.txt")
+    );
+    assert_eq!(
+        run(
+            &[
+                "sync",
+                "plan",
+                "--left",
+                "left",
+                "--right",
+                "right",
+                "--path-contains",
+                "missing"
+            ],
+            path
+        )
+        .status
+        .code(),
+        Some(64)
+    );
+}
+#[test]
+fn filtered_incomplete_rows_never_become_empty_success_or_hide_global_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    for root in ["base", "left", "right"] {
+        fs::create_dir(path.join(root)).unwrap();
+        fs::write(path.join(root).join("same.txt"), "same").unwrap();
+        fs::write(path.join(root).join("bad.txt"), "bad").unwrap();
+    }
+    #[cfg(windows)]
+    let _held = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path.join("left/bad.txt"))
+            .unwrap()
+    };
+    #[cfg(unix)]
+    {
+        fs::remove_file(path.join("left/bad.txt")).unwrap();
+        std::os::unix::fs::symlink("missing", path.join("left/bad.txt")).unwrap();
+    }
+    for base in [false, true] {
+        let mut args = vec![
+            "folders",
+            "left",
+            "right",
+            "--path-contains",
+            "no-match",
+            "--format",
+            "json",
+        ];
+        if base {
+            args.extend(["--base", "base"]);
+        }
+        let out = run(&args, path);
+        assert_eq!(out.status.code(), Some(2));
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["matched_count"], 0);
+        assert_eq!(value["total_incomplete"], 1);
+    }
+    let out = run(
+        &[
+            "folders",
+            "left",
+            "right",
+            "--status",
+            "uncompared",
+            "--format",
+            "json",
+        ],
+        path,
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["matched_count"], 1);
+    assert!(
+        value["entries"][0]["status"] == "Error" || value["entries"][0]["status"] == "SkippedLink"
+    );
+}
+#[test]
+fn merge_work_sessions_round_trip_and_never_write_a_result_or_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    for (name, value) in [
+        ("base", "a\n"),
+        ("left", "LEFT\n"),
+        ("right", "RIGHT\n"),
+        ("result", "keep"),
+    ] {
+        fs::write(path.join(name), value).unwrap();
+    }
+    let create = [
+        "session",
+        "create",
+        "--base",
+        "base",
+        "--left",
+        "left",
+        "--right",
+        "right",
+        "--output",
+        "作業 session.json",
+    ];
+    assert_eq!(run(&create, path).status.code(), Some(0));
+    let out = run(&["session", "inspect", "作業 session.json"], path);
+    assert_eq!(out.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["unresolved"], 1);
+    assert_eq!(json["inputs_verified"], true);
+    assert_eq!(json["merge_result_saved"], false);
+    assert_eq!(json["undo_history_restored"], false);
+    assert_eq!(fs::read_to_string(path.join("result")).unwrap(), "keep");
+    let before = fs::read(path.join("作業 session.json")).unwrap();
+    assert_eq!(run(&create, path).status.code(), Some(2));
+    assert_eq!(fs::read(path.join("作業 session.json")).unwrap(), before);
+    let overwrite = [
+        "session",
+        "create",
+        "--base",
+        "base",
+        "--left",
+        "left",
+        "--right",
+        "right",
+        "--output",
+        "left",
+        "--overwrite",
+    ];
+    assert_eq!(run(&overwrite, path).status.code(), Some(2));
+    assert_eq!(fs::read_to_string(path.join("left")).unwrap(), "LEFT\n");
+    fs::write(path.join("left"), "changed externally\n").unwrap();
+    let out = run(&["session", "inspect", "作業 session.json"], path);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8(out.stderr).unwrap().contains("changed"));
+    assert_eq!(fs::read(path.join("作業 session.json")).unwrap(), before);
+}
+#[test]
+fn invalid_and_missing_session_inputs_are_incomplete_and_mixed_bom_cannot_be_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    fs::write(
+        path.join("session.json"),
+        "{\"kind\":\"other\",\"version\":99}",
+    )
+    .unwrap();
+    assert_eq!(
+        run(&["session", "inspect", "session.json"], path)
+            .status
+            .code(),
+        Some(2)
+    );
+    for name in ["base", "left", "right"] {
+        fs::write(path.join(name), "same\r\n").unwrap();
+    }
+    let args = [
+        "session",
+        "create",
+        "--base",
+        "base",
+        "--left",
+        "left",
+        "--right",
+        "right",
+        "--output",
+        "valid.json",
+    ];
+    assert_eq!(run(&args, path).status.code(), Some(0));
+    fs::remove_file(path.join("right")).unwrap();
+    assert_eq!(
+        run(&["session", "inspect", "valid.json"], path)
+            .status
+            .code(),
+        Some(2)
+    );
+    fs::write(path.join("right"), "\u{feff}same\r\n").unwrap();
+    assert_eq!(run(&args, path).status.code(), Some(2));
+    assert!(!path.join("result").exists());
+    assert_eq!(
+        run(&["gui", "--session", "valid.json", "--ignore-case"], path)
+            .status
+            .code(),
+        Some(64)
+    );
+}
+#[test]
 fn html_reports_share_rule_status_escape_source_and_protect_all_inputs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path();

@@ -4,10 +4,20 @@ use windows::Win32::UI::Shell::FOS_PICKFOLDERS;
 use yy_merge_core::folders::three::{Entry as ThreeEntry, NodeKind, Status as ThreeStatus};
 use yy_merge_core::folders::{Entry, Status};
 use yy_merge_core::sync_plan::Plan;
+#[path = "folder_filter.rs"]
+mod filter_view;
+#[path = "folder_session_view.rs"]
+mod session_view;
+pub(super) use session_view::{
+    LoadJob as SessionJob, begin_load as begin_session_load, cancel_load as cancel_session_load,
+};
 #[path = "sync_preview.rs"]
 mod sync_preview;
+pub(super) use filter_view::{Controls, enter, layout_controls, notification};
+use yy_merge_core::folders::filter::{Facts, Filter, path_key};
 
 struct FolderRow {
+    search_key: String,
     entry: Entry,
     three: Option<ThreeStatus>,
     kinds: Option<[Option<NodeKind>; 3]>,
@@ -16,6 +26,7 @@ struct FolderRow {
 impl From<Entry> for FolderRow {
     fn from(entry: Entry) -> Self {
         Self {
+            search_key: path_key(&entry.path),
             entry,
             three: None,
             kinds: None,
@@ -34,6 +45,7 @@ impl From<ThreeEntry> for FolderRow {
             _ => Status::Different,
         };
         Self {
+            search_key: path_key(&e.path),
             ancestor_file,
             three: Some(e.status),
             kinds: Some([e.base, e.left, e.right]),
@@ -50,6 +62,11 @@ impl From<ThreeEntry> for FolderRow {
 
 const PAGE: usize = 2_000;
 pub(super) struct FolderView {
+    recursive: bool,
+    filter: Filter,
+    visible: Vec<usize>,
+    filter_due: Option<Instant>,
+    controls_dirty: bool,
     view_plan: bool,
     plan: Option<Arc<Plan>>,
     plan_receiver: Option<mpsc::Receiver<Result<Plan>>>,
@@ -79,9 +96,31 @@ impl FolderView {
         if self.view_plan {
             self.plan.as_ref().map(|p| p.items.len()).unwrap_or(0)
         } else {
-            self.entries.len()
+            self.visible.len()
         }
     }
+}
+fn rebuild_filter(f: &mut FolderView) {
+    f.visible = f
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, row)| {
+            let facts = if let Some(status) = row.three {
+                let kinds = row.kinds.unwrap();
+                Facts::three(status, kinds[1].is_some(), kinds[2].is_some())
+            } else {
+                Facts::two(&row.entry.status)
+            };
+            f.filter.matches(&row.search_key, facts).then_some(i)
+        })
+        .collect();
+    if !f.view_plan {
+        f.page = 0;
+    }
+}
+fn visible_row(f: &FolderView, index: usize) -> Option<&FolderRow> {
+    f.visible.get(index).and_then(|i| f.entries.get(*i))
 }
 fn choose_folder(title: &str) -> Option<PathBuf> {
     unsafe {
@@ -99,6 +138,7 @@ fn start(f: &mut FolderView) {
     f.cancel.cancel();
     f.cancel = Arc::default();
     f.entries.clear();
+    f.visible.clear();
     f.page = 0;
     f.error = None;
     f.plan = None;
@@ -109,24 +149,28 @@ fn start(f: &mut FolderView) {
     f.export_result = None;
     let (tx, rx) = mpsc::channel();
     f.receiver = Some(rx);
-    let (base, left, right, cancel) = (
+    let (base, left, right, cancel, recursive) = (
         f.base.clone(),
         f.left.clone(),
         f.right.clone(),
         f.cancel.clone(),
+        f.recursive,
     );
     std::thread::spawn(move || {
         let result = if let Some(base) = base {
-            yy_merge_core::folders::three::compare(&base, &left, &right, true, &cancel)
+            yy_merge_core::folders::three::compare(&base, &left, &right, recursive, &cancel)
                 .map(|entries| entries.into_iter().map(FolderRow::from).collect())
         } else {
-            yy_merge_core::folders::compare(&left, &right, true, &cancel)
+            yy_merge_core::folders::compare(&left, &right, recursive, &cancel)
                 .map(|entries| entries.into_iter().map(FolderRow::from).collect())
         };
         let _ = tx.send(result);
     });
 }
 pub(super) fn command(id: u16) -> Option<Result<()>> {
+    if matches!(id, FOLDER_SESSION_OPEN | FOLDER_SESSION_SAVE) {
+        return Some(session_view::command(id));
+    }
     if let Some(result) = sync_preview::command(id) {
         return Some(result);
     }
@@ -154,6 +198,11 @@ pub(super) fn command(id: u16) -> Option<Result<()>> {
         };
         app(|a| {
             a.folders = Some(FolderView {
+                recursive: true,
+                filter: Default::default(),
+                visible: vec![],
+                filter_due: None,
+                controls_dirty: true,
                 view_plan: false,
                 plan: None,
                 plan_receiver: None,
@@ -275,6 +324,7 @@ fn label(row: &FolderRow) -> String {
     )
 }
 pub(super) fn refresh(a: &mut App) {
+    filter_view::sync_controls(a);
     sync_preview::update_menu(a);
     if a.folders.as_ref().is_some_and(|f| f.view_plan) {
         sync_preview::refresh(a);
@@ -286,7 +336,13 @@ pub(super) fn refresh(a: &mut App) {
     unsafe {
         SendMessageW(a.list, WM_SETREDRAW, Some(WPARAM(0)), None);
         SendMessageW(a.list, LB_RESETCONTENT, None, None);
-        for entry in f.entries.iter().skip(f.page * PAGE).take(PAGE) {
+        for entry in f
+            .visible
+            .iter()
+            .skip(f.page * PAGE)
+            .take(PAGE)
+            .filter_map(|i| f.entries.get(*i))
+        {
             SendMessageW(
                 a.list,
                 LB_ADDSTRING,
@@ -295,10 +351,11 @@ pub(super) fn refresh(a: &mut App) {
             );
         }
         let extent = f
-            .entries
+            .visible
             .iter()
             .skip(f.page * PAGE)
             .take(PAGE)
+            .filter_map(|i| f.entries.get(*i))
             .map(|e| label(e).encode_utf16().count())
             .max()
             .unwrap_or(0);
@@ -332,12 +389,13 @@ pub(super) fn refresh(a: &mut App) {
         format!("未完了: {e}（一覧は破棄しました）")
     } else {
         format!(
-            "{}項目 / 差異{} / 未比較{} / ページ{}/{}・前へ/次へで切替・両側のファイルはダブルクリックまたはEnterで開く",
+            "表示{}/全{}項目 / 全体の差異{} / 全体の未比較{} / ページ{}/{}・絞り込みは表示のみ・Enterでファイルを開く",
+            f.visible.len(),
             f.entries.len(),
             differences,
             incomplete,
             f.page + 1,
-            f.entries.len().div_ceil(PAGE).max(1)
+            f.visible.len().div_ceil(PAGE).max(1)
         )
     };
     text(a.status, &state);
@@ -385,6 +443,11 @@ pub(super) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
         return Err("unexpected folder result count".into());
     }
     a.folders = Some(FolderView {
+        recursive: true,
+        filter: Default::default(),
+        visible: vec![],
+        filter_due: None,
+        controls_dirty: true,
         view_plan: false,
         plan: None,
         plan_receiver: None,
@@ -402,8 +465,10 @@ pub(super) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
         error: None,
     });
     a.folder_mode = true;
+    rebuild_filter(a.folders.as_mut().unwrap());
     refresh(a);
     layout(a);
+    filter_view::smoke(a, dir)?;
     unsafe {
         if SendMessageW(a.list, LB_GETCOUNT, None, None).0 != 5 {
             return Err("native folder list did not show results".into());
@@ -441,6 +506,7 @@ pub(super) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
             .into(),
         );
     }
+    rebuild_filter(f);
     refresh(a);
     unsafe {
         if SendMessageW(a.list, LB_GETCOUNT, None, None).0 != PAGE as isize {
@@ -523,7 +589,9 @@ pub(super) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     if selected_pair(a).is_ok() {
         return Err("deleted file was fabricated as an empty file".into());
     }
+    filter_view::smoke_three(a)?;
     sync_preview::smoke(a, dir)?;
+    session_view::smoke(a, dir)?;
     a.folders.take();
     a.folder_mode = false;
     super::refresh(a);
@@ -532,6 +600,7 @@ pub(super) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
         .map_err(|e| e.to_string())
 }
 pub(super) fn update_menu(a: &App) {
+    session_view::update_menu(a);
     sync_preview::update_menu(a);
 }
 fn await_smoke_worker(a: &mut App) -> Result<()> {
@@ -553,12 +622,12 @@ pub(super) fn selection(a: &mut App) {
     if let Some(f) = &a.folders {
         let index = unsafe { SendMessageW(a.list, LB_GETCURSEL, None, None).0 };
         if index >= 0
-            && let Some(e) = f.entries.get(f.page * PAGE + index as usize)
+            && let Some(e) = visible_row(f, f.page * PAGE + index as usize)
         {
             text(
                 a.status,
                 &format!(
-                    "{}{} | {}",
+                    "{}{} | {} | 表示{}/全{}・全体の未比較{}",
                     label(e),
                     e.kinds
                         .map(|k| {
@@ -582,13 +651,21 @@ pub(super) fn selection(a: &mut App) {
                         "ダブルクリックまたはEnter: 別ウィンドウでファイル比較"
                     } else {
                         "両側に通常ファイルがある項目だけファイル比較を開けます"
-                    })
+                    }),
+                    f.visible.len(),
+                    f.entries.len(),
+                    f.entries
+                        .iter()
+                        .filter(|e| matches!(e.entry.status, Status::SkippedLink | Status::Error))
+                        .count()
                 ),
             );
         }
     }
 }
 pub(super) fn tick(a: &mut App) {
+    session_view::tick(a);
+    filter_view::tick(a);
     sync_preview::tick(a);
     let Some(f) = &mut a.folders else {
         return;
@@ -602,7 +679,10 @@ pub(super) fn tick(a: &mut App) {
         f.receiver = None;
         let result = f.cancel.check().and(result);
         match result {
-            Ok(entries) => f.entries = entries,
+            Ok(entries) => {
+                f.entries = entries;
+                rebuild_filter(f);
+            }
             Err(e) => {
                 f.error = Some(if e == "cancelled" {
                     "停止しました".into()
@@ -670,7 +750,7 @@ fn selected_pair(a: &App) -> Result<Gui> {
     }
     let index = unsafe { SendMessageW(a.list, LB_GETCURSEL, None, None).0 };
     let e = (index >= 0)
-        .then(|| f.entries.get(f.page * PAGE + index as usize))
+        .then(|| visible_row(f, f.page * PAGE + index as usize))
         .flatten()
         .ok_or("一覧からファイルを選択してください")?;
     if !e.entry.file_pair {

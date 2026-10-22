@@ -42,6 +42,16 @@ pub fn read_bounded(path: &Path, cancel: &Cancellation) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 impl Snapshot {
+    /// Hash captured source bytes, with cancellation between bounded chunks.
+    pub fn fingerprint(&self, cancel: &Cancellation) -> Result<String> {
+        let mut hash = blake3::Hasher::new();
+        for block in self.bytes.chunks(64 * 1024) {
+            cancel.check()?;
+            hash.update(block);
+        }
+        cancel.check()?;
+        Ok(hash.finalize().to_hex().to_string())
+    }
     /// No heuristic encoding guesses. BOM, otherwise UTF-8; legacy encodings explicit.
     pub fn open(path: &Path, charset: Option<&str>, cancel: &Cancellation) -> Result<Self> {
         let bytes = read_bounded(path, cancel)?;

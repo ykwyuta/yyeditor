@@ -40,6 +40,21 @@ pub struct Cli {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Save or inspect folder comparison setup; opening rescans current contents.
+    FolderSession {
+        #[command(subcommand)]
+        command: FolderSessionCommand,
+    },
+    /// Save or inspect a two-way comparison work session.
+    ComparisonSession {
+        #[command(subcommand)]
+        command: ComparisonSessionCommand,
+    },
+    /// Create or inspect a resumable three-way merge work session.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// Save or validate a portable comparison-rules profile.
     RulesProfile {
         #[command(subcommand)]
@@ -97,6 +112,8 @@ pub enum Command {
         report: Option<PathBuf>,
         #[arg(long)]
         overwrite: bool,
+        #[command(flatten)]
+        filter: FolderFilterArgs,
     },
     /// Start yymergew; --wait returns its comparison/merge result.
     Gui(Gui),
@@ -105,6 +122,101 @@ pub enum Command {
         #[command(subcommand)]
         command: SyncCommand,
     },
+}
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum FolderStatus {
+    #[default]
+    All,
+    Different,
+    Equal,
+    LeftOnly,
+    RightOnly,
+    Review,
+    Uncompared,
+}
+impl From<FolderStatus> for folders::filter::Selection {
+    fn from(value: FolderStatus) -> Self {
+        use folders::filter::Selection as S;
+        match value {
+            FolderStatus::All => S::All,
+            FolderStatus::Different => S::Different,
+            FolderStatus::Equal => S::Equal,
+            FolderStatus::LeftOnly => S::LeftOnly,
+            FolderStatus::RightOnly => S::RightOnly,
+            FolderStatus::Review => S::Review,
+            FolderStatus::Uncompared => S::Uncompared,
+        }
+    }
+}
+#[derive(Clone, Debug, Default, clap::Args)]
+pub struct FolderFilterArgs {
+    /// Display only relative paths containing this literal text (Unicode lowercase, slash-normalized).
+    #[arg(long)]
+    path_contains: Option<String>,
+    /// Display group only; never changes scan scope, global exit status or sync inputs.
+    #[arg(long, value_enum, default_value = "all")]
+    status: FolderStatus,
+}
+#[derive(Subcommand)]
+pub enum FolderSessionCommand {
+    Create {
+        #[arg(long)]
+        left: PathBuf,
+        #[arg(long)]
+        right: PathBuf,
+        #[arg(long)]
+        base: Option<PathBuf>,
+        #[arg(long)]
+        recursive: bool,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        overwrite: bool,
+        #[command(flatten)]
+        filter: FolderFilterArgs,
+    },
+    /// Validate setup and roots, without scanning or restoring old results.
+    Inspect { path: PathBuf },
+}
+#[derive(Subcommand)]
+pub enum ComparisonSessionCommand {
+    /// Capture paths, input fingerprints and comparison rules (no input copies).
+    Create {
+        #[arg(long)]
+        left: PathBuf,
+        #[arg(long)]
+        right: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        encoding: Option<String>,
+        #[arg(long)]
+        overwrite: bool,
+        #[command(flatten)]
+        rules: RuleArgs,
+    },
+    /// Verify inputs and recompute the comparison; never write either input.
+    Inspect { path: PathBuf },
+}
+#[derive(Subcommand)]
+pub enum SessionCommand {
+    /// Save an initial merge work session, including unresolved conflicts.
+    Create {
+        #[arg(long)]
+        base: PathBuf,
+        #[arg(long)]
+        left: PathBuf,
+        #[arg(long)]
+        right: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        encoding: Option<String>,
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Verify the session and its inputs, then print a summary (no result writes).
+    Inspect { path: PathBuf },
 }
 #[derive(Subcommand)]
 pub enum ProfileCommand {
@@ -227,6 +339,15 @@ impl RuleArgs {
 }
 #[derive(Clone, Debug, Default, clap::Args)]
 pub struct Gui {
+    /// Rescan folders using saved roots, recursion and display filter.
+    #[arg(long, conflicts_with_all=["session","comparison_session","left","right","base","output","encoding","rules_profile","ignore_space","ignore_trailing_space","ignore_case","ignore_eol","git_diff","git_merge"])]
+    pub folder_session: Option<PathBuf>,
+    /// Restore a two-way comparison session, including rules and selected positions.
+    #[arg(long, conflicts_with_all=["session","left","right","base","output","encoding","rules_profile","ignore_space","ignore_trailing_space","ignore_case","ignore_eol","git_diff","git_merge"])]
+    pub comparison_session: Option<PathBuf>,
+    /// Restore a three-way work session after verifying its input fingerprints.
+    #[arg(long, conflicts_with_all=["left","right","base","output","encoding","rules_profile","ignore_space","ignore_trailing_space","ignore_case","ignore_eol","git_diff","git_merge"])]
+    pub session: Option<PathBuf>,
     #[command(flatten)]
     pub rules: RuleArgs,
     #[arg(long, requires = "right")]
@@ -322,8 +443,157 @@ fn emit(
         stdout.write_all(text.as_bytes()).map_err(|e| e.to_string())
     }
 }
+fn folder_heading(
+    filter: &folders::filter::Filter,
+    matched: usize,
+    total: usize,
+    differences: usize,
+    incomplete: usize,
+) -> String {
+    if !filter.active() {
+        return String::new();
+    }
+    format!(
+        "# matched {matched}/{total}; global differences {differences}; global incomplete {incomplete}; path_contains={:?}; status={:?}\n",
+        filter.query(),
+        filter.status()
+    )
+}
+fn folder_json(
+    entries: serde_json::Value,
+    filter: &folders::filter::Filter,
+    total: usize,
+    differences: usize,
+    incomplete: usize,
+) -> Result<String> {
+    let text = if filter.active() {
+        serde_json::to_string_pretty(&serde_json::json!({
+            "version":1,"filtered":true,"filter":filter,"total_count":total,"matched_count":entries.as_array().map_or(0, Vec::len),
+            "total_differences":differences,"total_incomplete":incomplete,"entries":entries
+        }))
+    } else {
+        serde_json::to_string_pretty(&entries)
+    };
+    text.map(|text| text + "\n").map_err(|e| e.to_string())
+}
 pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation) -> Result<i32> {
     match command {
+        Command::FolderSession { command } => {
+            use yy_merge_core::folder_session::Session;
+            match command {
+                FolderSessionCommand::Create {
+                    left,
+                    right,
+                    base,
+                    recursive,
+                    output,
+                    overwrite,
+                    filter,
+                } => {
+                    let filter = folders::filter::Filter::new(
+                        filter.path_contains.unwrap_or_default(),
+                        filter.status.into(),
+                    )?;
+                    Session::capture(
+                        &left,
+                        &right,
+                        base.as_deref(),
+                        recursive,
+                        &filter,
+                        None,
+                        cancel,
+                    )?
+                    .save(&output, overwrite, cancel)?;
+                }
+                FolderSessionCommand::Inspect { path } => {
+                    let session = Session::open(&path, cancel)?;
+                    let text=serde_json::to_string_pretty(&serde_json::json!({"version":1,"kind":"yymerge-folder-session","roots_verified":true,"left":session.left,"right":session.right,"base":session.base,"recursive":session.recursive,"path_contains":session.path_contains,"status":session.status,"selected":session.selected,"results_restored":false,"sync_plan_restored":false})).map_err(|e|e.to_string())?+"\n";
+                    emit(&text, None, &[], false, stdout, cancel)?;
+                }
+            }
+            Ok(0)
+        }
+        Command::ComparisonSession { command } => {
+            use yy_merge_core::comparison_session::{Position, Session};
+            match command {
+                ComparisonSessionCommand::Create {
+                    left,
+                    right,
+                    output,
+                    encoding,
+                    overwrite,
+                    rules,
+                } => {
+                    let l = Snapshot::open(&left, encoding.as_deref(), cancel)?;
+                    let r = Snapshot::open(&right, encoding.as_deref(), cancel)?;
+                    let (rules, profile) = rules.resolve(cancel)?;
+                    let state = Session::capture([&l, &r], rules, Position::default(), cancel)?;
+                    let mut protected = vec![&l, &r];
+                    if let Some(profile) = &profile {
+                        protected.push(profile);
+                    }
+                    save(&output, &state.json(cancel)?, &protected, overwrite, cancel)?;
+                }
+                ComparisonSessionCommand::Inspect { path } => {
+                    let (state, _) = Session::open(&path, cancel)?;
+                    let text=serde_json::to_string_pretty(&serde_json::json!({
+                        "version":1,"kind":"yymerge-comparison-session","inputs_verified":true,
+                        "left":state.inputs[0].path,"right":state.inputs[1].path,"rules":state.rules,
+                        "position":state.position,"differences":state.comparison.diff.edits.len(),
+                        "ignored":state.comparison.ignored.len(),"undo_history_restored":false,
+                        "left_encoding":state.inputs[0].encoding.name(),"right_encoding":state.inputs[1].encoding.name(),
+                        "equivalent":state.comparison.diff.edits.is_empty() && state.inputs[0].encoding==state.inputs[1].encoding && state.inputs[0].bom==state.inputs[1].bom
+                    })).map_err(|e|e.to_string())?+"\n";
+                    emit(&text, None, &[], false, stdout, cancel)?;
+                }
+            }
+            Ok(0)
+        }
+        Command::Session { command } => {
+            use yy_merge_core::session::Session;
+            match command {
+                SessionCommand::Create {
+                    base,
+                    left,
+                    right,
+                    output,
+                    encoding,
+                    overwrite,
+                } => {
+                    let b = Snapshot::open(&base, encoding.as_deref(), cancel)?;
+                    let l = Snapshot::open(&left, encoding.as_deref(), cancel)?;
+                    let r = Snapshot::open(&right, encoding.as_deref(), cancel)?;
+                    let model = yy_merge_core::merge(&b.text, &l.text, &r.text, cancel)?;
+                    let state = Session::capture(
+                        [&b, &l, &r],
+                        &model,
+                        model.render(true)?,
+                        false,
+                        0,
+                        cancel,
+                    )?;
+                    save(
+                        &output,
+                        &state.json(cancel)?,
+                        &[&b, &l, &r],
+                        overwrite,
+                        cancel,
+                    )?;
+                }
+                SessionCommand::Inspect { path } => {
+                    let (state, _) = Session::open(&path, cancel)?;
+                    let text = serde_json::to_string_pretty(&serde_json::json!({
+                        "version":1,"kind":"yymerge-merge-session","inputs_verified":true,
+                        "base":state.inputs[0].path,"left":state.inputs[1].path,"right":state.inputs[2].path,
+                        "unresolved":state.model.unresolved(),"manual":state.manual,
+                        "selected_conflict":state.selected,"result_utf8_bytes":state.result.len(),
+                        "undo_history_restored":false,"merge_result_saved":false
+                    })).map_err(|e|e.to_string())? + "\n";
+                    emit(&text, None, &[], false, stdout, cancel)?;
+                }
+            }
+            Ok(0)
+        }
         Command::RulesProfile { command } => {
             use yy_merge_core::profile::Profile;
             match command {
@@ -450,7 +720,13 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             format,
             report,
             overwrite,
+            filter,
         } => {
+            use folders::filter::{Facts, Filter, path_key};
+            let filter = Filter::new(
+                filter.path_contains.unwrap_or_default(),
+                filter.status.into(),
+            )?;
             if let Some(path) = &report {
                 let parent = std::fs::canonicalize(
                     path.parent()
@@ -466,6 +742,25 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             }
             if let Some(base) = base {
                 let entries = folders::three::compare(&base, &left, &right, recursive, cancel)?;
+                let incomplete = entries.iter().filter(|e| e.incomplete()).count();
+                let differences = entries
+                    .iter()
+                    .filter(|e| !e.incomplete() && e.status != folders::three::Status::Unchanged)
+                    .count();
+                let mut visible = Vec::new();
+                for (i, e) in entries.iter().enumerate() {
+                    if i & 1023 == 0 {
+                        cancel.check()?;
+                    }
+                    if !filter.active()
+                        || filter.matches(
+                            &path_key(&e.path),
+                            Facts::three(e.status, e.left.is_some(), e.right.is_some()),
+                        )
+                    {
+                        visible.push(e);
+                    }
+                }
                 let code = if entries.iter().any(|e| e.incomplete()) {
                     2
                 } else {
@@ -477,49 +772,108 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
                 };
                 let text = match format {
                     FolderFormat::Json => {
-                        serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())? + "\n"
+                        if filter.active() {
+                            folder_json(
+                                serde_json::json!(&visible),
+                                &filter,
+                                entries.len(),
+                                differences,
+                                incomplete,
+                            )?
+                        } else {
+                            serde_json::to_string_pretty(&visible).map_err(|e| e.to_string())?
+                                + "\n"
+                        }
                     }
-                    FolderFormat::Text => entries
-                        .iter()
-                        .map(|e| {
-                            format!(
-                                "{:?}\t{}{}\n",
-                                e.status,
-                                e.path.display(),
-                                e.detail
-                                    .as_ref()
-                                    .map(|d| format!("\t{d}"))
-                                    .unwrap_or_default()
-                            )
-                        })
-                        .collect(),
+                    FolderFormat::Text => {
+                        folder_heading(
+                            &filter,
+                            visible.len(),
+                            entries.len(),
+                            differences,
+                            incomplete,
+                        ) + &visible
+                            .iter()
+                            .map(|e| {
+                                format!(
+                                    "{:?}\t{}{}\n",
+                                    e.status,
+                                    e.path.display(),
+                                    e.detail
+                                        .as_ref()
+                                        .map(|d| format!("\t{d}"))
+                                        .unwrap_or_default()
+                                )
+                            })
+                            .collect::<String>()
+                    }
                 };
                 emit(&text, report, &[], overwrite, stdout, cancel)?;
                 return Ok(code);
             }
             let entries = folders::compare(&left, &right, recursive, cancel)?;
+            let incomplete = entries
+                .iter()
+                .filter(|e| Facts::two(&e.status).incomplete)
+                .count();
+            let differences = entries
+                .iter()
+                .filter(|e| {
+                    let f = Facts::two(&e.status);
+                    !f.incomplete && !f.equal
+                })
+                .count();
             let same = entries
                 .iter()
                 .all(|e| matches!(e.status, folders::Status::Equal));
-            if entries.iter().any(|e| {
-                matches!(
-                    e.status,
-                    folders::Status::SkippedLink | folders::Status::Error
-                )
-            }) {
+            if !filter.active()
+                && entries.iter().any(|e| {
+                    matches!(
+                        e.status,
+                        folders::Status::SkippedLink | folders::Status::Error
+                    )
+                })
+            {
                 return Err("folder comparison incomplete: links/reparse points skipped or files could not be read".into());
+            }
+            let mut visible = Vec::new();
+            for (i, e) in entries.iter().enumerate() {
+                if i & 1023 == 0 {
+                    cancel.check()?;
+                }
+                if !filter.active() || filter.matches(&path_key(&e.path), Facts::two(&e.status)) {
+                    visible.push(e);
+                }
             }
             let text = match format {
                 FolderFormat::Json => {
-                    serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())? + "\n"
+                    if filter.active() {
+                        folder_json(
+                            serde_json::json!(&visible),
+                            &filter,
+                            entries.len(),
+                            differences,
+                            incomplete,
+                        )?
+                    } else {
+                        serde_json::to_string_pretty(&visible).map_err(|e| e.to_string())? + "\n"
+                    }
                 }
-                FolderFormat::Text => entries
-                    .iter()
-                    .map(|e| format!("{:?}\t{}\n", e.status, e.path.display()))
-                    .collect(),
+                FolderFormat::Text => {
+                    folder_heading(
+                        &filter,
+                        visible.len(),
+                        entries.len(),
+                        differences,
+                        incomplete,
+                    ) + &visible
+                        .iter()
+                        .map(|e| format!("{:?}\t{}\n", e.status, e.path.display()))
+                        .collect::<String>()
+                }
             };
             emit(&text, report, &[], overwrite, stdout, cancel)?;
-            Ok(i32::from(!same))
+            Ok(if incomplete > 0 { 2 } else { i32::from(!same) })
         }
         Command::GitTool { .. } => Err("Git adapter must be dispatched with the GUI host".into()),
         Command::Gui(_) => Err("GUI must be dispatched by the application".into()),
@@ -603,7 +957,73 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folder_session_gui_dispatch_preserves_unicode_path() {
+        assert_eq!(
+            super::entry(
+                ["yymerge", "gui", "--folder-session", "比較 folder.json"]
+                    .map(std::ffi::OsString::from),
+                |g| {
+                    assert_eq!(
+                        g.folder_session,
+                        Some(std::path::PathBuf::from("比較 folder.json"))
+                    );
+                    assert!(
+                        g.left.is_none() && g.session.is_none() && g.comparison_session.is_none()
+                    );
+                    Ok(0)
+                }
+            ),
+            0
+        );
+    }
+    #[test]
+    fn comparison_session_gui_dispatch_preserves_unicode_path() {
+        assert_eq!(
+            super::entry(
+                [
+                    "yymerge",
+                    "gui",
+                    "--comparison-session",
+                    "比較 session.json"
+                ]
+                .map(std::ffi::OsString::from),
+                |g| {
+                    assert_eq!(
+                        g.comparison_session,
+                        Some(std::path::PathBuf::from("比較 session.json"))
+                    );
+                    assert!(g.session.is_none() && g.left.is_none() && g.output.is_none());
+                    Ok(0)
+                }
+            ),
+            0
+        );
+    }
     use super::*;
+    #[test]
+    fn session_gui_dispatch_preserves_path_and_rejects_conflicting_inputs() {
+        assert_eq!(
+            entry(
+                ["yymerge", "gui", "--session", "作業 session.json"].map(OsString::from),
+                |g| {
+                    assert_eq!(g.session, Some(PathBuf::from("作業 session.json")));
+                    assert!(g.left.is_none() && g.base.is_none() && g.output.is_none());
+                    Ok(0)
+                }
+            ),
+            0
+        );
+        for extra in [
+            vec!["--ignore-case"],
+            vec!["--left", "left", "--right", "right"],
+            vec!["--rules-profile", "rules.json"],
+        ] {
+            let mut args = vec!["yymerge", "gui", "--session", "session.json"];
+            args.extend(extra);
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
     #[test]
     fn gui_resolves_profiles_before_dispatch_and_blocks_non_two_way_modes() {
         let dir = tempfile::tempdir().unwrap();

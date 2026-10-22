@@ -7,6 +7,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
 };
+pub mod filter;
 pub mod three;
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum Status {

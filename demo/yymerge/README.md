@@ -85,3 +85,46 @@ yymerge diff before.txt after.txt --rules-profile review.json --format html --re
 ```
 
 GUIは[ファイル] → [2方向比較をHTMLレポートに保存…]を使います。左右の原文と行番号、改行種別、適用規則を表示し、青の「≈」は規則で無視した差分です。全文とフルパスを含みます。上限32 MiBを超える場合はエラーになり、既存のHTMLは保持します。
+
+3方向マージを途中保存する場合は、GUIの[ファイル] → [マージ作業セッションを保存…]を使います。[開く…]で未解決の競合・採用状態・手動編集を復元できます。Undo履歴と以前のRESULT保存先は復元しません。
+
+```powershell
+yymerge session create --base demo/yymerge/base.txt --left demo/yymerge/left.txt --right demo/yymerge/right.txt --output work.yymerge-session.json
+yymerge session inspect work.yymerge-session.json
+yymerge gui --session work.yymerge-session.json --wait
+```
+
+`session create`の0は作業ファイルの作成成功で、マージ結果の保存ではありません。入力を変更・削除してから`inspect`すると2になり、その作業ファイルからのGUI復元も停止します。保存時の入力を保持してください。作業セッションだけを保存してもRESULTは未保存として扱われます。
+
+フォルダー結果を絞り込む場合は、GUIの一覧上部でパスの部分一致と状態を指定します。CLIでも同じ条件を利用できます。
+
+```powershell
+yymerge folders LEFT RIGHT --recursive --path-contains .csv --status different --format json
+yymerge folders LEFT RIGHT --base BASE --recursive --status review --format json
+```
+
+有効な条件があるJSONは`entries`と全体／表示件数を持つオブジェクトです。表示が0件でも全体に差異・未比較があれば終了コードは1・2になります。同期計画はこの表示条件で絞らず、全入力から作ります。パスは文字そのものの部分一致で、`*.csv`のglobは使いません。
+
+本文検索はファイル比較・マージ画面でCtrl+Fを押します。対象ペインを選び、文字列を入力してEnter、F3／Shift+F3で前後へ移動してください。正規表現・大小区別・単語単位を指定できます。RESULTを編集中に検索した場合も、文書が変わる前の検索結果で新しい選択範囲を上書きしません。
+
+3方向マージではCtrl+HでRESULTの置換欄を開けます。一致を検索して[選択を置換]、またはRESULT全体への[全置換]を使います。置換後は入力どおりで、`$1`や`\n`を展開しません。Ctrl+Zで1操作をまとめて戻せます。置換しても未解決の競合は残るため、内容を確認して[手動編集の完了を確定]とRESULT保存を行ってください。
+
+2方向比較の再開は、[ファイル] → [2方向比較の作業セッションを保存…]／[開く…]を使います。左右の選択範囲・対象ペイン・差分位置・比較規則を残し、入力の生バイト指紋を検証して再比較します。
+
+```powershell
+yymerge comparison-session create --left demo/yymerge/left.txt --right demo/yymerge/right.txt --ignore-case --output compare.json
+yymerge comparison-session inspect compare.json
+yymerge gui --comparison-session compare.json --wait
+```
+
+作業ファイルは本文を含まず、元ファイルが変更・欠落すると再開を停止します。CLIの作成・検証成功は0で、左右が同じことを意味しません。3方向マージ用の`session`／`--session`とは別形式です。
+
+フォルダー比較は[ファイル] → [フォルダー比較の作業セッションを保存…]／[開く…]で設定を再利用できます。
+
+```powershell
+yymerge folder-session create --left LEFT --right RIGHT --base BASE --recursive --path-contains .csv --output folders.json
+yymerge folder-session inspect folders.json
+yymerge gui --folder-session folders.json --wait
+```
+
+保存先は全比較対象の外に指定します。再開時は現在の内容を再走査し、表示条件と選択項目を復元します。過去の比較結果・同期計画・実行記録は復元せず、背後の未保存RESULTは保持します。CLIの`create`／`inspect`は設定の保存・検証だけです。

@@ -992,11 +992,13 @@ name = "yy-merge-ui"
 version = "0.1.0"
 dependencies = [
  "windows",
+ "yy-buffer",
  "yy-config",
  "yy-core",
  "yy-layout",
  "yy-merge-cli",
  "yy-merge-core",
+ "yy-search",
  "yy-ui-win",
 ]
 

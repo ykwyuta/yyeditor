@@ -22,10 +22,18 @@ use yy_merge_cli::Gui;
 use yy_merge_core::{Cancellation, Choice, Diff, Merge, Part, Result, files::Snapshot};
 use yy_ui_win::editor::Editor;
 
+#[path = "comparison_session_view.rs"]
+mod comparison_session_view;
 #[path = "folders_view.rs"]
 mod folders_view;
+#[path = "replace_view.rs"]
+mod replace_view;
 #[path = "report_view.rs"]
 mod report_view;
+#[path = "search_view.rs"]
+mod search_view;
+#[path = "session_view.rs"]
+mod session_view;
 
 const FRAME: PCWSTR = w!("YYMergeFrame");
 const PANE: PCWSTR = w!("YYMergePane");
@@ -69,10 +77,25 @@ const RULE_EOL: u16 = 136;
 const PROFILE_OPEN: u16 = 137;
 const PROFILE_SAVE: u16 = 138;
 const REPORT_HTML: u16 = 139;
+const SESSION_OPEN: u16 = 140;
+const SESSION_SAVE: u16 = 141;
+const FIND_OPEN: u16 = 142;
+const FIND_NEXT: u16 = 143;
+const FIND_PREV: u16 = 144;
+const FIND_CLOSE: u16 = 145;
+const REPLACE_OPEN: u16 = 146;
+const REPLACE_ONE: u16 = 147;
+const REPLACE_ALL: u16 = 148;
+const COMPARISON_SESSION_OPEN: u16 = 149;
+const COMPARISON_SESSION_SAVE: u16 = 150;
+const FOLDER_SESSION_OPEN: u16 = 151;
+const FOLDER_SESSION_SAVE: u16 = 152;
 const HELP_MD: &str = include_str!("../../../help/help.md");
 const SS_LEFTNOWORDWRAP: u32 = 12;
 thread_local! {static APP:RefCell<Option<App>>=const{RefCell::new(None)};}
 struct Loaded {
+    comparison_resume: Option<yy_merge_core::comparison_session::Position>,
+    resume: Option<session_view::Resume>,
     inputs: Vec<Snapshot>,
     diff: Diff,
     rules: yy_merge_core::rules::Rules,
@@ -130,8 +153,14 @@ fn trim_history(a: &mut App) {
     }
 }
 struct App {
+    folder_session_job: Option<folders_view::SessionJob>,
     folders: Option<folders_view::FolderView>,
     folder_mode: bool,
+    folder_filter: folders_view::Controls,
+    search_controls: search_view::Controls,
+    search: search_view::State,
+    replace_controls: replace_view::Controls,
+    replace: replace_view::State,
     hwnd: HWND,
     panes: Vec<HWND>,
     labels: Vec<HWND>,
@@ -144,6 +173,7 @@ struct App {
     loaded: Option<Loaded>,
     receiver: Option<mpsc::Receiver<Result<Loaded>>>,
     report_job: Option<report_view::Job>,
+    session_job: Option<session_view::Job>,
     projection_receiver: Option<mpsc::Receiver<Projection>>,
     projection_cancel: Arc<Cancellation>,
     projection_due: Option<Instant>,
@@ -221,11 +251,32 @@ fn child(parent: HWND, class: PCWSTR, label: &str, id: u16, style: WINDOW_STYLE)
     }
 }
 fn load(g: &Gui, c: &Cancellation) -> Result<Loaded> {
+    load_with_encodings(g, c, None)
+}
+fn load_with_encodings(
+    g: &Gui,
+    c: &Cancellation,
+    encodings: Option<&[String; 2]>,
+) -> Result<Loaded> {
+    if let Some(path) = &g.comparison_session {
+        return comparison_session_view::load(path, c);
+    }
+    if let Some(path) = &g.session {
+        return session_view::load(path, c);
+    }
     let left = g.left.as_ref().ok_or("左ファイルを選択してください")?;
     let right = g.right.as_ref().ok_or("右ファイルを選択してください")?;
     let mut inputs = vec![
-        Snapshot::open(left, g.encoding.as_deref(), c)?,
-        Snapshot::open(right, g.encoding.as_deref(), c)?,
+        Snapshot::open(
+            left,
+            encodings.map(|e| e[0].as_str()).or(g.encoding.as_deref()),
+            c,
+        )?,
+        Snapshot::open(
+            right,
+            encodings.map(|e| e[1].as_str()).or(g.encoding.as_deref()),
+            c,
+        )?,
     ];
     let rules = g.rules.core();
     if g.base.is_some() && rules.active() {
@@ -277,6 +328,8 @@ fn load(g: &Gui, c: &Cancellation) -> Result<Loaded> {
         )
     };
     Ok(Loaded {
+        comparison_resume: None,
+        resume: None,
         inputs,
         diff,
         rules,
@@ -288,9 +341,14 @@ fn load(g: &Gui, c: &Cancellation) -> Result<Loaded> {
     })
 }
 fn begin(a: &mut App) {
+    begin_options(a, a.options.clone());
+}
+fn begin_options(a: &mut App, g: Gui) {
     if a.receiver.is_some() {
         return;
     }
+    search_view::cancel(a);
+    folders_view::cancel_session_load(a);
     a.generation = a.generation.wrapping_add(1);
     a.projection_cancel.cancel();
     a.projection_receiver = None;
@@ -298,16 +356,40 @@ fn begin(a: &mut App) {
     a.alignment_warning = None;
     a.cancel = Arc::new(Cancellation::default());
     let c = a.cancel.clone();
-    let g = a.options.clone();
     let (tx, rx) = mpsc::channel();
+    let encodings = a
+        .loaded
+        .as_ref()
+        .filter(|data| {
+            data.merged.is_none()
+                && g.base.is_none()
+                && g.encoding.is_none()
+                && [&g.left, &g.right]
+                    .into_iter()
+                    .zip(&data.inputs)
+                    .all(|(path, input)| {
+                        path.as_ref()
+                            .and_then(|p| std::fs::canonicalize(p).ok())
+                            .is_some_and(|p| p == input.path)
+                    })
+        })
+        .map(|data| {
+            [
+                data.inputs[0].encoding.name().to_string(),
+                data.inputs[1].encoding.name().to_string(),
+            ]
+        });
     std::thread::spawn(move || {
-        let _ = tx.send(load(&g, &c));
+        let _ = tx.send(load_with_encodings(&g, &c, encodings.as_ref()));
     });
     a.receiver = Some(rx);
     a.exit = 130;
     text(a.status, "比較中… [停止] で中止できます");
 }
 fn install(a: &mut App, mut data: Loaded) -> Result<()> {
+    search_view::reset(a);
+    let resume = data.resume.take();
+    let comparison_resume = data.comparison_resume.take();
     let dpi = unsafe { GetDpiForWindow(a.hwnd) };
     let mut editors = vec![
         editor(&data.inputs[0].text, dpi)?,
@@ -342,16 +424,44 @@ fn install(a: &mut App, mut data: Loaded) -> Result<()> {
         editors[1].marks = comparison.right_marks;
     }
     a.editors = editors;
+    if resume.is_some() {
+        a.options = Gui {
+            left: Some(data.inputs[0].path.clone()),
+            right: Some(data.inputs[1].path.clone()),
+            base: Some(data.inputs[2].path.clone()),
+            encoding: Some(data.inputs[2].encoding.name().into()),
+            ..Default::default()
+        };
+        a.folder_mode = false;
+    }
     a.loaded = Some(data);
+    if comparison_resume.is_some() {
+        let data = a.loaded.as_ref().unwrap();
+        a.options = Gui {
+            left: Some(data.inputs[0].path.clone()),
+            right: Some(data.inputs[1].path.clone()),
+            rules: yy_merge_cli::RuleArgs::from_core(data.rules),
+            ..Default::default()
+        };
+        a.folder_mode = false;
+    }
     a.history.clear();
     a.redo.clear();
     a.selected = 0;
     a.manual = false;
     a.saved = false;
     a.edited = false;
+    if let Some(resume) = resume {
+        a.manual = resume.manual;
+        a.selected = resume.selected;
+        a.edited = true;
+    }
     refresh(a);
     layout(a);
     jump(a);
+    if let Some(position) = comparison_resume {
+        comparison_session_view::restore_position(a, position);
+    }
     Ok(())
 }
 fn refresh(a: &mut App) {
@@ -846,7 +956,7 @@ fn choose_file_ext(save: bool, title: &str, extension: Option<&str>) -> Option<P
     }
 }
 fn git_blocked(id: u16) -> bool {
-    matches!(id, OPEN | OPEN_MERGE) || (OPEN_FOLDERS..=REPORT_HTML).contains(&id)
+    matches!(id, OPEN | OPEN_MERGE) || (OPEN_FOLDERS..=SESSION_SAVE).contains(&id)
 }
 fn git_exit(a: &App) -> i32 {
     if a.receiver.is_some() {
@@ -940,6 +1050,21 @@ fn set_rule(a: &mut App, id: u16) -> Result<()> {
     Ok(())
 }
 fn command(id: u16) -> Result<()> {
+    app(folders_view::cancel_session_load);
+    if (FIND_OPEN..=FIND_CLOSE).contains(&id) {
+        return app(|a| search_view::command(a, id)).unwrap_or(Ok(()));
+    }
+    if (REPLACE_OPEN..=REPLACE_ALL).contains(&id) {
+        return app(|a| replace_view::command(a, id)).unwrap_or(Ok(()));
+    }
+    // Never finish a pending replacement behind another command's dialog.
+    app(replace_view::cancel);
+    if matches!(id, COMPARISON_SESSION_OPEN | COMPARISON_SESSION_SAVE) {
+        return comparison_session_view::command(id);
+    }
+    if matches!(id, SESSION_OPEN | SESSION_SAVE) {
+        return session_view::command(id);
+    }
     if id == REPORT_HTML {
         return report_view::command();
     }
@@ -975,6 +1100,7 @@ fn command(id: u16) -> Result<()> {
     }
     if id == STOP {
         app(|a| {
+            search_view::cancel(a);
             if let Some(f) = &a.folders
                 && f.is_running()
             {
@@ -984,6 +1110,9 @@ fn command(id: u16) -> Result<()> {
             a.projection_cancel.cancel();
             a.projection_due = None;
             if let Some(job) = &a.report_job {
+                job.cancel.cancel();
+            }
+            if let Some(job) = &a.session_job {
                 job.cancel.cancel();
             }
         });
@@ -1190,6 +1319,9 @@ fn update_rule_menu(a: &App) {
     }
 }
 fn layout(a: &mut App) {
+    comparison_session_view::update_menu(a);
+    session_view::update_menu(a);
+    search_view::update_menu(a);
     report_view::update_menu(a);
     folders_view::update_menu(a);
     update_rule_menu(a);
@@ -1229,8 +1361,10 @@ fn layout(a: &mut App) {
         }
         let side = unit(230).min(w / 3);
         let area = (w - side - unit(12)).max(2);
-        let top = bar + unit(5);
+        let search_height = search_view::layout_controls(a, bar + unit(5), w, dpi);
+        let top = bar + unit(5) + search_height;
         let bottom = (h - status - unit(5)).max(top + 2);
+        let filter_height = folders_view::layout_controls(a, top, w, dpi);
         for (i, label) in if a.folder_mode {
             ["▱ 開く", "▣ 保存", "↑ 前ページ", "↓ 次ページ", "■ 停止"]
         } else {
@@ -1249,9 +1383,9 @@ fn layout(a: &mut App) {
             let _ = MoveWindow(
                 a.list,
                 unit(4),
-                top,
+                top + filter_height,
                 (w - unit(8)).max(1),
-                (bottom - top).max(1),
+                (bottom - top - filter_height).max(1),
                 true,
             );
             let _ = MoveWindow(
@@ -1340,6 +1474,12 @@ fn menu() -> Result<HMENU> {
                     (OPEN_THREE_FOLDERS, "3方向フォルダー比較を開く…"),
                     (SAVE, "結果を保存…\tCtrl+S"),
                     (REPORT_HTML, "2方向比較をHTMLレポートに保存…"),
+                    (SESSION_OPEN, "マージ作業セッションを開く…"),
+                    (SESSION_SAVE, "マージ作業セッションを保存…"),
+                    (COMPARISON_SESSION_OPEN, "2方向比較の作業セッションを開く…"),
+                    (COMPARISON_SESSION_SAVE, "2方向比較の作業セッションを保存…"),
+                    (FOLDER_SESSION_OPEN, "フォルダー比較の作業セッションを開く…"),
+                    (FOLDER_SESSION_SAVE, "フォルダー比較の作業セッションを保存…"),
                     (EXIT, "終了"),
                 ],
             ),
@@ -1366,6 +1506,16 @@ fn menu() -> Result<HMENU> {
                     (RULE_EOL, "LFとCRLFの違いを無視"),
                     (PROFILE_OPEN, "比較プロファイルを読み込む…"),
                     (PROFILE_SAVE, "現在の規則をプロファイルに保存…"),
+                ],
+            ),
+            (
+                "検索(&E)",
+                vec![
+                    (FIND_OPEN, "検索…\tCtrl+F"),
+                    (REPLACE_OPEN, "RESULTを置換…\tCtrl+H"),
+                    (FIND_NEXT, "次を検索\tF3"),
+                    (FIND_PREV, "前を検索\tShift+F3"),
+                    (FIND_CLOSE, "検索バーを閉じる"),
                 ],
             ),
             (
@@ -1445,6 +1595,9 @@ fn update_dpi(a: &mut App, dpi: u32) {
     }
     let font = control_font(dpi);
     if !font.0.is_null() {
+        a.search_controls.set_font(font);
+        a.replace_controls.set_font(font);
+        a.folder_filter.set_font(font);
         for hwnd in a
             .labels
             .iter()
@@ -1568,10 +1721,21 @@ pub fn run(options: Gui) -> Result<i32> {
             );
         }
         let smoke = options.ui_smoke_test.clone();
-        let should_load = options.left.is_some() && options.right.is_some();
+        let folder_filter = folders_view::Controls::create(hwnd, font)?;
+        let search_controls = search_view::Controls::create(hwnd, font)?;
+        let replace_controls = replace_view::Controls::create(hwnd, font)?;
+        let should_load = options.session.is_some()
+            || options.comparison_session.is_some()
+            || options.left.is_some() && options.right.is_some();
         let mut state = App {
+            folder_session_job: None,
             folders: None,
             folder_mode: false,
+            folder_filter,
+            search_controls,
+            search: Default::default(),
+            replace_controls,
+            replace: Default::default(),
             hwnd,
             panes,
             labels,
@@ -1584,6 +1748,7 @@ pub fn run(options: Gui) -> Result<i32> {
             loaded: None,
             receiver: None,
             report_job: None,
+            session_job: None,
             projection_receiver: None,
             projection_cancel: Arc::default(),
             projection_due: None,
@@ -1601,7 +1766,9 @@ pub fn run(options: Gui) -> Result<i32> {
             smoke_result: None,
             exit: 130,
         };
-        if state.smoke.is_some() && !should_load {
+        if let Some(path) = state.options.folder_session.clone() {
+            folders_view::begin_session_load(&mut state, path)?;
+        } else if state.smoke.is_some() && !should_load {
             let dir = state.smoke.as_ref().unwrap();
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             for (name, data) in [
@@ -1626,6 +1793,36 @@ pub fn run(options: Gui) -> Result<i32> {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             if yy_ui_win::help::translate(&msg) {
+                continue;
+            }
+            if msg.message == WM_KEYDOWN
+                && let Some(result) = app(|a| {
+                    replace_view::key(
+                        a,
+                        msg.hwnd,
+                        msg.wParam.0,
+                        GetKeyState(VK_SHIFT.0 as i32) < 0,
+                    )
+                    .or_else(|| {
+                        search_view::key(
+                            a,
+                            msg.hwnd,
+                            msg.wParam.0,
+                            GetKeyState(VK_SHIFT.0 as i32) < 0,
+                        )
+                    })
+                })
+                .flatten()
+            {
+                if let Err(e) = result {
+                    error(&e);
+                }
+                continue;
+            }
+            if msg.message == WM_KEYDOWN
+                && msg.wParam.0 == 13
+                && app(|a| folders_view::enter(a, msg.hwnd)).unwrap_or(false)
+            {
                 continue;
             }
             if msg.message == WM_KEYDOWN
@@ -1696,6 +1893,15 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
             LRESULT(0)
         }
         WM_COMMAND => {
+            if search_view::notification(w.0 as u16, (w.0 >> 16) as u32) {
+                return LRESULT(0);
+            }
+            if replace_view::notification(w.0 as u16, (w.0 >> 16) as u32) {
+                return LRESULT(0);
+            }
+            if folders_view::notification(w.0 as u16, (w.0 >> 16) as u32) {
+                return LRESULT(0);
+            }
             if w.0 as u16 == 240 && app(|a| a.folder_mode).unwrap_or(false) {
                 if (w.0 >> 16) as u32 == LBN_DBLCLK {
                     if let Err(e) = folders_view::open_selected() {
@@ -1719,6 +1925,24 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
             LRESULT(0)
         }
         WM_TIMER => {
+            app(search_view::tick);
+            app(replace_view::tick);
+            if let Some(result) = app(session_view::tick).flatten() {
+                match result {
+                    Ok(path) => text(
+                        app(|a| a.status).unwrap_or_default(),
+                        &format!(
+                            "作業セッションを保存しました（RESULTの保存状態は変わりません）: {}",
+                            path.display()
+                        ),
+                    ),
+                    Err(e) if e == "cancelled" => text(
+                        app(|a| a.status).unwrap_or_default(),
+                        "作業セッションの保存を中止しました",
+                    ),
+                    Err(e) => error(&e),
+                }
+            }
             if let Some(result) = app(report_view::tick).flatten() {
                 match result {
                     Ok(path) => text(
@@ -1800,6 +2024,8 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
             LRESULT(0)
         }
         WM_CLOSE => {
+            app(folders_view::cancel_session_load);
+            app(search_view::cancel);
             if app(|a| a.edited && !a.saved).unwrap_or(false)
                 && !confirm("未保存の結果を破棄して閉じますか？")
             {
@@ -1813,8 +2039,12 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
                     a.exit = git_exit(a);
                 }
                 a.cancel.cancel();
+                search_view::cancel(a);
                 a.projection_cancel.cancel();
                 if let Some(job) = &a.report_job {
+                    job.cancel.cancel();
+                }
+                if let Some(job) = &a.session_job {
                     job.cancel.cancel();
                 }
                 if !a.options.git_merge
@@ -1842,6 +2072,9 @@ fn shortcut(key: usize) -> Option<u16> {
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
     match key {
+        70 if ctrl => Some(FIND_OPEN),
+        72 if ctrl => Some(REPLACE_OPEN),
+        114 => Some(if shift { FIND_PREV } else { FIND_NEXT }),
         112 => Some(HELP),
         118 => Some(if shift { PREV } else { NEXT }),
         83 if ctrl => Some(SAVE),
@@ -1861,6 +2094,9 @@ unsafe extern "system" fn pane_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
         let i = a.panes.iter().position(|h| *h == hwnd)?;
         if i >= a.editors.len() {
             return None;
+        }
+        if matches!(msg, WM_SETFOCUS | WM_LBUTTONDOWN) {
+            search_view::focus(a, i);
         }
         let editable = i == 3 && a.receiver.is_none();
         let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
@@ -2016,6 +2252,10 @@ fn smoke(a: &mut App) -> Result<()> {
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     folders_view::smoke(a, &dir)?;
     rules_smoke(a, &dir)?;
+    session_view::smoke(a, &dir)?;
+    comparison_session_view::smoke(a, &dir)?;
+    search_view::smoke(a, &dir)?;
+    replace_view::smoke(a, &dir)?;
     for (width, height) in [(680, 420), (1920, 1080), (1000, 700), (1280, 820)] {
         unsafe {
             win(SetWindowPos(

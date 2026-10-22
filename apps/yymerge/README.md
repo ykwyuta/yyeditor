@@ -25,7 +25,7 @@ GUIの[ファイル] → [フォルダー比較を開く]で、子フォルダ�
 
 [同期計画]メニューから追加・更新、ミラー、祖先付き統合の操作候補を一覧化し、JSONへ保存できます。CLIは`sync plan --left LEFT --right RIGHT --mode update-right`です。計画の作成・保存では入力フォルダーを変更しません。要確認項目のない計画は[計画を確認して実行]、CLIの`sync apply PLAN --execute --run-dir NEW_DIRECTORY`で適用できます。置換・削除前の元ファイルを退避し、`sync rollback RUN_DIRECTORY --execute`またはGUIから復元できます。中断した同期は[実行記録から同期を再開]、または`sync resume RUN_DIRECTORY --execute`で入力・退避状態を再検証して続けられます。復元を始めた記録は再開できません。退避先は全入力の外、左右と同じファイルシステムが必須です。変更検出時は停止し、実行後のユーザー編集は復元時に上書きしません。詳しい制限と手順はヘルプを参照してください。
 
-未実装: 高度な比較規則、構造化データ、画像・バイナリー、セッション保存、巨大入力のディスク索引。これらを含む提案書のP0全体は未完了です。
+未実装: 高度な比較規則、構造化データ、画像・バイナリー、巨大入力のディスク索引。これらを含む提案書のP0全体は未完了です。
 
 `git-tool diff`／`git-tool merge`をGitの外部ツールとして登録できます。`git-tool config`は登録用設定例を表示するだけで、自動でGit設定を変更しません。GUIは終了まで待機し、保存・解決済みの結果だけをMERGEDへ反映します。`--headless`も用意します。祖先なし・削除・リンク・submoduleのマージ競合は未対応として返します。登録・解除手順と終了コードは[ヘルプ](help/help.md#git-tool)を参照してください。
 
@@ -34,3 +34,15 @@ GUIの[ファイル] → [フォルダー比較を開く]で、子フォルダ�
 規則は[比較規則]メニューからJSONプロファイルへ保存・読み込みできます。CLIでは`rules-profile save review.json --ignore-case`で作成し、`diff LEFT RIGHT --rules-profile review.json`や`gui --rules-profile review.json`で再利用します。設定は明示指定したときだけ適用します。形式と手順は[プロファイルのヘルプ](help/help.md#comparison-profiles)を参照してください。
 
 [ファイル] → [2方向比較をHTMLレポートに保存…]またはCLIの`diff LEFT RIGHT --format html --report review.html`で、原文・行番号・改行種別・適用規則を含む単一HTMLを保存できます。GUIはバックグラウンドで生成し、保存前の入力検証と32 MiBの出力上限を設けています。詳しくは[HTMLレポートのヘルプ](help/help.md#html-report)を参照してください。
+
+通常の3方向マージは[ファイル] → [マージ作業セッションを保存…]／[開く…]で途中保存・再開できます。未解決の競合と手動編集中のRESULTを残し、再開時は入力の指紋を検証します。CLIは`session create`／`session inspect`／`gui --session FILE`に対応します。RESULTの保存とUndo履歴の復元は別扱いです。[作業セッションのヘルプ](help/help.md#merge-session)を参照してください。
+
+2方向比較も[ファイル] → [2方向比較の作業セッションを保存…]／[開く…]で再開できます。左右の入力パス・指紋・文字コード、比較規則、両ペインの選択と対象ペイン・差分位置を保存します。CLIは`comparison-session create`／`inspect`／`gui --comparison-session FILE`です。ファイル本文を内包せず、変更・欠落した入力では再開を止めます。[2方向作業セッションのヘルプ](help/help.md#comparison-session)を参照してください。
+
+フォルダー比較の一覧は、パスの部分一致と状態で絞り込めます。CLIは`folders LEFT RIGHT --path-contains .csv --status different`です。絞り込みは表示専用で、全体の差異・未比較判定と同期計画は変わりません。[フォルダー絞り込みのヘルプ](help/help.md#folder-filter)を参照してください。
+
+フォルダー比較の設定は[ファイル] → [フォルダー比較の作業セッションを保存…]／[開く…]で再利用できます。2方向・BASE付き3方向、再帰の有無、表示フィルター、選択項目を保存します。再開時には最新の内容を再走査し、過去の比較結果や同期計画は復元しません。CLIは`folder-session create`／`inspect`／`gui --folder-session FILE`です。[フォルダー作業セッションのヘルプ](help/help.md#folder-session)を参照してください。
+
+ファイル画面ではCtrl+Fで検索バーを開き、LEFT / RIGHT / BASE / RESULTを指定して検索できます。正規表現・大小文字の区別・単語単位を選べ、F3／Shift+F3で前後へ移動します。既存のYY検索エンジンをバックグラウンドで実行し、編集・選択・比較対象が変わった場合は古い検索結果を破棄します。[本文検索のヘルプ](help/help.md#pane-search)を参照してください。
+
+3方向マージではCtrl+HでRESULT専用の単一置換・全置換を使えます。1操作を1回のUndoで戻せ、変更は手動編集・未保存として扱います。出力上限・取消・編集中の変更を検査してから反映します。置換後の文字列は正規表現検索でもそのまま使用し、キャプチャ参照やエスケープの展開は行いません。[RESULT置換のヘルプ](help/help.md#result-replace)を参照してください。

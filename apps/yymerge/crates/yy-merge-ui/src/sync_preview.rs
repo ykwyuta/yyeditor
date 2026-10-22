@@ -249,6 +249,7 @@ pub(super) fn command(id: u16) -> Option<Result<()>> {
                     f.right = plan.right.clone();
                     f.base = plan.base.clone();
                     f.entries.clear();
+                    f.visible.clear();
                     f.error = Some("実行記録を開きました。比較結果は再走査してください。".into());
                     f.plan_error = None;
                     f.plan = Some(Arc::new(plan));
@@ -387,7 +388,7 @@ pub(super) fn refresh(a: &mut App) {
         format!("計画作成未完了: {error}")
     } else if let Some(plan) = &f.plan {
         format!(
-            "計画 | 操作候補{} / 要確認{} / 未比較{} / 維持{} | ページ{}/{}{}",
+            "計画（全入力対象・比較フィルターなし） | 操作候補{} / 要確認{} / 未比較{} / 維持{} | ページ{}/{}{}",
             plan.summary.operations,
             plan.summary.review,
             plan.summary.uncompared,
@@ -545,6 +546,14 @@ pub(super) fn smoke(a: &mut App, dir: &Path) -> Result<()> {
         .ok_or("native plan was not generated")?;
     if plan.summary.review == 0 || !plan.preview_only {
         return Err("plan lost unresolved conflicts or its preview flag".into());
+    }
+    if !a.folders.as_ref().unwrap().filter.active()
+        || !a.folders.as_ref().unwrap().visible.is_empty()
+        || a.folders.as_ref().unwrap().row_count() != plan.items.len()
+        || unsafe { SendMessageW(a.list, LB_GETCOUNT, None, None).0 }
+            != plan.items.len().min(PAGE) as isize
+    {
+        return Err("display filter changed sync plan rows".into());
     }
     let index = plan
         .items
