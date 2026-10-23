@@ -10,6 +10,7 @@ struct Dialog {
     names: Vec<String>,
     raw: bool,
     kind: DbKind,
+    native: bool,
 }
 fn quote(value: &str) -> String {
     format!("{{{}}}", value.replace('}', "}}"))
@@ -21,6 +22,27 @@ fn target(kind: DbKind, values: &[String], raw: bool) -> yy_db_core::Result<Stri
         } else {
             values[2].trim().into()
         });
+    }
+    if values.get(12).is_some_and(|v| v == "Rust直接接続") {
+        let mut config = serde_json::json!({"host":values[4].trim(),"port":values[5].trim().parse::<u16>().map_err(|_|"ポート番号は1～65535です")?,"database":values[6].trim(),"username":values[7].trim(),"password":values[8]});
+        if !values[9].trim().is_empty() {
+            let extras: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&values[9])
+                    .map_err(|e| format!("追加設定はJSONで入力してください: {e}"))?;
+            for (k, v) in extras {
+                if !["tls", "ca_file", "trust_server_certificate"].contains(&k.as_str()) {
+                    return Err(format!("追加設定 {k} は未対応です"));
+                }
+                config
+                    .as_object_mut()
+                    .ok_or("接続設定が不正です")?
+                    .insert(k, v);
+            }
+        }
+        let config: yy_db_core::native::Config =
+            serde_json::from_value(config).map_err(|e| e.to_string())?;
+        config.validate()?;
+        return config.encode();
     }
     if raw {
         return if values[11].trim().is_empty() {
@@ -131,9 +153,11 @@ fn refresh(h: HWND, s: &mut Dialog) {
         let visible = match i {
             0 | 1 => true,
             2 => embedded,
-            3..=9 => !embedded && !s.raw,
-            10 => !embedded,
-            11 => !embedded && s.raw,
+            3 => !embedded && !s.native && !s.raw,
+            4..=9 => !embedded && (!s.raw || s.native),
+            10 => !embedded && !s.native,
+            11 => !embedded && !s.native && s.raw,
+            12 => !embedded,
             _ => false,
         };
         unsafe {
@@ -156,14 +180,14 @@ fn refresh(h: HWND, s: &mut Dialog) {
             0,
             0,
             px(700),
-            px(if embedded { 314 } else { 580 }),
+            px(if embedded { 314 } else { 616 }),
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
         let hint = GetDlgItem(Some(h), 20).unwrap_or_default();
         let _ = MoveWindow(
             hint,
             px(16),
-            px(if embedded { 140 } else { 426 }),
+            px(if embedded { 140 } else { 462 }),
             px(646),
             px(54),
             true,
@@ -172,7 +196,7 @@ fn refresh(h: HWND, s: &mut Dialog) {
             let _ = MoveWindow(
                 GetDlgItem(Some(h), id).unwrap_or_default(),
                 px(x),
-                px(if embedded { 234 } else { 502 }),
+                px(if embedded { 234 } else { 538 }),
                 px(104),
                 px(28),
                 true,
@@ -183,6 +207,8 @@ fn refresh(h: HWND, s: &mut Dialog) {
         unsafe { GetDlgItem(Some(h), 20).unwrap_or_default() },
         if embedded {
             "ファイルはフルパスを指定します。空欄または :memory: は保存しないメモリDBです。"
+        } else if s.native {
+            "ODBC・Java不要。追加設定はJSONです（例: {\"tls\":\"disable\"}）。通常はTLS必須。Oracleは試験対応、Db2はZeus由来のDRDA実装です。制限はヘルプを参照してください。"
         } else if s.raw {
             "既存の接続文字列は伏せて表示します。項目入力へ切り替える場合は接続情報を入力し直してください。"
         } else {
@@ -203,6 +229,18 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT
         }
         if m == WM_COMMAND {
             let id = (w.0 & 0xffff) as u16;
+            if id == 112 && (w.0 >> 16) == CBN_SELCHANGE as usize {
+                s.native =
+                    unsafe { send_message(s.fields[12], CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 }
+                        == 0;
+                s.raw = false;
+                unsafe {
+                    send_message(s.fields[10], BM_SETCHECK, WPARAM(0), LPARAM(0));
+                }
+                set_text(s.fields[9], "");
+                refresh(h, s);
+                return LRESULT(0);
+            }
             if id == 101 && (w.0 >> 16) == CBN_SELCHANGE as usize {
                 refresh(h, s);
                 return LRESULT(0);
@@ -239,6 +277,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT
                                 None
                             } else {
                                 Some(ConnectionDetails {
+                                    native: s.native,
                                     driver: values[3].clone(),
                                     server: values[4].clone(),
                                     port: values[5].clone(),
@@ -310,6 +349,7 @@ pub(super) fn edit(
             None,
         )
         .ok()?;
+        let is_new = profile.is_none();
         let p = profile.unwrap_or(Profile {
             name: String::new(),
             kind: DbKind::Sqlite,
@@ -317,6 +357,7 @@ pub(super) fn edit(
             details: None,
         });
         let embedded = matches!(p.kind, DbKind::Sqlite | DbKind::DuckDb);
+        let direct = yy_db_core::native::Config::decode(&p.target).ok().flatten();
         let mut s = Dialog {
             fields: vec![],
             labels: vec![],
@@ -325,6 +366,7 @@ pub(super) fn edit(
             names,
             raw: !embedded && p.details.is_none(),
             kind: p.kind,
+            native: is_new || direct.is_some(),
         };
         let labels = [
             "接続名（必須）",
@@ -339,20 +381,22 @@ pub(super) fn edit(
             "追加オプション（任意）",
             "",
             "接続文字列（詳細）",
+            "接続方式",
         ];
         for (i, label) in labels.iter().enumerate() {
             let y = match i {
                 0 => 16,
                 1 => 52,
-                2 | 3 => 88,
-                4 => 124,
-                5 => 160,
-                6 => 196,
-                7 => 232,
-                8 => 268,
-                9 => 304,
-                10 => 344,
-                _ => 382,
+                2 | 12 => 88,
+                3 => 124,
+                4 => 160,
+                5 => 196,
+                6 => 232,
+                7 => 268,
+                8 => 304,
+                9 => 340,
+                10 => 380,
+                _ => 418,
             };
             let lab = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -369,7 +413,7 @@ pub(super) fn edit(
                 None,
             )
             .ok()?;
-            let (class, style) = if i == 1 {
+            let (class, style) = if i == 1 || i == 12 {
                 (w!("COMBOBOX"), CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0)
             } else if i == 3 {
                 (w!("COMBOBOX"), CBS_DROPDOWN as u32 | WS_VSCROLL.0)
@@ -399,7 +443,7 @@ pub(super) fn edit(
                 px(196),
                 px(y),
                 px(if i == 2 { 350 } else { 466 }),
-                px(if i == 1 || i == 3 { 240 } else { 28 }),
+                px(if i == 1 || i == 3 || i == 12 { 240 } else { 28 }),
                 Some(h),
                 Some(HMENU((100 + i) as *mut _)),
                 Some(instance.into()),
@@ -433,6 +477,20 @@ pub(super) fn edit(
                 LPARAM(wide(&driver).as_ptr() as isize),
             );
         }
+        for label in ["Rust直接接続", "ODBC"] {
+            send_message(
+                s.fields[12],
+                CB_ADDSTRING,
+                WPARAM(0),
+                LPARAM(wide(label).as_ptr() as isize),
+            );
+        }
+        send_message(
+            s.fields[12],
+            CB_SETCURSEL,
+            WPARAM(usize::from(!s.native)),
+            LPARAM(0),
+        );
         set_text(s.fields[0], &p.name);
         set_text(s.fields[2], if embedded { &p.target } else { ":memory:" });
         set_text(s.fields[11], if embedded { "" } else { &p.target });
@@ -454,6 +512,10 @@ pub(super) fn edit(
             ] {
                 set_text(s.fields[i], value);
             }
+        }
+        if let Some(d) = direct {
+            for (i,value) in [(4,d.host),(5,d.port.to_string()),(6,d.database),(7,d.username),(8,d.password),(9,serde_json::json!({"tls":d.tls,"ca_file":d.ca_file,"trust_server_certificate":d.trust_server_certificate}).to_string())] {set_text(s.fields[i],&value);}
+            s.raw = false;
         }
         for (id, label, x, y, width, height, class, style) in [
             (
@@ -534,6 +596,29 @@ pub(super) fn edit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn direct_connection_needs_no_odbc_driver_and_preserves_credentials() {
+        let mut values = vec![String::new(); 13];
+        for (i, value) in [
+            (4, "localhost"),
+            (5, "50000"),
+            (6, "YYDEMO"),
+            (7, "db2inst1"),
+            (8, "p;'}\\w"),
+            (9, "{\"tls\":\"disable\"}"),
+            (12, "Rust直接接続"),
+        ] {
+            values[i] = value.into();
+        }
+        let target = target(DbKind::Db2, &values, false).unwrap();
+        let decoded = yy_db_core::native::Config::decode(&target)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.password, "p;'}\\w");
+        assert_eq!(decoded.tls, "disable");
+        values[9] = "{\"password\":\"override\"}".into();
+        assert!(super::target(DbKind::Db2, &values, false).is_err());
+    }
     #[test]
     fn structured_targets_quote_credentials_and_select_native_server_attributes() {
         let mut values = vec![String::new(); 12];

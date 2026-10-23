@@ -13,3 +13,4 @@ pub use values::{Column, ResultSet, Value};
 pub type Result<T> = std::result::Result<T, String>;
 pub mod catalog;
 pub mod diagnostics;
+pub mod native;

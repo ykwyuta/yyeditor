@@ -1,6 +1,8 @@
 # yydbmanager third-party notices
 
 yydbmanager and the yy series shared components are GPL-3.0-or-later.
+Native database drivers and the Zeus DRDA port are described in the bundled
+THIRD-PARTY-NOTICES.md, including the exact upstream source revision and licenses.
 See the repository's COPYING. Source: https://github.com/ykwyuta/yyeditor
 
 The Markdown help uses the shared yy-preview renderer and Microsoft Edge

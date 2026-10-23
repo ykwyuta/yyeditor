@@ -14,7 +14,7 @@ public static class DbShellTest {
  private delegate bool WindowCallback(IntPtr h,IntPtr p);
  [DllImport("user32.dll")] private static extern bool EnumWindows(WindowCallback callback,IntPtr p);
  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h,out uint id);
- public static IntPtr FindProcessWindow(uint id) {IntPtr found=IntPtr.Zero;EnumWindows((h,p)=>{uint pid;GetWindowThreadProcessId(h,out pid);if(pid==id && GetDlgItem(h,202)!=IntPtr.Zero){found=h;return false;}return true;},IntPtr.Zero);return found;}
+ public static IntPtr FindProcessWindow(uint id) {ActiveProcessId=id;IntPtr found=IntPtr.Zero;EnumWindows((h,p)=>{uint pid;GetWindowThreadProcessId(h,out pid);if(pid==id && GetDlgItem(h,202)!=IntPtr.Zero){found=h;return false;}return true;},IntPtr.Zero);return found;}
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr h,System.Text.StringBuilder s,int n);
  public static IntPtr FindChild(IntPtr parent,string cls) {for(var h=GetWindow(parent,5);h!=IntPtr.Zero;h=GetWindow(h,2)){var s=new System.Text.StringBuilder(256);GetClassName(h,s,256);if(s.ToString().Equals(cls,StringComparison.OrdinalIgnoreCase))return h;}return IntPtr.Zero;}
  public static string Describe(uint id) {var s=new System.Text.StringBuilder();EnumWindows((h,p)=>{uint pid;GetWindowThreadProcessId(h,out pid);if(pid==id){var c=new System.Text.StringBuilder(256);var t=new System.Text.StringBuilder(512);GetClassName(h,c,256);GetWindowText(h,t,512);s.AppendLine(h+" "+c+" "+t);for(var ch=GetWindow(h,5);ch!=IntPtr.Zero;ch=GetWindow(ch,2)){var ct=new System.Text.StringBuilder(1024);GetWindowText(ch,ct,1024);s.AppendLine(" child: "+ct);}}return true;},IntPtr.Zero);return s.ToString();}
@@ -27,7 +27,13 @@ public static class DbShellTest {
  [DllImport("user32.dll")] public static extern uint GetMenuItemID(IntPtr h,int index);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern bool SetWindowText(IntPtr h,string value);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h,System.Text.StringBuilder s,int n);
- [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string cls,string title);
+ public static uint ActiveProcessId;
+ public static IntPtr FindWindow(string cls,string title) {
+   IntPtr found=IntPtr.Zero;
+   if(ActiveProcessId==0)return found;
+   EnumWindows((h,p)=>{uint id;GetWindowThreadProcessId(h,out id);if(id!=ActiveProcessId)return true;var c=new System.Text.StringBuilder(256);var t=new System.Text.StringBuilder(1024);GetClassName(h,c,256);GetWindowText(h,t,1024);if((cls==null||c.ToString()==cls)&&(title==null||t.ToString()==title)){found=h;return false;}return true;},IntPtr.Zero);
+   return found;
+ }
  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h,uint msg,IntPtr w,IntPtr l);
  [DllImport("user32.dll",EntryPoint="SendMessageW",CharSet=CharSet.Unicode)] public static extern IntPtr ReadMessage(IntPtr h,uint msg,IntPtr w,System.Text.StringBuilder l);
  [DllImport("user32.dll",EntryPoint="SendMessageW",CharSet=CharSet.Unicode)] public static extern IntPtr TextMessage(IntPtr h,uint msg,IntPtr w,string l);
@@ -568,6 +574,14 @@ try {
     $taskKind=[DbShellTest]::GetDlgItem($taskDialog,101)
     [DbShellTest]::SendMessage($taskKind,0x14E,4,0)|Out-Null
     [DbShellTest]::SendMessage($taskDialog,0x111,(101 -bor (1 -shl 16)),$taskKind)|Out-Null
+    $taskMode=[DbShellTest]::GetDlgItem($taskDialog,112)
+    if($taskMode -eq [IntPtr]::Zero -or [DbShellTest]::SendMessage($taskMode,0x147,0,0).ToInt64() -ne 0){throw 'Rust direct connection is not the default for a new external connection'}
+    if([DbShellTest]::IsWindowVisible([DbShellTest]::GetDlgItem($taskDialog,103))){throw 'Rust direct connection exposes an ODBC driver field'}
+    [DbShellTest]::SendMessage($taskMode,0x14E,1,0)|Out-Null
+    [DbShellTest]::SendMessage($taskDialog,0x111,(112 -bor (1 -shl 16)),$taskMode)|Out-Null
+    if(![DbShellTest]::IsWindowVisible([DbShellTest]::GetDlgItem($taskDialog,103))){throw 'ODBC connection no longer exposes its driver field'}
+    [DbShellTest]::SendMessage($taskMode,0x14E,0,0)|Out-Null
+    [DbShellTest]::SendMessage($taskDialog,0x111,(112 -bor (1 -shl 16)),$taskMode)|Out-Null
     foreach($taskField in @(@{Id=100;Text='検証 PostgreSQL'},@{Id=103;Text='PostgreSQL Unicode'},@{Id=104;Text='db.example'},@{Id=106;Text='sales'},@{Id=107;Text='developer'},@{Id=108;Text='test-secret;}'})){
         [DbShellTest]::TextMessage([DbShellTest]::GetDlgItem($taskDialog,$taskField.Id),0xC,0,$taskField.Text)|Out-Null
     }
@@ -581,6 +595,7 @@ try {
     $taskDialog=[IntPtr]::Zero
     for($i=0;$i -lt 100;$i++){$taskDialog=[DbShellTest]::FindWindow('YYDbConnection','接続先の設定');if($taskDialog -ne [IntPtr]::Zero -and [DbShellTest]::IsWindowVisible($taskDialog)){break};Start-Sleep -Milliseconds 20}
     if(![DbShellTest]::IsWindowVisible([DbShellTest]::GetDlgItem($taskDialog,104))){throw 'Structured connection fields were not retained'}
+    if([DbShellTest]::SendMessage([DbShellTest]::GetDlgItem($taskDialog,112),0x147,0,0).ToInt64() -ne 0){throw 'Saved Rust connection mode was not restored'}
     $taskHost=[Text.StringBuilder]::new(256);[DbShellTest]::ReadMessage([DbShellTest]::GetDlgItem($taskDialog,104),0xD,256,$taskHost)|Out-Null
     if($taskHost.ToString() -ne 'db.example'){throw 'Server name was not retained'}
     [DbShellTest]::SendNotifyMessage($taskDialog,0x111,2,0)|Out-Null

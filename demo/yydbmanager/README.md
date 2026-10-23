@@ -13,18 +13,21 @@ docker compose -p yydbmanager-demo up -d --wait --wait-timeout 120
 
 `healthy`になれば、接続とサンプルの読み込みが完了しています。イメージ取得が不要な場合は短時間で起動します。初回ダウンロードの時間は別です。
 
-yydbmanagerを起動し、右側のオブジェクトエクスプローラーで「新規接続…」を選びます。
+yydbmanagerを起動し、右側のオブジェクトエクスプローラーで登録済みの「demo / PostgreSQL」をダブルクリックします。SQLite・DuckDBと5種類の外部DBの計7接続先が初期登録され、外部DBはODBC不要のRust直接接続を使用します。アプリ起動だけではDBへの接続やコンテナーの起動は行いません。
+
+既存の接続設定にも初回だけデモ接続先を追加します。既存の同名設定を上書きせず、追加後に編集・削除したデモ接続先を再追加しません。Composeのポートやパスワードを変更した場合は、該当接続先を編集してください。手動登録する場合は次の値を使用します。
 
 | 設定 | PostgreSQLの入力値 |
 | --- | --- |
 | 接続名 | yydbmanager デモ PostgreSQL |
 | DB種類 | PostgreSQL |
-| ドライバー | 導入済みの64bit PostgreSQL ODBCドライバー名 |
+| 接続方式 | Rust直接接続 |
 | サーバー | `127.0.0.1` |
 | ポート | `25432` |
 | データベース | `yydemo` |
 | ユーザー | `yy_demo` |
 | パスワード | `YyDemo_2026!` |
+| 追加設定 | `{"tls":"disable"}` |
 
 接続先を保存して接続し、`sql/01-overview.sql`をSQLタブで開いてF5で実行してください。DockerにDBクライアントが入っているため、次の件数検証にはホスト側のODBCドライバーは不要です。
 
@@ -70,7 +73,7 @@ Oracle／Db2はイメージ取得・初回DB作成に時間がかかるため既
 
 パスワードはすべて`YyDemo_2026!`です。デモ専用の公開された固定値です。公開ポートはループバックに限定しています。既存のCI検証環境やホストの5432／50000ポートとも分けています。
 
-SQL ServerはODBC Driver 18等の64bitドライバーを選びます。接続文字列の詳細設定では`Encrypt=yes;TrustServerCertificate=yes;`を指定します。OracleはOracle Instant Client ODBC、Db2はIBM Data Server Driver、MySQLはMySQLまたはMariaDBの64bit ODBCドライバーを使用します。ドライバー名はそのPCに登録されている名前に合わせてください。ComposeはWindows側のドライバーをインストールしません。
+初期登録される5接続先はいずれもループバック向けのRust直接接続で、デモ用にTLSを無効にしています。SQL Serverのユーザーは初期登録では`sa`です（上表の`yy_demo`でも接続できます）。ODBC方式を選ぶ場合のみ、各DBの64bit ODBCドライバーを別途導入してください。
 
 ポートが衝突する場合は`.env.example`を`.env`へコピーしてホスト側ポートを変更し、Composeを再実行してください。コンテナー内部のポートとデータは変更しません。
 
@@ -132,7 +135,9 @@ SQLiteの`exact_values.amount`は小数の桁を保持するためTEXTで格納�
 
 ### Docker不要のSQLite／DuckDB
 
-yydbmanagerでSQLiteまたはDuckDBの接続先を新規作成し、ファイルに`data/demo.sqlite`または`data/demo.duckdb`の絶対パスを指定します。どちらも作成済みの同じデータを含みます。変更を試す場合はファイルをコピーしてから接続してください。これらの2DBにはDockerも追加ODBCドライバーも不要です。
+右側のオブジェクトエクスプローラーで「demo / SQLite」または「demo / DuckDB」をダブルクリックすると、すぐにデモを試せます。Dockerも追加ODBCドライバーも不要です。受注1200件などの作成済みデータを実行ファイルに同梱し、初回に接続設定ファイルと同じフォルダーの`demo/demo.sqlite`と`demo/demo.duckdb`へコピーします。通常は`%APPDATA%/yydbmanager/demo/`です。リポジトリーがない環境でも使用でき、既存のデモDBファイルは上書きしません。
+
+外部DBのみの初期設定から更新した場合も、この2接続先だけを一度追加します。すでに削除した外部DB接続先は復元せず、追加後に編集・削除したSQLite・DuckDB接続先も再追加しません。データを初期状態から別途試す場合は、このフォルダーの`data/demo.sqlite`または`data/demo.duckdb`を別名でコピーし、新規接続のファイルにその絶対パスを指定してください。
 
 ## DB別の性能分析を試す
 

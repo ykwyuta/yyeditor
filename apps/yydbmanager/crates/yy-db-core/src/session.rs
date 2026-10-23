@@ -75,6 +75,7 @@ pub enum Database {
     Sqlite(rusqlite::Connection),
     Duck(duckdb::Connection),
     Odbc(DbKind, odbc_api::Connection<'static>, String),
+    Native(DbKind, Box<crate::native::Connection>),
 }
 pub struct Cancellation {
     flag: Arc<AtomicBool>,
@@ -133,6 +134,12 @@ impl Database {
                 Ok(Self::Duck(c))
             }
             kind => {
+                if let Some(config) = crate::native::Config::decode(&o.connection_string)? {
+                    return Ok(Self::Native(
+                        kind,
+                        Box::new(crate::native::Connection::open(kind, config, o.read_only)?),
+                    ));
+                }
                 if o.connection_string.trim().is_empty() {
                     return Err(
                         "ODBC接続文字列を指定してください（対応する64bitドライバーが必要です）"
@@ -160,7 +167,7 @@ impl Database {
         match self {
             Self::Sqlite(_) => DbKind::Sqlite,
             Self::Duck(_) => DbKind::DuckDb,
-            Self::Odbc(k, ..) => *k,
+            Self::Odbc(k, ..) | Self::Native(k, ..) => *k,
         }
     }
     pub fn cancellation(&self) -> Cancellation {
@@ -174,6 +181,7 @@ impl Database {
                 Box::new(move || h.interrupt())
             }
             Self::Odbc(..) => Box::new(|| {}),
+            Self::Native(_, c) => c.interrupter(),
         };
         Cancellation {
             flag: Arc::new(AtomicBool::new(false)),
@@ -193,6 +201,7 @@ impl Database {
     fn query(&mut self, sql: &str, cancel: &AtomicBool) -> Result<Vec<ResultSet>> {
         let mut results = vec![];
         match self {
+            Self::Native(_, c) => return c.query(sql, cancel),
             Self::Sqlite(c) => {
                 let mut s = c.prepare(sql).map_err(|e| e.to_string())?;
                 let columns = s
@@ -568,10 +577,21 @@ impl Database {
                     DbKind::Db2,
                     sets.first().ok_or("計画がありません")?,
                 )?;
-                let predicates=self.query(&format!("WITH stmt AS (SELECT * FROM EXPLAIN_STATEMENT WHERE QUERYNO={queryno} AND EXPLAIN_REQUESTER=CURRENT USER AND EXPLAIN_LEVEL='P' ORDER BY EXPLAIN_TIME DESC FETCH FIRST 1 ROW ONLY) SELECT p.OPERATOR_ID,p.PREDICATE_ID,p.HOW_APPLIED,p.PREDICATE_TEXT FROM EXPLAIN_PREDICATE p JOIN stmt t ON {} ORDER BY p.OPERATOR_ID,p.PREDICATE_ID",key("p")),cancel)?;
+                let predicate_column = if matches!(self, Self::Native(..)) {
+                    "CAST(p.PREDICATE_TEXT AS VARCHAR(32672)) AS PREDICATE_TEXT,OCTET_LENGTH(p.PREDICATE_TEXT) AS PREDICATE_BYTES"
+                } else {
+                    "p.PREDICATE_TEXT"
+                };
+                let predicates=self.query(&format!("WITH stmt AS (SELECT * FROM EXPLAIN_STATEMENT WHERE QUERYNO={queryno} AND EXPLAIN_REQUESTER=CURRENT USER AND EXPLAIN_LEVEL='P' ORDER BY EXPLAIN_TIME DESC FETCH FIRST 1 ROW ONLY) SELECT p.OPERATOR_ID,p.PREDICATE_ID,p.HOW_APPLIED,{predicate_column} FROM EXPLAIN_PREDICATE p JOIN stmt t ON {} ORDER BY p.OPERATOR_ID,p.PREDICATE_ID",key("p")),cancel)?;
                 if let Some(set) = predicates.first() {
                     let rows = set.page(0, 10_000)?;
                     for row in &rows {
+                        if row
+                            .get(4)
+                            .is_some_and(|v| v.display().parse::<u64>().is_ok_and(|n| n > 32672))
+                        {
+                            return Err("Db2直接接続の述語サイズ上限（32672バイト）を超えています。ODBC接続または保存計画を使用してください".into());
+                        }
                         if let Some(node) = row
                             .first()
                             .and_then(|v| v.display().trim().parse::<u64>().ok())
@@ -595,6 +615,9 @@ impl Database {
         }
     }
     pub fn import_into(&mut self, set: &ResultSet, table: &str, create: bool) -> Result<u64> {
+        if let Self::Native(_, c) = self {
+            return c.import(set, table, create);
+        }
         if let Self::Odbc(kind, _, connection) = self {
             return import_odbc(*kind, connection, set, table, create);
         }
@@ -657,7 +680,9 @@ impl Database {
                             c.execute(&sql, duckdb::params_from_iter(values))
                                 .map_err(|e| e.to_string())?;
                         }
-                        Self::Odbc(..) => return Err("ODBCの型付きインポートは未実装です".into()),
+                        Self::Odbc(..) | Self::Native(..) => {
+                            return Err("外部DBは専用インポートを使用してください".into());
+                        }
                     }
                 }
                 start += 512;

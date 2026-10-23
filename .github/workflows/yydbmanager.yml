@@ -62,7 +62,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/yydbmanager | Out-Null
           Copy-Item apps/yydbmanager/target/release/yydbmanager.exe dist/yydbmanager/
-          Copy-Item apps/yydbmanager/README.md,apps/yydbmanager/NOTICE.md dist/yydbmanager/
+          Copy-Item apps/yydbmanager/README.md,apps/yydbmanager/NOTICE.md,apps/yydbmanager/THIRD-PARTY-NOTICES.md dist/yydbmanager/
           Copy-Item crates/yy-win/fonts/LICENSE-UDEVGothic.txt dist/yydbmanager/
           Copy-Item COPYING,COPYING.EXCEPTION dist/yydbmanager/
           Copy-Item crates/yy-preview/assets/LICENSE-*.txt dist/yydbmanager/
