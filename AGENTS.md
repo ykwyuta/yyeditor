@@ -2,7 +2,7 @@
 
 ## 検証するワークスペース
 
-- ルート、`apps/yymerge/Cargo.toml`、`apps/yydbmanager/Cargo.toml`は別のCargoワークスペース。ルートの検査だけで後二者も検査済みとは扱わない。
+- ルート、`apps/yymerge/Cargo.toml`、`apps/yydbmanager/Cargo.toml`、`apps/yy3designer/Cargo.toml`は別のCargoワークスペース。ルートの検査だけで独立アプリも検査済みとは扱わない。
 - 変更前に該当する`.github/workflows/*.yml`を読み、OS、機能フラグ、Rust/C++ツールチェーン、外部プログラム、検証コマンドを確認する。ローカルのRustがCIの`stable`より古い場合、その結果だけでCI成功を見込まない。
 - 変更したワークスペースでは`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`と変更に対応するテストを実行する。独立ワークスペースでは`--manifest-path`を付ける。yymergeのLinux検証は`--no-default-features`も使う。
 - `crates/`の共有部品を変更した場合、利用する独立アプリへの影響と各ワークフローのpath条件を確認する。Windowsで成功してもLinux固有のコードを検証済みとはしない。

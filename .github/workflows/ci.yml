@@ -10,6 +10,9 @@ on:
       - "apps/yymerge/**"
       - "demo/yymerge/**"
       - ".github/workflows/yymerge.yml"
+      - "apps/yy3designer/**"
+      - "demo/yy3designer/**"
+      - ".github/workflows/yy3designer.yml"
   pull_request:
     paths-ignore:
       - "apps/yydbmanager/**"
@@ -18,6 +21,9 @@ on:
       - "apps/yymerge/**"
       - "demo/yymerge/**"
       - ".github/workflows/yymerge.yml"
+      - "apps/yy3designer/**"
+      - "demo/yy3designer/**"
+      - ".github/workflows/yy3designer.yml"
 
 env:
   CARGO_TERM_COLOR: always
