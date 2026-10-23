@@ -319,16 +319,44 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let fs = ShellFs::connect(Arc::new(RealShell {
+        let t = Arc::new(RealShell {
             executable,
             dir: dir.path().to_owned(),
-        }))
-        .unwrap();
+        });
+        let fs = Arc::new(ShellFs::connect(t.clone()).unwrap());
         let name = "a b'日本語.txt";
         std::fs::write(dir.path().join(name), b"binary\x00\xff").unwrap();
         std::fs::write(dir.path().join(".hidden"), b"hidden").unwrap();
         let items = fs.read_dir(b".").unwrap();
         assert_eq!(items.len(), 2);
+        let custom = crate::listing::CommandListFs::new(
+            fs.clone(),
+            t.clone(),
+            crate::listing::ListCommand::from_settings(Some("ls -1A"), None)
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(custom.read_dir(b".").unwrap().len(), 2);
+        let subset = crate::listing::CommandListFs::new(
+            fs.clone(),
+            t.clone(),
+            crate::listing::ListCommand::from_settings(Some("printf '%s\\0' .hidden"), Some("nul"))
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(subset.read_dir(b".").unwrap()[0].name, b".hidden");
+        let nested = "nested '日本語";
+        std::fs::create_dir(dir.path().join(nested)).unwrap();
+        std::fs::write(dir.path().join(nested).join("space file"), b"nested").unwrap();
+        assert_eq!(
+            custom.read_dir(nested.as_bytes()).unwrap()[0]
+                .info
+                .as_ref()
+                .unwrap()
+                .len(),
+            6
+        );
+        fs.remove(nested.as_bytes(), true).unwrap();
         assert_eq!(fs.stat(name.as_bytes()).unwrap().len(), 8);
         assert!(
             fs.real_path(name.as_bytes())

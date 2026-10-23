@@ -9,6 +9,7 @@ pub mod deploy;
 pub mod forward;
 pub mod fs;
 pub mod known_hosts;
+pub mod listing;
 #[cfg(unix)]
 pub mod local;
 pub mod log;

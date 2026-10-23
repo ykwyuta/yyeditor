@@ -15,6 +15,10 @@ user = "gateway-user"
 hostname = "internal.example.local"
 user = "server-user"
 proxy_jump = "gateway"
+# Optional yysftp listing override; output direct child names, not ls -la records.
+# Runs in the displayed directory; YY_LIST_DIRECTORY also contains its path.
+# list_command = "ls -1A"
+# list_format = "lines"  # or "nul" (each name ends in NUL)
 
 # 2. SFTP proxy with the product's composite SSH user name.
 # The syntax of this user name is an example, not a universal product syntax.

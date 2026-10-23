@@ -15,6 +15,7 @@ yyeditor は、数 GB のファイルもすぐに開ける Windows 向けの軽�
 - [3270（メインフレーム）](#tn3270)
 - [ファイル転送（yysftp）](#transfer)
 - [SSHゲートウェイ経由のファイル転送](#sftp-gateway)
+- [接続先ごとのディレクトリ一覧コマンド](#sftp-list-command)
 - [スプレッドシート（yysheet）](#yysheet)
 - [タブと比較](#tabs)
 - [編集](#editing)
@@ -443,6 +444,26 @@ user = "operator@server-user@internal.example.local"
 接続できないときは[接続の記録]で、SSH認証の失敗か、踏み台の中継の拒否か、SFTP起動の拒否かを確認します。ゲートウェイが対話シェルのメニューだけを提供し、SFTP・exec中継・ポート転送をすべて禁止している場合、この設定だけでは転送できません。管理者にSFTP用の許可された接続方式を確認してください。任意のシェルメニューを自動操作する機能や製品固有プロトコルには対応していません。
 
 参照した公式仕様: [WinSCPのSSHトンネル](https://winscp.net/eng/docs/ui_login_tunnel)、[SFTPサーバーの起動設定](https://winscp.net/eng/docs/ui_login_sftp)、[プロキシ](https://winscp.net/eng/docs/ui_login_proxy)。WinSCPの設定ファイルを直接読み込む機能ではありません。
+
+### 接続先ごとのディレクトリ一覧コマンド {#sftp-list-command}
+
+一覧に使うコマンドを変更する場合、ヘルプ → 設定ファイルを開くで、対象の接続先に次の項目を追加し、yysftpを再起動します。
+
+```toml
+[remote.host.internal]
+hostname = "internal.example.local"
+user = "server-user"
+list_command = "ls -1A"
+list_format = "lines"
+```
+
+`list_command`には任意のコマンドやスクリプトを指定できます。表示対象のディレクトリへ移動してから、接続先のPOSIXシェルでPTYなしのSSH execとして実行します。環境変数`YY_LIST_DIRECTORY`にも対象ディレクトリの絶対パスを渡します。プレースホルダーの置換は行わず、`%`やシェルの引用符はそのまま使えます。接続先がexecを許可している必要があります。
+
+- `list_format = "lines"`（省略時）: 標準出力に直下のファイル名だけを1行ずつ出します。LF・CRLFに対応し、名前の前後の空白は保持します。`ls -la`のような属性付き一覧やフルパスは使えません。
+- `list_format = "nul"`: 各ファイル名の末尾にNULを出します。改行や末尾のCRを含む名前にも対応します。GNU findの例は、TOMLのリテラル文字列を使って `list_command = 'find . -mindepth 1 -maxdepth 1 -printf "%f\0"'` とします。
+- 空のディレクトリでは何も出力しません。`.`と`..`は無視します。空行・重複・`/`を含む名前はエラーです。説明や診断は標準エラーへ出し、失敗時は非ゼロで終了させてください。失敗時に標準の一覧方式へ自動で戻ることはありません。
+
+指定した接続先名でのyysftpの一覧に適用します。SFTP・SCP・エージェントのいずれでも使えますが、別の接続先名や踏み台の設定からは継承しません。未指定の接続先は従来の一覧処理を使います。属性取得とファイル操作・転送は選択した方式を引き続き使うため、それらも接続先で動作する必要があります（SCPの属性取得はGNU stat等が必要です）。属性は各項目について取得するため、大量の項目では通常の一覧より時間がかかる場合があります。
 
 ## スプレッドシート（yysheet） {#yysheet}
 
@@ -1264,6 +1285,8 @@ identity_file = "~/.ssh/id_build"
 proxy_jump = "bastion"        # 踏み台（"a,admin@b:2022" の多段も可。"none" で ~/.ssh/config の指定も使わない）
 proxy = "none"                # この接続先のプロキシ（"none" で共通のプロキシも使わない）
 agent_dir = "/work/yamada/.yyeditor"   # ホームが noexec の場合など
+# list_command = "ls -1A"     # yysftpの一覧だけを任意コマンドに変更（直下の名前だけ出力）
+# list_format = "lines"       # "lines"（既定）/ "nul"。詳細はディレクトリ一覧コマンドの節
 forward = ["L 5432:localhost:5432", "D 1080"]   # ポートフォワーディング（yyterm だけが使う）
 terminal_multiplexer = "none"  # "none" / "tmux" / "screen"（yyterm の永続セッション）
 terminal_session_prefix = ""  # tmux / screen を使う場合は登録必須。タブ名と連結してセッション名にする

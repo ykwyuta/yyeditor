@@ -66,6 +66,22 @@ struct ForwardSet {
 }
 
 impl RemoteState {
+    fn listing_command(
+        &self,
+        target: &Target,
+    ) -> Result<Option<yy_remote::listing::ListCommand>, String> {
+        let h = self
+            .config
+            .host
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&target.host))
+            .map(|(_, h)| h);
+        yy_remote::listing::ListCommand::from_settings(
+            h.and_then(|h| h.list_command.as_deref()),
+            h.and_then(|h| h.list_format.as_deref()),
+        )
+        .map_err(|e| format!("{} の一覧設定: {e}", target.host))
+    }
     pub(crate) fn new(factory: Option<ConnectorFactory>, config: RemoteConfig) -> RemoteState {
         RemoteState {
             factory,
@@ -729,6 +745,12 @@ pub(crate) fn fs(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<dyn RemoteF
     sftp_fs(target, show).map(|f| f as Arc<dyn RemoteFs>)
 }
 
+pub(crate) fn listing_command(
+    target: &Target,
+) -> Result<Option<yy_remote::listing::ListCommand>, String> {
+    with_state(|r| r.listing_command(target)).unwrap_or(Ok(None))
+}
+
 /// `target` の SFTP（接続先に何も置かない。接続・SFTP の開始は必要なときだけ）。
 pub(crate) fn sftp_fs(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<SftpFs>, String> {
     let cached = with_state(|r| {
@@ -1346,6 +1368,31 @@ pub(crate) fn open_location(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listing_commands_are_scoped_to_the_requested_host_alias() {
+        let config = yy_config::Config::from_toml(
+            r#"
+            [remote.host.first]
+            hostname = "same.example"
+            list_command = "ls -1A"
+            [remote.host.second]
+            hostname = "same.example"
+            list_command = "custom --zero"
+            list_format = "nul"
+            [remote.host.invalid]
+            list_format = "nul"
+        "#,
+        )
+        .unwrap();
+        let r = RemoteState::new(None, config.remote);
+        let list = |name| r.listing_command(&Target::parse(name).unwrap());
+        assert_eq!(list("first").unwrap(), list("FIRST").unwrap());
+        assert_ne!(list("first").unwrap(), list("second").unwrap());
+        assert!(list("same.example").unwrap().is_none());
+        assert!(list("unconfigured").unwrap().is_none());
+        assert!(list("invalid").is_err());
+    }
 
     #[test]
     fn lists_ssh_config_hosts() {

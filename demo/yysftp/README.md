@@ -4,6 +4,8 @@
 
 接続先に`internal`、`sftp-proxy`または`sftp-command`を指定します。方式の選び方と制約は[同梱ヘルプ](../../crates/yy-win/help/help.md#sftp-gateway)を参照してください。
 
+接続先ごとに一覧コマンドを変える場合は、該当する`[remote.host.名前]`に`list_command = "ls -1A"`と`list_format = "lines"`を指定します。任意のスクリプトも使用できますが、標準出力は直下のファイル名だけにしてください。実行条件・NUL区切り・属性取得の制約は[ディレクトリ一覧コマンド](../../crates/yy-win/help/help.md#sftp-list-command)を参照してください。
+
 SecureCube Access Check／Access Check Essential向けの確認点は[専用メモ](securecube-access-check.md)に記載しています。Essentialの公開仕様に合わせたSCPモードでは、一覧にもSFTPを要求しないよう改善しています。
 
 製品の実機には接続せず、`crates/yy-ssh/tests/gateway.rs`の模擬SSHゲートウェイを使用しました。Windows上の実際のループバックSSH通信で、次を確認しています。

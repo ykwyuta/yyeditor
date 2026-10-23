@@ -1196,6 +1196,7 @@ fn browser(target: &Target) -> std::result::Result<(Arc<dyn RemoteFs>, Vec<u8>),
         return Ok(b);
     }
     let scp = with(|a| a.protocol == Protocol::Scp).unwrap_or(false);
+    let listing = crate::remote::listing_command(target)?;
     let fs: Arc<dyn RemoteFs> = if scp && !crate::remote::use_agent() {
         let t = crate::remote::transport(target, &set_status)?;
         crate::remote::wait(&set_status, move |_| {
@@ -1208,6 +1209,14 @@ fn browser(target: &Target) -> std::result::Result<(Arc<dyn RemoteFs>, Vec<u8>),
     };
     // 転送に使う接続（エージェントのセッションの接続か、同じ SSH の接続）
     let t = crate::remote::transport(target, &set_status)?;
+    let fs: Arc<dyn RemoteFs> = match listing {
+        Some(listing) => Arc::new(yy_remote::listing::CommandListFs::new(
+            fs,
+            t.clone(),
+            listing,
+        )),
+        None => fs,
+    };
     let home = fs.home().to_vec();
     with(|a| {
         a.browsers.retain(|b| !b.target.same(target));

@@ -696,6 +696,10 @@ pub struct RemoteHost {
     pub sftp_subsystem: Option<String>,
     /// SFTPサーバーを起動するリモートコマンド。PTYは使わない。
     pub sftp_server: Option<String>,
+    /// yysftpの一覧だけを置き換えるリモートコマンド。対象ディレクトリで実行。
+    pub list_command: Option<String>,
+    /// list_commandのファイル名区切り。lines（既定）またはnul。
+    pub list_format: Option<String>,
     /// この接続先に使うプロキシ（`none` で共通のプロキシも使わない）
     pub proxy: Option<String>,
     /// この接続先でエージェントを置くフォルダ（ホームが noexec の場合など）
@@ -898,6 +902,8 @@ mod tests {
             sftp_server = "/usr/lib/openssh/sftp-server"
             [remote.host.gateway]
             sftp_subsystem = "gateway-sftp"
+            list_command = "ls -1A"
+            list_format = "lines"
             "#,
         )
         .unwrap();
@@ -927,6 +933,17 @@ mod tests {
             c.remote.host["gateway"].sftp_subsystem.as_deref(),
             Some("gateway-sftp")
         );
+        assert_eq!(
+            c.remote.host["gateway"].list_command.as_deref(),
+            Some("ls -1A")
+        );
+        assert_eq!(
+            c.remote.host["gateway"].list_format.as_deref(),
+            Some("lines")
+        );
+        assert!(c.remote.host["lab"].list_command.is_none());
+        let saved = toml::to_string(&c).unwrap();
+        assert_eq!(Config::from_toml(&saved).unwrap().remote, c.remote);
         assert!(
             Config::from_toml(
                 "[remote.host.x]
