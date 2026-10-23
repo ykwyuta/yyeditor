@@ -288,8 +288,7 @@ try {
         [DbShellTest]::TextMessage([DbShellTest]::GetDlgItem($taskFieldForm,102),0xC,0,$Type)|Out-Null
         [DbShellTest]::SendMessage([DbShellTest]::GetDlgItem($taskFieldForm,105),0xF1,[int]$Important,0)|Out-Null
         [DbShellTest]::SendNotifyMessage($taskFieldForm,0x111,1,0)|Out-Null
-        for($i=0;$i -lt 100 -and ![DbShellTest]::IsWindowEnabled($taskWindow);$i++){Start-Sleep -Milliseconds 20}
-        Start-Sleep -Milliseconds 40
+        Wait-DialogClosed $taskFieldForm
     }
     Add-ERField 'customer_name' 'VARCHAR(100)' $true
     [DbShellTest]::SendNotifyMessage($taskWindow,0x111,9114,0)|Out-Null
@@ -321,7 +320,9 @@ try {
     [DbShellTest]::SendNotifyMessage($taskWindow,0x111,9136,0)|Out-Null
     $taskRecommend=Wait-VisibleDialog 'YYDbERChoice' '論理関係の推薦（意味を確認して選択）'
     $taskRecommendList=[DbShellTest]::GetDlgItem($taskRecommend,10)
-    if([DbShellTest]::SendMessage($taskRecommendList,0x18B,0,0).ToInt64() -ne 1){throw 'Expected one unregistered logical relation recommendation'}
+    for($i=0;$i -lt 100 -and [DbShellTest]::SendMessage($taskRecommendList,0x18B,0,0).ToInt64() -ne 1;$i++){Start-Sleep -Milliseconds 20}
+    $taskRecommendationCount=[DbShellTest]::SendMessage($taskRecommendList,0x18B,0,0).ToInt64()
+    if($taskRecommendationCount -ne 1){throw "Expected one unregistered logical relation recommendation; actual=$taskRecommendationCount"}
     if([DbShellTest]::SendMessage($taskRecommendList,0x190,0,0).ToInt64() -ne 0){throw 'Recommendations must require explicit selection'}
     Snapshot $taskRecommend 'er-recommendations'
     [DbShellTest]::SendMessage($taskRecommendList,0x185,1,0)|Out-Null
@@ -500,7 +501,10 @@ try {
     [DbShellTest]::TextMessage([DbShellTest]::GetDlgItem($taskDialog,102),0xC,0,$taskTarget)|Out-Null
     Snapshot $taskDialog 'connection-form'
     [DbShellTest]::SendNotifyMessage($taskDialog,0x111,1,0)|Out-Null
-    for($i=0;$i -lt 100 -and !(Test-Path $env:YYDBMANAGER_CONNECTIONS_FILE);$i++){Start-Sleep -Milliseconds 50}
+    Wait-DialogClosed $taskDialog
+    $taskProfileCombo=[DbShellTest]::GetDlgItem($taskWindow,124)
+    for($i=0;$i -lt 100 -and [DbShellTest]::TextMessage($taskProfileCombo,0x158,-1,'画面検証用 SQLite (SQLite)').ToInt64() -lt 0;$i++){Start-Sleep -Milliseconds 50}
+    if([DbShellTest]::TextMessage($taskProfileCombo,0x158,-1,'画面検証用 SQLite (SQLite)').ToInt64() -lt 0){throw 'Saved connection was not added to the model'}
     if(!(Test-Path $env:YYDBMANAGER_CONNECTIONS_FILE)){throw "Connection profile was not saved: $([DbShellTest]::Describe($taskProcess.Id))"}
     foreach($taskHidden in @(201,202,124)){if([DbShellTest]::IsWindowVisible([DbShellTest]::GetDlgItem($taskWindow,$taskHidden))){throw 'Connection details are still visible in the main window'}}
     if([DbShellTest]::GetDlgItem($taskWindow,125) -ne [IntPtr]::Zero){throw 'Global ambiguous refresh button still exists'}
@@ -549,8 +553,12 @@ try {
     $taskProcess=Start-Process @taskStart
     $taskWindow=Wait-Frame
     $taskCombo=[DbShellTest]::GetDlgItem($taskWindow,124)
-    if([DbShellTest]::SendMessage($taskCombo,0x146,0,0).ToInt64() -ne 1){throw 'Saved connection did not reload'}
-    [DbShellTest]::SendMessage($taskCombo,0x14E,0,0)|Out-Null
+    $taskSavedIndex=[DbShellTest]::TextMessage($taskCombo,0x158,-1,'画面検証用 SQLite (SQLite)').ToInt64()
+    if($taskSavedIndex -lt 0){throw 'Saved connection did not reload'}
+    foreach($taskDemoName in @('demo / SQLite (SQLite)','demo / DuckDB (DuckDB)','demo / PostgreSQL (PostgreSQL)','demo / MySQL (MySQL)','demo / SQL Server (SQL Server)','demo / Oracle (Oracle)','demo / Db2 (IBM Db2)')) {
+        if([DbShellTest]::TextMessage($taskCombo,0x158,-1,$taskDemoName).ToInt64() -lt 0){throw "Default demo profile did not reload: $taskDemoName"}
+    }
+    [DbShellTest]::SendMessage($taskCombo,0x14E,$taskSavedIndex,0)|Out-Null
     [DbShellTest]::SendMessage($taskWindow,0x111,(124 -bor (1 -shl 16)),$taskCombo)|Out-Null
     [DbShellTest]::SendNotifyMessage($taskWindow,0x111,122,0)|Out-Null
     $taskDialog=[IntPtr]::Zero
@@ -566,8 +574,8 @@ try {
     for($i=0;$i -lt 100;$i++){$taskConfirm=[DbShellTest]::FindWindow('#32770','接続設定');if($taskConfirm -ne [IntPtr]::Zero -and [DbShellTest]::GetDlgItem($taskConfirm,6) -ne [IntPtr]::Zero){break};Start-Sleep -Milliseconds 20}
     if($taskConfirm -eq [IntPtr]::Zero){throw 'Delete confirmation did not appear'}
     [DbShellTest]::SendNotifyMessage([DbShellTest]::GetDlgItem($taskConfirm,6),0xF5,0,0)|Out-Null
-    for($i=0;$i -lt 100 -and [DbShellTest]::SendMessage($taskCombo,0x146,0,0).ToInt64() -ne 0;$i++){Start-Sleep -Milliseconds 20}
-    if([DbShellTest]::SendMessage($taskCombo,0x146,0,0).ToInt64() -ne 0){throw 'Saved connection was not deleted'}
+    for($i=0;$i -lt 100 -and [DbShellTest]::TextMessage($taskCombo,0x158,-1,'画面検証用 SQLite (SQLite)').ToInt64() -ge 0;$i++){Start-Sleep -Milliseconds 20}
+    if([DbShellTest]::TextMessage($taskCombo,0x158,-1,'画面検証用 SQLite (SQLite)').ToInt64() -ge 0){throw 'Saved connection was not deleted'}
     [DbShellTest]::SendNotifyMessage($taskWindow,0x111,121,0)|Out-Null
     $taskDialog=[IntPtr]::Zero
     for($i=0;$i -lt 100;$i++){$taskDialog=[DbShellTest]::FindWindow('YYDbConnection','接続先の設定');if($taskDialog -ne [IntPtr]::Zero -and [DbShellTest]::IsWindowVisible($taskDialog)){break};Start-Sleep -Milliseconds 20}
