@@ -27,6 +27,7 @@ pub fn resolver(config: &yy_config::RemoteConfig) -> yy_remote::ssh_config::Reso
             (
                 name.clone(),
                 HostOverride {
+                    ssh: h.ssh.clone(),
                     hostname: h.hostname.clone(),
                     user: h.user.clone(),
                     port: h.port,

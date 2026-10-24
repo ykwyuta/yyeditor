@@ -66,6 +66,7 @@ jobs:
           Copy-Item -Recurse demo/yy3designer dist/yy3designer/examples
           Copy-Item COPYING,COPYING.EXCEPTION,crates/yy-win/fonts/LICENSE-UDEVGothic.txt dist/yy3designer/
           Copy-Item crates/yy-preview/assets/LICENSE-*.txt dist/yy3designer/
+          Copy-Item crates/yy-config/LICENSE-FS2.txt dist/yy3designer/
       - uses: actions/upload-artifact@v4
         with:
           name: yy3designer-windows-x64

@@ -21,6 +21,7 @@ mod credstore;
 mod diffview;
 mod download;
 mod draw;
+mod explorer;
 mod findbar;
 mod fm;
 mod font;
@@ -37,6 +38,7 @@ mod remotedlg;
 mod render;
 mod sftp;
 mod sheet;
+mod sites;
 mod tabclose;
 mod term;
 mod util;
@@ -55,6 +57,7 @@ use crate::util::Context;
 pub use browser::{DevCertFn, run_browser};
 /// 構成図エディタ（yydraw）を起動する。
 pub use draw::run_draw;
+pub use explorer::{ExplorerApp, explorer_command};
 /// ファイル管理（yyfilemanager）を起動する
 pub use fm::run_filemanager;
 /// ファイル転送（yysftp）を起動する

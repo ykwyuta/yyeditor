@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, PWSTR, Result, w};
 use yy_config::TransferConfig;
 use yy_remote::log::TransferLog;
-use yy_remote::xfer::{self, Direction, Job, Journal, State};
+use yy_remote::xfer::{self, Direction, Job, Journal, Protocol, State};
 use yy_remote::{RemoteFs, RemoteUri, Transport};
 
 use super::{
@@ -704,7 +704,8 @@ impl Queue {
             transport,
             retry,
             scp_chunk: u64::from(cfg.scp_chunk_mb.max(1)) << 20,
-            hasher: crate::remote::use_agent().then(|| crate::remote::background_hasher(&target)),
+            hasher: (e.job.protocol != Protocol::Scp && crate::remote::agent_for(&target))
+                .then(|| crate::remote::background_hasher(&target)),
         };
         self.tlog.line(
             Some(work.job.id),
@@ -1371,10 +1372,11 @@ pub(super) fn upload(hwnd: HWND, paths: Vec<PathBuf>) {
     if paths.is_empty() {
         return;
     }
-    let Some(Some((loc, protocol))) = with(|a| a.loc.clone().map(|l| (l, a.protocol))) else {
+    let Some(Some(loc)) = with(|a| a.loc.clone()) else {
         info_box(hwnd, "先に送り先（接続先のフォルダ）を開いてください。");
         return;
     };
+    let protocol = super::protocol_for(&loc.target);
     // 送るもの（接続先のパスは表示しているフォルダからの相対）
     let mut dirs: Vec<Vec<u8>> = Vec::new();
     let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
@@ -1554,9 +1556,10 @@ fn download_items(
     items: Vec<(Vec<u8>, Option<yy_remote::sftp::Attrs>)>,
     dest: PathBuf,
 ) {
-    let Some((hwnd, protocol)) = with(|a| (a.frame, a.protocol)) else {
+    let Some(hwnd) = with(|a| a.frame) else {
         return;
     };
+    let protocol = super::protocol_for(&loc.target);
     if items.is_empty() {
         return;
     }

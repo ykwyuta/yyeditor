@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::HSTRING;
 use yy_core::Encoding;
 use yy_remote::uri::{RemoteUri, Target};
-use yy_remote::{DirEntry, FileInfo, RemoteFs, Session};
+use yy_remote::{DirEntry, FileInfo, RemoteFs};
 
 use crate::goto::{CLASS_BUTTON, CLASS_EDIT, CLASS_STATIC, Template};
 use crate::remote::{self, RemoteDest};
@@ -45,7 +45,7 @@ pub(crate) enum Mode {
 pub(crate) struct Picked {
     pub(crate) uri: RemoteUri,
     /// エージェントのセッション（エージェントを使うときだけ。保存に使う）
-    pub(crate) session: Option<Arc<Session>>,
+    pub(crate) session: Option<Arc<remote::EditorConnection>>,
     /// 開く: 指定した文字コード（`None` なら自動判別）。保存: 保存する文字コード
     pub(crate) encoding: Option<Encoding>,
     pub(crate) bom: bool,
@@ -510,7 +510,7 @@ fn accept_folder(hwnd: HWND) {
             port: target.port,
             path: st.dir.clone(),
         },
-        session: remote::with_state(|r| r.connected(&target)).flatten(),
+        session: None,
         encoding: None,
         bom: false,
         existing: None,
@@ -583,7 +583,17 @@ fn accept_name(hwnd: HWND) {
     }
     let bom = st.mode == Mode::Save
         && unsafe { SendMessageW(item(hwnd, ID_BOM), BM_GETCHECK, None, None).0 } == 1;
-    let session = remote::with_state(|r| r.connected(&target)).flatten();
+    let session = if st.mode == Mode::Save {
+        match remote::editor_connection(&target, &show) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                set_info(hwnd, &e);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     st.result = Some(Picked {
         uri,
         session,

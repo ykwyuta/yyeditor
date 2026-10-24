@@ -3,6 +3,9 @@
 
 #[cfg(windows)]
 fn main() {
+    if let Some(code) = yy_win::explorer_command(yy_win::ExplorerApp::Terminal) {
+        std::process::exit(code);
+    }
     // yyterm [フォルダ | ssh://接続先/パス | ユーザー@ホスト]
     let initial = std::env::args().nth(1);
     if let Err(e) = yy_win::run_terminal(initial, ssh()) {

@@ -4,6 +4,7 @@
 現在の機能と内部仕様は[文書案内](../../README.md)を参照してください。
 
 - [YYシリーズ連携の追加候補（2026-10-24）](2026-10-24-series-integration.md)
+- [SSH接続先GUI・SecureCube／WinSCP設定の対応表（2026-10-25）](2026-10-25-ssh-site-settings.md)
 
 ## 1. 目的と要求
 

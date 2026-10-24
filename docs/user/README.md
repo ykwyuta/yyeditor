@@ -20,6 +20,12 @@
 
 ## 使い始める
 
+yyeditor・yyterm・yysftpの接続先は共通の[SSH接続先管理GUI](../../crates/yy-win/help/help.md#ssh-sites)から登録できます。
+SFTP／SCP、ProxyJump、L/R/D転送、tmux／screenもホスト別に設定します。
+
+yyeditor・yytermは各アプリの「ヘルプ → エクスプローラーの右クリックに登録」から、
+ファイルやフォルダーの右クリックメニューに追加できます。[登録・解除の説明](../../crates/yy-win/help/help.md#explorer)を参照してください。
+
 Windowsの配布資材を展開して使うアプリの実行ファイルを起動します。yymergeはGUI用の`yymergew.exe`と
 CLI用の`yymerge.exe`を分けています。yydbmanager・yymerge・YY3Designerは個別の配布資材です。
 ヘルプはF1またはヘルプメニューから開けます。Markdownプレビュー・ブラウザ・ヘルプの表示には

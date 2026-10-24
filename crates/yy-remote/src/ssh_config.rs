@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::proxy::{self, Proxy, Route};
 use crate::uri::Target;
+pub use yy_config::SshSettings as HostSpecSettings;
 
 /// 踏み台をたどる深さの上限（設定の循環を止める）
 const MAX_JUMP_DEPTH: usize = 8;
@@ -25,6 +26,7 @@ const MAX_JUMP_DEPTH: usize = 8;
 /// 接続に使う値。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostSpec {
+    pub ssh: yy_config::SshSettings,
     /// 接続先として入力された名前（履歴やタイトルに使う）
     pub target: Target,
     /// 実際に接続するホスト名
@@ -171,6 +173,7 @@ impl HostSpec {
 /// yyeditor の接続設定（`config.toml` の `[remote.host.<名前>]`）の 1 項目。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostOverride {
+    pub ssh: yy_config::SshSettings,
     pub hostname: Option<String>,
     pub user: Option<String>,
     pub port: Option<u16>,
@@ -266,6 +269,7 @@ impl Resolver {
             }
         }
         let mut spec = HostSpec {
+            ssh: own.ssh.clone(),
             target: target.clone(),
             hostname,
             port,

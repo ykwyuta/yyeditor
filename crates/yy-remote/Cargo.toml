@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 yy-proto.workspace = true
+yy-config.workspace = true
 crossbeam-channel.workspace = true
 sha2.workspace = true
 hmac.workspace = true

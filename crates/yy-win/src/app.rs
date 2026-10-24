@@ -649,6 +649,17 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         item(help, ID_HELP, w!("ヘルプ(&H)\tF1"))?;
         item(help, ID_HELP_KEYS, w!("キーボードショートカット(&K)"))?;
         item(help, ID_OPEN_SETTINGS, w!("設定ファイルを開く(&S)"))?;
+        item(help, crate::sites::ID_MANAGE, w!("SSH接続先を管理…"))?;
+        item(
+            help,
+            crate::explorer::ID_REGISTER,
+            w!("エクスプローラーの右クリックに登録"),
+        )?;
+        item(
+            help,
+            crate::explorer::ID_UNREGISTER,
+            w!("エクスプローラーの右クリックから解除"),
+        )?;
         item(help, ID_OPEN_REMOTE_LOG, w!("リモート接続の記録を開く(&R)"))?;
         item(
             help,
@@ -903,7 +914,11 @@ impl App {
                 );
             }
             if let Some(path) = initial_file {
-                open_path(frame, path, None, false);
+                if path.is_dir() {
+                    with_app(|a| a.add_workspace_folder(&path));
+                } else {
+                    open_path(frame, path, None, false);
+                }
                 if let Some(line) = initial_line.filter(|n| *n >= 1) {
                     with_app(|a| a.goto_line(line));
                 }
@@ -5156,6 +5171,18 @@ fn execute_command(hwnd: HWND, id: u16) {
             }
         }
         ID_OPEN_SETTINGS => open_settings(hwnd),
+        crate::sites::ID_MANAGE => {
+            if let Some(config) = crate::sites::manage(hwnd) {
+                with_app(|a| a.config.remote = config);
+            }
+        }
+        crate::explorer::ID_REGISTER | crate::explorer::ID_UNREGISTER => {
+            crate::explorer::menu(
+                hwnd,
+                crate::ExplorerApp::Editor,
+                id == crate::explorer::ID_REGISTER,
+            );
+        }
         ID_OPEN_REMOTE_LOG => open_remote_log(hwnd),
         ID_FORGET_PASSWORDS => crate::remote::forget_passwords(hwnd),
         ID_ABOUT => info_box(

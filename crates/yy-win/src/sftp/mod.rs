@@ -587,6 +587,7 @@ fn create_menu() -> Result<HMENU> {
         let bar = CreateMenu()?;
         let file = CreatePopupMenu()?;
         item(file, ID_CONNECT, w!("接続(&C)...\tCtrl+N"))?;
+        item(file, crate::sites::ID_MANAGE, w!("SSH接続先を管理…"))?;
         item(file, ID_DISCONNECT, w!("切断(&D)"))?;
         sep(file)?;
         item(file, ID_TERMINAL, w!("ターミナルで開く(&T)"))?;
@@ -808,10 +809,13 @@ impl App {
                         "{}　{} 個の項目{sel}　転送: {}　エージェント: {}",
                         l.target,
                         self.items.len(),
-                        self.protocol.name(),
-                        if crate::remote::use_agent() {
+                        crate::remote::protocol(&l.target, self.protocol).name(),
+                        if crate::remote::protocol(&l.target, self.protocol) != Protocol::Scp
+                            && crate::remote::agent_for(&l.target)
+                        {
                             "使う"
-                        } else if self.protocol == Protocol::Scp {
+                        } else if crate::remote::protocol(&l.target, self.protocol) == Protocol::Scp
+                        {
                             "使わない（シェル）"
                         } else {
                             "使わない（SFTP）"
@@ -846,8 +850,11 @@ impl App {
                     (MF_BYCOMMAND | if on { MF_CHECKED } else { MF_UNCHECKED }).0,
                 );
             };
-            check(ID_PROTO_SFTP, self.protocol == Protocol::Sftp);
-            check(ID_PROTO_SCP, self.protocol == Protocol::Scp);
+            let protocol = self.loc.as_ref().map_or(self.protocol, |l| {
+                crate::remote::protocol(&l.target, self.protocol)
+            });
+            check(ID_PROTO_SFTP, protocol == Protocol::Sftp);
+            check(ID_PROTO_SCP, protocol == Protocol::Scp);
             check(ID_HIDDEN, self.show_hidden);
             check(ID_USE_AGENT, crate::remote::use_agent());
         }
@@ -1189,13 +1196,17 @@ fn local_time(secs: u64) -> String {
 
 /// `target` の一覧・ファイル操作（エージェント、SFTPまたはSCP用シェル）。
 /// なければ接続する。接続中はアプリの状態を借りない）。
+fn protocol_for(target: &Target) -> Protocol {
+    crate::remote::protocol(target, with(|a| a.protocol).unwrap_or(Protocol::Sftp))
+}
+
 fn browser(target: &Target) -> std::result::Result<(Arc<dyn RemoteFs>, Vec<u8>), String> {
     if let Some(b) = with(|a| a.browser(target).map(|b| (b.fs.clone(), b.home.clone()))).flatten() {
         return Ok(b);
     }
-    let scp = with(|a| a.protocol == Protocol::Scp).unwrap_or(false);
+    let scp = protocol_for(target) == Protocol::Scp;
     let listing = crate::remote::listing_command(target)?;
-    let fs: Arc<dyn RemoteFs> = if scp && !crate::remote::use_agent() {
+    let fs: Arc<dyn RemoteFs> = if scp {
         let t = crate::remote::transport(target, &set_status)?;
         crate::remote::wait(&set_status, move |_| {
             yy_remote::shellfs::ShellFs::connect(t)
@@ -1268,7 +1279,10 @@ fn go(mut loc: Loc, push: bool) {
         }
     };
     if loc.path.is_empty() {
-        loc.path = home;
+        loc.path = crate::remote::host_settings(&loc.target)
+            .and_then(|h| h.remote_directory)
+            .map(String::into_bytes)
+            .unwrap_or(home);
     }
     let path = loc.path.clone();
     let listed = remote_op(
@@ -1518,6 +1532,16 @@ fn command(hwnd: HWND, id: u16) {
             }
         }
         ID_CONNECT => cmd_connect(hwnd),
+        crate::sites::ID_MANAGE => {
+            if let Some(config) = crate::sites::manage(hwnd) {
+                with(|a| {
+                    a.config.remote = config;
+                    a.browsers.clear();
+                    a.fill_tree();
+                    a.update_menu();
+                });
+            }
+        }
         ID_DISCONNECT => {
             with(|a| {
                 if let Some(l) = a.loc.take() {
@@ -1602,12 +1626,39 @@ fn command(hwnd: HWND, id: u16) {
             }
         }
         ID_PROTO_SFTP | ID_PROTO_SCP => {
-            with(|a| {
-                a.protocol = if id == ID_PROTO_SCP {
-                    Protocol::Scp
-                } else {
-                    Protocol::Sftp
+            if let Some(Some(target)) = with(|a| a.loc.as_ref().map(|l| l.target.clone())) {
+                let Some(path) = yy_config::connections::default_path() else {
+                    return;
                 };
+                let mut host = crate::remote::host_settings(&target).unwrap_or_default();
+                host.protocol = Some(if id == ID_PROTO_SCP {
+                    yy_config::TransferProtocol::Scp
+                } else {
+                    yy_config::TransferProtocol::Sftp
+                });
+                host.use_agent = Some(false);
+                if let Err(e) =
+                    yy_config::connections::Profiles::edit(&path, &target.host, Some(host))
+                {
+                    error_box(hwnd, &e);
+                    return;
+                }
+                let (config, error) = Config::load();
+                if let Some(error) = error {
+                    error_box(hwnd, &error.to_string());
+                    return;
+                }
+                crate::remote::reload_settings(config.remote.clone());
+                with(|a| a.config.remote = config.remote);
+            }
+            with(|a| {
+                if a.loc.is_none() {
+                    a.protocol = if id == ID_PROTO_SCP {
+                        Protocol::Scp
+                    } else {
+                        Protocol::Sftp
+                    };
+                }
                 a.update_menu();
                 a.set_status("");
                 a.browsers.clear();

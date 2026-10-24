@@ -30,6 +30,74 @@ use yy_remote::{
 use crate::app::with_app;
 use crate::util::{group_digits, human_size};
 
+pub(crate) enum EditorConnection {
+    Agent(Arc<Session>),
+    Native(yy_remote::file_access::FileAccess),
+}
+
+impl EditorConnection {
+    fn fs(&self) -> Arc<dyn RemoteFs> {
+        match self {
+            Self::Agent(s) => s.clone(),
+            Self::Native(s) => s.fs(),
+        }
+    }
+    pub(crate) fn stat(&self, path: &[u8]) -> std::io::Result<FileInfo> {
+        self.fs().stat(path)
+    }
+    pub(crate) fn make_dir(&self, path: &[u8]) -> std::io::Result<()> {
+        self.fs().make_dir(path)
+    }
+    pub(crate) fn rename(&self, from: &[u8], to: &[u8]) -> std::io::Result<()> {
+        self.fs().rename(from, to)
+    }
+    pub(crate) fn remove(&self, path: &[u8], recursive: bool) -> std::io::Result<()> {
+        self.fs().remove(path, recursive)
+    }
+    pub(crate) fn create_file(&self, path: &[u8]) -> std::io::Result<FileInfo> {
+        match self {
+            Self::Agent(s) => s.create_file(path),
+            Self::Native(s) => {
+                let empty = tempfile::NamedTempFile::new()?;
+                s.upload(empty.path(), path, None, false, &mut |_, _| true)?
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "同じ名前のファイルがあります",
+                        )
+                    })
+            }
+        }
+    }
+    fn download(
+        &self,
+        path: &[u8],
+        out: &mut dyn Write,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> std::io::Result<FileInfo> {
+        match self {
+            Self::Agent(s) => s.download(path, out, progress),
+            Self::Native(s) => s.download(path, out, progress),
+        }
+    }
+}
+
+pub(crate) fn editor_connection(
+    target: &Target,
+    show: &dyn Fn(&str),
+) -> Result<Arc<EditorConnection>, String> {
+    if agent_for(target) {
+        return session(target, show).map(|s| Arc::new(EditorConnection::Agent(s)));
+    }
+    let p = protocol(target, yy_remote::xfer::Protocol::Sftp);
+    let transport = transport(target, show)?;
+    wait(show, move |_| {
+        yy_remote::file_access::FileAccess::connect(transport, p)
+    })
+    .map(|s| Arc::new(EditorConnection::Native(s)))
+    .map_err(|e| e.to_string())
+}
+
 /// 接続中のスレッドからの問い合わせ（`LPARAM` は `Box<PromptRequest>`）
 pub(crate) const WM_APP_REMOTE_PROMPT: u32 = WM_APP + 30;
 /// バックグラウンドの処理の進み・終わりを UI スレッドに知らせる
@@ -48,8 +116,7 @@ pub(crate) struct RemoteState {
     config: RemoteConfig,
     /// 最後に使った場所（ファイル選択の初期値）
     pub(crate) last: Option<RemoteUri>,
-    /// 接続先にエージェントを置いて使う（エディタは常に。ターミナルとファイル転送は設定・メニュー）。
-    /// 使わなければ、一覧・ファイル操作は SFTP（[`fs`]）
+    /// 従来のエージェント利用の既定値。ホスト別のprotocol/use_agent指定を優先する。
     pub(crate) use_agent: bool,
     /// エージェントを使わないときの一覧・ファイル操作（SFTP）
     sftps: Vec<(Target, Arc<SftpFs>)>,
@@ -135,6 +202,7 @@ impl RemoteState {
                 (
                     name.clone(),
                     HostOverride {
+                        ssh: h.ssh.clone(),
                         hostname: h.hostname.clone(),
                         user: h.user.clone(),
                         port: h.port,
@@ -726,9 +794,49 @@ pub(crate) fn session(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<Sessio
     Ok(s)
 }
 
-/// 接続先にエージェントを置いて使うか（エディタは常に。ターミナル・ファイル転送は設定・メニュー）。
+/// 従来のエージェント利用の既定値。個別ホストにはagent_forを使う。
 pub(crate) fn use_agent() -> bool {
     with_state(|r| r.use_agent).unwrap_or(true)
+}
+
+pub(crate) fn host_settings(target: &Target) -> Option<yy_config::RemoteHost> {
+    with_state(|r| {
+        r.config
+            .host
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&target.host))
+            .map(|(_, h)| h.clone())
+    })
+    .flatten()
+}
+
+pub(crate) fn reload_settings(config: yy_config::RemoteConfig) {
+    with_state(|r| {
+        r.config = config;
+        r.connector = None;
+        r.sessions.clear();
+        r.transports.clear();
+        r.sftps.clear();
+    });
+}
+
+pub(crate) fn protocol(
+    target: &Target,
+    fallback: yy_remote::xfer::Protocol,
+) -> yy_remote::xfer::Protocol {
+    match host_settings(target).and_then(|h| h.protocol) {
+        Some(yy_config::TransferProtocol::Sftp) => yy_remote::xfer::Protocol::Sftp,
+        Some(yy_config::TransferProtocol::Scp) => yy_remote::xfer::Protocol::Scp,
+        None => fallback,
+    }
+}
+
+pub(crate) fn agent_for(target: &Target) -> bool {
+    match host_settings(target) {
+        Some(h) if h.protocol.is_some() => false,
+        Some(h) => h.use_agent.unwrap_or_else(use_agent),
+        None => use_agent(),
+    }
 }
 
 /// エージェントを使うかを変える（変えた後の一覧・ファイル操作から）。
@@ -739,10 +847,17 @@ pub(crate) fn set_use_agent(on: bool) {
 /// `target` のファイル操作（一覧・情報・作成・名前の変更・削除）。エージェントを使う設定なら
 /// エージェント（[`session`]）、でなければ SFTP（接続先に何も置かない）。
 pub(crate) fn fs(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<dyn RemoteFs>, String> {
-    if use_agent() {
+    if agent_for(target) {
         return session(target, show).map(|s| s as Arc<dyn RemoteFs>);
     }
-    sftp_fs(target, show).map(|f| f as Arc<dyn RemoteFs>)
+    if protocol(target, yy_remote::xfer::Protocol::Sftp) == yy_remote::xfer::Protocol::Scp {
+        let t = transport(target, show)?;
+        wait(show, move |_| yy_remote::shellfs::ShellFs::connect(t))
+            .map(|f| Arc::new(f) as Arc<dyn RemoteFs>)
+            .map_err(|e| e.to_string())
+    } else {
+        sftp_fs(target, show).map(|f| f as Arc<dyn RemoteFs>)
+    }
 }
 
 pub(crate) fn listing_command(
@@ -1161,7 +1276,7 @@ pub(crate) fn open(
     {
         return Ok(());
     }
-    let session = session(&uri.target(), &show_status)?;
+    let session = editor_connection(&uri.target(), &show_status)?;
     let path = uri.path.clone();
     let p = path.clone();
     let s = session.clone();
@@ -1250,7 +1365,7 @@ fn describe(uri: &RemoteUri, e: &std::io::Error) -> String {
 #[derive(Clone)]
 pub(crate) struct RemoteDest {
     pub(crate) uri: RemoteUri,
-    pub(crate) session: Arc<Session>,
+    pub(crate) session: Arc<EditorConnection>,
     /// 開いた（前回保存した）ときのファイル。これと違えば外部で変更されている
     pub(crate) expected: Option<FileId>,
     /// 外部で変更されていても置き換える
@@ -1273,6 +1388,19 @@ impl RemoteDest {
         let expected = self.expected;
         let force = self.force;
         Box::new(move |local, progress| {
+            if let EditorConnection::Native(access) = session.as_ref() {
+                return access
+                    .upload(local, &path, expected, force, &mut |n, _| progress(n))?
+                    .map(|i| i.id)
+                    .ok_or_else(|| {
+                        SaveError::Conflict(
+                            "保存先が開いた後に変更されたか、同じ名前のファイルがあります。".into(),
+                        )
+                    });
+            }
+            let EditorConnection::Agent(session) = session.as_ref() else {
+                unreachable!()
+            };
             let mut f = std::fs::File::open(local)?;
             match session.upload(&mut f, &path, expected, progress)? {
                 UploadOutcome::Saved(info) => Ok(info.id),
@@ -1297,7 +1425,7 @@ impl RemoteDest {
 pub(crate) fn current_dest(file: &RemoteFile) -> Result<RemoteDest, String> {
     let uri = RemoteUri::parse(&file.uri)
         .ok_or_else(|| format!("場所が正しくありません: {}", file.uri))?;
-    let session = session(&uri.target(), &show_status)?;
+    let session = editor_connection(&uri.target(), &show_status)?;
     Ok(RemoteDest {
         uri,
         session,
@@ -1343,9 +1471,9 @@ pub(crate) fn list_dir(dir: &RemoteUri) -> Result<(Vec<workspace::Entry>, usize)
 pub(crate) fn file_op<T: Send + 'static>(
     uri: &RemoteUri,
     label: &str,
-    f: impl FnOnce(&Arc<Session>) -> std::io::Result<T> + Send + 'static,
+    f: impl FnOnce(&Arc<EditorConnection>) -> std::io::Result<T> + Send + 'static,
 ) -> Result<T, String> {
-    let session = session(&uri.target(), &show_status)?;
+    let session = editor_connection(&uri.target(), &show_status)?;
     show_status(label);
     let r = wait(&show_status, move |_| f(&session));
     show_status("");
@@ -1368,6 +1496,49 @@ pub(crate) fn open_location(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_and_agent_policy_are_scoped_to_alias_not_physical_gateway() {
+        struct Restore(Option<RemoteState>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                STATE.with(|s| *s.borrow_mut() = self.0.take());
+            }
+        }
+        let config = yy_config::Config::from_toml(
+            r#"
+            [remote.host.scp_target]
+            hostname = "gateway.example"
+            protocol = "scp"
+            [remote.host.sftp_target]
+            hostname = "gateway.example"
+            protocol = "sftp"
+            [remote.host.legacy]
+            hostname = "gateway.example"
+        "#,
+        )
+        .unwrap();
+        let _restore =
+            Restore(STATE.with(|s| s.replace(Some(RemoteState::new(None, config.remote)))));
+        let target = |s| Target::parse(s).unwrap();
+        use yy_remote::xfer::Protocol;
+        assert_eq!(
+            protocol(&target("ScP_TaRgEt"), Protocol::Sftp),
+            Protocol::Scp
+        );
+        assert_eq!(
+            protocol(&target("sftp_target"), Protocol::Scp),
+            Protocol::Sftp
+        );
+        assert!(!agent_for(&target("scp_target")));
+        assert!(!agent_for(&target("sftp_target")));
+        assert!(agent_for(&target("legacy")));
+        assert_eq!(protocol(&target("legacy"), Protocol::Sftp), Protocol::Sftp);
+        assert_eq!(
+            protocol(&target("gateway.example"), Protocol::Sftp),
+            Protocol::Sftp
+        );
+    }
 
     #[test]
     fn listing_commands_are_scoped_to_the_requested_host_alias() {

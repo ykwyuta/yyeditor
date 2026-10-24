@@ -1092,6 +1092,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4021,6 +4031,7 @@ dependencies = [
 name = "yy-config"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "serde",
  "tempfile",
  "thiserror 2.0.21",
@@ -4181,6 +4192,7 @@ dependencies = [
  "sha1",
  "sha2",
  "tempfile",
+ "yy-config",
  "yy-proto",
 ]
 

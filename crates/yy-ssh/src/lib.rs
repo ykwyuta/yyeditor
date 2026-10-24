@@ -14,6 +14,7 @@
 
 mod forward;
 mod proxy;
+mod settings;
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -240,6 +241,7 @@ impl SshConnector {
             (None, None) => "直接".to_owned(),
         };
         log.note(format!("{} に接続します（{how}）", spec.address()));
+        let timeout = Duration::from_secs(u64::from(spec.ssh.connect_timeout_secs.max(1)));
         // プロキシを使う場合は、先にプロキシを通した TCP 接続を作る（認証を尋ねてやり直せるように）
         let mut proxied = match proxy {
             Some(p) => Some(connect_proxy(
@@ -317,13 +319,13 @@ impl SshConnector {
                 log.note("SSH の鍵交換が済みました");
                 Ok(handle)
             };
-            match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+            match tokio::time::timeout(timeout, connect).await {
                 Ok(r) => r,
                 Err(_) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
                         "{host}:{port} に接続できませんでした（{} 秒で時間切れ）",
-                        CONNECT_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     ),
                 )),
             }
@@ -367,17 +369,11 @@ impl Connector for SshConnector {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, e.clone()));
         }
         let rt = runtime()?;
-        let config = Arc::new(client::Config {
-            keepalive_interval: Some(self.keepalive),
-            keepalive_max: 3,
-            inactivity_timeout: None,
-            nodelay: true,
-            ..client::Config::default()
-        });
         let mut handles: Vec<Arc<Handle<Client>>> = Vec::new();
         // 接続先（最後のホップ）の -R の振り分け表
         let routes = forward::Routes::default();
         for (i, hop) in hops.iter().enumerate() {
+            let config = Arc::new(settings::client_config(&hop.ssh, self.keepalive)?);
             let via = handles.last().map(|h| (h.as_ref(), hops[i - 1]));
             let r = if i + 1 == hops.len() {
                 routes.clone()
@@ -406,6 +402,8 @@ impl Connector for SshConnector {
             jumps: handles,
             routes,
             sftp: spec.sftp.clone(),
+            exec_via_shell: spec.ssh.exec_via_shell,
+            timeout: Duration::from_secs(u64::from(spec.ssh.connect_timeout_secs)),
         }))
     }
 }
@@ -637,7 +635,11 @@ fn authenticate(
         Ok(())
     };
 
-    for path in &spec.identity_files {
+    for path in spec
+        .identity_files
+        .iter()
+        .filter(|_| spec.ssh.public_key_auth)
+    {
         if !path.is_file() {
             continue;
         }
@@ -666,7 +668,7 @@ fn authenticate(
         log.note("使える秘密鍵のファイルがありません");
     }
 
-    if allowed(&methods, MethodKind::KeyboardInteractive) {
+    if spec.ssh.keyboard_interactive_auth && allowed(&methods, MethodKind::KeyboardInteractive) {
         log.note("keyboard-interactive 認証を試します");
         let user_host = spec.user_host();
         let mut r = rt
@@ -718,7 +720,7 @@ fn authenticate(
         }
     }
 
-    if allowed(&methods, MethodKind::Password) {
+    if spec.ssh.password_auth && allowed(&methods, MethodKind::Password) {
         let key = yy_remote::ssh_password_key(spec);
         let mut notice = None;
         // 保存したパスワードがあれば、尋ねずに使う
@@ -858,6 +860,8 @@ fn load_key(
 
 /// 認証済みの SSH 接続。
 struct SshTransport {
+    exec_via_shell: bool,
+    timeout: Duration,
     handle: Arc<Handle<Client>>,
     /// 経由している踏み台の接続（最初の踏み台から順に）
     jumps: Vec<Arc<Handle<Client>>>,
@@ -886,6 +890,10 @@ impl Drop for SshTransport {
 
 /// チャネルで始めること。
 enum Start {
+    CommandShell {
+        script: Vec<u8>,
+        marker: Vec<u8>,
+    },
     Exec(Vec<u8>),
     /// サブシステム（`sftp` など）
     Subsystem(String),
@@ -915,6 +923,31 @@ impl SshTransport {
             let mut ch = self.handle.channel_open_session().await?;
             let mut pending = std::collections::VecDeque::new();
             match start {
+                Start::CommandShell { script, marker } => {
+                    ch.request_shell(true).await?;
+                    let ready = tokio::time::timeout(self.timeout, async {
+                        let mut prefix = Vec::new();
+                        let mut sent = false;
+                        loop {
+                            match ch.wait().await {
+                                Some(ChannelMsg::Success) if !sent => { ch.data(script.as_slice()).await.map_err(ssh_error)?; sent = true; }
+                                Some(ChannelMsg::Data { data }) => {
+                                    prefix.extend_from_slice(&data);
+                                    if let Some(pos) = prefix.windows(marker.len()).position(|w| w == marker) {
+                                        let rest = prefix.split_off(pos + marker.len());
+                                        if !rest.is_empty() { pending.push_back(ChannelMsg::Data { data: rest.into() }); }
+                                        return Ok(());
+                                    }
+                                    if prefix.len() > STDERR_LIMIT { return Err(io::Error::new(io::ErrorKind::InvalidData, "shell開始前の出力が多すぎます")); }
+                                }
+                                Some(ChannelMsg::Failure) => return Err(io::Error::new(io::ErrorKind::PermissionDenied, "PTYなしshell要求が拒否されました")),
+                                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "shellのコマンド開始前に切断されました")),
+                                _ => {}
+                            }
+                        }
+                    }).await.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "shellコマンドの開始が時間切れです（対話メニューやポリシーを確認してください）")));
+                    if let Err(e) = ready { let _ = ch.close().await; return Err(russh::Error::IO(e)); }
+                }
                 Start::Exec(command) => ch.exec(true, command).await?,
                 Start::Subsystem(name) => ch.request_subsystem(true, name).await?,
                 Start::Sftp(mode) => {
@@ -1043,6 +1076,11 @@ impl SshTransport {
 
 impl Transport for SshTransport {
     fn sftp(&self) -> io::Result<Process> {
+        if self.exec_via_shell
+            && let yy_remote::ssh_config::SftpStart::Command(command) = &self.sftp
+        {
+            return self.exec(command.as_bytes());
+        }
         let o = self.open(Start::Sftp(self.sftp.clone()), false)?;
         Ok(Process::new(
             Box::new(o.writer),
@@ -1051,7 +1089,19 @@ impl Transport for SshTransport {
         ))
     }
     fn exec(&self, command: &[u8]) -> io::Result<Process> {
-        let o = self.open(Start::Exec(command.to_vec()), false)?;
+        let start = if self.exec_via_shell {
+            let token = tempfile_token();
+            let marker = format!("\u{1}YYCMD{token}\u{2}").into_bytes();
+            let mut script = b"printf '%s' ".to_vec();
+            script.extend(yy_remote::shell_quote(&marker));
+            script.extend(b"; exec sh -c ");
+            script.extend(yy_remote::shell_quote(command));
+            script.push(b'\n');
+            Start::CommandShell { script, marker }
+        } else {
+            Start::Exec(command.to_vec())
+        };
+        let o = self.open(start, false)?;
         Ok(Process::new(
             Box::new(o.writer),
             Box::new(o.reader),
@@ -1169,6 +1219,15 @@ impl Transport for SshTransport {
     ) -> io::Result<yy_remote::ActiveForward> {
         forward::start(runtime()?, &self.handle, &self.routes, f, note)
     }
+}
+
+fn tempfile_token() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    format!(
+        "{:x}-{:x}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 struct ChannelReader {

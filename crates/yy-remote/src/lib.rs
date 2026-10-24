@@ -6,6 +6,7 @@
 //! 依存しないので、UI からも、SSH を使わないテスト（[`local`]）からも使える。
 
 pub mod deploy;
+pub mod file_access;
 pub mod forward;
 pub mod fs;
 pub mod known_hosts;

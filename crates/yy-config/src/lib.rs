@@ -3,6 +3,7 @@
 //! `%APPDATA%\yyeditor\config.toml`（Windows 以外では `$XDG_CONFIG_HOME/yyeditor/config.toml`）
 //! から読み込む。ファイルがない・項目が欠けている場合は既定値を使う。
 
+pub mod connections;
 pub mod recent;
 pub mod workspace;
 
@@ -682,6 +683,13 @@ pub enum TerminalMultiplexer {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RemoteHost {
+    pub ssh: SshSettings,
+    /// ファイル転送方式。指定時は専用エージェントを使わない。
+    pub protocol: Option<TransferProtocol>,
+    /// 接続先ごとのエージェント利用（protocol指定時はfalseにする）。
+    pub use_agent: Option<bool>,
+    /// 接続時のリモートフォルダー。
+    pub remote_directory: Option<String>,
     /// 接続するホスト名（省略すると設定の名前）
     pub hostname: Option<String>,
     pub user: Option<String>,
@@ -711,6 +719,49 @@ pub struct RemoteHost {
     pub terminal_multiplexer: TerminalMultiplexer,
     /// セッション名に付けるプレフィクス。有効にするときは必須。
     pub terminal_session_prefix: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransferProtocol {
+    Sftp,
+    Scp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SshSettings {
+    /// exec要求の代わりにPTYなしのshell要求でコマンドを開始する。
+    pub exec_via_shell: bool,
+    pub connect_timeout_secs: u32,
+    pub keepalive_secs: Option<u32>,
+    pub keepalive_max: u32,
+    pub public_key_auth: bool,
+    pub keyboard_interactive_auth: bool,
+    pub password_auth: bool,
+    pub ciphers: Vec<String>,
+    pub key_exchange: Vec<String>,
+    pub host_key_algorithms: Vec<String>,
+    pub macs: Vec<String>,
+    pub compression: bool,
+}
+impl Default for SshSettings {
+    fn default() -> Self {
+        Self {
+            exec_via_shell: false,
+            connect_timeout_secs: 20,
+            keepalive_secs: None,
+            keepalive_max: 3,
+            public_key_auth: true,
+            keyboard_interactive_auth: true,
+            password_auth: true,
+            ciphers: Vec::new(),
+            key_exchange: Vec::new(),
+            host_key_algorithms: Vec::new(),
+            macs: Vec::new(),
+            compression: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -774,7 +825,7 @@ impl Config {
 
     /// `path` から読み込む。ファイルが存在しなければ既定値を返す。
     pub fn load_from(path: &Path) -> Result<Config, ConfigError> {
-        match std::fs::read_to_string(path) {
+        let mut config = match std::fs::read_to_string(path) {
             Ok(s) => Config::from_toml(&s).map_err(|source| ConfigError::Parse {
                 path: path.to_owned(),
                 source,
@@ -784,7 +835,10 @@ impl Config {
                 path: path.to_owned(),
                 source,
             }),
-        }
+        }?;
+        let profiles = connections::Profiles::load(&connections::beside(path))?;
+        profiles.merge_into(&mut config.remote);
+        Ok(config)
     }
 
     /// 設定ファイルがないときに作る内容（既定値をすべて書き出したもの）。

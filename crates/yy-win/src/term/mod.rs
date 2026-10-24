@@ -678,6 +678,17 @@ fn create_menu() -> Result<HMENU> {
         let help = CreatePopupMenu()?;
         item(help, ID_HELP_KEYS, w!("キーボードショートカット(&K)"))?;
         item(help, ID_SETTINGS, w!("設定ファイルを開く(&S)"))?;
+        item(help, crate::sites::ID_MANAGE, w!("SSH接続先を管理…"))?;
+        item(
+            help,
+            crate::explorer::ID_REGISTER,
+            w!("エクスプローラーの右クリックに登録"),
+        )?;
+        item(
+            help,
+            crate::explorer::ID_UNREGISTER,
+            w!("エクスプローラーの右クリックから解除"),
+        )?;
         item(help, ID_REMOTE_LOG, w!("リモート接続の記録を開く(&R)"))?;
         item(
             help,
@@ -876,8 +887,16 @@ fn tab_binding(
 /// `place` で新しいタブを開く。SSH の接続先なら、接続設定・`~/.ssh/config` と `extra` の
 /// ポートフォワーディングを（その接続でまだ始めていなければ）始め、結果をタブの先頭に表示する。
 /// 始められなくても警告を表示するだけで、シェルはそのまま使う。
-fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
+fn open_tab_forwarding(mut place: Place, extra: &[yy_remote::Forward]) {
+    // A profile's default directory does not turn a normal connection into a new-session request.
     let mode = folder_open_mode(&place);
+    if let Place::Remote { target, dir } = &mut place
+        && dir.is_none()
+    {
+        *dir = crate::remote::host_settings(target)
+            .and_then(|h| h.remote_directory)
+            .map(String::into_bytes);
+    }
     open_tab_request(place, extra, None, mode);
 }
 
@@ -3104,6 +3123,18 @@ fn command(hwnd: HWND, id: u16) {
         ID_WS_ADD => cmd_add_folder(hwnd),
         ID_WS_ADD_REMOTE => cmd_add_remote_folder(hwnd),
         ID_HELP_KEYS => info_box(hwnd, KEYS_HELP),
+        crate::sites::ID_MANAGE => {
+            if let Some(config) = crate::sites::manage(hwnd) {
+                with(|a| a.config.remote = config);
+            }
+        }
+        crate::explorer::ID_REGISTER | crate::explorer::ID_UNREGISTER => {
+            crate::explorer::menu(
+                hwnd,
+                crate::ExplorerApp::Terminal,
+                id == crate::explorer::ID_REGISTER,
+            );
+        }
         ID_SETTINGS => {
             let Some(path) = Config::default_path() else {
                 return;

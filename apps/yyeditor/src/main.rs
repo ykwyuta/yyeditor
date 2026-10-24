@@ -7,6 +7,9 @@ fn main() {
     if yy_win::git_askpass() {
         return;
     }
+    if let Some(code) = yy_win::explorer_command(yy_win::ExplorerApp::Editor) {
+        std::process::exit(code);
+    }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     // 描画確認用: yyeditor --render-bmp <入力> <出力.bmp>
     if args.first().is_some_and(|a| a == "--render-bmp") && args.len() == 3 {

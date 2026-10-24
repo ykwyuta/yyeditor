@@ -1,0 +1,53 @@
+# SSH接続設定とエージェントなしファイル編集
+
+## 設定の所有と優先順位
+
+操作方法・保存例は[同梱ヘルプ](../../crates/yy-win/help/help.md#ssh-sites)。
+`yy-config::connections::Profiles` がversion 1の `connections.toml` を管理する。
+`Config::load_from` は同じディレクトリーのprofilesを読み、同名のlegacy host定義全体を置換する。
+`removed` はGUIで削除したlegacy定義の復活を抑止する。OpenSSH設定ファイルは変更しない。
+プロファイル更新は固定のsidecarロックを取得して再読込し、同一ディレクトリーの一時ファイルをfsyncして置換する。
+ロックファイル自体は残るが、ロックはOSハンドルの寿命で解放される。
+
+`yy-win::sites` は3アプリ共通の接続先管理・カテゴリ別編集を提供する。
+新規／複製時は既存名への上書きを拒否する。変更を保存したアプリはRemoteStateの接続キャッシュを破棄し、
+すでに端末・転送・保存処理が所有しているArcは維持する。他プロセスは再起動時に取り込む。
+秘密情報の保存は既存のWindows資格情報マネージャー経路を使う。GUIのプロキシURLに平文パスワードは許可しない。
+
+## 転送方式
+
+ホストの `protocol` が指定された場合はグローバル `use_agent` より優先し、エージェントを使用しない。
+SCPではShellFsを使い、SFTP要求・エージェント配置・転送後のエージェントhash検証を行わない。
+yysftpは一覧対象・アップロード先・ダウンロード元のTargetから方式を解決し、ジョブに確定値を保持する。
+転送メニューで接続中の方式を変更した場合はホストのprofileへ保存する。未接続時だけ従来の今回の既定値を変更する。
+
+エディタの `EditorConnection` は専用エージェントと `yy_remote::file_access::FileAccess` を分岐する。
+SFTPは読み書きに32KiB単位のパケット、SCPは標準SCPのバイナリ転送を使う。
+FileAccessは前後のidentity／サイズ確認、キャンセル、同一フォルダーへのステージング、変更競合、基本mode保持を担当する。
+SFTPの既存ファイルの保存ではPOSIX rename拡張を必須にし、remove＋renameによる擬似置換を拒否する。
+SCPではnoclobberで一時パスを予約し、GNU `mv -T -f` で置換する。失敗時は所有する一時ファイルだけを削除する。
+サーバー側CAS操作ではないので、最終statとrenameの間の競合は排除できない。秒単位mtimeとサイズが同じ変更も検出できない場合がある。
+所有者・ACL等の完全な継承は保証しない。
+
+## SSH設定とL7ゲートウェイ
+
+HostOverride／HostSpecは共有のSshSettingsを保持し、踏み台ごとにrusshのConfigを生成する。
+タイムアウト、keepalive、認証方式、暗号・鍵交換・ホスト鍵・MAC・圧縮を反映する。
+公開鍵→keyboard-interactive→passwordの既存順序は維持し、無効な方法を試さない。
+不明な暗号等は入力エラーにし、既定値へ黙って戻さない。OpenSSH方式の正式名を使い、WinSCP raw名は解釈しない。
+
+`exec_via_shell` はPTYなしshellを要求し、Success後に境界マーカーと `exec sh -c <quoted command>` を送る。
+STDOUTは開始境界まで上限64KiB／接続タイムアウト以内で走査する。境界より後のバイトは失わず後段へ渡す。
+SFTPサーバーのカスタムコマンドにもこの入口を使える。通常のSFTP subsystemは独立した要求のまま。
+端末のPTYつきshell、tmux/screen、forwardingは既存経路を維持する。
+PTY必須の接続先選択メニューの自動化やSecureCube固有プロトコルの推定は行わない。
+
+## 回帰検証
+
+- yy-config: 別ファイル保存、legacy上書き・削除、同時更新、失敗時の設定保持。
+- yy-win: 実ネイティブダイアログで6カテゴリを巡回し、L/R/D転送・tmux・ProxyJumpを保持。
+- yy-ssh: 実SSHソケット、多段認証、トンネル、カスタムサブシステム、バナー付きshell／全バイト値。
+- yy-remote（Unix）: 実scp／sftp-serverでエディタ読み書き、競合・キャンセル・リンク拒否・一時ファイル回収。
+
+SecureCube Access Check／Essential実機への接続は未検証。仕様差と残作業は
+[WinSCPとの対応表](../history/proposals/2026-10-25-ssh-site-settings.md)で管理する。

@@ -34,6 +34,50 @@ impl Clone for Gateway {
 
 impl server::Handler for Gateway {
     type Error = russh::Error;
+    async fn shell_request(
+        &mut self,
+        id: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.events.lock().unwrap().push("shell:no-pty".into());
+        session.channel_success(id)?;
+        let channel = self.channels.remove(&id).unwrap();
+        let handle = session.handle();
+        tokio::spawn(async move {
+            let mut stream = channel.into_stream();
+            stream
+                .write_all(b"Gateway login banner\r\n$ ")
+                .await
+                .unwrap();
+            let mut script = Vec::new();
+            loop {
+                let b = stream.read_u8().await.unwrap();
+                script.push(b);
+                if b == b'\n' {
+                    break;
+                }
+                assert!(script.len() < 65536);
+            }
+            assert!(
+                script
+                    .windows(b"exec sh -c".len())
+                    .any(|w| w == b"exec sh -c")
+            );
+            let start = script.iter().position(|&b| b == 1).unwrap();
+            let end = script.iter().position(|&b| b == 2).unwrap() + 1;
+            // Split the marker to exercise scanning across SSH packets, then send every byte value.
+            stream.write_all(&script[start..start + 2]).await.unwrap();
+            stream.flush().await.unwrap();
+            stream.write_all(&script[start + 2..end]).await.unwrap();
+            let binary: Vec<_> = (0..65536).map(|n| (n % 256) as u8).collect();
+            stream.write_all(&binary).await.unwrap();
+            stream.flush().await.unwrap();
+            let _ = handle.exit_status_request(id, 0).await;
+            let _ = handle.eof(id).await;
+            let _ = handle.close(id).await;
+        });
+        Ok(())
+    }
     async fn auth_keyboard_interactive<'a>(
         &'a mut self,
         user: &str,
@@ -397,4 +441,50 @@ fn transfers_binary_through_gateway_using_tunnel_command_or_sftp_proxy() {
             .expect("must reject unknown subsystem");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
+}
+
+#[test]
+fn shell_request_mode_strips_login_banner_and_keeps_binary_bytes_without_exec_or_pty() {
+    use std::io::Read;
+    let server = Server::new(None);
+    let dir = tempfile::tempdir().unwrap();
+    let connector = yy_ssh::SshConnector::new(&yy_remote::ConnectorOptions {
+        known_hosts: dir.path().join("known_hosts"),
+        extra_known_hosts: vec![],
+        keepalive: Duration::from_secs(15),
+        passwords: None,
+    });
+    let mut resolver = Resolver::default();
+    resolver.hosts.push((
+        "shell-only".into(),
+        HostOverride {
+            hostname: Some("127.0.0.1".into()),
+            port: Some(server.port),
+            user: Some("operator@target".into()),
+            ..Default::default()
+        },
+    ));
+    let mut spec = resolver.resolve(&yy_remote::uri::Target::parse("shell-only").unwrap());
+    spec.ssh.exec_via_shell = true;
+    let transport = connector
+        .connect(&spec, &Answers::default(), &ConnectLog::default())
+        .unwrap();
+    let (input, mut output, finish) = transport.exec(b"binary-test").unwrap().into_parts();
+    drop(input);
+    let mut bytes = Vec::new();
+    output.read_to_end(&mut bytes).unwrap();
+    assert_eq!(
+        bytes,
+        (0..65536).map(|n| (n % 256) as u8).collect::<Vec<_>>()
+    );
+    drop(output);
+    assert_eq!(finish().unwrap().status, Some(0));
+    let events = server.events.lock().unwrap();
+    assert!(events.iter().any(|e| e == "shell:no-pty"));
+    assert!(events.iter().any(|e| e == "auth:operator@target"));
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.starts_with("exec:") || e.starts_with("subsystem:"))
+    );
 }

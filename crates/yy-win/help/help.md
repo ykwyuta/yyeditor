@@ -7,7 +7,9 @@ yyeditor は、数 GB のファイルもすぐに開ける Windows 向けの軽�
 **目次**
 
 - [ファイルを開く・保存する](#files)
+- [エクスプローラーの右クリックから開く](#explorer)
 - [リモート（SSH）のファイル](#remote)
+- [SSH接続先をGUIで管理する](#ssh-sites)
 - [ワークスペース](#workspace)
 - [ソース管理（Git）](#git)
 - [ターミナル（yyterm）](#terminal)
@@ -35,6 +37,31 @@ yyeditor は、数 GB のファイルもすぐに開ける Windows 向けの軽�
 - [キーボードショートカット](#shortcuts)
 - [設定](#settings)
 - [困ったときは](#trouble)
+
+## エクスプローラーの右クリックから開く {#explorer}
+
+yyeditor・yytermのそれぞれで「ヘルプ → エクスプローラーの右クリックに登録」を選ぶと、
+現在ログインしているWindowsユーザーのメニューへ、その実行ファイルを登録します。管理者権限は不要です。
+
+- **yyeditor で開く**: ファイルを編集します。フォルダー・ドライブ・フォルダー内の空白部分では、対象フォルダーをワークスペースへ追加して開きます。
+- **yyterm で開く**: フォルダー・ドライブ・フォルダー内の空白部分から、その場所を作業ディレクトリとするローカル端末を開きます。
+- 各項目にはアプリのアイコンを表示します。Windows 11では「その他のオプションを確認」（Shift+F10）の中に表示されます。複数選択時は表示しません。
+- 解除は各アプリの「ヘルプ → エクスプローラーの右クリックから解除」です。既定のファイル関連付けや他のアプリのメニューは変更しません。
+- 実行ファイルを移動した場合は、移動先で再登録してください。削除する前に解除してください。
+
+PowerShellからも登録・解除できます（各プロセスの終了コードは成功0、失敗1）。
+
+```powershell
+Start-Process -FilePath .\yyeditor.exe -ArgumentList '--register-context-menu' -Wait
+Start-Process -FilePath .\yyterm.exe -ArgumentList '--register-context-menu' -Wait
+# 解除
+Start-Process -FilePath .\yyeditor.exe -ArgumentList '--unregister-context-menu' -Wait
+Start-Process -FilePath .\yyterm.exe -ArgumentList '--unregister-context-menu' -Wait
+```
+
+登録先は `HKEY_CURRENT_USER\Software\Classes` 配下の `*\shell\yyeditor.Open`、
+`Directory\shell\{yyeditor,yyterm}.Open`、`Directory\Background\shell\{yyeditor,yyterm}.Open`、
+`Drive\shell\{yyeditor,yyterm}.Open` です。解除は該当アプリのこれらのキーだけを削除します。
 
 ## ファイルを開く・保存する {#files}
 
@@ -104,9 +131,10 @@ SSH は yyeditor に組み込んであるので、Windows の OpenSSH（ssh.exe�
   サーバーが受け付ける方式、エージェントの配置と起動）を記録しています。接続に失敗したときのメッセージに記録の
   最後の部分を表示します。全体は **ヘルプ メニューの「リモート接続の記録を開く」**
   （`%APPDATA%\yyeditor\logs\remote-ssh.log`）で見られます。パスワード・パスフレーズは記録しません。
-- 最初に接続したとき、接続先のホームの `~/.yyeditor/agent` に小さなプログラム（エージェント）を置きます。
-  ファイルの一覧・読み出し・保存はエージェントが行います。インターネットへの接続は必要ありません。
-- **上書き保存**（Ctrl+S）は接続先のファイルを置き換えます（権限・所有者・シンボリックリンクは保ちます）。
+- 従来の既定動作では、接続先の `~/.yyeditor/agent` に小さなプログラムを置き、一覧・読み出し・保存を行います。
+  [接続先管理](#ssh-sites)でSFTP／SCPを指定すると、エージェントを配置せずその方式で編集します。
+- **上書き保存**（Ctrl+S）は接続先のファイルを置き換えます。エージェント方式では権限・所有者・シンボリックリンクを保ちます。
+  エージェントなしの保存条件・属性の制限は[接続先管理](#ssh-sites)を参照してください。
   開いたあとでほかの人やプログラムがファイルを変更していた場合は、上書きするか尋ねます。
 - **名前を付けて保存**（Ctrl+Shift+S）: リモートのファイルはリモートに保存します。
   **リモートに名前を付けて保存**・**このパソコンに名前を付けて保存** で保存先を選べます。
@@ -401,15 +429,87 @@ terminal_session_prefix = "yyterm-" # 有効にする場合は必須
   `yysftp.exe --download ssh://接続先/フォルダ --to 保存先のフォルダ` は、起動したらそのフォルダのダウンロードを
   転送の一覧に入れます（エディタ・ターミナルの「zip にしてダウンロード」で zip が 100 MB を超えたときに使います）。
 
+### SSH接続先をGUIで管理する {#ssh-sites}
+
+yyeditor・yytermは「ヘルプ → SSH接続先を管理…」、yysftpは「ファイル → SSH接続先を管理…」から
+共通の接続先一覧を開きます。新規・編集・複製・削除ができ、画面上部で設定カテゴリを切り替えます。
+保存した接続名は、リモートファイル選択、端末のSSH接続、yysftpの接続先として指定できます。
+設定は `%APPDATA%\yyeditor\connections.toml` に保存し、エディタ設定や `.ssh/config` は書き換えません。
+
+| カテゴリ | 主な設定 |
+| --- | --- |
+| 基本 | 接続名、ホスト、ポート、ユーザー、SFTP／SCP、開始フォルダー |
+| 秘密鍵・接続経路 | 秘密鍵、ProxyJump、中継コマンド、HTTP／SOCKSプロキシ、エージェント |
+| SFTP・SCP／一覧・ポート転送 | SFTP起動方法、独自の一覧コマンド、L／R／D転送 |
+| 端末・セッション | none／tmux／screenの排他選択、セッション名プレフィクス |
+| SSH認証・接続維持 | タイムアウト、死活確認、公開鍵・対話認証・パスワード認証の有効化 |
+| SSH暗号・互換性 | 暗号・鍵交換・ホスト鍵・MACの優先順、圧縮、PTYなしshellでのコマンド起動 |
+
+転送方式を指定すると、そのホストのファイル編集・一覧・転送には専用エージェントを使いません。
+SCP指定ではSFTPサブシステムも要求しません。方式が空欄の場合は従来の設定を引き継ぎます。
+yysftpの転送メニューで接続中ホストの方式を変えた場合も、そのホストへ保存します。
+接続前の切り替えは今回の未設定ホスト用の既定値です。自動的なSFTP／SCP切り替えは行いません。
+
+ProxyJumpは `gateway` や `user@gateway:2222`、多段の場合は `gateway1,gateway2` と指定します。
+各踏み台の接続名もGUIで登録できます。ポート転送は `L 8080:localhost:80; R 9000:localhost:3000; D 1080`
+のようにセミコロンで区切ります。Lはローカル、Rはリモート、DはローカルSOCKSプロキシです。
+転送はyytermの接続時だけ開始します。tmux／screenにはプレフィクスが必須で、接続時にタブ名を入力します。
+タブを閉じてもセッションは残ります。
+
+優先順位は接続引数の明示的なユーザー／ポート → `connections.toml` の同名接続 →
+`config.toml` の接続（GUI側に同名接続がない場合）→ `.ssh/config` → 既定値です。
+接続名は大文字小文字を区別せず、GUI側の同名接続はホスト定義全体を置き換えます。
+ファイルロックと一時ファイルの置換で保存します。保存したアプリは新しい接続から反映し、
+接続中の端末は維持します。ほかの起動中アプリは再起動してください。
+
+パスワードや鍵のパスフレーズ、MFAの回答は接続時に入力します。保存を選んだ資格情報は
+Windows資格情報マネージャーを使い、接続設定ファイルには書きません。
+プロキシURLもパスワードを含めず、ユーザー名まで指定してください。
+暗号等のリストはSSHの正式名をカンマで区切ります。空欄は組み込みライブラリの既定値です。
+WinSCPの短縮名や `WARN` トークンをそのまま貼り付ける形式ではありません。
+
+```toml
+version = 1
+[hosts.essential]
+hostname = "gateway.example.com"
+user = "環境の手順に記載された転送用ログイン名"
+port = 22
+protocol = "scp"
+remote_directory = "/work"
+terminal_multiplexer = "tmux"
+terminal_session_prefix = "work-"
+forward = ["L 8080:localhost:80", "D 1080"]
+[hosts.essential.ssh]
+connect_timeout_secs = 30
+keepalive_secs = 15
+keyboard_interactive_auth = true
+exec_via_shell = true
+```
+
+`exec_via_shell = true` は、PTYなしのSSH shell要求から `sh -c` で各コマンドを開始します。
+開始前のバナーは境界マーカーまで読み飛ばし、その後はバイナリを変更せず渡します。
+PTY必須の対話メニューへの自動回答や、製品固有の接続先選択プロトコルは実装していません。
+通常のexec要求が使えるホストはfalseのままにします。
+
+エージェントなしの編集保存は同じフォルダーへ一時ファイルを送り、変更競合を検査して置き換えます。
+SFTPで既存ファイルを置き換えるには `posix-rename@openssh.com` 拡張が必要です。
+SFTP／SCPの変更検出はサイズ・更新日時等に依存し、同じ値に戻された変更や置換直前の競合を完全には検出できません。
+アクセス権の基本モードは保持しますが、所有者・ACL等は作り直したファイルのものになります。
+
+**現在の範囲**: WinSCPのSSH関連全設定との完全互換には未達です。GSSAPI／SSPI、Pageant／ssh-agent、
+PuTTY形式鍵・証明書認証、Telnet／任意ローカルコマンドのプロキシ、SFTP v4～6、
+ファイル名文字コード・時差補正、サーバー不具合の個別回避、リモートごみ箱等は未対応です。
+任意のWinSCP raw設定を保存しただけで適用される仕組みにはしていません。
+
 ### SSHゲートウェイを経由したファイル転送 {#sftp-gateway}
 
-SSHGW／特権アクセス管理製品には、SSHトンネルを通す方式と、ゲートウェイ自身がSFTPを中継する方式があります。製品名だけでは接続方式を決められません。管理者が許可した経路に合わせ、ヘルプ → 設定ファイルを開くで共通の`config.toml`の`[remote.host.名前]`を編集し、yysftpを再起動してください。SFTPで利用する場合は`[transfer]`の`use_agent = false`（既定）で接続先エージェントを使わず、`protocol = "sftp"`を指定します。SCPで利用する場合は後述の条件を確認してください。WinSCPの「接続→トンネル」は`proxy_jump`、「環境→SFTP→SFTPサーバー」は`sftp_server`に相当します。
+SSHGW／特権アクセス管理製品には、SSHトンネルを通す方式と、ゲートウェイ自身がSFTPを中継する方式があります。製品名だけでは接続方式を決められません。管理者が許可した経路を[SSH接続先管理](#ssh-sites)のGUIから設定してください。SFTPで利用する場合は`[transfer]`の`use_agent = false`（既定）で接続先エージェントを使わず、`protocol = "sftp"`を指定します。SCPで利用する場合は後述の条件を確認してください。WinSCPの「接続→トンネル」は`proxy_jump`、「環境→SFTP→SFTPサーバー」は`sftp_server`に相当します。
 
 **SecureCube Access Check／Access Check Essential**: 製品がSSHを終端して接続先へ中継する構成では、まず製品の転送用接続口へ直接接続します。通常のOpenSSH踏み台と同じ`proxy_jump`、`jump_command`や、ゲートウェイ自身の`/usr/lib/openssh/sftp-server`を実行する構成だとは仮定しないでください。ゲートウェイのOSがRHELであっても、中継先のOSや利用できるコマンドは別です。接続先選択を含むログイン名・ポート・認証手順は、その環境の利用者向け手順で確認します。公開資料だけから製品固有のログイン名の書式を決めることはできません。
 
-標準版の[公式カタログ](https://www.nri-secure.co.jp/hubfs/NRIS/PDF/ac_pamphlet_jp.pdf)はSFTP・SCPを掲載しています。一方、[Essentialの公式FAQ](https://www.nri-secure.co.jp/service/solution/accesscheck/access-check-essential)の中継プロトコルはSSH・RDP・SCPで、SFTPは掲載されていません。SCPで利用する環境では`[transfer]`に`protocol = "scp"`、`use_agent = false`を指定してください。転送メニューからSCPを選ぶこともできます。SCP選択時は既存の一覧用接続を作り直します。
+標準版の[公式カタログ](https://www.nri-secure.co.jp/hubfs/NRIS/PDF/ac_pamphlet_jp.pdf)はSFTP・SCPを掲載しています。一方、[Essentialの公式FAQ](https://www.nri-secure.co.jp/service/solution/access-check-essential)の中継プロトコルはSSH・RDP・SCPで、SFTPは掲載されていません。SCPで利用する環境では、ホスト別の転送方式にSCPを指定してください。専用エージェントとSFTPは要求しません。転送メニューからSCPを選ぶこともできます。SCP選択時は既存の一覧用接続を作り直します。
 
-SCPの一覧・ファイル操作には、中継先でPTYなしのexec要求を受け付けるPOSIXシェルとGNU `find`、`stat`、`realpath`、`mkdir`、`mv`、`rm`、`rmdir`、転送には従来の`scp`、`wc`、`cat`、`tail`等が必要です。SFTPとエージェントは使いません。名前・メタデータはNUL区切りで取得し、空白や日本語を含む名前を扱います。これは[WinSCPのSCPが一覧等にUnixシェルを必要とする方式](https://winscp.net/eng/docs/requirements#scp_requirements)を参考にした実装です。SCPコマンドだけを許可し、一覧用コマンドやexecを禁止する製品ポリシーでは、一覧付き画面を利用できません。SFTPへの自動切替やポリシーの迂回はしません。製品実機での互換性は未検証です。
+SCPの一覧・ファイル操作には、中継先でPTYなしのexec要求、または上述のPTYなしshell要求を受け付けるPOSIXシェルとGNU `find`、`stat`、`realpath`、`mkdir`、`mv`、`rm`、`rmdir`、転送には従来の`scp`、`wc`、`cat`、`tail`等が必要です。SFTPとエージェントは使いません。名前・メタデータはNUL区切りで取得し、空白や日本語を含む名前を扱います。これは[WinSCPのSCPが一覧等にUnixシェルを必要とする方式](https://winscp.net/eng/docs/requirements#scp_requirements)を参考にした実装です。SCPコマンドだけを許可し、一覧用コマンドやPTYなしexec／shellの両方を禁止する製品ポリシーでは、一覧付き画面を利用できません。SFTPへの自動切替やポリシーの迂回はしません。製品実機での互換性は未検証です。
 
 **SSHトンネル方式**では、接続先とゲートウェイのホスト鍵・認証をそれぞれ確認します。内部ホスト名はゲートウェイ側で解決します。
 

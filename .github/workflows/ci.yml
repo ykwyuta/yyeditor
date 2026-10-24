@@ -133,6 +133,7 @@ jobs:
           Copy-Item target/release/yyclip.exe dist/
           Copy-Item target/release/yybrowser.exe dist/
           Copy-Item target/release/yydraw.exe dist/
+          Copy-Item crates/yy-config/LICENSE-FS2.txt dist/
           Copy-Item crates/yy-draw/assets/NOTICE.md dist/yydraw-cloud-icons-NOTICE.md
           Copy-Item crates/yy-draw/assets/catalog-sources.json dist/yydraw-cloud-icons-sources.json
           Copy-Item docs/user/yydraw-business-icons.md dist/yydraw-business-icons.md
@@ -150,6 +151,8 @@ jobs:
   linux-core:
     name: Linux (core crates)
     runs-on: ubuntu-latest
+    env:
+      YY_REQUIRE_SFTP: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -259,6 +262,7 @@ jobs:
           Copy-Item -Recurse apps/yymerge/help dist/yymerge/
           Copy-Item COPYING,COPYING.EXCEPTION,crates/yy-win/fonts/LICENSE-UDEVGothic.txt dist/yymerge/
           Copy-Item crates/yy-preview/assets/LICENSE-*.txt dist/yymerge/
+          Copy-Item crates/yy-config/LICENSE-FS2.txt dist/yymerge/
       - uses: actions/upload-artifact@v4
         with:
           name: yymerge-windows-x64
@@ -315,6 +319,7 @@ jobs:
         run: |
           mkdir -p dist/yymerge-linux
           cp apps/yymerge/target/release/yymerge apps/yymerge/README.md apps/yymerge/NOTICE.md apps/yymerge/LICENSE-*.txt COPYING COPYING.EXCEPTION dist/yymerge-linux/
+          cp crates/yy-config/LICENSE-FS2.txt dist/yymerge-linux/
       - uses: actions/upload-artifact@v4
         with:
           name: yymerge-linux-x64-cli
@@ -352,6 +357,7 @@ jobs:
           Copy-Item crates/yy-win/fonts/LICENSE-UDEVGothic.txt dist/yydbmanager/
           Copy-Item COPYING,COPYING.EXCEPTION dist/yydbmanager/
           Copy-Item crates/yy-preview/assets/LICENSE-*.txt dist/yydbmanager/
+          Copy-Item crates/yy-config/LICENSE-FS2.txt dist/yydbmanager/
           $taskResult = Start-Process -FilePath ./dist/yydbmanager/yydbmanager.exe -ArgumentList '--smoke-test','smoke-output' -WindowStyle Hidden -PassThru -Wait
           if ($taskResult.ExitCode -ne 0) { throw "Embedded engine smoke test failed: $($taskResult.ExitCode)" }
           Get-Content smoke-output/smoke-test.txt
