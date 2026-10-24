@@ -5,7 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "crates/yy-draw/assets/friendly-icons.json"
-INVENTORY = ROOT / "docs/yydraw-friendly-icons.md"
+INVENTORY = ROOT / "docs/user/yydraw-friendly-icons.md"
 
 LINE = "#4a3b32"
 SKIN = "#fce2c4"
@@ -844,7 +844,7 @@ def main():
         "公式クラウド素材1,834種・業務・ITアイコン376種と合わせて2,430種です。",
         "このリポジトリと同じGPL-3.0-or-laterで提供します。",
         "",
-        "再生成: `python tools/friendly-icons/generate.py`。整合性確認: `python tools/friendly-icons/generate.py --check`。",
+        "一覧の検索語は、アプリのアイコン検索で使用できます。",
         "",
     ]
     for name, rows in categories:

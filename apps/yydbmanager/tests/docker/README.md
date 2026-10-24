@@ -38,7 +38,7 @@ docker compose -p yydbmanager-validation -f apps/yydbmanager/tests/docker/compos
 
 Dockerイメージはタグに加えて、実行時のdigestとサーバー版を結果レポートに記録します。WindowsのSQL Serverドライバー経由の試験と、Linux検証ランナーの試験結果は区別して扱います。
 
-実行済みの結果は[2026-10-20の検証記録](results/2026-10-20.md)を参照してください。DBイメージの取得・初回ビルド・初期化時間と、テスト本体の実行時間は別です。
+実行済みの結果は[2026-10-20の検証記録](../../../../docs/history/verification/yydbmanager-docker-2026-10-20.md)を参照してください。DBイメージの取得・初回ビルド・初期化時間と、テスト本体の実行時間は別です。
 
 ERの複合主キー・複合外部キーの列順、一意制約、NOT NULLも検証します。各DBの`.yyer`と画像をランナーの結果フォルダーへ出力します。[2026-10-21のER検証](results/2026-10-21-er.json)は5DBすべてで成功しました。
 

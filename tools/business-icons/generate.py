@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "crates/yy-draw/assets/business-icons.json"
-INVENTORY = ROOT / "docs/yydraw-business-icons.md"
+INVENTORY = ROOT / "docs/user/yydraw-business-icons.md"
 INK = "#29445f"
 ACCENT = "#247ca8"
 PALE = "#e4f2fa"
@@ -826,7 +826,7 @@ def main():
                  "ラベルは他のyyシリーズと同じフォントを使用します。図柄内の製品名も省略せずパスで描き、外部フォントに依存しません。", "",
                  "公式クラウドアイコン1,834種・イラストアイコン220種と合わせて2,430種です。公式クラウド素材とは別の独自図柄で、",
                  "このリポジトリと同じGPL-3.0-or-laterで提供します。製品名のアイコンも公式ロゴではなく、用途を表す独自イラストです。", "",
-                 "再生成: `python tools/business-icons/generate.py`。整合性確認: `python tools/business-icons/generate.py --check`。", ""]
+                 "一覧の検索語は、アプリのアイコン検索で使用できます。", ""]
     for name, rows in categories:
         inventory += [f"## {name}", "", "| 名前 | 検索語 |", "| --- | --- |"]
         inventory += [f"| {label} | {keywords} |" for label, keywords, _ in rows]

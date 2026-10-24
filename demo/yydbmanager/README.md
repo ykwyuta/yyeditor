@@ -183,27 +183,7 @@ docker compose -p yydbmanager-demo --profile "*" down -v
 
 起動失敗時は`logs`を確認してください。ポート使用中は`.env`で変更、初期化途中の失敗はログの原因を解消してから専用ボリュームを作り直します。`healthy`判定にはDBプロセスの起動だけでなく、デモ投入完了も含めています。
 
-## データを再生成する（開発者向け）
-
-通常利用では不要です。テキストSQL・CSV等はPython標準ライブラリーだけで再生成できます。
-
-```powershell
-# リポジトリーのルートで実行
-python demo/yydbmanager/tools/generate.py
-cargo run --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --example prepare_demo -- demo/yydbmanager demo/yydbmanager/generated
-```
-
-後者はアプリと同じSQLite／DuckDB・入出力ライブラリーを使い、件数、精度、計画、Parquet、固定長、ER YAMLを検証してバイナリを生成します。既存ファイルは上書きしません。`generated/`の出力を確認してから`data/`の配布サンプルを更新してください。JSONの期待件数は`data/expected-counts.json`です。
-
-`verify.ps1 -Services ...`は起動中の指定DBの全テーブル件数、共通サンプルSQLとDB別の性能分析SQLを読み取り検証し、使用イメージID・件数・実行ファイル一覧を`reports/verification.json`へ記録します。Oracleは日本語の投入結果も検証します。プロファイルを指定しただけで未起動のDBへ接続することはありません。Db2 CLPの「0行取得」による終了コード1は成功として扱い、SQLエラーは失敗にします。
-
-## 動作確認（2026-10-21）
-
-- PostgreSQL 17、MySQL 8.4、SQL Server 2022、Oracle Free、Db2 12.1.5を専用Composeプロジェクトで起動し、デモ用ユーザーで9テーブルの期待件数と、共通サンプル4ファイル＋DB別性能分析SQLを実行しました。
-- 同梱SQLite／DuckDBで投入・件数・整数／小数精度・計画取得・性能分析SQLを確認しました。CSV／Parquet／固定長とER YAMLの読み書きもアプリのライブラリーで検証しました。
-- PostgreSQLは取得済みイメージ・空の専用ボリュームで約6秒で起動しました。初回ダウンロード、PC性能やDockerの設定によって所要時間は変わります。
-
-検証時の全5DBはホストOSのODBCではなく、各コンテナーの標準クライアントを使用しています。Windows側ドライバーの導入・接続確認は別途必要です。大規模データでの負荷試験や、本番環境の監視設定を保証するものではありません。
+再生成・自動検証の手順は[開発者向け](../../docs/developer/yydbmanager.md)、過去の結果は[検証記録](../../docs/history/verification/yydbmanager-demo-2026-10-21.md)へ分けています。
 
 ## 公式イメージの参照先
 

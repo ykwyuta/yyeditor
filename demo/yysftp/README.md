@@ -8,13 +8,6 @@
 
 SecureCube Access Check／Access Check Essential向けの確認点は[専用メモ](securecube-access-check.md)に記載しています。Essentialの公開仕様に合わせたSCPモードでは、一覧にもSFTPを要求しないよう改善しています。
 
-製品の実機には接続せず、`crates/yy-ssh/tests/gateway.rs`の模擬SSHゲートウェイを使用しました。Windows上の実際のループバックSSH通信で、次を確認しています。
-
-- direct-tcpipトンネル、PTYなし中継コマンド、複合ユーザー名のSFTPプロキシ、既定SFTPサブシステムの4経路。
-- ゲートウェイと接続先それぞれのホスト鍵確認、パスワード・OTPの2段階keyboard-interactive認証。
-- ホームディレクトリーの解決、フォルダー一覧、64 KiBの全バイト値を含むデータの並列書き込みと読み出しの一致。
-- SFTP起動要求の拒否時に、PermissionDeniedエラーとして復帰すること。
-
-実行コマンドは`cargo +1.99.0 test -p yy-ssh --test gateway --locked`です。外部SSH/SFTPプログラムや製品の認証情報は不要です。実製品ごとのメニューや独自プロトコルとの互換性は未確認です。
+実製品との接続は未検証です。確認済みの模擬ゲートウェイの範囲は[検証記録](../../docs/history/verification/yysftp-gateway-2026-10-23.md)を参照してください。
 
 参考にした公式仕様: [WinSCPのトンネル](https://winscp.net/eng/docs/ui_login_tunnel)、[SFTPの起動設定](https://winscp.net/eng/docs/ui_login_sftp)、[プロキシ](https://winscp.net/eng/docs/ui_login_proxy)。

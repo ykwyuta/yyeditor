@@ -41,5 +41,5 @@ Product-named icons are original concept illustrations, not official product or
 provider logos. They are independent of the third-party cloud catalog above.
 Rebuild with `python tools/business-icons/generate.py` and
 `python tools/friendly-icons/generate.py`; the categorized inventories and
-search terms are in `docs/yydraw-business-icons.md` and
-`docs/yydraw-friendly-icons.md`.
+search terms are in `docs/user/yydraw-business-icons.md` and
+`docs/user/yydraw-friendly-icons.md`.

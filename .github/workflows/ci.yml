@@ -131,8 +131,8 @@ jobs:
           Copy-Item target/release/yydraw.exe dist/
           Copy-Item crates/yy-draw/assets/NOTICE.md dist/yydraw-cloud-icons-NOTICE.md
           Copy-Item crates/yy-draw/assets/catalog-sources.json dist/yydraw-cloud-icons-sources.json
-          Copy-Item docs/yydraw-business-icons.md dist/yydraw-business-icons.md
-          Copy-Item docs/yydraw-friendly-icons.md dist/yydraw-friendly-icons.md
+          Copy-Item docs/user/yydraw-business-icons.md dist/yydraw-business-icons.md
+          Copy-Item docs/user/yydraw-friendly-icons.md dist/yydraw-friendly-icons.md
           # エージェントは x86_64 と aarch64 の両方を入れる
           foreach ($a in 'x86_64', 'aarch64') {
             if (-not (Test-Path "dist/agents/yy-agent-$a-linux")) { throw "yy-agent-$a-linux がありません" }

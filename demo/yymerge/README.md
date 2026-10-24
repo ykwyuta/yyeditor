@@ -55,7 +55,7 @@ yymerge sync rollback C:/work/yymerge-run-001 --execute
 `run-dir`は存在しない新規フォルダーで、入力の外・同じファイルシステムに指定します。祖先付き統合のデモには未解決項目があるため、そのままでは実行できません。GUIでも[計画を確認して実行]と[実行記録から復元]を利用できます。
 
 
-Git連携を試す場合は、作業用Gitリポジトリーを用意し、[Git連携ヘルプ](../../apps/yymerge/help/help.md#git-tool)に沿って`git-tool config`の設定例を登録します。普段使うリポジトリーやglobal設定を書き換える必要はありません。`git-tool config --headless`ならGUIを使わず、解決できる3方向の変更だけを反映し、競合は失敗として残します。自動検証は`apps/yymerge/app/tests/git_tools.rs`の一時リポジトリーで行います。
+Git連携を試す場合は、作業用Gitリポジトリーを用意し、[Git連携ヘルプ](../../apps/yymerge/help/help.md#git-tool)に沿って`git-tool config`の設定例を登録します。普段使うリポジトリーやglobal設定を書き換える必要はありません。`git-tool config --headless`ならGUIを使わず、解決できる3方向の変更だけを反映し、競合は失敗として残します。
 
 
 比較規則は、次のように原文が異なる2ファイルで確認できます。
@@ -139,7 +139,7 @@ apps/yymerge/target/debug/yymerge.exe gui --left demo/yymerge/office/left.xlsx -
 apps/yymerge/target/debug/yymerge.exe diff demo/yymerge/office/left.pptx demo/yymerge/office/right.pptx --format html --report slides.html
 ```
 
-差異ありの終了コードは1です。見た目の再現ではなく、セル・スライドの文章と内部データを比較します。原本の編集・マージは行いません。例はこのリポジトリー用に作成したものです。再生成する場合のみPythonのopenpyxl、python-pptx、Pillowを用意して`python demo/yymerge/office/generate.py`を実行します。これらはアプリ実行時やCIで比較するためには不要です。
+差異ありの終了コードは1です。見た目の再現ではなく、セル・スライドの文章と内部データを比較します。原本の編集・マージは行いません。例はこのリポジトリー用に作成したものです。比較の実行にPythonは不要です。
 
 
 ## 画像比較
@@ -151,10 +151,12 @@ apps/yymerge/target/debug/yymerge.exe gui --image --left demo/yymerge/images/lef
 apps/yymerge/target/debug/yymerge.exe image-diff demo/yymerge/images/left.png demo/yymerge/images/right.png --diff-image difference.png --report images.json
 ```
 
-差異ありは終了コード1です。`left.webp`・`right.webp`はPNGと同じ画素の可逆WebPです。`sample.jpg`・`sample.bmp`・`sample-lossy.webp`は別形式の読み込み確認用です。`oriented.jpg`はEXIFの向きを持つ2×3画像で、比較時には3×2になります。`animated.png`・`animated.webp`・`sixteen-bit.png`は未対応形式の拒否確認用で、通常の比較作例ではありません。再生成する場合だけPillowを用意して`python demo/yymerge/images/generate.py`を実行します。画像比較は原本を書き換えず、出力も原本と異なる場所を指定してください。
+差異ありは終了コード1です。`left.webp`・`right.webp`はPNGと同じ画素の可逆WebPです。`sample.jpg`・`sample.bmp`・`sample-lossy.webp`は別形式の読み込み確認用です。`oriented.jpg`はEXIFの向きを持つ2×3画像で、比較時には3×2になります。`animated.png`・`animated.webp`・`sixteen-bit.png`は未対応形式の拒否確認用で、通常の比較作例ではありません。画像比較は原本を書き換えず、出力も原本と異なる場所を指定してください。
 
 Officeの見た目も比較する場合はLibreOfficeを準備し、`yymerge gui --image --left demo/yymerge/office/left.xlsx --right demo/yymerge/office/right.xlsx --wait`を実行してください。右Excelの追加シートは追加ページになり、PageDownで欠落比較を確認できます。PowerPointは`.pptx`の組を指定すると2スライドの画像比較になります。CLIの例: `yymerge image-diff demo/yymerge/office/left.pptx demo/yymerge/office/right.pptx --page 2 --diff-image slide-2.png`。出力は選択ページが対象です。
 
 ## PDF比較
 
-`pdf/left.pdf`と`pdf/right.pdf`を通常の2方向比較で開くと、外部ツールなしでページごとの見た目を比較できます。CLIは`yymerge pdf-diff demo/yymerge/pdf/left.pdf demo/yymerge/pdf/right.pdf --format html --report pdf.html`で全ページを出力します。差異ありは終了コード1です。`pdf/later.pdf`は先頭が同じで2ページ目だけ異なる確認用です。`pdf/password.pdf`（パスワード`yymerge-demo`）はパスワード入力未対応の拒否確認用です。通常の作例はPython標準ライブラリだけで`python demo/yymerge/pdf/generate.py`から再生成できます。暗号化作例だけ、pypdfがある環境で`python demo/yymerge/pdf/generate-password.py`を実行します。いずれもyymergeの実行時やCIにはPython不要です。
+`pdf/left.pdf`と`pdf/right.pdf`を通常の2方向比較で開くと、外部ツールなしでページごとの見た目を比較できます。CLIは`yymerge pdf-diff demo/yymerge/pdf/left.pdf demo/yymerge/pdf/right.pdf --format html --report pdf.html`で全ページを出力します。差異ありは終了コード1です。`pdf/later.pdf`は先頭が同じで2ページ目だけ異なる確認用です。`pdf/password.pdf`（パスワード`yymerge-demo`）はパスワード入力未対応の拒否確認用です。yymergeの実行時にPythonは不要です。
+
+作例の再生成と必要なPythonライブラリは[開発者向け](../../docs/developer/yymerge.md)を参照してください。

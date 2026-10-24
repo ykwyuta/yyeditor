@@ -19,9 +19,4 @@
 
 `robot.png`は32×32の原画です。「写真・イラストをドット絵へ」で取り込む場合、幅32・高さ32、最近傍、減色なしを選ぶと元のドットを保持します。別の寸法や色数で縮小・減色を試すこともできます。`preview.png`は角丸ロボの3D出力例です。
 
-サンプルは外部素材を使わず、次のプログラムで再生成します。
-
-```powershell
-cargo run --manifest-path apps/yy3designer/Cargo.toml -p yy3-core --example make_demo --locked -- demo/yy3designer
-cargo run --manifest-path apps/yy3designer/Cargo.toml -p yy3-core --example scenes --locked -- demo/yy3designer
-```
+作例の再生成方法は[開発者向け](../../docs/developer/yy3designer.md)に記載しています。

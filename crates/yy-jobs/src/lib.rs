@@ -2,7 +2,7 @@
 //!
 //! ファイルサイズに比例する処理（行数カウント、文字コード変換、検索、保存など）を
 //! ワーカースレッドで実行し、進捗の取得とキャンセルを提供する。
-//! 詳細は `docs/proposal/01-architecture.md` 4.2 を参照。
+//! 詳細は `docs/developer/buffer-io-jobs.md` を参照。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
