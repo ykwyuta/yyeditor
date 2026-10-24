@@ -169,9 +169,11 @@ yyfilemanager の中核は `cargo test -p yy-files`、ブラウザの設定・�
 [.github/workflows/ci.yml](../../.github/workflows/ci.yml) は次を行います。
 
 - Linux x86_64 / aarch64 用の静的エージェントをビルドし、バージョン・ハッシュ・静的リンクを確認。
-- Windows でフォーマット、Clippy、ワークスペースのテスト、7アプリのリリースビルドを実行。
+- Windows でフォーマット、Clippy、ワークスペースのテスト、8アプリのリリースビルドを実行。
 - Linux で中核のテスト、x3270 / GnuCOBOL との照合、Windows UI の型検査を実行。
-- `yyeditor-windows-x64` アーティファクトに yyeditor / yyterm / yysftp / yysheet / yyfilemanager / yyclip / yybrowser と両アーキテクチャのエージェントを収録。
+- 独立ワークスペースのyymerge Windows/Linux検査・画面・Office描画検証とyydbmanager Windows/Linux検査も共通ワークフローで実行。DuckDB用の`windows-2022`固定を維持。
+- Windows各ジョブ成功後、`yyeditor-windows-x64`にyyeditor / yyterm / yysftp / yysheet / yyfilemanager / yyclip / yybrowser / yydraw / yydbmanager / yymerge / yymergewと両エージェントを収録。個別成果物も維持。
+- yymerge/yydbmanagerの説明・ライセンス・ヘルプは同名サブフォルダーに保存。手動実行の`docker_databases=true`で5DBの実接続試験を実行。
 
 yyclip、yyfilemanager、yybrowser も CI のビルド・配布・Windows 向け型検査に含まれています。
 
@@ -187,3 +189,12 @@ YYSortも同じコミットを利用します。参照更新時は各ワーク�
 
 
 独立ワークスペースとモジュールの境界は[内部構成](architecture.md)、操作説明は[利用者向け](../user/README.md)、過去の提案・測定は[履歴](../history/README.md)を参照してください。
+
+## yyeditorからの比較
+
+タブとGitの比較は、yyeditorと同じ場所の`yymergew.exe`をシェルを介さず起動します。
+不変スナップショットをワーカースレッドで一時フォルダーにUTF-8出力し、元の表示名は
+`--left-label` / `--right-label`で渡します。未保存・SSH文書・存在しないGit側の空文書にも対応します。
+子プロセスの終了を待って一時ファイルを削除し、起動・比較失敗を通知します。
+巨大な内容はyymergeのディスク索引による2方向表示で開き、編集タブへの書き戻しはありません。
+開発中は独立ビルドした`yymergew.exe`を`target/debug`または`target/release`のyyeditorの隣へコピーしてください。

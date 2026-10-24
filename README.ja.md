@@ -17,7 +17,7 @@ Windows向けの編集・端末・転送・表計算・作図・DB・比較ツ�
 | **yybrowser** | タブブラウザ、プロファイル、プロキシ、広告ブロック | [ガイド](crates/yy-win/help/browser.md) |
 | **yydraw** | 構成図、公式クラウド・業務アイコン、グループ・整列、SVG/PNG | [ガイド](docs/user/yydraw.md) |
 | **yydbmanager** | 7DBのSQL・実行計画・ER図、データ入出力、保存計画の表示 | [ガイド](docs/user/yydbmanager.md) |
-| **yymerge** | 2/3方向マージ、フォルダー同期、Excel・PowerPoint・画像・PDFの比較 | [ガイド](docs/user/yymerge.md) |
+| **yymerge** | 2/3方向マージ、巨大ファイル・SSH入力・フォルダー・Office・画像・PDFの比較 | [ガイド](docs/user/yymerge.md) |
 | **YY3Designer** | ドット絵、画像変換、最大6方向の3D化、厚み・丸み、PNG/OBJ | [ガイド](docs/user/yy3designer.md) |
 | **yy-agent** | SSH接続先で使うLinux補助プログラム | [ガイド](docs/developer/guide.ja.md) |
 
@@ -30,7 +30,8 @@ Windows向けの編集・端末・転送・表計算・作図・DB・比較ツ�
 ## 動作環境と使い始め方
 
 Windows x64向けの配布資材を展開し、目的のアプリの実行ファイルを起動します。
-yydbmanager・yymerge・YY3Designerは個別配布です。使い方はF1またはヘルプメニューで開けます。
+共通CIの`yyeditor-windows-x64`にはyydbmanager・yymergeも同梱します。YY3Designerは専用CI・配布を維持します。
+yyeditorのタブ・Git比較には、同じフォルダーの`yymergew.exe`を使います。使い方はF1またはヘルプメニューで開けます。
 GUIのプレビュー・ブラウザ等はWebView2を利用します。yymergeはWindows/Linux向けCLIも提供します。
 SSH・外部DBは接続先の設定が必要です。接続方法・形式ごとの制限は各ヘルプを確認してください。
 

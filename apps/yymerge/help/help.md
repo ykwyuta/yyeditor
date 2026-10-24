@@ -811,3 +811,103 @@ yymergew --folder-session folders.json
 `path_glob`は追加の任意項目です。従来の作業ファイルも読み込めます。非空の`path_contains`との併用や、不正なワイルドカードは拒否します。ワイルドカードを含む新しい作業ファイルは、この機能に未対応の旧版では読み込めません。
 
 `--folder-session`は他のセッション、入力パス・文字コード・比較規則の別指定、Git専用モードと併用できません。根フォルダーの絶対パスを保持するため、別PCで再開する場合も同じパスに入力が必要です。
+
+## yyeditorとの連携 {#editor}
+
+yyeditorの表示メニュー「開いているファイルを比較」とGitの差分表示から起動できます。
+`yymergew.exe`を`yyeditor.exe`と同じ場所に置いてください。未保存の内容もUTF-8として渡し、
+左右の見出しに文書名またはGitの版を表示します。元の文書と比較入力は読み取り専用です。
+大きい内容は巨大ファイル用の画面で開きます。エディタへの書き戻しはありません。
+GUI起動の`--left-label` / `--right-label`は表示名だけを変更し、ファイルパスは変更しません。
+
+## 巨大ファイルの比較 {#large}
+
+32 MiBを超える通常のテキストを2方向比較で開くと、巨大ファイル用の画面へ切り替わります。
+数GB級の入力を扱い、全文のStringや全行の配列をメモリへ展開しません。
+小さい入力でも`--large`でこの画面を選べます。
+
+```powershell
+yymergew.exe --left left.log --right right.log
+yymergew.exe --large --left left.txt --right right.txt
+```
+
+左右は読み取り専用です。ホイール・上下矢印・Page Up/Down・Home/Endで移動し、
+横スクロールで長い行の途中を見られます。F7 / Shift+F7で次／前の相違行へ移動します。
+Escで読み込み・索引作成を中止し、F1でヘルプを開きます。
+表示する範囲だけを読み、1行が非常に長くても一度に本文全体を作りません。
+
+比較はCRLF/LF・末尾改行も含めて行の内容を確認します。既定では文字コードとBOMの差も相違です。
+文字コードは`--encoding CP932`、または`--left-encoding UTF-8 --right-encoding CP932`のように
+左右別に指定できます。Unicodeへ変換した結果だけを比べるには`--ignore-encoding`を付けます。
+UTF-8のBOMなしが既定で、BOMがあればUnicodeの種類を判別します。
+不正な符号はエラーを通知します。通常モードのパック十進数等のバイト可視化とは別の機能です。
+
+### CLI
+
+通常の`diff`は、32 MiBを超えるテキストの標準の要約出力で自動切替します。
+明示的な`large-diff`はサイズにかかわらず同じ比較処理を使います。
+
+```powershell
+yymerge.exe diff left.log right.log
+yymerge.exe large-diff left.log right.log --report comparison-index.json
+yymerge.exe large-diff utf8.log cp932.log --right-encoding CP932 --ignore-encoding
+```
+
+終了コードは0が一致、1が相違、2がエラー／未完了、130が中止です。
+`--report`はJSONを少しずつ一時ファイルへ出力し、完成してから保存します。既存ファイルは置き換えません。
+`mode`は`disk`、`row_count`は表示上の行数、`changed_rows`は相違行数です。
+`rows`の各要素には`kind`、左右の`offset`・`line`・`length`があります（例: `left_offset`）。
+オフセットと長さは変換後UTF-8のバイト単位、行番号は0始まり、存在しない側はnullです。
+JSONに本文や認証情報は含めません。元の文字コード・BOMだけの差は相違行数が0でも`equivalent=false`になります。
+
+### 作業領域と制約
+
+入力は一時フォルダーへUTF-8変換して不変スナップショットを作ります。
+OSのファイルマップを使い、読み終えたページを解放して実メモリの増加を抑えます。
+索引は表示上の1行あたり49バイト、相違行の探索索引は相違行あたり8バイトです。
+変換後の2入力と索引を置ける空きディスクが必要です。SSH入力は転送した原文の領域も必要です。
+Windowsは`TEMP` / `TMP`、Linuxは`TMPDIR`で作業領域を指定できます。
+通常終了・中止時に作業ファイルを削除します。プロセスやOSを強制終了した場合は残ることがあります。
+
+巨大ファイル用の画面は2方向の読み取り専用比較です。3方向マージ、編集・置換、無視規則、
+統合差分パッチ、HTML出力、作業セッション、Office・画像・PDFには通常モードの制限が適用されます。
+巨大ファイルの整列では近傍32行の一致を探すため、最短の編集列になるとは限りません。
+一致判定はハッシュだけで決めず、本文も照合します。全行を残して相違を表示します。
+
+## SSHリモートファイル {#remote}
+
+[ファイル] → [SSH/パスを指定して比較]から、左右にURIまたはローカルのファイルパスを入力します。
+URIは`ssh://[ユーザー@]接続先[:ポート]/絶対パス`です。
+左右ともSSHを指定できます。転送画面に読み込み済みバイト数を表示し、中止ボタンまたはEscで中止できます。
+初回のホスト鍵は指紋を確認して承認し、登録済みの鍵と異なる接続は拒否します。
+パスワード・秘密鍵のパスフレーズ・keyboard-interactiveは入力画面で尋ねます。
+パスワードは保存せず、必要な接続のたびに入力します。
+
+```powershell
+yymergew.exe --left ssh://server/var/log/app.log --right .\local.log
+yymergew.exe --left ssh://server-a/data/a.csv --right ssh://server-b/data/a.csv
+yymerge.exe diff ssh://server/var/log/app.log local.log
+yymerge.exe large-diff ssh://server-a/data/a.csv ssh://server-b/data/a.csv
+```
+
+yyeditorと同じRustのSSH/SFTP実装を使います。`ssh.exe`等の外部クライアントは不要です。
+接続先にはSFTPが必要です。接続先にyy-agentを配置する操作は行いません。
+共通設定`%APPDATA%\yyeditor\config.toml`の`[remote]`・`[remote.host.<名前>]`と、
+設定で有効な`~/.ssh/config`・`~/.ssh/known_hosts`を読みます。
+Linuxの共通設定は`$XDG_CONFIG_HOME/yyeditor/config.toml`または`~/.config/yyeditor/config.toml`です。
+ホスト名、ユーザー、ポート、秘密鍵、ProxyJump、プロキシ、ゲートウェイの中継コマンドとSFTP起動設定を利用できます。
+
+```toml
+[remote.host.production]
+hostname = "db.example.internal"
+user = "operator"
+port = 22
+identity_file = "~/.ssh/id_ed25519"
+# proxy_jump = "gateway"
+# sftp_server = "/usr/lib/openssh/sftp-server"
+```
+
+この例は`ssh://production/data/file.csv`で使えます。接続先側の通常ファイルをローカルの作業領域へ転送し、
+転送前後のサイズ・更新時刻を検査します。変更を検出したら比較を中止するので再実行してください。
+リモート入力は原本へ書き戻しません。マージの出力先・レポートの保存先はローカルを指定します。
+CLIの非対話実行ではホスト鍵と秘密鍵による認証を事前に設定してください。秘密情報をURIや引数へ書かないでください。

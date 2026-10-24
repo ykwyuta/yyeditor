@@ -5,9 +5,11 @@ pub mod files;
 pub mod folder_session;
 pub mod folders;
 pub mod images;
+pub mod large;
 pub mod office;
 pub mod office_render;
 pub mod profile;
+pub mod remote;
 pub mod report;
 pub mod review;
 pub mod rules;
@@ -30,6 +32,9 @@ const MAX_WORK: usize = 50_000_000;
 #[derive(Default)]
 pub struct Cancellation(AtomicBool);
 impl Cancellation {
+    pub fn flag(&self) -> &AtomicBool {
+        &self.0
+    }
     pub const fn new() -> Self {
         Self(AtomicBool::new(false))
     }

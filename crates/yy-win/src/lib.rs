@@ -18,7 +18,6 @@ mod browser;
 mod clipboard;
 mod crash;
 mod credstore;
-mod diffstream;
 mod diffview;
 mod download;
 mod draw;
@@ -73,7 +72,6 @@ pub(crate) const FINDBAR_CLASS: PCWSTR = w!("YYEditorFindBar");
 pub(crate) const PREVIEW_CLASS: PCWSTR = w!("YYEditorPreview");
 pub(crate) const COLHEAD_CLASS: PCWSTR = w!("YYEditorColumnHeader");
 pub(crate) const HELP_CLASS: PCWSTR = w!("YYEditorHelp");
-pub(crate) const DIFF_CLASS: PCWSTR = w!("YYEditorDiff");
 
 /// 実行ファイルに埋め込んだアイコンのリソース ID（apps/yyeditor/build.rs）
 const APP_ICON_ID: usize = 1;
@@ -234,21 +232,6 @@ fn run_inner(
             ..Default::default()
         };
         if RegisterClassExW(&help_class) == 0 {
-            return Err(windows::core::Error::from_thread());
-        }
-
-        let diff_class = WNDCLASSEXW {
-            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            style: CS_HREDRAW | CS_VREDRAW,
-            lpfnWndProc: Some(diffview::proc),
-            hInstance: hinstance,
-            hCursor: cursor,
-            hIcon: icon,
-            hIconSm: icon_small,
-            lpszClassName: DIFF_CLASS,
-            ..Default::default()
-        };
-        if RegisterClassExW(&diff_class) == 0 {
             return Err(windows::core::Error::from_thread());
         }
 

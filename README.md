@@ -17,7 +17,7 @@ Windows tools for editing, terminals, transfer, spreadsheets, diagrams, database
 | **yybrowser** | Tabbed browsing, profiles, proxies and ad blocking | [Guide](crates/yy-win/help/browser.md) |
 | **yydraw** | Architecture diagrams, cloud/business icons, grouping, alignment and SVG/PNG | [Guide](docs/user/yydraw.md) |
 | **yydbmanager** | SQL for seven databases, execution plans, ER diagrams and import/export | [Guide](docs/user/yydbmanager.md) |
-| **yymerge** | 2/3-way merge, folder sync, Excel/PowerPoint, image and PDF comparison | [Guide](docs/user/yymerge.md) |
+| **yymerge** | 2/3-way merge, disk-backed huge-file comparison, SSH inputs, folder sync, Office/images/PDF | [Guide](docs/user/yymerge.md) |
 | **YY3Designer** | Pixel art, image conversion, six-view 3D, thickness/rounding and PNG/OBJ | [Guide](docs/user/yy3designer.md) |
 | **yy-agent** | Linux helper deployed to SSH hosts | [Guide](docs/developer/guide.ja.md) |
 
@@ -29,7 +29,8 @@ Windows tools for editing, terminals, transfer, spreadsheets, diagrams, database
 
 ## Getting started
 
-Extract the Windows x64 distribution and launch the application. yydbmanager, yymerge and YY3Designer have separate packages.
+Extract the Windows x64 distribution and launch the application. The common CI artifact `yyeditor-windows-x64` includes yydbmanager and yymerge beside the other applications. YY3Designer retains its separate CI/package.
+Keep `yymergew.exe` beside `yyeditor.exe` to compare editor tabs and Git revisions.
 Open the bundled manual with F1 or the Help menu. Previews and browser features use WebView2.
 yymerge also provides a Windows/Linux CLI. SSH and external databases require connection settings and appropriate host permissions.
 Use each manual for supported formats and current limitations.

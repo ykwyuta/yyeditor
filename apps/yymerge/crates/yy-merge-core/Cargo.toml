@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+yy-config = { path = "../../../../crates/yy-config" }
+yy-ssh = { path = "../../../../crates/yy-ssh" }
+yy-remote = { path = "../../../../crates/yy-remote" }
+yy-io = { path = "../../../../crates/yy-io" }
+yy-buffer = { path = "../../../../crates/yy-buffer" }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
@@ -18,3 +23,6 @@ hayro = "=0.8.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_Memory"] }

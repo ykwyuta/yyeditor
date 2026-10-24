@@ -11,7 +11,7 @@
 | YYLibrary | [外部リポジトリ](https://github.com/ykwyuta/YYLibrary) | yy-encodingと対応表生成。本体の複製を置かずGitコミットを固定 |
 | YYSort | [外部リポジトリ](https://github.com/ykwyuta/YYSort) | 固定長/CSVのCLI外部ソート。YYLibraryを共用 |
 
-独立ワークスペースは個別のCargo.lockとCIを持ちます。共有クレートを利用するアプリは複数の
+独立ワークスペースは個別のCargo.lockを持ちます。yydbmanagerとyymergeの検証・配布は共通CIに統合し、YY3Designerは専用CIを維持します。共有クレートを利用するアプリは複数の
 ワークスペースにまたがるため、ルートの検査だけで全アプリの検証済みとは扱いません。
 
 ## モジュール境界

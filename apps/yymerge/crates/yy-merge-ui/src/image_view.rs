@@ -173,6 +173,7 @@ struct State {
     edits: [HWND; 3],
     top: i32,
     paths: [PathBuf; 2],
+    labels: [Option<String>; 2],
     settings: Settings,
     mode: Mode,
     display: Option<Display>,
@@ -288,6 +289,7 @@ fn poll(s: &mut State) {
         Ok(Completed::Display(d)) => {
             s.settings = d.summary.settings;
             s.mode = d.mode;
+            s.labels = [None, None];
             s.paths = [
                 d.pair.left.source.path.clone(),
                 d.pair.right.source.path.clone(),
@@ -352,6 +354,7 @@ fn poll(s: &mut State) {
             if let Some(d) = &s.display {
                 s.settings = d.summary.settings;
                 s.mode = d.mode;
+                s.labels = [None, None];
                 s.paths = [
                     d.pair.left.source.path.clone(),
                     d.pair.right.source.path.clone(),
@@ -522,12 +525,16 @@ fn paint(s: &State, dc: HDC) {
             format!(
                 "LEFT: {} — {}",
                 s.paths[0].file_name().unwrap_or_default().to_string_lossy(),
-                s.paths[0].display()
+                s.labels[0]
+                    .clone()
+                    .unwrap_or_else(|| s.paths[0].display().to_string())
             ),
             format!(
                 "RIGHT: {} — {}",
                 s.paths[1].file_name().unwrap_or_default().to_string_lossy(),
-                s.paths[1].display()
+                s.labels[1]
+                    .clone()
+                    .unwrap_or_else(|| s.paths[1].display().to_string())
             ),
             String::from(match mode {
                 Mode::Difference => "差分（桃:変更／橙:欠落）",
@@ -719,6 +726,7 @@ fn command(s: &mut State, id: usize) -> Result<()> {
             let Some(b) = choose(s.hwnd, false, "RIGHT: 比較する画像", None)? else {
                 return Ok(());
             };
+            s.labels = [None, None];
             s.paths = [a, b];
             s.settings = Default::default();
             sync_edits(s);
@@ -1145,6 +1153,7 @@ pub(super) fn run(g: Gui) -> Result<i32> {
             edits: edits.try_into().map_err(|_| "image controls missing")?,
             top: 0,
             paths,
+            labels: [g.left_label, g.right_label],
             settings: Default::default(),
             mode: Mode::Difference,
             display: None,

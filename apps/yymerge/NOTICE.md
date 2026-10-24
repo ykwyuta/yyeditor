@@ -33,3 +33,5 @@ Optional Office image rendering invokes a separately installed LibreOffice.
 PDF page counting and rasterization use embedded Hayro (MIT selected), with
 Vello CPU and its Rust dependencies. No Poppler executable or shared library
 is used. See LICENSE-PDF-DEPS.txt for dependency and bundled font/CMap/ICC notices.
+
+SSH uses the YY series yy-ssh/yy-remote components and the Rust russh client, with its cryptography and runtime dependencies. License texts and attributions: LICENSE-SSH-DEPS.txt.

@@ -1,6 +1,8 @@
 //! Headless commands share the GUI's exact comparison and merge model.
 pub use clap::Parser as ArgumentParser;
 pub mod git_tool;
+pub mod large_command;
+mod remote_input;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{ffi::OsString, io::Write, path::PathBuf};
 use yy_merge_core::{
@@ -40,6 +42,18 @@ pub struct Cli {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Bounded-memory text comparison with a disk index (including SSH inputs).
+    LargeDiff {
+        left: PathBuf,
+        right: PathBuf,
+        #[arg(long)]
+        encoding: Option<String>,
+        #[command(flatten)]
+        inputs: InputOptions,
+        /// JSON summary and per-row source offsets; written atomically.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
     /// Compare every PDF page visually without external tools.
     PdfDiff {
         left: PathBuf,
@@ -153,7 +167,7 @@ pub enum Command {
         filter: FolderFilterArgs,
     },
     /// Start yymergew; --wait returns its comparison/merge result.
-    Gui(Gui),
+    Gui(Box<Gui>),
     /// Review, execute and restore journalled folder synchronization.
     Sync {
         #[command(subcommand)]
@@ -438,6 +452,9 @@ impl InputOptions {
 }
 #[derive(Clone, Debug, Default, clap::Args)]
 pub struct Gui {
+    /// Use the disk-backed large text viewer even for small files.
+    #[arg(long, requires_all=["left","right"], conflicts_with_all=["base","output","image","session","comparison_session","folder_session","git_merge"])]
+    pub large: bool,
     #[command(flatten)]
     pub inputs: InputOptions,
     /// Force the dedicated image viewer (also for files with nonstandard extensions).
@@ -458,6 +475,12 @@ pub struct Gui {
     pub left: Option<PathBuf>,
     #[arg(long, requires = "left")]
     pub right: Option<PathBuf>,
+    /// Display name for the left input; does not change its file path.
+    #[arg(long, requires = "left", allow_hyphen_values = true)]
+    pub left_label: Option<String>,
+    /// Display name for the right input; does not change its file path.
+    #[arg(long, requires = "right", allow_hyphen_values = true)]
+    pub right_label: Option<String>,
     #[arg(long,requires_all=["left","right"])]
     pub base: Option<PathBuf>,
     #[arg(long, requires = "base")]
@@ -747,7 +770,7 @@ pub fn entry(
                         .into(),
                 )
             } else {
-                gui(g)
+                gui(*g)
             }
         })(),
         Command::GitTool { command } => {
@@ -812,8 +835,28 @@ fn folder_json(
     };
     text.map(|text| text + "\n").map_err(|e| e.to_string())
 }
-pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation) -> Result<i32> {
+pub fn execute(
+    mut command: Command,
+    stdout: &mut impl Write,
+    cancel: &Cancellation,
+) -> Result<i32> {
+    let _remote_inputs = remote_input::prepare(&mut command, cancel)?;
     match command {
+        Command::LargeDiff {
+            left,
+            right,
+            encoding,
+            inputs,
+            report,
+        } => large_command::run(
+            &left,
+            &right,
+            encoding.as_deref(),
+            &inputs,
+            report.as_deref(),
+            stdout,
+            cancel,
+        ),
         Command::PdfDiff {
             left,
             right,
@@ -1012,6 +1055,31 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             rules,
         } => {
             let (rules, profile_input) = rules.resolve(cancel)?;
+            if large_command::required(&left, &right)
+                && yy_merge_core::office::Kind::detect(&left).is_none()
+                && yy_merge_core::office::Kind::detect(&right).is_none()
+                && !yy_merge_core::images::is_image(&left)
+                && !yy_merge_core::images::is_image(&right)
+                && !yy_merge_core::office_render::is_pdf(&left)
+                && !yy_merge_core::office_render::is_pdf(&right)
+            {
+                if rules.active()
+                    || profile_input.is_some()
+                    || !matches!(format, Format::Text)
+                    || report.is_some()
+                {
+                    return Err("large text uses disk comparison; use large-diff with --report for a streamed JSON index; ignore rules/unified/HTML are unavailable in this mode".into());
+                }
+                return large_command::run(
+                    &left,
+                    &right,
+                    encoding.as_deref(),
+                    &inputs,
+                    None,
+                    stdout,
+                    cancel,
+                );
+            }
             if yy_merge_core::images::is_image(&left) || yy_merge_core::images::is_image(&right) {
                 if rules.active()
                     || profile_input.is_some()
@@ -1400,6 +1468,44 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn editor_snapshot_labels_are_literal_and_require_inputs() {
+        let label = "--未保存 \"作業ツリー\"";
+        assert_eq!(
+            super::entry(
+                [
+                    "yymerge",
+                    "gui",
+                    "--left",
+                    "left.txt",
+                    "--right",
+                    "right.txt",
+                    "--encoding",
+                    "UTF-8",
+                    "--left-label",
+                    label,
+                    "--right-label",
+                    "HEAD"
+                ]
+                .map(std::ffi::OsString::from),
+                |g| {
+                    assert_eq!(g.left_label.as_deref(), Some(label));
+                    assert_eq!(g.right_label.as_deref(), Some("HEAD"));
+                    assert_eq!(g.encoding.as_deref(), Some("UTF-8"));
+                    Ok(0)
+                }
+            ),
+            0
+        );
+        assert_ne!(
+            super::entry(
+                ["yymerge", "gui", "--left-label", "missing"].map(std::ffi::OsString::from),
+                |_| panic!("missing inputs accepted")
+            ),
+            0
+        );
+    }
+
     #[test]
     fn folder_session_gui_dispatch_preserves_unicode_path() {
         assert_eq!(

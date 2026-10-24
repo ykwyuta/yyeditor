@@ -219,7 +219,7 @@ unified diffは、指定した出力文字コード・改行で対象へ適用�
 | [`yy-layout`](../../../crates/yy-layout)、[`yy-syntax`](../../../crates/yy-syntax)、[`yy-search`](../../../crates/yy-search) | 計測、折り返し、色分け、検索 | 差分の仮想行・対応行、複数ペインの検索と同期 |
 | [`yy-encoding`](https://github.com/ykwyuta/YYLibrary/tree/master/crates/yy-encoding)、[`yy-io`](../../../crates/yy-io) | 日本語・EBCDIC系、共有読み取り、変換、保存 | 左右別の符号化、比較キーと元バイトの対応、外部変更検証 |
 | [`yy-core/src/diff.rs`](../../../crates/yy-core/src/diff.rs) | 小規模2方向比較の既存テスト・回帰例 | 大きな入力は近傍32行の近似経路がある。厳密なマージエンジンとしては直接採用しない |
-| [`yy-win/src/diffview.rs`](../../../crates/yy-win/src/diffview.rs)、[`diffstream.rs`](../../../crates/yy-win/src/diffstream.rs) | 既存差分画面の操作・ストリーム読み取り・ディスク索引の知見 | アプリ状態から分離。近傍整列と1行49バイトの索引を、圧縮した範囲・疎な索引へ改良 |
+| `yy-win/src/diffview.rs`、`diffstream.rs`（提案当時の実装。現在は[yymerge起動](../../../crates/yy-win/src/diffview.rs)へ置換） | 既存差分画面の操作・ストリーム読み取り・ディスク索引の知見 | アプリ状態から分離。近傍整列と1行49バイトの索引を、圧縮した範囲・疎な索引へ改良 |
 | [`yy-files`](../../../crates/yy-files)のscan／hash／sync／fs | 走査、比較候補、操作計画、実行記録、レジューム | 3方向・リネーム・リンク・操作前提条件を拡張。同期の意味が異なる部分は専用モデルにする |
 | [`yy-delimited`](../../../crates/yy-delimited)、[`yy-cobol`](../../../crates/yy-cobol)、[`yy-sheet`](../../../crates/yy-sheet) | 引用符・レコード・コピー句・固定長、格子操作 | キーによる対応付け、精度を落とさないセル比較、複数レイアウトの確定と差分表示 |
 | [`yy-ui-win/src/grid.rs`](../../../crates/yy-ui-win/src/grid.rs) | yysheet／yydbmanagerでも使う格子描画 | 表比較の左右・変更記号・キー列・取り込み操作 |

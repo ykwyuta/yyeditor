@@ -43,6 +43,7 @@ mod session_view;
 const FRAME: PCWSTR = w!("YYMergeFrame");
 const PANE: PCWSTR = w!("YYMergePane");
 const OPEN: u16 = 100;
+const OPEN_REMOTE: u16 = 159;
 const OPEN_MERGE: u16 = 101;
 const SAVE: u16 = 102;
 const PREV: u16 = 103;
@@ -365,6 +366,25 @@ fn begin(a: &mut App) {
     begin_options(a, a.options.clone());
 }
 fn begin_options(a: &mut App, g: Gui) {
+    if super::use_large(&g) && g.base.is_none() {
+        if g.rules.ignore_space
+            || g.rules.ignore_case
+            || g.rules.ignore_eol
+            || g.rules.ignore_trailing_space
+            || g.rules.rules_profile.is_some()
+        {
+            text(
+                a.status,
+                "巨大ファイル表示では比較規則をリセットしてください",
+            );
+            return;
+        }
+        match super::remote_view::spawn(&g) {
+            Ok(()) => text(a.status, "巨大ファイル比較を別ウィンドウで開きました"),
+            Err(error) => text(a.status, &error),
+        }
+        return;
+    }
     if a.receiver.is_some() {
         return;
     }
@@ -641,7 +661,10 @@ fn refresh(a: &mut App) {
                     } else {
                         "LEFT"
                     },
-                    data.inputs[0].path.display()
+                    a.options
+                        .left_label
+                        .clone()
+                        .unwrap_or_else(|| data.inputs[0].path.display().to_string())
                 ),
                 1 => format!(
                     "{}: {} [読取専用]",
@@ -652,7 +675,10 @@ fn refresh(a: &mut App) {
                     } else {
                         "RIGHT"
                     },
-                    data.inputs[1].path.display()
+                    a.options
+                        .right_label
+                        .clone()
+                        .unwrap_or_else(|| data.inputs[1].path.display().to_string())
                 ),
                 2 => data
                     .inputs
@@ -1092,6 +1118,9 @@ fn set_rule(a: &mut App, id: u16) -> Result<()> {
     Ok(())
 }
 fn command(id: u16) -> Result<()> {
+    if id == OPEN_REMOTE {
+        return super::remote_view::open();
+    }
     app(folders_view::cancel_session_load);
     if (FIND_OPEN..=FIND_CLOSE).contains(&id) {
         return app(|a| search_view::command(a, id)).unwrap_or(Ok(()));
@@ -1526,6 +1555,7 @@ fn menu() -> Result<HMENU> {
                 "ファイル(&F)",
                 vec![
                     (OPEN, "2方向比較を開く（テキスト／Excel／PowerPoint）…"),
+                    (OPEN_REMOTE, "SSH/パスを指定して比較…"),
                     (OPEN_IMAGES, "画像・PDF・Officeの見た目比較を開く…"),
                     (OPEN_MERGE, "3方向マージを開く…"),
                     (OPEN_FOLDERS, "フォルダー比較を開く…"),
@@ -2309,6 +2339,36 @@ unsafe extern "system" fn pane_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
 fn smoke(a: &mut App) -> Result<()> {
     let dir = a.smoke.clone().unwrap();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    if a.options.left_label.is_some()
+        && a.options.right_label.is_some()
+        && a.loaded.as_ref().is_some_and(|d| d.inputs.len() == 2)
+    {
+        let data = a.loaded.as_ref().unwrap();
+        let mut report = String::new();
+        for (i, (side, label)) in [
+            ("LEFT", &a.options.left_label),
+            ("RIGHT", &a.options.right_label),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut text = vec![0u16; 4096];
+            let count = unsafe { GetWindowTextW(a.labels[i], &mut text) };
+            let text = String::from_utf16_lossy(&text[..count.max(0) as usize]);
+            if text != format!("{side}: {} [読取専用]", label.as_ref().unwrap())
+                || a.editors[i].text() != data.inputs[i].text.as_ref()
+            {
+                return Err(format!("editor snapshot label/content mismatch: {text}"));
+            }
+            win(a.editors[i].offscreen(700, 300))?;
+            report.push_str(&format!("{text}\n{}\n", a.editors[i].text()));
+        }
+        std::fs::write(dir.join("editor-comparison-smoke.txt"), report)
+            .map_err(|e| e.to_string())?;
+        a.exit = 0;
+        a.smoke_phase = 3;
+        return Ok(());
+    }
     office_view::smoke(a, &dir)?;
     encoding_view::smoke(a, &dir)?;
     folders_view::smoke(a, &dir)?;
@@ -2471,6 +2531,10 @@ fn four_pane_smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 fn smoke_tick(a: &mut App) -> Result<bool> {
+    if a.smoke_phase == 3 {
+        a.smoke_phase = 0;
+        return Ok(true);
+    }
     if a.smoke_phase == 0 || a.smoke.is_none() {
         return Ok(false);
     }

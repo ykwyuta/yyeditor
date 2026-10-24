@@ -43,3 +43,12 @@ Excel・PowerPointの見た目もページ単位で比較できます。別途Li
 PDFの画像比較は外部ツール不要です。通常の[開く]でPDFを選び、PageUp / PageDownでページを移動できます。CLIの`pdf-diff before.pdf after.pdf`と通常の`diff`は全ページを比較し、JSON・テキスト・全ページ入りHTMLを出力します。選択ページのPNG出力は`image-diff --page 2 --diff-image page-2.png`を使います。[PDFの比較範囲と上限](../../apps/yymerge/help/help.md#pdf-compare)を参照してください。
 
 左右別の文字コードは GUIの「比較規則 → 入力の文字コード…」または `diff --left-encoding UTF-8 --right-encoding CP932 --ignore-encoding` で指定できます。パック十進数などの非テキスト部分を含む読み取り専用比較に対応し、不正バイト・制御文字を可視化します。数値への自動解釈は行いません。固定長EBCDICの指定・制約・比較作業ファイルについてはヘルプの「文字コードと制限」を参照してください。
+
+## 巨大ファイルとSSH
+
+32 MiBを超えるテキストの2方向比較は、ディスク索引を使う読み取り専用画面で開きます。
+F7 / Shift+F7で相違行へ移動し、Escで索引作成を中止できます。CLIは`large-diff`で明示指定できます。
+[巨大ファイルの操作・作業領域・制約](../../apps/yymerge/help/help.md#large)を参照してください。
+
+[ファイル] → [SSH/パスを指定して比較]では、左右に`ssh://接続先/絶対パス`またはローカルパスを指定できます。
+yyeditorの接続設定・Rust SSHクライアントを共用します。[認証・ゲートウェイ設定と使用例](../../apps/yymerge/help/help.md#remote)を参照してください。
