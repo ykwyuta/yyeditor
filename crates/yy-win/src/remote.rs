@@ -19,7 +19,7 @@ use windows::core::HSTRING;
 use yy_config::RemoteConfig;
 use yy_config::workspace;
 use yy_core::{Document, Encoding, FileId, RemoteFile, SaveError, Upload};
-use yy_remote::ssh_config::{HostOverride, Resolver};
+use yy_remote::ssh_config::Resolver;
 use yy_remote::uri::{RemoteUri, Target};
 use yy_remote::{
     AgentFiles, ConnectLog, Connector, ConnectorFactory, ConnectorOptions, FileInfo, HostKeyCheck,
@@ -137,17 +137,8 @@ impl RemoteState {
         &self,
         target: &Target,
     ) -> Result<Option<yy_remote::listing::ListCommand>, String> {
-        let h = self
-            .config
-            .host
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(&target.host))
-            .map(|(_, h)| h);
-        yy_remote::listing::ListCommand::from_settings(
-            h.and_then(|h| h.list_command.as_deref()),
-            h.and_then(|h| h.list_format.as_deref()),
-        )
-        .map_err(|e| format!("{} の一覧設定: {e}", target.host))
+        yy_remote::policy::listing(&self.config, target)
+            .map_err(|e| format!("{} の一覧設定: {e}", target.host))
     }
     pub(crate) fn new(factory: Option<ConnectorFactory>, config: RemoteConfig) -> RemoteState {
         RemoteState {
@@ -193,34 +184,7 @@ impl RemoteState {
     }
 
     fn resolver(&self) -> Resolver {
-        let mut r = Resolver::from_environment(self.config.read_ssh_config);
-        r.hosts = self
-            .config
-            .host
-            .iter()
-            .map(|(name, h)| {
-                (
-                    name.clone(),
-                    HostOverride {
-                        ssh: h.ssh.clone(),
-                        hostname: h.hostname.clone(),
-                        user: h.user.clone(),
-                        port: h.port,
-                        identity_file: h.identity_file.clone(),
-                        proxy_jump: h.proxy_jump.clone(),
-                        jump_command: h.jump_command.clone(),
-                        sftp_subsystem: h.sftp_subsystem.clone(),
-                        sftp_server: h.sftp_server.clone(),
-                        proxy: h.proxy.clone(),
-                        agent_dir: h.agent_dir.clone(),
-                        forward: h.forward.clone(),
-                    },
-                )
-            })
-            .collect();
-        r.agent_dir = Some(self.config.agent_dir.clone()).filter(|d| !d.trim().is_empty());
-        r.proxy = Some(self.config.proxy.clone()).filter(|p| !p.trim().is_empty());
-        r
+        yy_remote::policy::resolver(&self.config)
     }
 
     /// 接続済みの `target` のセッション（切れていれば捨てる）。
@@ -800,14 +764,7 @@ pub(crate) fn use_agent() -> bool {
 }
 
 pub(crate) fn host_settings(target: &Target) -> Option<yy_config::RemoteHost> {
-    with_state(|r| {
-        r.config
-            .host
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(&target.host))
-            .map(|(_, h)| h.clone())
-    })
-    .flatten()
+    with_state(|r| yy_remote::policy::host(&r.config, target).cloned()).flatten()
 }
 
 pub(crate) fn reload_settings(config: yy_config::RemoteConfig) {
@@ -824,19 +781,32 @@ pub(crate) fn protocol(
     target: &Target,
     fallback: yy_remote::xfer::Protocol,
 ) -> yy_remote::xfer::Protocol {
-    match host_settings(target).and_then(|h| h.protocol) {
-        Some(yy_config::TransferProtocol::Sftp) => yy_remote::xfer::Protocol::Sftp,
-        Some(yy_config::TransferProtocol::Scp) => yy_remote::xfer::Protocol::Scp,
-        None => fallback,
-    }
+    with_state(|r| yy_remote::policy::protocol(&r.config, target, fallback)).unwrap_or(fallback)
 }
 
 pub(crate) fn agent_for(target: &Target) -> bool {
-    match host_settings(target) {
-        Some(h) if h.protocol.is_some() => false,
-        Some(h) => h.use_agent.unwrap_or_else(use_agent),
-        None => use_agent(),
+    with_state(|r| yy_remote::policy::use_agent(&r.config, target, r.use_agent)).unwrap_or(true)
+}
+
+/// Shared location for sheet I/O, workspace copies and downloads.
+pub(crate) fn file_location(
+    uri: &RemoteUri,
+    show: &dyn Fn(&str),
+) -> Result<yy_remote::transfer::Loc, String> {
+    let target = uri.target();
+    if agent_for(&target) {
+        return session(&target, show)
+            .map(|s| yy_remote::transfer::Loc::Remote(s, uri.path.clone()));
     }
+    let protocol = protocol(&target, yy_remote::xfer::Protocol::Sftp);
+    let listing = listing_command(&target)?;
+    let transport = transport(&target, show)?;
+    wait(show, move |_| {
+        yy_remote::file_access::FileAccess::connect(transport, protocol)
+            .map(|s| s.with_listing(listing))
+    })
+    .map(|s| yy_remote::transfer::Loc::Native(Arc::new(s), uri.path.clone()))
+    .map_err(|e| e.to_string())
 }
 
 /// エージェントを使うかを変える（変えた後の一覧・ファイル操作から）。

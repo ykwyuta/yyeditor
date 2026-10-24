@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use yy_remote::{Connector, ConnectorOptions, Prompter, RemoteFs, RemoteUri, SftpFs};
+use yy_remote::{Connector, ConnectorOptions, Prompter, RemoteUri, SftpFs};
 
 pub use yy_remote::Prompter as InputPrompter;
 pub use yy_remote::{HostKeyCheck, HostKeyQuestion};
@@ -17,33 +17,7 @@ pub struct Download {
 }
 
 pub fn resolver(config: &yy_config::RemoteConfig) -> yy_remote::ssh_config::Resolver {
-    use yy_remote::ssh_config::{HostOverride, Resolver};
-    let mut resolver = Resolver::from_environment(config.read_ssh_config);
-    resolver.proxy = (!config.proxy.is_empty()).then(|| config.proxy.clone());
-    resolver.hosts = config
-        .host
-        .iter()
-        .map(|(name, h)| {
-            (
-                name.clone(),
-                HostOverride {
-                    ssh: h.ssh.clone(),
-                    hostname: h.hostname.clone(),
-                    user: h.user.clone(),
-                    port: h.port,
-                    identity_file: h.identity_file.clone(),
-                    proxy_jump: h.proxy_jump.clone(),
-                    jump_command: h.jump_command.clone(),
-                    sftp_subsystem: h.sftp_subsystem.clone(),
-                    sftp_server: h.sftp_server.clone(),
-                    proxy: h.proxy.clone(),
-                    agent_dir: h.agent_dir.clone(),
-                    forward: h.forward.clone(),
-                },
-            )
-        })
-        .collect();
-    resolver
+    yy_remote::policy::resolver(config)
 }
 
 pub fn download(
@@ -92,8 +66,27 @@ pub fn download_with_progress(
         .connect(&spec, prompter, &yy_remote::ConnectLog::new())
         .map_err(|e| e.to_string())?;
     cancel.check()?;
-    let fs = Arc::new(SftpFs::connect(transport.as_ref()).map_err(|e| e.to_string())?);
-    fetch_progress(fs, &uri, cancel, progress).map(Some)
+    use yy_remote::transfer::Loc;
+    let source = if yy_remote::policy::use_agent(&config, &uri.target(), false) {
+        let session = yy_remote::Session::start(
+            transport,
+            &yy_remote::AgentFiles::beside_exe(),
+            spec.agent_dir.as_deref(),
+            &yy_remote::ConnectLog::new(),
+        )
+        .map_err(|e| e.to_string())?;
+        Loc::Remote(Arc::new(session), uri.path.clone())
+    } else {
+        let protocol =
+            yy_remote::policy::protocol(&config, &uri.target(), yy_remote::xfer::Protocol::Sftp);
+        let listing =
+            yy_remote::policy::listing(&config, &uri.target()).map_err(|e| e.to_string())?;
+        let access = yy_remote::file_access::FileAccess::connect(transport, protocol)
+            .map_err(|e| e.to_string())?
+            .with_listing(listing);
+        Loc::Native(Arc::new(access), uri.path.clone())
+    };
+    fetch_location(source, &uri, cancel, progress).map(Some)
 }
 
 pub fn fetch(fs: Arc<SftpFs>, uri: &RemoteUri, cancel: &Cancellation) -> Result<Download> {
@@ -106,8 +99,24 @@ fn fetch_progress(
     cancel: &Cancellation,
     progress: &dyn Fn(u64),
 ) -> Result<Download> {
-    use yy_remote::transfer::{Loc, copy};
-    let before = fs.stat(&uri.path).map_err(|e| e.to_string())?;
+    fetch_location(
+        yy_remote::transfer::Loc::Sftp(fs, uri.path.clone()),
+        uri,
+        cancel,
+        progress,
+    )
+}
+
+fn fetch_location(
+    source: yy_remote::transfer::Loc,
+    uri: &RemoteUri,
+    cancel: &Cancellation,
+    progress: &dyn Fn(u64),
+) -> Result<Download> {
+    use yy_remote::transfer::{Loc, copy, info};
+    let before = info(&source)
+        .map_err(|e| e.to_string())?
+        .ok_or("remote file not found")?;
     if before.kind != yy_remote::FileKind::File {
         return Err("SSH input must be a regular file".into());
     }
@@ -123,14 +132,10 @@ fn fetch_progress(
     let path = directory
         .path()
         .join(format!("input.{}", extension.unwrap_or("txt")));
-    let stats = copy(
-        &Loc::Sftp(fs.clone(), uri.path.clone()),
-        &Loc::Local(path.clone()),
-        &mut |stats| {
-            progress(stats.bytes);
-            cancel.check().is_ok()
-        },
-    )
+    let stats = copy(&source, &Loc::Local(path.clone()), &mut |stats| {
+        progress(stats.bytes);
+        cancel.check().is_ok()
+    })
     .map_err(|e| {
         if cancel.check().is_err() {
             "cancelled".into()
@@ -139,7 +144,9 @@ fn fetch_progress(
         }
     })?;
     cancel.check()?;
-    let after = fs.stat(&uri.path).map_err(|e| e.to_string())?;
+    let after = info(&source)
+        .map_err(|e| e.to_string())?
+        .ok_or("remote file was removed")?;
     if before.id != after.id || stats.bytes != before.len() {
         return Err("remote file changed during download; retry the comparison".into());
     }
@@ -200,6 +207,48 @@ mod tests {
             }
         });
         assert!(result.is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn scp_comparison_input_never_starts_sftp() {
+        use super::*;
+        use yy_remote::{Process, Transport};
+        struct ScpOnly(yy_remote::local::LocalTransport);
+        impl Transport for ScpOnly {
+            fn exec(&self, command: &[u8]) -> std::io::Result<Process> {
+                self.0.exec(command)
+            }
+            fn subsystem(&self, _: &str) -> std::io::Result<Process> {
+                panic!("SCP input must not request SFTP")
+            }
+            fn is_closed(&self) -> bool {
+                false
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("日本語 file.csv");
+        std::fs::write(&source, b"one,two\n").unwrap();
+        let uri = RemoteUri {
+            user: None,
+            host: "scp".into(),
+            port: None,
+            path: source.to_str().unwrap().as_bytes().to_vec(),
+        };
+        let access = yy_remote::file_access::FileAccess::connect(
+            Arc::new(ScpOnly(yy_remote::local::LocalTransport::new())),
+            yy_remote::xfer::Protocol::Scp,
+        )
+        .unwrap();
+        let location = yy_remote::transfer::Loc::Native(Arc::new(access), uri.path.clone());
+        let got = fetch_location(location.clone(), &uri, &Cancellation::new(), &|_| {}).unwrap();
+        assert_eq!(std::fs::read(&got.path).unwrap(), b"one,two\n");
+        assert_eq!(got.path.extension().unwrap(), "csv");
+        let temp = got.path.clone();
+        drop(got);
+        assert!(!temp.exists());
+        let stop = Cancellation::new();
+        stop.cancel();
+        assert!(fetch_location(location, &uri, &stop, &|_| {}).is_err());
     }
     #[test]
     fn shared_profiles_preserve_gateway_settings() {

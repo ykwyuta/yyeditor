@@ -890,12 +890,14 @@ yymerge.exe diff ssh://server/var/log/app.log local.log
 yymerge.exe large-diff ssh://server-a/data/a.csv ssh://server-b/data/a.csv
 ```
 
-yyeditorと同じRustのSSH/SFTP実装を使います。`ssh.exe`等の外部クライアントは不要です。
-接続先にはSFTPが必要です。接続先にyy-agentを配置する操作は行いません。
+yyeditorと同じRustのSSH／SFTP／SCP実装を使います。`ssh.exe`等の外部クライアントは不要です。
+ホスト別の`protocol = "sftp"`／`"scp"`を使います。方式未指定時はSFTPです。SCPではSFTPを要求せず、POSIXシェルとGNU stat等のコマンドが必要です。
+明示的な転送方式があればエージェントを使いません。方式未指定かつホスト別の`use_agent = true`の場合だけyy-agentを使います（実行ファイル横のagentsフォルダー、またはYY_AGENT_DIRが必要）。
 共通設定`%APPDATA%\yyeditor\config.toml`の`[remote]`・`[remote.host.<名前>]`と、
-設定で有効な`~/.ssh/config`・`~/.ssh/known_hosts`を読みます。
+同じフォルダーの`connections.toml`と、設定で有効な`~/.ssh/config`・`~/.ssh/known_hosts`を読みます。
+yyeditor・yyterm・yysheetの「ヘルプ → SSH接続先を管理…」、yysftpの「ファイル → SSH接続先を管理…」で登録した接続名をそのまま使えます。
 Linuxの共通設定は`$XDG_CONFIG_HOME/yyeditor/config.toml`または`~/.config/yyeditor/config.toml`です。
-ホスト名、ユーザー、ポート、秘密鍵、ProxyJump、プロキシ、ゲートウェイの中継コマンドとSFTP起動設定を利用できます。
+ホスト名、複合ユーザー名、ポート、秘密鍵、ProxyJump、プロキシ、SSH認証・暗号設定、ゲートウェイの中継コマンドとSFTP起動設定を共通に利用できます。
 
 ```toml
 [remote.host.production]

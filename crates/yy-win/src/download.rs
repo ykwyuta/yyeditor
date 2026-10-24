@@ -3,7 +3,7 @@
 //!
 //! - 置き場所は Windows のダウンロード フォルダ（`FOLDERID_Downloads`。場所を変えていればその場所）。同じ名前が
 //!   あれば、ブラウザと同じく `名前 (2).拡張子` にする（上書きしない）。
-//! - エージェントを使う設定（エディタは常に）ならエージェント、でなければ SFTP（接続先に何も置かない）で読む。
+//! - 共通のホスト別設定に従い、エージェントまたはSFTP／SCPで読む。
 //! - 始める前に量を数え、10 MB 以上なら確かめる（大きさの上限はない）。進み具合はステータスバーに出し、Esc で
 //!   中止すると作りかけを消す。
 //!
@@ -62,13 +62,8 @@ pub(crate) fn download(hwnd: HWND, uri: &RemoteUri) -> Result<Option<String>, St
         return Err("ダウンロード フォルダが分かりません。".into());
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}\n\n{e}", dir.display()))?;
-    let target = uri.target();
     let show = crate::remote::show_status;
-    let src = if crate::remote::use_agent() {
-        Loc::Remote(crate::remote::session(&target, &show)?, uri.path.clone())
-    } else {
-        Loc::Sftp(crate::remote::sftp_fs(&target, &show)?, uri.path.clone())
-    };
+    let src = crate::remote::file_location(uri, &show)?;
     let name = local_name(uri)?;
     // 量を数える
     show(&format!("{name} の大きさを調べています…（Esc で中止）"));
@@ -177,6 +172,14 @@ pub(crate) fn zip_download(hwnd: HWND, uri: &RemoteUri) -> Result<Option<String>
     use yy_remote::ZipState;
     let target = uri.target();
     let show = crate::remote::show_status;
+    if !crate::remote::agent_for(&target) {
+        return queue_in_sftp(
+            hwnd,
+            uri,
+            &local_name(uri)?,
+            "接続先の共通設定でエージェントを使わないため、選択された転送方式でフォルダを転送します。",
+        );
+    }
     let session = crate::remote::session(&target, &show)?;
     let name = local_name(uri)?;
     show(&format!("{name} を zip にしています…（Esc で中止）"));
@@ -318,7 +321,7 @@ fn queue_in_sftp(
 ) -> Result<Option<String>, String> {
     use windows::Win32::UI::WindowsAndMessaging::{IDOK, MB_ICONINFORMATION, MB_OKCANCEL};
     let text = format!(
-        "「{name}」は zip にすると {} を超えるため、ここではダウンロードしません。\n（{why}）\n\n\
+        "「{name}」の zip 作成をここでは利用できません。\n（{why}、zip の上限: {}）\n\n\
          yysftp の転送の一覧に、フォルダのダウンロードとして入れます。次の画面で保存先のフォルダを\
          選んでください（その中に「{name}」フォルダを作ります）。",
         crate::util::human_size(ZIP_LIMIT)

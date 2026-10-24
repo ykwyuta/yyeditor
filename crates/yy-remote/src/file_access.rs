@@ -29,6 +29,22 @@ impl FileAccess {
         })
     }
 
+    /// Apply the same custom directory listing to traversal and file operations.
+    pub fn with_listing(mut self, listing: Option<crate::listing::ListCommand>) -> Self {
+        if let Some(listing) = listing {
+            self.fs = Arc::new(crate::listing::CommandListFs::new(
+                self.fs,
+                self.transport.clone(),
+                listing,
+            ));
+        }
+        self
+    }
+
+    pub fn remote_fs(&self) -> &dyn RemoteFs {
+        self.fs.as_ref()
+    }
+
     pub fn fs(&self) -> Arc<dyn RemoteFs> {
         self.fs.clone()
     }

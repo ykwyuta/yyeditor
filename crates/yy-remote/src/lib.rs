@@ -16,6 +16,7 @@ pub mod listing;
 pub mod local;
 pub mod log;
 pub mod multiplex;
+pub mod policy;
 pub mod proxy;
 pub mod rpc;
 pub mod scp;
