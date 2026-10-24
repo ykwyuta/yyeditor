@@ -6,6 +6,7 @@
 - 変更前に該当する`.github/workflows/*.yml`を読み、OS、機能フラグ、Rust/C++ツールチェーン、外部プログラム、検証コマンドを確認する。ローカルのRustがCIの`stable`より古い場合、その結果だけでCI成功を見込まない。
 - 変更したワークスペースでは`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`と変更に対応するテストを実行する。独立ワークスペースでは`--manifest-path`を付ける。yymergeのLinux検証は`--no-default-features`も使う。
 - `crates/`の共有部品を変更した場合、利用する独立アプリへの影響と各ワークフローのpath条件を確認する。Windowsで成功してもLinux固有のコードを検証済みとはしない。
+- SSH等の共有型にフィールドを追加・変更した場合は、`apps/yy-agent/tests/ssh.rs`等の`cfg(unix)`結合試験にある構造体初期化も確認し、Linuxでルート全体の`cargo clippy --workspace --all-targets --locked -- -D warnings`を実行する。変更したライブラリだけの`-p`指定では利用側の試験コードを検証できない。
 - 書式・Clippyの失敗を広い`allow`や検査の除外で回避しない。警告対象の計算・型・API利用を修正する。
 
 ## 共有ライブラリ

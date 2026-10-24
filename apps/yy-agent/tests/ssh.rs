@@ -356,6 +356,7 @@ impl TestServer {
 
     fn spec(&self, identity_files: Vec<PathBuf>) -> HostSpec {
         HostSpec {
+            ssh: Default::default(),
             target: Target::parse(&format!("127.0.0.1:{}", self.port)).unwrap(),
             hostname: "127.0.0.1".into(),
             port: self.port,
