@@ -41,6 +41,10 @@
 
 ## 3. プロジェクト構成（Cargo ワークスペース）
 
+文字コード処理`yy-encoding`と変換表生成ツール`gen-tables`は
+[YYLibrary](https://github.com/ykwyuta/YYLibrary)で管理する。
+アプリ側は固定コミットのCargo Git依存で同じ文字コード実装を利用する。
+
 ```
 yyeditor/
 ├─ Cargo.toml                 # [workspace] 定義、共通 profile
@@ -48,9 +52,6 @@ yyeditor/
 ├─ crates/
 │  ├─ yy-buffer/              # 永続ピースツリー、スナップショット、行/オフセット変換
 │  │  └─ src/{lib.rs, tree.rs, piece.rs, snapshot.rs, cursor.rs, metrics.rs}
-│  ├─ yy-encoding/            # コーデック trait、各文字コード実装、自動判別
-│  │  ├─ src/{lib.rs, detect.rs, registry.rs, codecs/...}
-│  │  └─ tables/              # 生成済みマッピングテーブル（build 時に埋め込み）
 │  ├─ yy-io/                  # mmap、ファイルオープン、変換ローダー、保存、ロック、一時ファイル
 │  │  └─ src/{lib.rs, source.rs, loader.rs, saver.rs, tempdir.rs, lock.rs}
 │  ├─ yy-core/                # Document（バッファ＋メタ情報）、マルチカーソル・矩形選択、一括編集、Undo/Redo
@@ -72,7 +73,6 @@ yyeditor/
 │     ├─ build.rs             # embed-resource で manifest（PerMonitorV2 DPI, longPathAware, UTF-8）埋め込み
 │     └─ res/
 ├─ tools/
-│  ├─ gen-tables/             # Unicode/JIS/IBM の対応表からコーデックテーブルを生成
 │  └─ gen-bigfile/            # 性能試験用の巨大ファイル生成
 ├─ tests/
 │  ├─ fixtures/               # 各文字コード・CSV のテストデータ

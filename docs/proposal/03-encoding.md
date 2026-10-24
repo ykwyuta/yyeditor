@@ -90,7 +90,7 @@ pub enum Unmappable {           // 保存時に変換できない文字の扱い
 
 ### 2.3 テーブル生成
 
-- `tools/gen-tables` が、Unicode Consortium の対応表、JIS X 0213 の対応表（x0213.org 公開データ）、IBM の CDRA 変換表（ICU の `.ucm` ファイル）などを入力に、Rust のソース（`static` 配列）を生成して `crates/yy-encoding/tables/` にコミットする。
+- [YYLibraryの生成ツール](https://github.com/ykwyuta/YYLibrary/tree/master/tools/gen-tables)が、Unicode Consortium の対応表、JIS X 0213 の対応表（x0213.org 公開データ）、IBM の CDRA 変換表（ICU の `.ucm` ファイル）などを入力に、Rust のソース（`static` 配列）を生成して YYLibraryの`crates/yy-encoding/src/tables/` にコミットする。
 - デコード用は「リード バイト→ 256 要素のページ」の 2 段テーブル、エンコード用は Unicode の上位バイトで引く 2 段テーブルとし、ともに O(1) 変換。
 - 実行時に外部 `.map` ファイル（TSV 形式: `バイト列<TAB>Unicode`）を読み込んでテーブルを上書き・追加できる。外字（ユーザー定義文字、SJIS 0xF040〜0xF9FC → U+E000〜）もこの仕組みで対応する。
 

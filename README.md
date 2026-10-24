@@ -4,7 +4,7 @@ English | [日本語](README.ja.md)
 
 <img src="apps/yyeditor/res/yyeditor-256.png" alt="yyeditor icon" width="96">
 
-A collection of Windows applications written in Rust for text editing, terminal connections, file transfer, spreadsheet processing, shared-folder management, web browsing, and clipboard reuse. The applications include tools for working with huge files, Japanese character encodings, and mainframe data.
+A collection of Windows applications and cross-platform CLI tools written in Rust for text editing, terminal connections, file transfer, spreadsheet processing, shared-folder management, web browsing, and clipboard reuse. The applications include tools for working with huge files, Japanese character encodings, and mainframe data.
 
 This repository contains the following applications and their shared libraries.
 
@@ -21,6 +21,7 @@ This repository contains the following applications and their shared libraries.
 | **yy-agent** | A Linux helper for file operations on SSH hosts |
 | **yymerge** | Exact text comparison and three-way merge with a Windows GUI, headless CLI, and separate CI; initial implementation ([details](apps/yymerge/README.md)) |
 | **YY3Designer** | Pixel art editor, photo conversion, six-view voxel modeling and adjustable rounded dots; separate CI ([details](apps/yy3designer/README.md)) |
+| **yysort** | Windows/Linux CLI external sort for fixed records and RFC 4180 CSV, shared encodings, CPU/memory limits and a DFSORT control-card subset ([details](https://github.com/ykwyuta/YYSort)) |
 
 For development prerequisites, builds, tests, and internal architecture, see [DEVELOPER.md](DEVELOPER.md).
 

@@ -5,11 +5,13 @@ use std::ops::Range;
 use yy_core::{Query, Replacement, Searcher, Selection, SelectionSet};
 
 const VALUE: u16 = 267;
+const EXPAND: u16 = 269;
 pub(super) struct Controls {
     label: HWND,
     value: HWND,
     one: HWND,
     all: HWND,
+    expand: HWND,
 }
 impl Controls {
     pub(super) fn create(parent: HWND, font: HFONT) -> Result<Self> {
@@ -30,6 +32,13 @@ impl Controls {
             )?,
             one: child(parent, w!("BUTTON"), "選択を置換", REPLACE_ONE, WS_TABSTOP)?,
             all: child(parent, w!("BUTTON"), "全置換", REPLACE_ALL, WS_TABSTOP)?,
+            expand: child(
+                parent,
+                w!("BUTTON"),
+                "置換構文",
+                EXPAND,
+                WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+            )?,
         };
         controls.set_font(font);
         unsafe {
@@ -45,8 +54,8 @@ impl Controls {
         }
         Ok(controls)
     }
-    fn handles(&self) -> [HWND; 4] {
-        [self.label, self.value, self.one, self.all]
+    fn handles(&self) -> [HWND; 5] {
+        [self.label, self.value, self.expand, self.one, self.all]
     }
     pub(super) fn set_font(&self, font: HFONT) {
         unsafe {
@@ -59,6 +68,9 @@ impl Controls {
                 );
             }
         }
+    }
+    fn expand(&self) -> bool {
+        unsafe { SendMessageW(self.expand, BM_GETCHECK, None, None).0 != 0 }
     }
     fn value(&self) -> String {
         let mut value = vec![0u16; unsafe { GetWindowTextLengthW(self.value) }.max(0) as usize + 1];
@@ -79,6 +91,7 @@ struct Job {
     selection: Selection,
     query: Query,
     value: String,
+    expand: bool,
 }
 impl Drop for Job {
     fn drop(&mut self) {
@@ -90,12 +103,19 @@ struct Prepared {
     count: u64,
     caret: u64,
 }
-struct Budget {
+#[derive(Clone, Copy, Default)]
+struct Options {
+    all: bool,
+    expand: bool,
+}
+struct Budget<'a> {
     bytes: Vec<u8>,
     limit: usize,
+    cancel: &'a Cancellation,
 }
-impl Write for Budget {
+impl Write for Budget<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.cancel.check().map_err(io::Error::other)?;
         if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
             return Err(io::Error::other(
                 "置換結果が32 MiBの上限を超えるため反映しません",
@@ -113,11 +133,15 @@ fn prepare(
     value: &str,
     snap: &yy_buffer::Snapshot,
     selection: Range<u64>,
-    all: bool,
+    options: Options,
     cancel: &Cancellation,
     limit: usize,
 ) -> Result<Prepared> {
+    let Options { all, expand } = options;
     cancel.check()?;
+    if expand && !query.regex {
+        return Err("置換構文を使う場合は検索の[正規表現]も有効にしてください".into());
+    }
     if query.pattern.is_empty() {
         return Err("検索文字列を入力してください".into());
     }
@@ -125,6 +149,11 @@ fn prepare(
         return Err("置換後にNULは指定できません".into());
     }
     let searcher = Searcher::new(query).map_err(|e| e.to_string())?;
+    let replacement = if expand {
+        Replacement::parse(value, &searcher).map_err(|e| e.to_string())?
+    } else {
+        Replacement::literal(value)
+    };
     let mut step = |_| cancel.check().is_ok();
     if !all
         && searcher
@@ -144,29 +173,26 @@ fn prepare(
     let mut out = Budget {
         bytes: Vec::new(),
         limit,
+        cancel,
     };
-    // Literal templates keep expansion bounded per match, including regex searches.
-    let count = yy_search::rewrite(
-        &searcher,
-        snap,
-        range,
-        &Replacement::literal(value),
-        &mut out,
-        &mut step,
-    )
-    .map_err(|e| e.to_string())?;
+    let count =
+        yy_search::rewrite_streaming(&searcher, snap, range, &replacement, &mut out, &mut step)
+            .map_err(|e| e.to_string())?;
     cancel.check()?;
     if !all && count != 1 {
         return Err("選択範囲を単一の一致として置換できません".into());
     }
+    let caret = if all {
+        0
+    } else {
+        (out.bytes.len() as u64)
+            .checked_sub(snap.len() - selection.end)
+            .ok_or("置換後のカーソル位置が不正です")?
+    };
     Ok(Prepared {
         bytes: out.bytes,
         count,
-        caret: if all {
-            0
-        } else {
-            selection.start + value.len() as u64
-        },
+        caret,
     })
 }
 fn ready(a: &App) -> bool {
@@ -224,7 +250,14 @@ pub(super) fn layout_controls(a: &mut App, top: i32, width: i32, dpi: i32) -> i3
                 a.replace_controls.value,
                 unit(70),
                 top,
-                (width - unit(284)).max(1),
+                (width - unit(384)).max(1),
+                unit(27),
+            ),
+            (
+                a.replace_controls.expand,
+                width - unit(308),
+                top,
+                unit(96),
                 unit(27),
             ),
             (
@@ -249,20 +282,23 @@ pub(super) fn layout_controls(a: &mut App, top: i32, width: i32, dpi: i32) -> i3
 }
 pub(super) fn tab_targets(a: &App, targets: &mut Vec<HWND>) {
     if a.replace.visible {
-        targets.push(a.replace_controls.value);
+        targets.extend([a.replace_controls.value, a.replace_controls.expand]);
         if ready(a) && a.search.active == 3 && a.replace.job.is_none() {
             targets.extend([a.replace_controls.one, a.replace_controls.all]);
         }
     }
 }
 pub(super) fn notification(id: u16, code: u32) -> bool {
-    if id != VALUE {
+    if !matches!(id, VALUE | EXPAND) {
         return false;
     }
-    if code == EN_CHANGE {
+    if (id == VALUE && code == EN_CHANGE) || (id == EXPAND && code == BN_CLICKED) {
         app(|a| {
             cancel(a);
-            info(a, "RESULTのみ置換。置換後は入力文字列をそのまま使用します");
+            info(
+                a,
+                "RESULTのみ置換。[置換構文]は正規表現のキャプチャ・改行等を展開します",
+            );
         });
     }
     true
@@ -299,7 +335,10 @@ pub(super) fn command(a: &mut App, id: u16) -> Result<()> {
         search_view::focus(a, 3);
         a.replace.visible = true;
         layout(a);
-        info(a, "RESULTのみ置換。置換後は入力文字列をそのまま使用します");
+        info(
+            a,
+            "RESULTのみ置換。[置換構文]は正規表現のキャプチャ・改行等を展開します",
+        );
         return Ok(());
     }
     if a.search.active != 3 {
@@ -307,6 +346,7 @@ pub(super) fn command(a: &mut App, id: u16) -> Result<()> {
     }
     let query = a.search_controls.query();
     let value = a.replace_controls.value();
+    let expand = a.replace_controls.expand();
     if query.pattern.is_empty() {
         return Err("検索文字列を入力してください".into());
     }
@@ -325,7 +365,10 @@ pub(super) fn command(a: &mut App, id: u16) -> Result<()> {
             &worker_value,
             &snapshot,
             selection.range(),
-            id == REPLACE_ALL,
+            Options {
+                all: id == REPLACE_ALL,
+                expand,
+            },
             &worker_cancel,
             yy_merge_core::MAX_BYTES as usize,
         );
@@ -339,6 +382,7 @@ pub(super) fn command(a: &mut App, id: u16) -> Result<()> {
         selection,
         query,
         value,
+        expand,
     });
     info(a, "置換を計算中… [停止] で中止できます");
     update_menu(a);
@@ -362,6 +406,7 @@ pub(super) fn tick(a: &mut App) {
         || *a.editors[3].document.selections().primary() != job.selection
         || a.search_controls.query() != job.query
         || a.replace_controls.value() != job.value
+        || a.replace_controls.expand() != job.expand
     {
         info(a, "文書・選択・条件が変わったため置換を反映しません");
         return;
@@ -567,6 +612,54 @@ pub(super) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     if !a.editors[3].document.undo() || a.editors[3].text() != "犬\r\n猫 cat" {
         return Err("replace all was not one Undo".into());
     }
+    query(a, "(?<animal>犬)|(?<word>cat)", true, "${word}${animal}\\n");
+    unsafe {
+        SendMessageW(
+            a.replace_controls.expand,
+            BM_SETCHECK,
+            Some(WPARAM(BST_CHECKED.0 as usize)),
+            None,
+        );
+    }
+    select(a, 0..3);
+    command(a, REPLACE_ONE)?;
+    wait(a)?;
+    if a.editors[3].text() != "犬\n\r\n猫 cat"
+        || a.editors[3].document.selections().primary().head != 4
+    {
+        return Err("capture single replacement/caret failed".into());
+    }
+    if !a.editors[3].document.undo() {
+        return Err("capture replacement Undo failed".into());
+    }
+    command(a, REPLACE_ALL)?;
+    wait(a)?;
+    if a.editors[3].text() != "犬\n\r\n猫 cat\n" {
+        return Err("capture all replacement failed".into());
+    }
+    if !a.editors[3].document.undo() || a.editors[3].text() != "犬\r\n猫 cat" {
+        return Err("capture all Undo failed".into());
+    }
+    text(a.replace_controls.value, "$99");
+    command(a, REPLACE_ALL)?;
+    wait(a)?;
+    if a.editors[3].text() != "犬\r\n猫 cat" {
+        return Err("invalid capture changed RESULT".into());
+    }
+    text(a.replace_controls.value, "x");
+    command(a, REPLACE_ALL)?;
+    unsafe {
+        SendMessageW(
+            a.replace_controls.expand,
+            BM_SETCHECK,
+            Some(WPARAM(BST_UNCHECKED.0 as usize)),
+            None,
+        );
+    }
+    wait(a)?;
+    if a.editors[3].text() != "犬\r\n猫 cat" {
+        return Err("stale expansion mode applied".into());
+    }
     let before = a.editors[3].text();
     query(a, "cat", false, "dog");
     select(a, 0..0);
@@ -627,6 +720,12 @@ pub(super) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
         return Err("oversized replacement applied".into());
     }
     key(a, a.replace_controls.value, 9, false).unwrap()?;
+    if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() }
+        != a.replace_controls.expand
+    {
+        return Err("replacement syntax Tab navigation failed".into());
+    }
+    key(a, a.replace_controls.expand, 9, false).unwrap()?;
     if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } != a.replace_controls.one
     {
         return Err("replacement Tab navigation failed".into());
@@ -652,7 +751,7 @@ pub(super) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     await_rule_smoke(a)?;
     query(a, "", false, "");
     layout(a);
-    std::fs::write(dir.join("replace-smoke.txt"),"PASS: RESULT-only single/all replacement, literal regex templates and CRLF, one-step Undo/Redo, no-op preserves saved/version/history, manual/unsaved transition, unresolved and source bytes retained, stale document/selection/query/template/generation rejected, pane/cancel/close, output budget, Tab navigation, resize 680x420/1280x820\n").map_err(|e|e.to_string())
+    std::fs::write(dir.join("replace-smoke.txt"),"PASS: RESULT-only single/all replacement, opt-in capture/escape templates and literal default, invalid capture rejected, expanded caret, CRLF, one-step Undo/Redo, no-op preserves saved/version/history, manual/unsaved transition, unresolved and source bytes retained, stale document/selection/query/template/expansion/generation rejected, pane/cancel/close, output budget, Tab navigation, resize 680x420/1280x820\n").map_err(|e|e.to_string())
 }
 
 #[cfg(test)]
@@ -680,10 +779,94 @@ mod tests {
             value,
             doc.snapshot(),
             selected,
-            all,
+            Options {
+                all,
+                ..Default::default()
+            },
             &Cancellation::default(),
             limit,
         )
+    }
+    #[test]
+    fn capture_templates_are_explicit_validated_and_bounded() {
+        let c = Cancellation::default();
+        let q = query(r"(?<name>猫|dog)(?:=(\d+))?", true);
+        let doc = yy_core::Document::from_text("猫=12\r\ndog");
+        let options = Options {
+            all: true,
+            expand: true,
+        };
+        let result = prepare(
+            &q,
+            r"\U${name}\E:$2\n$$",
+            doc.snapshot(),
+            0..0,
+            options,
+            &c,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(result.count, 2);
+        assert_eq!(
+            String::from_utf8(result.bytes).unwrap(),
+            "猫:12\n$\r\nDOG:\n$"
+        );
+        let result = prepare(
+            &q,
+            r"$2/${name}",
+            doc.snapshot(),
+            0..6,
+            Options {
+                all: false,
+                expand: true,
+            },
+            &c,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(result.caret, 6);
+        assert_eq!(String::from_utf8(result.bytes).unwrap(), "12/猫\r\ndog");
+        for template in ["$99", "${unknown}", "${", &format!("${}", "9".repeat(512))] {
+            assert!(prepare(&q, template, doc.snapshot(), 0..0, options, &c, 1024).is_err());
+        }
+        assert!(
+            prepare(
+                &query("猫", false),
+                "$0",
+                doc.snapshot(),
+                0..0,
+                options,
+                &c,
+                1024
+            )
+            .is_err()
+        );
+        let doc = yy_core::Document::from_text("a".repeat(65536).as_str());
+        assert!(
+            prepare(
+                &query("(a+)", true),
+                &"$1".repeat(256),
+                doc.snapshot(),
+                0..0,
+                options,
+                &c,
+                10000
+            )
+            .is_err()
+        );
+        assert_eq!(doc.snapshot().len(), 65536);
+        let doc = yy_core::Document::from_text("猫");
+        let result = prepare(
+            &query("^|$", true),
+            r"<$0>\n",
+            doc.snapshot(),
+            0..0,
+            options,
+            &c,
+            11,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(result.bytes).unwrap(), "<>\n猫<>\n");
     }
     #[test]
     fn literal_unicode_case_word_and_single_keep_other_source_bytes() {
@@ -746,7 +929,21 @@ mod tests {
         let doc = yy_core::Document::from_text("a");
         let cancel = Cancellation::default();
         cancel.cancel();
-        assert!(prepare(&q, "x", doc.snapshot(), 0..0, true, &cancel, 10).is_err());
+        assert!(
+            prepare(
+                &q,
+                "x",
+                doc.snapshot(),
+                0..0,
+                Options {
+                    all: true,
+                    ..Default::default()
+                },
+                &cancel,
+                10
+            )
+            .is_err()
+        );
         assert_eq!(doc.snapshot().read(0..1), b"a");
     }
 }

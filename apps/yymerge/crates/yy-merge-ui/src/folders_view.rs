@@ -757,7 +757,10 @@ fn selected_pair(a: &App) -> Result<Gui> {
         return Err("両側に通常ファイルがある項目を選択してください。リンク・フォルダー・片側のみ・読み取り失敗の項目は開きません。".into());
     }
     Ok(Gui {
-        base: if e.ancestor_file {
+        base: if e.ancestor_file
+            && yy_merge_core::office::Kind::detect(&e.entry.path).is_none()
+            && !yy_merge_core::images::is_image(&e.entry.path)
+        {
             f.base.as_ref().map(|p| p.join(&e.entry.path))
         } else {
             None

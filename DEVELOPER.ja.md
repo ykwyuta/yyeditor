@@ -146,7 +146,7 @@ Windows ではファイルの先頭画面を画面外に描画して BMP に出�
 共通設定は `%APPDATA%\yyeditor\config.toml` です。設定の型と既定値は `crates/yy-config`、利用者向けの説明は [yyeditor ヘルプ](crates/yy-win/help/help.md) と [yysheet ヘルプ](crates/yy-win/help/sheet.md) にあります。yyclip の保存先は `%APPDATA%\yyclip\` で、詳細は [アプリの README](apps/yyclip/README.md) を参照してください。
 
 - ハイライト定義: `crates/yy-syntax/syntaxes/`。利用者の追加定義は `%APPDATA%\yyeditor\syntax\*.toml`。
-- 外部文字コード表: `%APPDATA%\yyeditor\mappings\*.map`。組み込み表の生成ツールは `tools/gen-tables`。
+- 外部文字コード表: `%APPDATA%\yyeditor\mappings\*.map`。組み込み表の生成ツールは [YYLibrary/tools/gen-tables](https://github.com/ykwyuta/YYLibrary/tree/master/tools/gen-tables)。
 - プレビューの埋め込みアセット: `crates/yy-preview/assets/`。取得スクリプトは `tools/fetch-preview-assets/fetch.py`。バージョンは `VERSIONS.txt`、ライセンスは同じフォルダに収録。
 - フォント: `crates/yy-win/fonts/`。UDEV Gothic を埋め込み、プロセス内で登録します。
 - アプリのアイコンとマニフェスト: 各 `apps/<アプリ>/res/`。アイコン生成ツールは `tools/gen-icon/gen_icon.py`、埋め込み処理は `apps/yyeditor/build.rs` を各アプリで共有します。
@@ -176,3 +176,11 @@ yyfilemanager の中核は `cargo test -p yy-files`、ブラウザの設定・�
 yyclip、yyfilemanager、yybrowser も CI のビルド・配布・Windows 向け型検査に含まれています。
 
 配布時は [COPYING](COPYING)、[COPYING.EXCEPTION](COPYING.EXCEPTION)、同梱素材のライセンスを確認してください。Microsoft Edge WebView2 Loader のリンクに関する追加の許可も、このリポジトリのライセンス条件の一部です。
+
+## 共有ライブラリの参照
+
+`yy-encoding`の本体は[YYLibrary](https://github.com/ykwyuta/YYLibrary)で管理します。
+Cargo.tomlの`rev`とCargo.lockで固定したコミットをCargoが取得するため、別途cloneやsubmodule初期化は不要です。
+共有文字コード依存にはRust 1.88以降が必要です。実装変更はYYLibraryで行い、このワークスペースと
+独立したyymerge・yydbmanager・YY3Designerのロックファイルを合わせて更新してください。
+YYSortも同じコミットを利用します。参照更新時は各ワークフローの検証を実施してください。

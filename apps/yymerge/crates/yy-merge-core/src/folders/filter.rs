@@ -83,9 +83,13 @@ fn normalize(text: &str) -> String {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Filter {
     path_contains: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_glob: Option<String>,
     status: Selection,
     #[serde(skip)]
     needle: String,
+    #[serde(skip)]
+    glob: Vec<char>,
 }
 impl Filter {
     pub fn new(path_contains: String, status: Selection) -> Result<Self> {
@@ -98,18 +102,48 @@ impl Filter {
         let needle = normalize(&path_contains);
         Ok(Self {
             path_contains,
+            path_glob: None,
             status,
             needle,
+            glob: Vec::new(),
         })
     }
+    /// Whole relative-path wildcard match. Stars include separators; '?' is one scalar.
+    pub fn wildcard(pattern: String, status: Selection) -> Result<Self> {
+        if pattern.is_empty() || pattern.contains('\0') || pattern.len() > 2048 {
+            return Err(
+                "folder wildcard: nonempty pattern up to 2048 UTF-8 bytes without NUL required"
+                    .into(),
+            );
+        }
+        let normalized = normalize(&pattern);
+        if normalized.chars().count() > 256 {
+            return Err("folder wildcard: normalized pattern exceeds 256 characters".into());
+        }
+        let mut glob = Vec::new();
+        for c in normalized.chars() {
+            if c != '*' || glob.last() != Some(&'*') {
+                glob.push(c);
+            }
+        }
+        Ok(Self {
+            path_glob: Some(pattern),
+            status,
+            glob,
+            ..Default::default()
+        })
+    }
+    pub fn glob(&self) -> Option<&str> {
+        self.path_glob.as_deref()
+    }
     pub fn query(&self) -> &str {
-        &self.path_contains
+        self.path_glob.as_deref().unwrap_or(&self.path_contains)
     }
     pub fn status(&self) -> Selection {
         self.status
     }
     pub fn active(&self) -> bool {
-        !self.path_contains.is_empty() || self.status != Selection::All
+        self.path_glob.is_some() || !self.path_contains.is_empty() || self.status != Selection::All
     }
     pub fn matches(&self, path_key: &str, facts: Facts) -> bool {
         let status = match self.status {
@@ -121,13 +155,118 @@ impl Filter {
             Selection::Review => facts.review,
             Selection::Uncompared => facts.incomplete,
         };
-        status && path_key.contains(&self.needle)
+        status
+            && if self.path_glob.is_some() {
+                wildcard_match(&self.glob, path_key)
+            } else {
+                path_key.contains(&self.needle)
+            }
     }
+}
+
+// Remember only the most recent star, advancing its retry position monotonically.
+// No recursive backtracking or per-path allocation. Work is bounded by pattern × path.
+fn wildcard_match(pattern: &[char], text: &str) -> bool {
+    let mut input = text.chars();
+    let mut at = 0;
+    let mut star = None;
+    while let Some(c) = input.clone().next() {
+        if pattern.get(at) == Some(&'*') {
+            at += 1;
+            star = Some((at, input.clone()));
+        } else if pattern.get(at).is_some_and(|p| *p == '?' || *p == c) {
+            at += 1;
+            input.next();
+        } else if let Some((resume, retry)) = &mut star {
+            if retry.next().is_none() {
+                return false;
+            }
+            input = retry.clone();
+            at = *resume;
+        } else {
+            return false;
+        }
+    }
+    pattern[at..].iter().all(|c| *c == '*')
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wildcard_paths_are_explicit_unicode_whole_path_and_status_filtered() {
+        let facts = Facts::two(&Status::Different);
+        for (pattern, path, matched) in [
+            ("*.csv", "data.CSV", true),
+            ("*.csv", "src/日本語/data.csv", true),
+            ("*.csv", "data.csv.bak", false),
+            ("src\\?.csv", "SRC/猫.csv", true),
+            ("src/?.csv", "src/猫猫.csv", false),
+            ("x**y", "x/a/y", true),
+            ("*a?b", "aaab", true),
+            ("[a].csv", "a.csv", false),
+            ("[a].csv", "[a].csv", true),
+            ("猫 *", "猫 file", true),
+            ("*.txt", "x.csv", false),
+            ("*", "", true),
+            ("?", "", false),
+        ] {
+            let filter = Filter::wildcard(pattern.into(), Selection::Different).unwrap();
+            assert_eq!(
+                filter.matches(&path_key(Path::new(path)), facts),
+                matched,
+                "{pattern} / {path}"
+            );
+            assert!(!filter.matches(&path_key(Path::new(path)), Facts::two(&Status::Error)));
+            assert_eq!(filter.glob(), Some(pattern));
+            assert!(filter.active());
+        }
+        for pattern in ["".into(), "x\0".into(), "?".repeat(257), "a".repeat(2049)] {
+            assert!(Filter::wildcard(pattern, Selection::All).is_err());
+        }
+        assert!(Filter::wildcard("?".repeat(256), Selection::All).is_ok());
+        assert!(Filter::wildcard("İ".repeat(129), Selection::All).is_err());
+    }
+    #[test]
+    fn wildcard_retry_matches_exhaustive_dynamic_programming_reference() {
+        fn words(alphabet: &[char], max: usize) -> Vec<String> {
+            let mut out = vec![String::new()];
+            let mut level = vec![String::new()];
+            for _ in 0..max {
+                level = level
+                    .iter()
+                    .flat_map(|s| alphabet.iter().map(move |c| format!("{s}{c}")))
+                    .collect();
+                out.extend(level.clone());
+            }
+            out
+        }
+        for pattern in words(&['a', '?', '*'], 5) {
+            let p: Vec<char> = pattern.chars().collect();
+            for text in words(&['a', '猫', '/'], 4) {
+                let chars: Vec<char> = text.chars().collect();
+                let mut row = vec![false; chars.len() + 1];
+                row[0] = true;
+                for c in &p {
+                    let mut next = vec![false; row.len()];
+                    next[0] = *c == '*' && row[0];
+                    for i in 1..row.len() {
+                        next[i] = if *c == '*' {
+                            row[i] || next[i - 1]
+                        } else {
+                            row[i - 1] && (*c == '?' || *c == chars[i - 1])
+                        };
+                    }
+                    row = next;
+                }
+                assert_eq!(
+                    wildcard_match(&p, &text),
+                    row[chars.len()],
+                    "{pattern:?} / {text:?}"
+                );
+            }
+        }
+    }
     #[test]
     fn literal_unicode_path_filter_preserves_spaces_metacharacters_and_boundaries() {
         let facts = Facts::two(&Status::Different);

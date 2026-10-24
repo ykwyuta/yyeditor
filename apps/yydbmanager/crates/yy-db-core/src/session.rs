@@ -247,11 +247,6 @@ impl Database {
                 results.push(set);
             }
             Self::Duck(c) => {
-                use duckdb::arrow::{
-                    array::{Array, BinaryArray, LargeBinaryArray},
-                    datatypes::DataType,
-                    util::display::array_value_to_string,
-                };
                 let mut s = c.prepare(sql).map_err(|e| e.to_string())?;
                 let batches = s.query_arrow([]).map_err(|e| e.to_string())?;
                 let schema = batches.get_schema();
@@ -272,54 +267,7 @@ impl Database {
                         }
                         let mut values = vec![];
                         for array in batch.columns() {
-                            let text = || {
-                                array_value_to_string(array.as_ref(), row)
-                                    .map_err(|e| e.to_string())
-                            };
-                            let v = if array.is_null(row) {
-                                Value::Null
-                            } else {
-                                match array.data_type() {
-                                    DataType::Binary => Value::Binary(
-                                        array
-                                            .as_any()
-                                            .downcast_ref::<BinaryArray>()
-                                            .unwrap()
-                                            .value(row)
-                                            .to_vec(),
-                                    ),
-                                    DataType::LargeBinary => Value::Binary(
-                                        array
-                                            .as_any()
-                                            .downcast_ref::<LargeBinaryArray>()
-                                            .unwrap()
-                                            .value(row)
-                                            .to_vec(),
-                                    ),
-                                    DataType::Int8
-                                    | DataType::Int16
-                                    | DataType::Int32
-                                    | DataType::Int64
-                                    | DataType::UInt8
-                                    | DataType::UInt16
-                                    | DataType::UInt32
-                                    | DataType::UInt64 => Value::Integer(text()?),
-                                    DataType::Decimal128(_, _) | DataType::Decimal256(_, _) => {
-                                        Value::Decimal(text()?)
-                                    }
-                                    DataType::Float32 | DataType::Float64 => Value::Float(
-                                        text()?.parse::<f64>().map_err(|e| e.to_string())?,
-                                    ),
-                                    DataType::Boolean => Value::Bool(text()? == "true"),
-                                    DataType::Date32
-                                    | DataType::Date64
-                                    | DataType::Time32(_)
-                                    | DataType::Time64(_)
-                                    | DataType::Timestamp(_, _) => Value::Temporal(text()?),
-                                    _ => Value::Text(text()?),
-                                }
-                            };
-                            values.push(v);
+                            values.push(crate::values::arrow_value(array.as_ref(), row)?);
                         }
                         set.push(&values)?;
                     }

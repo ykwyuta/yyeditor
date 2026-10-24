@@ -5,6 +5,7 @@ use yy_merge_core::folders::filter::{Filter, SELECTIONS};
 const QUERY: u16 = 250;
 const STATUS: u16 = 251;
 const CLEAR: u16 = 252;
+const MODE: u16 = 254;
 pub(crate) struct Controls {
     query: HWND,
     status: HWND,
@@ -23,10 +24,10 @@ impl Controls {
         let controls = Self {
             label: child(
                 parent,
-                w!("STATIC"),
-                "パスの部分一致",
-                253,
-                WINDOW_STYLE(SS_LEFTNOWORDWRAP),
+                w!("COMBOBOX"),
+                "",
+                MODE,
+                WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
             )?,
             query: child(
                 parent,
@@ -47,6 +48,15 @@ impl Controls {
         controls.set_font(font);
         unsafe {
             SendMessageW(controls.query, EM_SETLIMITTEXT, Some(WPARAM(512)), None);
+            for label in ["部分一致", "ワイルドカード"] {
+                SendMessageW(
+                    controls.label,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(HSTRING::from(label).as_ptr() as isize)),
+                );
+            }
+            SendMessageW(controls.label, CB_SETCURSEL, Some(WPARAM(0)), None);
             for selection in SELECTIONS {
                 SendMessageW(
                     controls.status,
@@ -92,9 +102,9 @@ pub(crate) fn layout_controls(a: &App, top: i32, width: i32, dpi: i32) -> i32 {
         let _ = MoveWindow(
             a.folder_filter.label,
             unit(6),
-            top + unit(4),
+            top,
             unit(116),
-            unit(26),
+            unit(150),
             true,
         );
         let _ = MoveWindow(
@@ -135,6 +145,12 @@ pub(crate) fn sync_controls(a: &mut App) {
     text(a.folder_filter.query, f.filter.query());
     unsafe {
         SendMessageW(
+            a.folder_filter.label,
+            CB_SETCURSEL,
+            Some(WPARAM(usize::from(f.filter.glob().is_some()))),
+            None,
+        );
+        SendMessageW(
             a.folder_filter.status,
             CB_SETCURSEL,
             Some(WPARAM(
@@ -148,7 +164,7 @@ pub(crate) fn sync_controls(a: &mut App) {
     }
 }
 pub(crate) fn notification(id: u16, code: u32) -> bool {
-    if !matches!(id, QUERY | STATUS | CLEAR) {
+    if !matches!(id, QUERY | STATUS | CLEAR | MODE) {
         return false;
     }
     app(|a| {
@@ -158,7 +174,7 @@ pub(crate) fn notification(id: u16, code: u32) -> bool {
         if id == QUERY && code == EN_CHANGE {
             a.folders.as_mut().unwrap().filter_due =
                 Some(Instant::now() + Duration::from_millis(250));
-        } else if id == STATUS && code == CBN_SELCHANGE {
+        } else if matches!(id, STATUS | MODE) && code == CBN_SELCHANGE {
             apply(a);
         } else if id == CLEAR && code == BN_CLICKED {
             let f = a.folders.as_mut().unwrap();
@@ -183,7 +199,12 @@ pub(crate) fn apply(a: &mut App) {
         .unwrap_or_default();
     let f = a.folders.as_mut().unwrap();
     f.filter_due = None;
-    match Filter::new(query, selection) {
+    let wildcard = unsafe { SendMessageW(a.folder_filter.label, CB_GETCURSEL, None, None).0 == 1 };
+    match if wildcard && !query.is_empty() {
+        Filter::wildcard(query, selection)
+    } else {
+        Filter::new(query, selection)
+    } {
         Ok(filter) => {
             f.filter = filter;
             rebuild_filter(f);
@@ -236,6 +257,27 @@ pub(super) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     {
         return Err("filtered selection lost its source path".into());
     }
+    unsafe {
+        SendMessageW(a.folder_filter.label, CB_SETCURSEL, Some(WPARAM(1)), None);
+    }
+    text(a.folder_filter.query, "*different.?xt");
+    apply(a);
+    if a.folders.as_ref().unwrap().visible.len() != 1
+        || a.folders.as_ref().unwrap().filter.glob() != Some("*different.?xt")
+        || selected_pair(a).is_ok()
+    {
+        return Err("wildcard mode failed to filter/reset selection".into());
+    }
+    text(a.folder_filter.query, &"?".repeat(257));
+    apply(a);
+    if a.folders.as_ref().unwrap().visible.len() != 1
+        || a.folders.as_ref().unwrap().filter.glob() != Some("*different.?xt")
+    {
+        return Err("invalid wildcard replaced active results".into());
+    }
+    unsafe {
+        SendMessageW(a.folder_filter.label, CB_SETCURSEL, Some(WPARAM(0)), None);
+    }
     text(a.folder_filter.query, "same.txt");
     unsafe {
         SendMessageW(a.folder_filter.status, CB_SETCURSEL, Some(WPARAM(2)), None);
@@ -281,7 +323,7 @@ pub(super) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     f.controls_dirty = true;
     rebuild_filter(f);
     refresh(a);
-    std::fs::write(dir.join("folder-filter-smoke.txt"),"PASS: native literal path/status filters, debounce and Enter, zero matches preserve overall differences, hidden errors remain incomplete, source selection retained, reset preserves rows\n").map_err(|e|e.to_string())
+    std::fs::write(dir.join("folder-filter-smoke.txt"),"PASS: native literal/wildcard path/status filters, invalid wildcard preserves active results, debounce and Enter, zero matches preserve overall differences, hidden errors remain incomplete, source selection retained, reset preserves rows\n").map_err(|e|e.to_string())
 }
 pub(super) fn smoke_three(a: &mut App) -> Result<()> {
     text(a.folder_filter.query, "");

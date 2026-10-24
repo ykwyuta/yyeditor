@@ -146,7 +146,7 @@ On Windows, render the first screen of a file offscreen and save it as a BMP:
 Shared settings are stored in `%APPDATA%\yyeditor\config.toml`. Setting types and defaults are defined in `crates/yy-config`; user documentation is in the [yyeditor help](crates/yy-win/help/help.md) and [yysheet help](crates/yy-win/help/sheet.md), both in Japanese. yyclip stores data under `%APPDATA%\yyclip\`; see its [README](apps/yyclip/README.md) (Japanese).
 
 - Syntax definitions: `crates/yy-syntax/syntaxes/`. User definitions: `%APPDATA%\yyeditor\syntax\*.toml`.
-- External encoding mappings: `%APPDATA%\yyeditor\mappings\*.map`. Built-in table generation: `tools/gen-tables`.
+- External encoding mappings: `%APPDATA%\yyeditor\mappings\*.map`. Built-in table generation: [YYLibrary/tools/gen-tables](https://github.com/ykwyuta/YYLibrary/tree/master/tools/gen-tables).
 - Embedded preview assets: `crates/yy-preview/assets/`. Fetch script: `tools/fetch-preview-assets/fetch.py`. Versions are recorded in `VERSIONS.txt`, with licenses in the same folder.
 - Fonts: `crates/yy-win/fonts/`. UDEV Gothic is embedded and registered within the process.
 - Application icons and manifests: `apps/<app>/res/`. Icon generator: `tools/gen-icon/gen_icon.py`. Applications share the embedding code in `apps/yyeditor/build.rs`.
@@ -176,3 +176,11 @@ Test the file manager core with `cargo test -p yy-files`, browser settings, rule
 yyclip, yyfilemanager, and yybrowser are included in CI builds, distribution artifacts, and Windows-target type checks.
 
 Before distribution, review [COPYING](COPYING), [COPYING.EXCEPTION](COPYING.EXCEPTION), and the licenses of bundled materials. The additional permission for linking the Microsoft Edge WebView2 Loader is part of this repository's license terms.
+
+## Shared library dependency
+
+`yy-encoding` is maintained in [YYLibrary](https://github.com/ykwyuta/YYLibrary).
+Cargo fetches the exact commit pinned by `rev` and Cargo.lock; no sibling checkout or submodule is required.
+The shared encoding dependency requires Rust 1.88 or newer. Change the shared implementation in YYLibrary,
+then update `rev` and the lockfiles in this workspace and the independent yymerge, yydbmanager and YY3Designer workspaces.
+YYSort also consumes the same revision. Verify the corresponding CI workflows when updating it.

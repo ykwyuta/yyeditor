@@ -276,14 +276,11 @@ impl Plan {
                     properties: props,
                 });
             }
+        } else if kind == DbKind::MySql && !raw.trim_start().starts_with('{') {
+            json::mysql_tree(&mut plan, raw)?;
         } else {
-            if kind == DbKind::MySql && !raw.trim_start().starts_with('{') {
-                json::mysql_tree(&mut plan, raw)?;
-            } else {
-                let value: serde_json::Value =
-                    serde_json::from_str(raw).map_err(|e| e.to_string())?;
-                json::visit(&mut plan, &value, None, 0)?;
-            }
+            let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+            json::visit(&mut plan, &value, None, 0)?;
         }
         if plan.nodes.is_empty() {
             return Err("対応する計画ノードが見つかりません。原文を確認してください".into());

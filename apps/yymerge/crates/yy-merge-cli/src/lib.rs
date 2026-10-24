@@ -40,6 +40,41 @@ pub struct Cli {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Compare every PDF page visually without external tools.
+    PdfDiff {
+        left: PathBuf,
+        right: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        threshold: u8,
+        #[arg(long, value_enum, default_value = "json")]
+        format: ImageReport,
+        #[arg(long)]
+        report: Option<PathBuf>,
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Compare raster pixels, PDF pages or rendered Excel/PowerPoint pages.
+    ImageDiff {
+        left: PathBuf,
+        right: PathBuf,
+        /// One-based PDF / Office print page / slide number. Raster images require 1.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=128))]
+        page: u16,
+        #[arg(long, default_value_t = 0)]
+        threshold: u8,
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        offset_x: i32,
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        offset_y: i32,
+        #[arg(long, value_enum, default_value = "json")]
+        format: ImageReport,
+        #[arg(long)]
+        report: Option<PathBuf>,
+        #[arg(long)]
+        diff_image: Option<PathBuf>,
+        #[arg(long)]
+        overwrite: bool,
+    },
     /// Save or inspect folder comparison setup; opening rescans current contents.
     FolderSession {
         #[command(subcommand)]
@@ -65,7 +100,7 @@ pub enum Command {
         #[command(subcommand)]
         command: git_tool::GitCommand,
     },
-    /// Compare text files. Exit 0 identical, 1 different, 2 incomplete/error.
+    /// Compare text or OOXML Excel/PowerPoint files. Exit 0 equivalent, 1 different, 2 incomplete/error.
     Diff {
         left: PathBuf,
         right: PathBuf,
@@ -75,6 +110,8 @@ pub enum Command {
         report: Option<PathBuf>,
         #[arg(long)]
         encoding: Option<String>,
+        #[command(flatten)]
+        inputs: InputOptions,
         #[arg(long)]
         overwrite: bool,
         #[command(flatten)]
@@ -153,9 +190,21 @@ pub struct FolderFilterArgs {
     /// Display only relative paths containing this literal text (Unicode lowercase, slash-normalized).
     #[arg(long)]
     path_contains: Option<String>,
+    /// Match the whole relative path with * (any sequence including /) and ? (one character).
+    #[arg(long, conflicts_with = "path_contains")]
+    path_glob: Option<String>,
     /// Display group only; never changes scan scope, global exit status or sync inputs.
     #[arg(long, value_enum, default_value = "all")]
     status: FolderStatus,
+}
+impl FolderFilterArgs {
+    fn core(self) -> Result<folders::filter::Filter> {
+        if let Some(pattern) = self.path_glob {
+            folders::filter::Filter::wildcard(pattern, self.status.into())
+        } else {
+            folders::filter::Filter::new(self.path_contains.unwrap_or_default(), self.status.into())
+        }
+    }
 }
 #[derive(Subcommand)]
 pub enum FolderSessionCommand {
@@ -190,6 +239,8 @@ pub enum ComparisonSessionCommand {
         output: PathBuf,
         #[arg(long)]
         encoding: Option<String>,
+        #[command(flatten)]
+        inputs: InputOptions,
         #[arg(long)]
         overwrite: bool,
         #[command(flatten)]
@@ -338,7 +389,60 @@ impl RuleArgs {
     }
 }
 #[derive(Clone, Debug, Default, clap::Args)]
+pub struct InputOptions {
+    /// Left encoding, e.g. UTF-8, CP932 or IBM-939/fixed:80. Read-only byte review.
+    #[arg(long, conflicts_with = "encoding")]
+    pub left_encoding: Option<String>,
+    /// Right encoding. Invalid bytes remain visible.
+    #[arg(long, conflicts_with = "encoding")]
+    pub right_encoding: Option<String>,
+    /// Ignore encoding/BOM differences when comparing decoded contents.
+    #[arg(long)]
+    pub ignore_encoding: bool,
+}
+impl InputOptions {
+    pub fn active(&self) -> bool {
+        self.left_encoding.is_some() || self.right_encoding.is_some() || self.ignore_encoding
+    }
+    pub fn open_pair(
+        &self,
+        left: &std::path::Path,
+        right: &std::path::Path,
+        common: Option<&str>,
+        c: &Cancellation,
+    ) -> Result<[Snapshot; 2]> {
+        if common.is_some() && (self.left_encoding.is_some() || self.right_encoding.is_some()) {
+            return Err("use either --encoding or per-file encodings".into());
+        }
+        let mut files = Vec::new();
+        for (path, encoding) in [
+            (left, self.left_encoding.as_deref()),
+            (right, self.right_encoding.as_deref()),
+        ] {
+            files.push(if self.active() {
+                Snapshot::open_review(
+                    path,
+                    encoding.or(common),
+                    yy_merge_core::review::Mode {
+                        ignore_encoding: self.ignore_encoding,
+                    },
+                    c,
+                )?
+            } else {
+                Snapshot::open_comparison(path, common, c)?
+            });
+        }
+        files[0].ensure_comparable(&files[1])?;
+        files.try_into().map_err(|_| "two inputs required".into())
+    }
+}
+#[derive(Clone, Debug, Default, clap::Args)]
 pub struct Gui {
+    #[command(flatten)]
+    pub inputs: InputOptions,
+    /// Force the dedicated image viewer (also for files with nonstandard extensions).
+    #[arg(long, requires_all=["left","right"], conflicts_with_all=["base","output","encoding","session","comparison_session","folder_session","git_merge"])]
+    pub image: bool,
     /// Rescan folders using saved roots, recursion and display filter.
     #[arg(long, conflicts_with_all=["session","comparison_session","left","right","base","output","encoding","rules_profile","ignore_space","ignore_trailing_space","ignore_case","ignore_eol","git_diff","git_merge"])]
     pub folder_session: Option<PathBuf>,
@@ -387,6 +491,214 @@ pub enum FolderFormat {
     Text,
     Json,
 }
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ImageReport {
+    Text,
+    Json,
+    Html,
+}
+
+struct ImageOutput {
+    page: u16,
+    format: ImageReport,
+    report: Option<PathBuf>,
+    difference: Option<PathBuf>,
+    overwrite: bool,
+}
+struct PdfOutput {
+    threshold: u8,
+    format: ImageReport,
+    report: Option<PathBuf>,
+    overwrite: bool,
+}
+fn pdf_diff(
+    left: PathBuf,
+    right: PathBuf,
+    output: PdfOutput,
+    stdout: &mut impl Write,
+    c: &Cancellation,
+) -> Result<i32> {
+    use yy_merge_core::{images::Settings, office_render};
+    if !office_render::is_pdf(&left) || !office_render::is_pdf(&right) {
+        return Err("pdf-diff requires two PDF files".into());
+    }
+    let pair = office_render::Pair::open(&left, &right, c)?;
+    let mut results = Vec::new();
+    let mut equivalent = true;
+    let mut html = String::from(
+        "<!doctype html><html lang=ja><meta charset=utf-8><meta http-equiv=Content-Security-Policy content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'\"><title>yymerge PDF比較</title><style>body{font-family:monospace}main{display:flex;gap:12px}main>section{width:33%;overflow:auto}img{max-width:100%}pre{white-space:pre-wrap}article{border-top:1px solid #888}</style><h1>yymerge PDF全ページ比較</h1>",
+    );
+    for number in 0..pair.pages() {
+        c.check()?;
+        let page = pair.page(number, c)?;
+        let comparison = page.compare(
+            Settings {
+                threshold: output.threshold,
+                ..Default::default()
+            },
+            c,
+        )?;
+        equivalent &= comparison.summary.equivalent;
+        if matches!(output.format, ImageReport::Html) {
+            let rendered = yy_merge_core::images::html(&page.left, &page.right, &comparison, c)?;
+            let fragment = rendered
+                .split_once("</h1>")
+                .ok_or("image HTML header missing")?
+                .1
+                .trim_end()
+                .trim_end_matches("</html>");
+            let heading = format!(
+                "<article id=page-{}><h2>Page {} / {}</h2><p>Missing LEFT={} RIGHT={}</p>",
+                number + 1,
+                number + 1,
+                pair.pages(),
+                page.missing[0],
+                page.missing[1]
+            );
+            if html.len() + heading.len() + fragment.len() + 32 > yy_merge_core::MAX_BYTES as usize
+            {
+                return Err("PDF HTML report exceeds 32 MiB".into());
+            }
+            html.push_str(&heading);
+            html.push_str(fragment);
+            html.push_str("</article>");
+        }
+        results.push(serde_json::json!({"page":number+1,"missing":page.missing,"comparison":comparison.summary}));
+    }
+    let identical = pair.left.source.original_identical(&pair.right.source);
+    let text = match output.format {
+        ImageReport::Json => serde_json::to_string_pretty(&serde_json::json!({"mode":"pdf","pdf_rendered":true,"office_rendered":false,"pages":pair.pages(),"left_pages":pair.left.pages,"right_pages":pair.right.pages,"original_identical":identical,"equivalent":equivalent,"page_results":results})).map_err(|e|e.to_string())? + "\n",
+        ImageReport::Text => {
+            let mut text = format!("PDF {}: {} pages (LEFT {}, RIGHT {}) | raw file identical: {identical}\n", if equivalent { "equivalent" } else { "different" }, pair.pages(), pair.left.pages, pair.right.pages);
+            for row in results { text.push_str(&format!("page {}: {} | changed {} pixels | missing {}\n", row["page"], if row["comparison"]["equivalent"] == true { "equivalent" } else { "different" }, row["comparison"]["changed_pixels"], row["missing"])); }
+            text
+        }
+        ImageReport::Html => { html.push_str("</html>"); html }
+    };
+    pair.left.source.verify(c)?;
+    pair.right.source.verify(c)?;
+    emit(
+        &text,
+        output.report,
+        &[&pair.left.source, &pair.right.source],
+        output.overwrite,
+        stdout,
+        c,
+    )?;
+    Ok(i32::from(!equivalent))
+}
+fn image_diff(
+    left: PathBuf,
+    right: PathBuf,
+    settings: yy_merge_core::images::Settings,
+    output: ImageOutput,
+    stdout: &mut impl Write,
+    cancel: &Cancellation,
+) -> Result<i32> {
+    use yy_merge_core::images::{self, Input};
+    if !(1..=128).contains(&output.page) {
+        return Err("image page must be in 1..128".into());
+    }
+    let office = yy_merge_core::office::Kind::detect(&left).is_some()
+        || yy_merge_core::office::Kind::detect(&right).is_some();
+    let pdf =
+        yy_merge_core::office_render::is_pdf(&left) || yy_merge_core::office_render::is_pdf(&right);
+    let (a, b, missing, pages) = if office || pdf {
+        let docs = yy_merge_core::office_render::Pair::open(&left, &right, cancel)?;
+        let page = docs.page(usize::from(output.page - 1), cancel)?;
+        (page.left, page.right, page.missing, docs.pages())
+    } else {
+        if output.page != 1 {
+            return Err("raster images have only page 1".into());
+        }
+        (
+            Input::open(&left, cancel)?,
+            Input::open(&right, cancel)?,
+            [false; 2],
+            1,
+        )
+    };
+    let comparison = yy_merge_core::office_render::compare(&a, &b, missing, settings, cancel)?;
+    let original_identical = a.source.original_identical(&b.source);
+    let text = match output.format {
+        ImageReport::Json => serde_json::to_string_pretty(&serde_json::json!({"mode":"image","office_rendered":office,"pdf_rendered":pdf,"page":output.page,"pages":pages,"missing":missing,"original_identical":original_identical,"left":a.source.path,"right":b.source.path,"comparison":comparison.summary})).map_err(|e| e.to_string())? + "\n",
+        ImageReport::Text => format!("image {}: {} <> {} | {} / {} changed pixels | threshold {} | offset {},{} | raw file identical: {}\n", if comparison.summary.equivalent { "equivalent" } else { "different" }, left.display(),right.display(),comparison.summary.changed_pixels,comparison.summary.compared_pixels,settings.threshold,settings.offset_x,settings.offset_y,original_identical),
+        ImageReport::Html => {
+            let html = images::html(&a,&b,&comparison,cancel)?;
+            if office || pdf { html.replacen("<main>", &format!("<p>{} rendered page {} / {} | missing LEFT={} RIGHT={} | embedded Hayro</p><main>", if pdf { "PDF" } else { "Office" }, output.page, pages, missing[0], missing[1]), 1) } else { html }
+        },
+    };
+    let png = output
+        .difference
+        .as_ref()
+        .map(|_| images::png(&comparison.difference, cancel))
+        .transpose()?;
+    // Validate all outputs before any write; each save is atomic, the pair is not a transaction.
+    let normalize = |p: &std::path::Path| -> Result<PathBuf> {
+        let parent = std::fs::canonicalize(
+            p.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new(".")),
+        )
+        .map_err(|e| e.to_string())?;
+        let target = parent.join(p.file_name().ok_or("output filename required")?);
+        match std::fs::symlink_metadata(&target) {
+            Ok(meta) => {
+                if !meta.is_file() || folders::is_link(&target, meta.file_type())? {
+                    return Err("image output must be a regular file, not a link".into());
+                }
+                if !output.overwrite {
+                    return Err("image output exists; use --overwrite".into());
+                }
+                std::fs::canonicalize(target).map_err(|e| e.to_string())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(target),
+            Err(e) => Err(e.to_string()),
+        }
+    };
+    let mut destinations = Vec::new();
+    for path in [output.report.as_ref(), output.difference.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        let target = normalize(path)?;
+        if target == a.source.path || target == b.source.path {
+            return Err("image output must differ from both input paths".into());
+        }
+        destinations.push(target);
+    }
+    if destinations.len() == 2 {
+        let same = if cfg!(windows) {
+            destinations[0].to_string_lossy().to_lowercase()
+                == destinations[1].to_string_lossy().to_lowercase()
+        } else {
+            destinations[0] == destinations[1]
+        };
+        if same {
+            return Err("image report and difference must have different output paths".into());
+        }
+    }
+    a.source.verify(cancel)?;
+    b.source.verify(cancel)?;
+    if let (Some(path), Some(bytes)) = (output.difference, png) {
+        save(
+            &path,
+            &bytes,
+            &[&a.source, &b.source],
+            output.overwrite,
+            cancel,
+        )?;
+    }
+    emit(
+        &text,
+        output.report,
+        &[&a.source, &b.source],
+        output.overwrite,
+        stdout,
+        cancel,
+    )?;
+    Ok(i32::from(!comparison.summary.equivalent))
+}
 
 pub fn entry(
     args: impl IntoIterator<Item = OsString>,
@@ -403,8 +715,31 @@ pub fn entry(
     install_interrupt();
     let result = match cli.command {
         Command::Gui(mut g) => (|| {
+            if g.inputs.active()
+                && (g.base.is_some()
+                    || g.git_diff
+                    || g.git_merge
+                    || g.session.is_some()
+                    || g.comparison_session.is_some()
+                    || g.folder_session.is_some()
+                    || g.image)
+            {
+                return Err(
+                    "per-file encodings/byte review require a regular two-way text comparison"
+                        .into(),
+                );
+            }
             let (rules, _) = g.rules.resolve(&CANCEL)?;
             let has_profile = g.rules.rules_profile.is_some();
+            if (g.image
+                || [&g.left, &g.right]
+                    .into_iter()
+                    .flatten()
+                    .any(|p| yy_merge_core::images::is_image(p)))
+                && (rules.active() || has_profile)
+            {
+                return Err("image comparison cannot use text comparison rules/profiles".into());
+            }
             g.rules = RuleArgs::from_core(rules);
             if (g.base.is_some() || g.git_diff || g.git_merge) && (rules.active() || has_profile) {
                 Err(
@@ -454,8 +789,9 @@ fn folder_heading(
         return String::new();
     }
     format!(
-        "# matched {matched}/{total}; global differences {differences}; global incomplete {incomplete}; path_contains={:?}; status={:?}\n",
+        "# matched {matched}/{total}; global differences {differences}; global incomplete {incomplete}; path={:?}; path_glob={:?}; status={:?}\n",
         filter.query(),
+        filter.glob(),
         filter.status()
     )
 }
@@ -478,6 +814,54 @@ fn folder_json(
 }
 pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation) -> Result<i32> {
     match command {
+        Command::PdfDiff {
+            left,
+            right,
+            threshold,
+            format,
+            report,
+            overwrite,
+        } => pdf_diff(
+            left,
+            right,
+            PdfOutput {
+                threshold,
+                format,
+                report,
+                overwrite,
+            },
+            stdout,
+            cancel,
+        ),
+        Command::ImageDiff {
+            left,
+            right,
+            page,
+            threshold,
+            offset_x,
+            offset_y,
+            format,
+            report,
+            diff_image,
+            overwrite,
+        } => image_diff(
+            left,
+            right,
+            yy_merge_core::images::Settings {
+                threshold,
+                offset_x,
+                offset_y,
+            },
+            ImageOutput {
+                page,
+                format,
+                report,
+                difference: diff_image,
+                overwrite,
+            },
+            stdout,
+            cancel,
+        ),
         Command::FolderSession { command } => {
             use yy_merge_core::folder_session::Session;
             match command {
@@ -490,10 +874,7 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
                     overwrite,
                     filter,
                 } => {
-                    let filter = folders::filter::Filter::new(
-                        filter.path_contains.unwrap_or_default(),
-                        filter.status.into(),
-                    )?;
+                    let filter = filter.core()?;
                     Session::capture(
                         &left,
                         &right,
@@ -507,7 +888,7 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
                 }
                 FolderSessionCommand::Inspect { path } => {
                     let session = Session::open(&path, cancel)?;
-                    let text=serde_json::to_string_pretty(&serde_json::json!({"version":1,"kind":"yymerge-folder-session","roots_verified":true,"left":session.left,"right":session.right,"base":session.base,"recursive":session.recursive,"path_contains":session.path_contains,"status":session.status,"selected":session.selected,"results_restored":false,"sync_plan_restored":false})).map_err(|e|e.to_string())?+"\n";
+                    let text=serde_json::to_string_pretty(&serde_json::json!({"version":1,"kind":"yymerge-folder-session","roots_verified":true,"left":session.left,"right":session.right,"base":session.base,"recursive":session.recursive,"path_contains":session.path_contains,"path_glob":session.path_glob,"status":session.status,"selected":session.selected,"results_restored":false,"sync_plan_restored":false})).map_err(|e|e.to_string())?+"\n";
                     emit(&text, None, &[], false, stdout, cancel)?;
                 }
             }
@@ -521,11 +902,11 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
                     right,
                     output,
                     encoding,
+                    inputs,
                     overwrite,
                     rules,
                 } => {
-                    let l = Snapshot::open(&left, encoding.as_deref(), cancel)?;
-                    let r = Snapshot::open(&right, encoding.as_deref(), cancel)?;
+                    let [l, r] = inputs.open_pair(&left, &right, encoding.as_deref(), cancel)?;
                     let (rules, profile) = rules.resolve(cancel)?;
                     let state = Session::capture([&l, &r], rules, Position::default(), cancel)?;
                     let mut protected = vec![&l, &r];
@@ -537,12 +918,12 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
                 ComparisonSessionCommand::Inspect { path } => {
                     let (state, _) = Session::open(&path, cancel)?;
                     let text=serde_json::to_string_pretty(&serde_json::json!({
-                        "version":1,"kind":"yymerge-comparison-session","inputs_verified":true,
+                        "version":if state.inputs[0].review.is_some() {3} else if state.inputs[0].office.is_some() {2} else {1},"kind":"yymerge-comparison-session","inputs_verified":true,
                         "left":state.inputs[0].path,"right":state.inputs[1].path,"rules":state.rules,
                         "position":state.position,"differences":state.comparison.diff.edits.len(),
                         "ignored":state.comparison.ignored.len(),"undo_history_restored":false,
-                        "left_encoding":state.inputs[0].encoding.name(),"right_encoding":state.inputs[1].encoding.name(),
-                        "equivalent":state.comparison.diff.edits.is_empty() && state.inputs[0].encoding==state.inputs[1].encoding && state.inputs[0].bom==state.inputs[1].bom
+                        "left_encoding":state.inputs[0].encoding.spec(),"right_encoding":state.inputs[1].encoding.spec(),
+                        "equivalent":state.inputs[0].equivalent(&state.inputs[1],state.comparison.diff.edits.is_empty()),"byte_review":state.inputs[0].review
                     })).map_err(|e|e.to_string())?+"\n";
                     emit(&text, None, &[], false, stdout, cancel)?;
                 }
@@ -626,32 +1007,90 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             format,
             report,
             encoding,
+            inputs,
             overwrite,
             rules,
         } => {
             let (rules, profile_input) = rules.resolve(cancel)?;
-            if matches!(format, Format::Unified) && rules.active() {
+            if yy_merge_core::images::is_image(&left) || yy_merge_core::images::is_image(&right) {
+                if rules.active()
+                    || profile_input.is_some()
+                    || encoding.is_some()
+                    || inputs.active()
+                {
+                    return Err(
+                        "image comparison cannot use text encodings or comparison rules".into(),
+                    );
+                }
+                let format = match format {
+                    Format::Text => ImageReport::Text,
+                    Format::Json => ImageReport::Json,
+                    Format::Html => ImageReport::Html,
+                    Format::Unified => {
+                        return Err("image comparison cannot generate text patches".into());
+                    }
+                };
+                if yy_merge_core::office_render::is_pdf(&left)
+                    || yy_merge_core::office_render::is_pdf(&right)
+                {
+                    return pdf_diff(
+                        left,
+                        right,
+                        PdfOutput {
+                            threshold: 0,
+                            format,
+                            report,
+                            overwrite,
+                        },
+                        stdout,
+                        cancel,
+                    );
+                }
+                return image_diff(
+                    left,
+                    right,
+                    Default::default(),
+                    ImageOutput {
+                        page: 1,
+                        format,
+                        report,
+                        difference: None,
+                        overwrite,
+                    },
+                    stdout,
+                    cancel,
+                );
+            }
+            if matches!(format, Format::Unified) && (rules.active() || inputs.active()) {
                 return Err(
                     "unified patches require exact comparison; remove ignore options".into(),
                 );
             }
-            let a = Snapshot::open(&left, encoding.as_deref(), cancel)?;
-            let b = Snapshot::open(&right, encoding.as_deref(), cancel)?;
+            let [a, b] = inputs.open_pair(&left, &right, encoding.as_deref(), cancel)?;
+            a.ensure_comparable(&b)?;
+            if matches!(format, Format::Unified) && a.office.is_some() {
+                return Err(
+                    "Office comparison cannot generate a unified patch; use text, json or html"
+                        .into(),
+                );
+            }
             let compared = yy_merge_core::rules::compare(&a.text, &b.text, rules, cancel)?;
             let diff = &compared.diff;
-            let same = a.text == b.text && a.encoding == b.encoding && a.bom == b.bom;
-            let equivalent = diff.edits.is_empty() && a.encoding == b.encoding && a.bom == b.bom;
-            let status = if same {
+            let same = a.original_identical(&b);
+            let equivalent = a.equivalent(&b, diff.edits.is_empty());
+            let status = if same && equivalent {
                 "Identical"
+            } else if equivalent && a.office.is_some() && a.text == b.text {
+                "EquivalentOfficeContent"
             } else if equivalent {
                 "EquivalentUnderRules"
             } else {
                 "Different"
             };
-            let text=match format {
+            let mut text=match format {
                 Format::Html=>yy_merge_core::report::html(&a,&b,rules,&compared,cancel)?,
-                Format::Json=>serde_json::to_string_pretty(&serde_json::json!({"identical":same,"equivalent":equivalent,"status":status,"rules":rules,"ignored_line_pairs":compared.ignored,"left_encoding":a.encoding.name(),"right_encoding":b.encoding.name(),"left_bom":a.bom,"right_bom":b.bom,"diff":diff})).map_err(|e|e.to_string())?+"\n",
-                Format::Text=>format!("{}: {} <> {} ({} changed regions; {} ignored line pairs; {}; {} / {})\n",if same {"identical"} else if equivalent {"equivalent under rules"} else {"different"},left.display(),right.display(),diff.edits.len(),compared.ignored.len(),rules.label(),a.encoding,b.encoding),
+                Format::Json=>serde_json::to_string_pretty(&serde_json::json!({"identical":same,"office":a.office,"equivalent":equivalent,"status":status,"rules":rules,"ignored_line_pairs":compared.ignored,"left_encoding":a.encoding.spec(),"right_encoding":b.encoding.spec(),"byte_review":a.review,"left_review":a.review_info,"right_review":b.review_info,"left_bom":a.bom,"right_bom":b.bom,"diff":diff})).map_err(|e|e.to_string())?+"\n",
+                Format::Text=>format!("{}: {} <> {} ({} changed regions; {} ignored line pairs; {}; {} / {})\n",if same && equivalent {"identical"} else if equivalent {if a.office.is_some() && a.text == b.text { "equivalent Office content (package bytes differ)" } else { "equivalent under rules" }} else {"different"},left.display(),right.display(),diff.edits.len(),compared.ignored.len(),rules.label(),a.encoding,b.encoding),
                 Format::Unified=>{
                     if a.encoding.name()!="UTF-8" || b.encoding.name()!="UTF-8" || !a.bom.is_empty() || !b.bom.is_empty() || a.text.contains('\r') || b.text.contains('\r') {return Err("unified output currently requires UTF-8 without BOM and LF newlines; use --format json for other encodings/EOL".into());}
                     if same {String::new()}else{
@@ -667,6 +1106,13 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
                     }
                 }
             };
+            if matches!(format, Format::Text) && a.office.is_some() {
+                let changes = yy_merge_core::office::changes(&a.text, &b.text, diff, cancel)?;
+                if text.len() + changes.len() > yy_merge_core::MAX_BYTES as usize {
+                    return Err("Office text report exceeds 32 MiB".into());
+                }
+                text.push_str(&changes);
+            }
             a.verify(cancel)?;
             b.verify(cancel)?;
             let mut inputs = vec![&a, &b];
@@ -722,11 +1168,8 @@ pub fn execute(command: Command, stdout: &mut impl Write, cancel: &Cancellation)
             overwrite,
             filter,
         } => {
-            use folders::filter::{Facts, Filter, path_key};
-            let filter = Filter::new(
-                filter.path_contains.unwrap_or_default(),
-                filter.status.into(),
-            )?;
+            use folders::filter::{Facts, path_key};
+            let filter = filter.core()?;
             if let Some(path) = &report {
                 let parent = std::fs::canonicalize(
                     path.parent()

@@ -11,6 +11,977 @@ fn run(args: &[&str], dir: &Path) -> Output {
         .unwrap()
 }
 #[test]
+fn per_file_encoding_byte_review_and_session_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    fs::write(p.join("left"), "日本語\n".as_bytes()).unwrap();
+    fs::write(p.join("right"), [0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea, 0x0a]).unwrap();
+    let args = [
+        "diff",
+        "left",
+        "right",
+        "--left-encoding",
+        "UTF-8",
+        "--right-encoding",
+        "CP932",
+        "--format",
+        "json",
+    ];
+    let out = run(&args, p);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut ignore = args.to_vec();
+    ignore.push("--ignore-encoding");
+    let out = run(&ignore, p);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["identical"], false);
+    assert_eq!(v["equivalent"], true);
+    assert_eq!(v["left_encoding"], "UTF-8");
+    assert_eq!(v["right_encoding"], "CP932");
+    assert_eq!(
+        run(
+            &[
+                "comparison-session",
+                "create",
+                "--left",
+                "left",
+                "--right",
+                "right",
+                "--left-encoding",
+                "UTF-8",
+                "--right-encoding",
+                "CP932",
+                "--ignore-encoding",
+                "--output",
+                "state.json"
+            ],
+            p
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let out = run(&["comparison-session", "inspect", "state.json"], p);
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["version"], 3);
+    assert_eq!(v["equivalent"], true);
+    // Packed decimal and invalid text must not fail, nor collapse distinct bytes.
+    fs::write(p.join("left"), [0x12, 0x3c, 0, 0xff]).unwrap();
+    fs::write(p.join("right"), [0x12, 0x3c, 0, 0xfe]).unwrap();
+    assert_eq!(run(&["diff", "left", "right"], p).status.code(), Some(2));
+    let out = run(
+        &[
+            "diff",
+            "left",
+            "right",
+            "--ignore-encoding",
+            "--format",
+            "html",
+        ],
+        p,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let html = String::from_utf8(out.stdout).unwrap();
+    assert!(html.contains("\\xFF") && html.contains("\\xFE"));
+    assert_eq!(
+        run(&["diff", "left", "left", "--ignore-encoding"], p)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(
+            &[
+                "diff",
+                "left",
+                "right",
+                "--ignore-encoding",
+                "--format",
+                "unified"
+            ],
+            p
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert_eq!(
+        run(
+            &[
+                "diff",
+                "left",
+                "right",
+                "--encoding",
+                "UTF-8",
+                "--left-encoding",
+                "CP932"
+            ],
+            p
+        )
+        .status
+        .code(),
+        Some(64)
+    );
+    // Same raw bytes can have different selected interpretations.
+    fs::write(p.join("left"), b"AB").unwrap();
+    let out = run(
+        &[
+            "diff",
+            "left",
+            "left",
+            "--left-encoding",
+            "UTF-8",
+            "--right-encoding",
+            "UTF-16LE",
+            "--ignore-encoding",
+            "--format",
+            "json",
+        ],
+        p,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["status"], "Different");
+    // BOM differences require the explicit ignore flag.
+    fs::write(p.join("right"), b"\xef\xbb\xbfAB").unwrap();
+    assert_eq!(
+        run(
+            &[
+                "diff",
+                "left",
+                "right",
+                "--left-encoding",
+                "UTF-8",
+                "--right-encoding",
+                "UTF-8"
+            ],
+            p
+        )
+        .status
+        .code(),
+        Some(1)
+    );
+    assert_eq!(
+        run(&["diff", "left", "right", "--ignore-encoding"], p)
+            .status
+            .code(),
+        Some(0)
+    );
+}
+#[test]
+fn image_cli_pixel_threshold_alignment_and_reports_share_the_gui_model() {
+    use yy_merge_core::{
+        Cancellation,
+        images::{self, Raster},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    let c = Cancellation::new();
+    let a = Raster::new(2, 1, vec![100, 120, 130, 255, 10, 20, 30, 255]).unwrap();
+    let b = Raster::new(2, 1, vec![105, 120, 130, 255, 10, 20, 30, 255]).unwrap();
+    fs::write(p.join("a.png"), images::png(&a, &c).unwrap()).unwrap();
+    fs::write(p.join("b.png"), images::png(&b, &c).unwrap()).unwrap();
+    let args = [
+        "image-diff",
+        "a.png",
+        "b.png",
+        "--diff-image",
+        "difference.png",
+        "--report",
+        "report.json",
+    ];
+    let out = run(&args, p);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&fs::read(p.join("report.json")).unwrap()).unwrap();
+    assert_eq!(v["comparison"]["changed_pixels"], 1);
+    assert_eq!(v["original_identical"], false);
+    assert!(images::Input::open(&p.join("difference.png"), &c).is_ok());
+    let out = run(&["image-diff", "a.png", "b.png", "--threshold", "5"], p);
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["comparison"]["raw_difference_pixels"], 1);
+    assert_eq!(v["comparison"]["changed_pixels"], 0);
+    let out = run(&["image-diff", "a.png", "b.png", "--offset-x", "-1"], p);
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["comparison"]["canvas"]["x"], -1);
+    for format in ["json", "text", "html"] {
+        let out = run(&["diff", "a.png", "b.png", "--format", format], p);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(!out.stdout.is_empty());
+        if format == "html" {
+            assert!(String::from_utf8_lossy(&out.stdout).contains("data:image/png;base64,"));
+        }
+    }
+    assert_eq!(
+        run(&["image-diff", "a.png", "a.png"], p).status.code(),
+        Some(0)
+    );
+}
+#[test]
+fn webp_cli_auto_detection_and_cross_format_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    for (name, bytes) in [
+        (
+            "left.webp",
+            include_bytes!("../../../../demo/yymerge/images/left.webp").as_slice(),
+        ),
+        (
+            "left.png",
+            include_bytes!("../../../../demo/yymerge/images/left.png").as_slice(),
+        ),
+        (
+            "right.webp",
+            include_bytes!("../../../../demo/yymerge/images/right.webp").as_slice(),
+        ),
+        (
+            "animated.webp",
+            include_bytes!("../../../../demo/yymerge/images/animated.webp").as_slice(),
+        ),
+    ] {
+        fs::write(p.join(name), bytes).unwrap();
+    }
+    let out = run(&["diff", "left.webp", "left.png", "--format", "json"], p);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["mode"], "image");
+    assert_eq!(v["original_identical"], false);
+    let out = run(
+        &[
+            "image-diff",
+            "left.webp",
+            "right.webp",
+            "--format",
+            "html",
+            "--diff-image",
+            "difference.png",
+        ],
+        p,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("data:image/png;base64,"));
+    assert!(
+        yy_merge_core::images::Input::open(
+            &p.join("difference.png"),
+            &yy_merge_core::Cancellation::new()
+        )
+        .is_ok()
+    );
+    let out = run(
+        &["diff", "animated.webp", "left.webp", "--format", "json"],
+        p,
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("animated WebP"));
+}
+#[test]
+fn pdf_cli_compares_pages_without_external_tools_and_preserves_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    let left = include_bytes!("../../../../demo/yymerge/pdf/left.pdf");
+    fs::write(p.join("left.pdf"), left).unwrap();
+    fs::write(
+        p.join("right.PDF"),
+        include_bytes!("../../../../demo/yymerge/pdf/right.pdf"),
+    )
+    .unwrap();
+    fs::write(
+        p.join("password.pdf"),
+        include_bytes!("../../../../demo/yymerge/pdf/password.pdf"),
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_yymerge"))
+            .current_dir(p)
+            .args(args)
+            .env("YYMERGE_SOFFICE", p.join("must-not-run"))
+            .env("YYMERGE_PDFINFO", p.join("must-not-run"))
+            .env("YYMERGE_PDFTOPPM", p.join("must-not-run"))
+            .output()
+            .unwrap()
+    };
+    let out = run(&["diff", "left.pdf", "right.PDF", "--format", "json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["pdf_rendered"], true);
+    assert_eq!(json["office_rendered"], false);
+    assert_eq!(json["pages"], 3);
+    assert_eq!(json["equivalent"], false);
+    assert_eq!(json["page_results"].as_array().unwrap().len(), 3);
+    fs::write(
+        p.join("later.pdf"),
+        include_bytes!("../../../../demo/yymerge/pdf/later.pdf"),
+    )
+    .unwrap();
+    assert_eq!(
+        run(&["image-diff", "left.pdf", "later.pdf", "--page", "1"])
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(&["diff", "left.pdf", "later.pdf"]).status.code(),
+        Some(1)
+    );
+    let out = run(&["pdf-diff", "left.pdf", "later.pdf", "--format", "html"]);
+    assert_eq!(out.status.code(), Some(1));
+    let html = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(html.matches("<article id=page-").count(), 2);
+    assert_eq!(html.matches("</html>").count(), 1);
+    let out = run(&[
+        "image-diff",
+        "left.pdf",
+        "right.PDF",
+        "--page",
+        "3",
+        "--threshold",
+        "255",
+        "--diff-image",
+        "difference.png",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["page"], 3);
+    assert_eq!(json["missing"], serde_json::json!([true, false]));
+    let image = yy_merge_core::images::Input::open(
+        &p.join("difference.png"),
+        &yy_merge_core::Cancellation::new(),
+    )
+    .unwrap();
+    assert_eq!(&image.raster.rgba[..4], &[255, 144, 0, 255]);
+    let out = run(&[
+        "image-diff",
+        "left.pdf",
+        "left.pdf",
+        "--page",
+        "2",
+        "--format",
+        "html",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("PDF rendered page 2 / 2"));
+    for args in [
+        vec!["image-diff", "left.pdf", "right.PDF", "--page", "4"],
+        vec!["diff", "left.pdf", "right.PDF", "--format", "unified"],
+        vec!["diff", "password.pdf", "left.pdf"],
+        vec![
+            "pdf-diff",
+            "left.pdf",
+            "left.pdf",
+            "--report",
+            "left.pdf",
+            "--overwrite",
+        ],
+        vec![
+            "merge",
+            "--base",
+            "left.pdf",
+            "--left",
+            "left.pdf",
+            "--right",
+            "right.PDF",
+            "--output",
+            "result.pdf",
+        ],
+        vec![
+            "image-diff",
+            "left.pdf",
+            "left.pdf",
+            "--report",
+            "left.pdf",
+            "--overwrite",
+        ],
+    ] {
+        let out = run(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stdout.is_empty());
+    }
+    assert_eq!(fs::read(p.join("left.pdf")).unwrap(), left);
+    assert!(!p.join("result.pdf").exists());
+}
+#[test]
+fn office_render_cli_validates_page_and_document_kind_before_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    fs::write(
+        p.join("a.xlsx"),
+        include_bytes!("../../../../demo/yymerge/office/left.xlsx"),
+    )
+    .unwrap();
+    fs::write(
+        p.join("b.pptx"),
+        include_bytes!("../../../../demo/yymerge/office/left.pptx"),
+    )
+    .unwrap();
+    assert_eq!(
+        run(&["image-diff", "a.xlsx", "b.pptx"], p).status.code(),
+        Some(2)
+    );
+    assert_eq!(
+        run(&["image-diff", "a.xlsx", "a.xlsx", "--page", "0"], p)
+            .status
+            .code(),
+        Some(64)
+    );
+    assert_eq!(
+        run(&["image-diff", "a.xlsx", "a.xlsx", "--page", "129"], p)
+            .status
+            .code(),
+        Some(64)
+    );
+}
+#[test]
+#[ignore = "requires LibreOffice; explicitly run in renderer CI"]
+fn office_render_cli_real_html_and_source_protection() {
+    // Obsolete Poppler settings must not be consulted by the embedded renderer.
+    let run = |args: &[&str], dir: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_yymerge"))
+            .current_dir(dir)
+            .args(args)
+            .env("YYMERGE_PDFINFO", dir.join("poppler-must-not-run"))
+            .env("YYMERGE_PDFTOPPM", dir.join("poppler-must-not-run"))
+            .output()
+            .unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    let left = include_bytes!("../../../../demo/yymerge/office/left.pptx");
+    fs::write(p.join("a.pptx"), left).unwrap();
+    fs::write(
+        p.join("b.pptx"),
+        include_bytes!("../../../../demo/yymerge/office/right.pptx"),
+    )
+    .unwrap();
+    let out = run(
+        &[
+            "image-diff",
+            "a.pptx",
+            "b.pptx",
+            "--page",
+            "2",
+            "--diff-image",
+            "difference.png",
+        ],
+        p,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["page"], 2);
+    assert_eq!(v["pages"], 2);
+    assert_eq!(v["office_rendered"], true);
+    assert!(
+        yy_merge_core::images::Input::open(
+            &p.join("difference.png"),
+            &yy_merge_core::Cancellation::new()
+        )
+        .is_ok()
+    );
+    let out = run(&["image-diff", "a.pptx", "a.pptx", "--format", "html"], p);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Office rendered page 1 / 2"));
+    let out = run(
+        &[
+            "image-diff",
+            "a.pptx",
+            "a.pptx",
+            "--report",
+            "a.pptx",
+            "--overwrite",
+        ],
+        p,
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(fs::read(p.join("a.pptx")).unwrap(), left);
+}
+#[test]
+fn image_cli_rejects_unsafe_outputs_unsupported_modes_and_bad_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    let source = include_bytes!("../../../../demo/yymerge/images/left.png");
+    fs::write(p.join("left.png"), source).unwrap();
+    fs::write(
+        p.join("right.png"),
+        include_bytes!("../../../../demo/yymerge/images/right.png"),
+    )
+    .unwrap();
+    fs::write(p.join("keep.html"), "keep").unwrap();
+    for extra in [
+        vec!["--report", "left.png", "--overwrite"],
+        vec!["--diff-image", "left.png", "--overwrite"],
+        vec!["--report", "keep.html"],
+        vec!["--report", "same.png", "--diff-image", "same.png"],
+        vec![
+            "--offset-x",
+            "40000",
+            "--report",
+            "keep.html",
+            "--overwrite",
+        ],
+    ] {
+        let mut args = vec!["image-diff", "left.png", "right.png"];
+        args.extend(extra);
+        let out = run(&args, p);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stdout.is_empty());
+        assert_eq!(fs::read(p.join("left.png")).unwrap(), source);
+        assert_eq!(fs::read_to_string(p.join("keep.html")).unwrap(), "keep");
+    }
+    for extra in [
+        vec!["--format", "unified"],
+        vec!["--ignore-space"],
+        vec!["--encoding", "UTF-8"],
+    ] {
+        let mut args = vec!["diff", "left.png", "right.png"];
+        args.extend(extra);
+        assert_eq!(run(&args, p).status.code(), Some(2));
+    }
+    assert_eq!(
+        run(
+            &["image-diff", "left.png", "right.png", "--threshold", "256"],
+            p
+        )
+        .status
+        .code(),
+        Some(64)
+    );
+    fs::write(p.join("bad.png"), b"broken").unwrap();
+    assert_eq!(
+        run(
+            &[
+                "image-diff",
+                "bad.png",
+                "right.png",
+                "--report",
+                "keep.html",
+                "--overwrite"
+            ],
+            p
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert_eq!(fs::read_to_string(p.join("keep.html")).unwrap(), "keep");
+    let out = run(
+        &[
+            "image-diff",
+            "left.png",
+            "right.png",
+            "--report",
+            "keep.html",
+            "--diff-image",
+            "never.png",
+        ],
+        p,
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!p.join("never.png").exists());
+    fs::write(p.join("result"), b"keep").unwrap();
+    assert_eq!(
+        run(
+            &[
+                "merge",
+                "--base",
+                "left.png",
+                "--left",
+                "left.png",
+                "--right",
+                "right.png",
+                "--output",
+                "result",
+                "--overwrite"
+            ],
+            p
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert_eq!(fs::read(p.join("result")).unwrap(), b"keep");
+    #[cfg(windows)]
+    {
+        let out = run(
+            &[
+                "image-diff",
+                "left.png",
+                "right.png",
+                "--report",
+                "LEFT.PNG",
+                "--diff-image",
+                "never.png",
+                "--overwrite",
+            ],
+            p,
+        );
+        assert_eq!(out.status.code(), Some(2));
+        assert!(!p.join("never.png").exists());
+        assert_eq!(
+            run(
+                &[
+                    "image-diff",
+                    "left.png",
+                    "right.png",
+                    "--report",
+                    "a.png",
+                    "--diff-image",
+                    "A.png"
+                ],
+                p
+            )
+            .status
+            .code(),
+            Some(2)
+        );
+    }
+}
+#[test]
+fn office_cli_compares_reports_sessions_and_blocks_source_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (ext, a, b, expected) in [
+        (
+            "xlsx",
+            include_bytes!("../../../../demo/yymerge/office/left.xlsx").as_slice(),
+            include_bytes!("../../../../demo/yymerge/office/right.xlsx").as_slice(),
+            "CELL",
+        ),
+        (
+            "pptx",
+            include_bytes!("../../../../demo/yymerge/office/left.pptx").as_slice(),
+            include_bytes!("../../../../demo/yymerge/office/right.pptx").as_slice(),
+            "SLIDE",
+        ),
+    ] {
+        let left = format!("left.{ext}");
+        let right = format!("right.{ext}");
+        fs::write(root.join(&left), a).unwrap();
+        fs::write(root.join(&right), b).unwrap();
+        let out = run(&["diff", &left, &right, "--format", "text"], root);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains(expected));
+        let out = run(&["diff", &left, &left, "--format", "json"], root);
+        assert_eq!(out.status.code(), Some(0));
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["identical"], true);
+        assert_eq!(
+            value["office"],
+            if ext == "xlsx" { "Excel" } else { "PowerPoint" }
+        );
+        let out = run(
+            &[
+                "diff",
+                &left,
+                &right,
+                "--format",
+                "html",
+                "--report",
+                "review.html",
+                "--overwrite",
+            ],
+            root,
+        );
+        assert_eq!(out.status.code(), Some(1));
+        let html = fs::read_to_string(root.join("review.html")).unwrap();
+        assert!(html.contains("Office抽出データ"));
+        assert!(html.contains(expected));
+        assert!(!html.contains("<test>"));
+        assert_eq!(
+            run(
+                &[
+                    "diff",
+                    &left,
+                    &right,
+                    "--format",
+                    "html",
+                    "--report",
+                    &left,
+                    "--overwrite"
+                ],
+                root
+            )
+            .status
+            .code(),
+            Some(2)
+        );
+        assert_eq!(
+            run(
+                &[
+                    "diff",
+                    &left,
+                    &right,
+                    "--format",
+                    "unified",
+                    "--report",
+                    "review.html",
+                    "--overwrite"
+                ],
+                root
+            )
+            .status
+            .code(),
+            Some(2)
+        );
+        assert_eq!(fs::read_to_string(root.join("review.html")).unwrap(), html);
+        assert_eq!(
+            run(
+                &[
+                    "comparison-session",
+                    "create",
+                    "--left",
+                    &left,
+                    "--right",
+                    &right,
+                    "--output",
+                    "work.json",
+                    "--overwrite"
+                ],
+                root
+            )
+            .status
+            .code(),
+            Some(0)
+        );
+        assert_eq!(
+            run(&["comparison-session", "inspect", "work.json"], root)
+                .status
+                .code(),
+            Some(0)
+        );
+        fs::write(root.join("result"), "keep").unwrap();
+        assert_eq!(
+            run(
+                &[
+                    "merge",
+                    "--base",
+                    &left,
+                    "--left",
+                    &left,
+                    "--right",
+                    &right,
+                    "--output",
+                    "result",
+                    "--overwrite"
+                ],
+                root
+            )
+            .status
+            .code(),
+            Some(2)
+        );
+        assert_eq!(fs::read_to_string(root.join("result")).unwrap(), "keep");
+        assert_eq!(
+            run(&["diff", &left, &right, "--encoding", "CP932"], root)
+                .status
+                .code(),
+            Some(2)
+        );
+        assert_eq!(fs::read(root.join(&left)).unwrap(), a);
+        assert_eq!(fs::read(root.join(&right)).unwrap(), b);
+        fs::write(root.join(&right), "broken Office package").unwrap();
+        let out = run(
+            &[
+                "diff",
+                &left,
+                &right,
+                "--format",
+                "html",
+                "--report",
+                "review.html",
+                "--overwrite",
+            ],
+            root,
+        );
+        assert_eq!(out.status.code(), Some(2));
+        assert!(out.stdout.is_empty());
+        assert_eq!(fs::read_to_string(root.join("review.html")).unwrap(), html);
+    }
+    assert_eq!(
+        run(&["diff", "left.xlsx", "left.pptx"], root).status.code(),
+        Some(2)
+    );
+    fs::write(root.join("old.xls"), b"not text").unwrap();
+    assert_eq!(
+        run(&["diff", "old.xls", "old.xls"], root).status.code(),
+        Some(2)
+    );
+}
+#[test]
+fn folder_wildcards_filter_rows_preserve_global_status_and_session_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    for side in ["left", "right", "base"] {
+        fs::create_dir_all(path.join(side).join("日本語")).unwrap();
+        fs::write(path.join(side).join("日本語/猫.CSV"), "same").unwrap();
+    }
+    fs::write(path.join("left/change.txt"), "different").unwrap();
+    for base in [false, true] {
+        let mut args = vec![
+            "folders",
+            "left",
+            "right",
+            "--recursive",
+            "--path-glob",
+            "*日本語/?.csv",
+            "--format",
+            "json",
+        ];
+        if base {
+            args.extend(["--base", "base"]);
+        }
+        let out = run(&args, path);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["matched_count"], 1);
+        assert_eq!(value["total_differences"], 1);
+        assert_eq!(value["filter"]["path_glob"], "*日本語/?.csv");
+        assert_eq!(value["filter"]["path_contains"], "");
+    }
+    let out = run(
+        &[
+            "folders",
+            "left",
+            "right",
+            "--recursive",
+            "--path-glob",
+            "*.absent",
+            "--format",
+            "json",
+        ],
+        path,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["matched_count"], 0);
+    assert_eq!(
+        run(
+            &[
+                "folders",
+                "left",
+                "right",
+                "--path-glob",
+                "*.csv",
+                "--path-contains",
+                "csv"
+            ],
+            path
+        )
+        .status
+        .code(),
+        Some(64)
+    );
+    fs::write(path.join("existing.json"), "keep").unwrap();
+    for pattern in ["".into(), "?".repeat(257)] {
+        let out = run(
+            &[
+                "folders",
+                "left",
+                "right",
+                "--path-glob",
+                &pattern,
+                "--report",
+                "existing.json",
+                "--overwrite",
+            ],
+            path,
+        );
+        assert_eq!(out.status.code(), Some(2));
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            fs::read_to_string(path.join("existing.json")).unwrap(),
+            "keep"
+        );
+    }
+    assert_eq!(
+        run(
+            &[
+                "folder-session",
+                "create",
+                "--left",
+                "left",
+                "--right",
+                "right",
+                "--path-glob",
+                "*.csv",
+                "--output",
+                "work.json"
+            ],
+            path
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let out = run(&["folder-session", "inspect", "work.json"], path);
+    assert_eq!(out.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["path_glob"], "*.csv");
+    assert_eq!(value["path_contains"], "");
+}
+#[test]
 fn folder_sessions_capture_setup_protect_roots_and_do_not_store_results() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path();

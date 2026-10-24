@@ -215,7 +215,7 @@ unified diffは、指定した出力文字コード・改行で対象へ適用�
 | [`yy-buffer`](../../crates/yy-buffer)、[`yy-core`](../../crates/yy-core) | スナップショット、編集、Undo／Redo、選択 | 入力の役割と独立した結果文書、差分範囲へのマッピング |
 | [`yy-ui-win/src/editor.rs`](../../crates/yy-ui-win/src/editor.rs)、render／ime／clipboard | 実エディターの描画・入力・IME・クリップボード | 現在のSQL固定ハイライト、全文文字列での初期化を見直し、言語選択と既存文書／範囲の埋め込みを追加 |
 | [`yy-layout`](../../crates/yy-layout)、[`yy-syntax`](../../crates/yy-syntax)、[`yy-search`](../../crates/yy-search) | 計測、折り返し、色分け、検索 | 差分の仮想行・対応行、複数ペインの検索と同期 |
-| [`yy-encoding`](../../crates/yy-encoding)、[`yy-io`](../../crates/yy-io) | 日本語・EBCDIC系、共有読み取り、変換、保存 | 左右別の符号化、比較キーと元バイトの対応、外部変更検証 |
+| [`yy-encoding`](https://github.com/ykwyuta/YYLibrary/tree/master/crates/yy-encoding)、[`yy-io`](../../crates/yy-io) | 日本語・EBCDIC系、共有読み取り、変換、保存 | 左右別の符号化、比較キーと元バイトの対応、外部変更検証 |
 | [`yy-core/src/diff.rs`](../../crates/yy-core/src/diff.rs) | 小規模2方向比較の既存テスト・回帰例 | 大きな入力は近傍32行の近似経路がある。厳密なマージエンジンとしては直接採用しない |
 | [`yy-win/src/diffview.rs`](../../crates/yy-win/src/diffview.rs)、[`diffstream.rs`](../../crates/yy-win/src/diffstream.rs) | 既存差分画面の操作・ストリーム読み取り・ディスク索引の知見 | アプリ状態から分離。近傍整列と1行49バイトの索引を、圧縮した範囲・疎な索引へ改良 |
 | [`yy-files`](../../crates/yy-files)のscan／hash／sync／fs | 走査、比較候補、操作計画、実行記録、レジューム | 3方向・リネーム・リンク・操作前提条件を拡張。同期の意味が異なる部分は専用モデルにする |

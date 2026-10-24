@@ -370,9 +370,9 @@ impl Renderer {
             let Some(asset) = n.asset.and_then(|id| assets.get(&id)) else {
                 continue;
             };
-            if !cache
+            if cache
                 .get(&asset.id)
-                .is_some_and(|entry| entry.source == asset.svg)
+                .is_none_or(|entry| entry.source != asset.svg)
             {
                 let tree =
                     usvg::Tree::from_str(&asset.svg, &self.options()).map_err(|e| e.to_string())?;

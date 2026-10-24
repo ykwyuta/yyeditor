@@ -13,6 +13,10 @@ struct Input {
     path: PathBuf,
     encoding: String,
     blake3: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    office: Option<crate::office::Kind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review: Option<crate::review::Mode>,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,6 +53,7 @@ impl Session {
         position: Position,
         cancel: &Cancellation,
     ) -> Result<Self> {
+        inputs[0].ensure_comparable(inputs[1])?;
         let comparison = rules::compare(&inputs[0].text, &inputs[1].text, rules, cancel)?;
         validate_position(inputs, position, &comparison)?;
         let mut descriptors = Vec::new();
@@ -56,13 +61,21 @@ impl Session {
             input.verify(cancel)?;
             descriptors.push(Input {
                 path: input.path.clone(),
-                encoding: input.encoding.name().into(),
+                encoding: input.encoding.spec(),
                 blake3: input.fingerprint(cancel)?,
+                office: input.office,
+                review: input.review,
             });
         }
         Ok(Self {
             kind: "yymerge-comparison-session".into(),
-            version: 1,
+            version: if inputs[0].review.is_some() {
+                3
+            } else if inputs[0].office.is_some() {
+                2
+            } else {
+                1
+            },
             inputs: descriptors.try_into().map_err(|_| "two inputs required")?,
             rules,
             position,
@@ -89,8 +102,19 @@ impl Session {
         }
         let session: Self = serde_json::from_str(&document.text)
             .map_err(|e| format!("invalid comparison session: {e}"))?;
-        if session.kind != "yymerge-comparison-session" || session.version != 1 {
+        if session.kind != "yymerge-comparison-session" || !matches!(session.version, 1..=3) {
             return Err("unsupported comparison session kind/version".into());
+        }
+        if session.version
+            != if session.inputs.iter().any(|i| i.review.is_some()) {
+                3
+            } else if session.inputs.iter().any(|i| i.office.is_some()) {
+                2
+            } else {
+                1
+            }
+        {
+            return Err("Office projection v1 requires comparison session version 2".into());
         }
         let mut inputs = Vec::new();
         for input in session.inputs {
@@ -98,7 +122,16 @@ impl Session {
             if !input.path.is_absolute() {
                 return Err("comparison session paths must be absolute".into());
             }
-            let snapshot = Snapshot::open(&input.path, Some(&input.encoding), cancel)?;
+            let snapshot = if let Some(mode) = input.review {
+                Snapshot::open_review(&input.path, Some(&input.encoding), mode, cancel)?
+            } else if input.office.is_some() {
+                Snapshot::open_comparison(&input.path, Some(&input.encoding), cancel)?
+            } else {
+                Snapshot::open(&input.path, Some(&input.encoding), cancel)?
+            };
+            if snapshot.office != input.office {
+                return Err("Office comparison session kind changed".into());
+            }
             if snapshot.fingerprint(cancel)? != input.blake3 {
                 return Err(format!(
                     "comparison session input changed: {}",
@@ -108,6 +141,7 @@ impl Session {
             inputs.push(snapshot);
         }
         let inputs: [Snapshot; 2] = inputs.try_into().map_err(|_| "two inputs required")?;
+        inputs[0].ensure_comparable(&inputs[1])?;
         let comparison = rules::compare(&inputs[0].text, &inputs[1].text, session.rules, cancel)?;
         validate_position([&inputs[0], &inputs[1]], session.position, &comparison)?;
         for input in &inputs {

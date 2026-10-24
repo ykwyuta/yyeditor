@@ -85,6 +85,8 @@ Rust で実装する、Windows 向けの軽量テキストエディタ **yyedito
 | [21-draw.md](21-draw.md) | 構成図（yydraw）：方眼紙、基本図形・クラウドアイコン、接続線の交差アーチ、共通フォント、独自バイナリ保存、SVG・PNG 出力 |
 | [22-dbmanager.md](22-dbmanager.md) | DB管理（yydbmanager）：7種類のDB、共通フォントと既存編集・格子・図資産の再利用、SSMS風の実行計画、CSV・TSV・任意区切り・Parquet・COBOL固定長の入出力、同梱エンジン、独立CI |
 | [23-merge.md](23-merge.md) | 差分比較・マージ（yymerge）：2／3方向とフォルダーの比較・統合、多形式対応、CLIとGit連携、共通UI・ヘルプ・アイコン、独立CI、性能・正確性の評価 |
+| [YYSort](https://github.com/ykwyuta/YYSort/blob/master/docs/design.md) | CLI専用yysort：DFSORT互換処理の対応目標、固定長・CSV、巨大ファイル外部ソート、CPU・メモリ上限、独立CI |
+| [DuckDB-FileIndex](https://github.com/ykwyuta/DuckDB-FileIndex/blob/master/docs/design.md) | DuckDB独立拡張fileindex：CSV・固定長ファイルの永続索引、SQL条件からのレコード位置検索、単独実行、専用CI |
 
 ## 4. 性能・品質目標（抜粋）
 

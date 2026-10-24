@@ -11,7 +11,7 @@
 
 操作・座標・保存形式・制限は[同梱ヘルプ](help/help.md)を参照してください。丸みは外側の角と辺だけに付け、隣接ドットの接続を保ちます。写真からの奥行き推定には対応していません。
 
-椅子・テーブル・子供・車・猫の編集できる作例は[demo/yy3designer](../../demo/yy3designer/README.md)にあります。配布版では`examples/examples.yy3d`を開いてください。
+椅子・テーブル・子供・車・猫・ロンドンの時計塔の編集できる作例は[demo/yy3designer](../../demo/yy3designer/README.md)にあります。配布版では`examples/examples.yy3d`を開いてください。
 
 ```powershell
 cargo build --manifest-path apps/yy3designer/Cargo.toml --release --locked

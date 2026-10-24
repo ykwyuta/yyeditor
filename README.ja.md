@@ -20,6 +20,7 @@
 | **yydraw** | 方眼紙・基本図形・クラウドアイコンで構成図を作成。交差線のアーチ、独自形式の保存、SVG・PNG 出力 |
 | **yy-agent** | SSH 接続先でファイル操作を行う Linux 用の補助プログラム |
 | **yymerge** | 厳密なテキスト比較・3方向マージ。Windows GUI、CLI、独立CIを備える初期実装（[実装範囲](apps/yymerge/README.md)） |
+| **yysort** | Windows/Linux用CLI外部ソート。固定長・RFC 4180 CSV、共通文字コード、CPU・メモリ上限、DFSORT制御文の一部に対応（[詳細](https://github.com/ykwyuta/YYSort)） |
 
 開発環境、ビルド、テスト、内部構成については [DEVELOPER.ja.md](DEVELOPER.ja.md) を参照してください。
 

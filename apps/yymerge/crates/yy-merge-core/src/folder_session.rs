@@ -17,6 +17,8 @@ pub struct Session {
     pub base: Option<PathBuf>,
     pub recursive: bool,
     pub path_contains: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_glob: Option<String>,
     pub status: Selection,
     pub selected: Option<PathBuf>,
 }
@@ -47,7 +49,12 @@ impl Session {
             right: root(right)?,
             base: base.map(root).transpose()?,
             recursive,
-            path_contains: filter.query().into(),
+            path_contains: if filter.glob().is_none() {
+                filter.query().into()
+            } else {
+                String::new()
+            },
+            path_glob: filter.glob().map(str::to_owned),
             status: filter.status(),
             selected,
         };
@@ -80,6 +87,14 @@ impl Session {
         Ok(())
     }
     pub fn filter(&self) -> Result<Filter> {
+        if let Some(pattern) = &self.path_glob {
+            if !self.path_contains.is_empty() {
+                return Err(
+                    "folder session cannot combine literal and wildcard path filters".into(),
+                );
+            }
+            return Filter::wildcard(pattern.clone(), self.status);
+        }
         Filter::new(self.path_contains.clone(), self.status)
     }
     pub fn json(&self, cancel: &Cancellation) -> Result<Vec<u8>> {
@@ -136,6 +151,38 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wildcard_sessions_round_trip_reject_mixed_modes_and_read_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = setup(dir.path());
+        let cancel = Cancellation::default();
+        let path = dir.path().join("session.json");
+        let original = session.json(&cancel).unwrap();
+        assert!(!String::from_utf8_lossy(&original).contains("path_glob"));
+        fs::write(&path, original).unwrap();
+        assert!(
+            Session::open(&path, &cancel)
+                .unwrap()
+                .filter()
+                .unwrap()
+                .glob()
+                .is_none()
+        );
+        session.path_contains.clear();
+        session.path_glob = Some("*日本語/*.csv".into());
+        session.save(&path, true, &cancel).unwrap();
+        let loaded = Session::open(&path, &cancel).unwrap();
+        assert_eq!(loaded.filter().unwrap().glob(), Some("*日本語/*.csv"));
+        session.path_contains = "literal".into();
+        assert!(session.json(&cancel).is_err());
+        session.path_contains.clear();
+        session.path_glob = Some("?".repeat(257));
+        assert!(session.json(&cancel).is_err());
+        let mut text = String::from_utf8(loaded.json(&cancel).unwrap()).unwrap();
+        text = text.replace("\"path_glob\":", "\"path_glob\": \"*\", \"path_glob\":");
+        fs::write(&path, text).unwrap();
+        assert!(Session::open(&path, &cancel).is_err());
+    }
     fn setup(dir: &Path) -> Session {
         for side in ["left", "right", "base"] {
             fs::create_dir(dir.join(side)).unwrap();

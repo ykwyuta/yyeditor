@@ -811,12 +811,10 @@ impl App {
                         self.protocol.name(),
                         if crate::remote::use_agent() {
                             "使う"
+                        } else if self.protocol == Protocol::Scp {
+                            "使わない（シェル）"
                         } else {
-                            if self.protocol == Protocol::Scp {
-                                "使わない（シェル）"
-                            } else {
-                                "使わない（SFTP）"
-                            }
+                            "使わない（SFTP）"
                         }
                     )
                 }

@@ -118,8 +118,18 @@ fn editable_examples_keep_six_views_and_closed_joined_meshes() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../demo/yy3designer");
     let all = load(&path.join("examples.yy3d")).unwrap();
-    assert_eq!(all.objects.len(), 5);
-    for (i, name) in ["chair", "table", "child", "car", "cat"].iter().enumerate() {
+    assert_eq!(all.objects.len(), 6);
+    for (i, name) in [
+        "chair",
+        "table",
+        "child",
+        "car",
+        "cat",
+        "london-clock-tower",
+    ]
+    .iter()
+    .enumerate()
+    {
         let individual = load(&path.join(format!("{name}.yy3d"))).unwrap();
         assert_eq!(individual.objects, vec![all.objects[i].clone()]);
         let object = individual.object();

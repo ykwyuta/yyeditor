@@ -66,6 +66,59 @@ impl Value {
         }
     }
 }
+/// Shared Arrow conversion for result grids and scalar/procedural evaluation.
+/// Decimal values retain their textual precision, including DECIMAL(38).
+pub fn arrow_value(array: &dyn duckdb::arrow::array::Array, row: usize) -> crate::Result<Value> {
+    use duckdb::arrow::{
+        array::{BinaryArray, LargeBinaryArray},
+        datatypes::DataType,
+        util::display::array_value_to_string,
+    };
+    if row >= array.len() {
+        return Err("Arrowの行位置が範囲外です".into());
+    }
+    if array.is_null(row) {
+        return Ok(Value::Null);
+    }
+    let text = || array_value_to_string(array, row).map_err(|e| e.to_string());
+    Ok(match array.data_type() {
+        DataType::Binary => Value::Binary(
+            array
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or("Arrow Binary型が不正です")?
+                .value(row)
+                .to_vec(),
+        ),
+        DataType::LargeBinary => Value::Binary(
+            array
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .ok_or("Arrow LargeBinary型が不正です")?
+                .value(row)
+                .to_vec(),
+        ),
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => Value::Integer(text()?),
+        DataType::Decimal128(_, _) | DataType::Decimal256(_, _) => Value::Decimal(text()?),
+        DataType::Float32 | DataType::Float64 => {
+            Value::Float(text()?.parse::<f64>().map_err(|e| e.to_string())?)
+        }
+        DataType::Boolean => Value::Bool(text()? == "true"),
+        DataType::Date32
+        | DataType::Date64
+        | DataType::Time32(_)
+        | DataType::Time64(_)
+        | DataType::Timestamp(_, _) => Value::Temporal(text()?),
+        _ => Value::Text(text()?),
+    })
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Column {
     pub name: String,

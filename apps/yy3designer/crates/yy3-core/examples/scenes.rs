@@ -23,6 +23,25 @@ impl Model {
             }
         }
     }
+    fn facade_pixel(&mut self, side: usize, u: u32, y: u32, color: Color) {
+        let p = match side {
+            0 => [u, y, 6],
+            1 => [41, y, u],
+            2 => [47 - u, y, 41],
+            _ => [6, y, 47 - u],
+        };
+        self.box_at(p, p.map(|v| v + 1), color);
+    }
+    fn facade_line(&mut self, side: usize, a: [u32; 2], b: [u32; 2], color: Color) {
+        let steps = a[0].abs_diff(b[0]).max(a[1].abs_diff(b[1])).max(1);
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let p = std::array::from_fn::<_, 2, _>(|j| {
+                (a[j] as f32 * (1. - t) + b[j] as f32 * t).round() as u32
+            });
+            self.facade_pixel(side, p[0], p[1], color);
+        }
+    }
     fn object(self, name: &str, roundness: f32) -> io::Result<Object> {
         let mut object = Object::new(name, self.size)?;
         object.roundness = roundness;
@@ -166,6 +185,105 @@ fn cat() -> io::Result<Object> {
     m.object("猫", 0.7)
 }
 
+fn london_clock_tower() -> io::Result<Object> {
+    let mut m = Model::new([48, 176, 48]);
+    let stone = [199, 169, 113, 255];
+    let light = [239, 215, 165, 255];
+    let gold = [206, 155, 53, 255];
+    let roof = [48, 76, 72, 255];
+    let recess = [65, 74, 78, 255];
+    let dial = [255, 247, 220, 255];
+    let ink = [31, 43, 47, 255];
+    // Stepped plinth, tall masonry shaft and the wider clock chamber.
+    m.box_at([2, 0, 2], [46, 3, 46], light);
+    m.box_at([4, 3, 4], [44, 7, 44], stone);
+    m.box_at([7, 7, 7], [41, 108, 41], stone);
+    m.box_at([6, 108, 6], [42, 139, 42], stone);
+    for x in [5, 38] {
+        for z in [5, 38] {
+            m.box_at([x, 7, z], [x + 5, 145, z + 5], light);
+            m.box_at([x - 1, 139, z - 1], [x + 6, 144, z + 6], gold);
+            for y in 145..161 {
+                let inset = ((y - 145) / 5).min(2);
+                m.box_at(
+                    [x + inset, y, z + inset],
+                    [x + 5 - inset, y + 1, z + 5 - inset],
+                    if y < 150 { light } else { roof },
+                );
+            }
+            m.box_at([x + 2, 161, z + 2], [x + 3, 164, z + 3], gold);
+        }
+    }
+    for side in 0..4 {
+        for y in 8..108 {
+            for u in 10..38 {
+                let band = [16, 36, 56, 76, 96, 105].contains(&y);
+                let pilaster = [11, 19, 27, 35].contains(&u);
+                m.facade_pixel(side, u, y, if band || pilaster { light } else { stone });
+            }
+        }
+        // Pointed lancet windows, with a stone mullion between the openings.
+        for base in [20, 40, 60, 80] {
+            for u in [14, 22, 30] {
+                for y in base..base + 12 {
+                    for x in u..u + 3 {
+                        if y < base + 10 || x == u + 1 {
+                            m.facade_pixel(side, x, y, recess);
+                        }
+                    }
+                }
+            }
+        }
+        // Each of the four faces has its own editable dial and hands at 10:10.
+        for y in 109..138 {
+            for u in 10..39 {
+                let radius = (u as f32 - 24.).hypot(y as f32 - 123.);
+                if radius <= 14. {
+                    let color = if radius > 13. {
+                        gold
+                    } else if radius > 12. {
+                        ink
+                    } else {
+                        dial
+                    };
+                    m.facade_pixel(side, u, y, color);
+                }
+            }
+        }
+        for hour in 0..12 {
+            let angle = hour as f32 * std::f32::consts::TAU / 12.;
+            let point = |r: f32| {
+                [
+                    (24. + r * angle.sin()).round() as u32,
+                    (123. + r * angle.cos()).round() as u32,
+                ]
+            };
+            m.facade_line(side, point(10.), point(11.), ink);
+        }
+        m.facade_line(side, [24, 123], [18, 127], ink);
+        m.facade_line(side, [24, 124], [18, 128], ink);
+        m.facade_line(side, [24, 123], [33, 128], ink);
+        m.facade_pixel(side, 24, 123, gold);
+    }
+    // Cornices, steep slate roof, gilded ridges and central finial.
+    m.box_at([4, 138, 4], [44, 141, 44], light);
+    m.box_at([5, 141, 5], [43, 144, 43], gold);
+    for y in 144..169 {
+        let half = 13 - (y - 144) / 2;
+        let low = 24 - half;
+        let high = 24 + half;
+        m.box_at([low, y, low], [high, y + 1, high], roof);
+        for x in [low, high - 1] {
+            for z in [low, high - 1] {
+                m.box_at([x, y, z], [x + 1, y + 1, z + 1], gold);
+            }
+        }
+    }
+    m.box_at([22, 169, 22], [26, 173, 26], roof);
+    m.box_at([23, 173, 23], [25, 176, 25], gold);
+    m.object("ロンドンの時計塔（エリザベス・タワー）", 0.)
+}
+
 pub fn write(path: &Path) -> io::Result<()> {
     let models = [
         ("chair", chair()?),
@@ -173,6 +291,7 @@ pub fn write(path: &Path) -> io::Result<()> {
         ("child", child()?),
         ("car", car()?),
         ("cat", cat()?),
+        ("london-clock-tower", london_clock_tower()?),
     ];
     let mut collection = Project::default();
     collection.objects.clear();
@@ -191,6 +310,10 @@ pub fn write(path: &Path) -> io::Result<()> {
         let mesh = mesh::build(&object)?;
         let raster = mesh::render(&mesh, 320, 320, -0.65, -0.4, 1.1)?;
         image::write_png(&path.join(format!("{file}.png")), &raster)?;
+        if file == "london-clock-tower" {
+            let portrait = mesh::render(&mesh, 640, 960, -0.65, -0.15, 1.85)?;
+            image::write_png(&path.join(format!("{file}.png")), &portrait)?;
+        }
         for y in 0..320usize {
             let start = ((i / 3) * 320 + y) * 960 + (i % 3) * 320;
             sheet.pixels[start..start + 320]

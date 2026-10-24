@@ -1,0 +1,52 @@
+%PDF-1.4
+% Original YY series fixture
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 400] /Rotate 0 /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 295 >>
+stream
+0 0 0 rg BT /F1 28 Tf 40 340 Td (Baseline document) Tj ET
+BT /F1 16 Tf 40 300 Td (Page 1 - YY series PDF comparison example) Tj ET
+0.12 0.35 0.75 rg 40 130 200 120 re f
+0.85 0.2 0.15 rg 300 130 120 120 re f
+0 0 0 rg BT /F1 16 Tf 40 85 Td (Compare colours, text, rotation and added pages.) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 400] /Rotate 90 /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 294 >>
+stream
+0 0 0 rg BT /F1 28 Tf 40 340 Td (Updated document) Tj ET
+BT /F1 16 Tf 40 300 Td (Page 2 - YY series PDF comparison example) Tj ET
+0.05 0.55 0.60 rg 40 130 200 120 re f
+0.85 0.2 0.15 rg 300 130 120 120 re f
+0 0 0 rg BT /F1 16 Tf 40 85 Td (Compare colours, text, rotation and added pages.) Tj ET
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000038 00000 n 
+0000000087 00000 n 
+0000000150 00000 n 
+0000000286 00000 n 
+0000000631 00000 n 
+0000000768 00000 n 
+0000001112 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+1182
+%%EOF

@@ -72,6 +72,17 @@ jobs:
             Get-Content "ui-smoke-$taskTextHelp/folder-filter-smoke.txt"
             Get-Content "ui-smoke-$taskTextHelp/search-smoke.txt"
             Get-Content "ui-smoke-$taskTextHelp/replace-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/office-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/encoding-smoke.txt"
+            $taskImage = Start-Process -FilePath $taskExe -ArgumentList '--image','--left','demo/yymerge/images/left.webp','--right','demo/yymerge/images/right.webp','--ui-smoke-test',"ui-image-$taskTextHelp" -WindowStyle Hidden -PassThru
+            if (-not $taskImage.WaitForExit(60000)) { $taskImage.Kill(); $taskImage.WaitForExit(); throw 'yymerge image smoke timed out' }
+            if ($taskImage.ExitCode -ne 0) { Get-Content "ui-image-$taskTextHelp/image-error.txt" -ErrorAction SilentlyContinue; throw "yymerge image smoke failed: $($taskImage.ExitCode)" }
+            Get-Content "ui-image-$taskTextHelp/image-smoke.txt"
+            $taskPdf = Start-Process -FilePath $taskExe -ArgumentList '--left','demo/yymerge/pdf/left.pdf','--right','demo/yymerge/pdf/right.pdf','--ui-smoke-test',"ui-pdf-$taskTextHelp" -WindowStyle Hidden -PassThru
+            if (-not $taskPdf.WaitForExit(60000)) { $taskPdf.Kill(); $taskPdf.WaitForExit(); throw 'yymerge PDF smoke timed out' }
+            if ($taskPdf.ExitCode -ne 0) { Get-Content "ui-pdf-$taskTextHelp/image-error.txt" -ErrorAction SilentlyContinue; throw "yymerge PDF smoke failed: $($taskPdf.ExitCode)" }
+            Get-Content "ui-pdf-$taskTextHelp/pdf-smoke.txt"
+            Get-Content "ui-pdf-$taskTextHelp/image-smoke.txt"
           }
           Remove-Item Env:YY_HELP_TEXT_ONLY
       - name: Package
@@ -79,7 +90,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/yymerge | Out-Null
           Copy-Item apps/yymerge/target/release/yymerge.exe,apps/yymerge/target/release/yymergew.exe dist/yymerge/
-          Copy-Item apps/yymerge/README.md,apps/yymerge/NOTICE.md,apps/yymerge/LICENSE-BLAKE3-CC0.txt dist/yymerge/
+          Copy-Item apps/yymerge/README.md,apps/yymerge/NOTICE.md,apps/yymerge/LICENSE-BLAKE3-CC0.txt,apps/yymerge/LICENSE-OFFICE-DEPS.txt,apps/yymerge/LICENSE-IMAGE-DEPS.txt,apps/yymerge/LICENSE-PDF-DEPS.txt dist/yymerge/
           Copy-Item -Recurse apps/yymerge/help dist/yymerge/
           Copy-Item COPYING,COPYING.EXCEPTION,crates/yy-win/fonts/LICENSE-UDEVGothic.txt dist/yymerge/
           Copy-Item crates/yy-preview/assets/LICENSE-*.txt dist/yymerge/
@@ -91,7 +102,10 @@ jobs:
         if: always()
         with:
           name: yymerge-ui-verification
-          path: ui-smoke-*/
+          path: |
+            ui-smoke-*/
+            ui-image-*/
+            ui-pdf-*/
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -107,9 +121,19 @@ jobs:
         run: cargo clippy --manifest-path apps/yymerge/Cargo.toml --workspace --all-targets --no-default-features --locked -- -D warnings
       - name: Exact comparison, encodings, merge, folder and process tests
         run: cargo test --manifest-path apps/yymerge/Cargo.toml --workspace --no-default-features --locked
+      - name: Install Office image renderers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libreoffice-calc libreoffice-impress fonts-noto-cjk
+      - name: Real Excel and PowerPoint image comparison
+        run: cargo test --manifest-path apps/yymerge/Cargo.toml --workspace --no-default-features --locked office_render -- --ignored --nocapture
       - name: Build console without UI
         run: cargo build --manifest-path apps/yymerge/Cargo.toml -p yymerge --no-default-features --bin yymerge --release --locked
+      - name: Package console and license notices
+        run: |
+          mkdir -p dist/yymerge-linux
+          cp apps/yymerge/target/release/yymerge apps/yymerge/README.md apps/yymerge/NOTICE.md apps/yymerge/LICENSE-*.txt COPYING COPYING.EXCEPTION dist/yymerge-linux/
       - uses: actions/upload-artifact@v4
         with:
           name: yymerge-linux-x64-cli
-          path: apps/yymerge/target/release/yymerge
+          path: dist/yymerge-linux/

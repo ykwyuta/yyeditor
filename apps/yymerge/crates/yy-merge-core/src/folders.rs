@@ -63,7 +63,8 @@ pub(super) fn scan(
     }
     Ok(())
 }
-pub(crate) fn is_link(path: &Path, kind: fs::FileType) -> Result<bool> {
+/// Includes Windows reparse points; useful when preflighting read-only report targets.
+pub fn is_link(path: &Path, kind: fs::FileType) -> Result<bool> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;

@@ -801,6 +801,7 @@ dependencies = [
 [[package]]
 name = "yy-encoding"
 version = "0.1.0"
+source = "git+https://github.com/ykwyuta/YYLibrary?rev=57deca92c834227f705496fd7c5c4a226ec8dc97#57deca92c834227f705496fd7c5c4a226ec8dc97"
 dependencies = [
  "chardetng",
  "encoding_rs",

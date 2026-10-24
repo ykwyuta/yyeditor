@@ -134,6 +134,10 @@ proptest! {
         let repl = Replacement::parse("<\\U$0\\E>", &s).unwrap();
         let mut out = Vec::new();
         let n = rewrite(&small, &snap, 0..len, &repl, &mut out, &mut |_| true).unwrap();
+        let mut streamed = Vec::new();
+        let streamed_count = yy_search::rewrite_streaming(&small, &snap, 0..len, &repl, &mut streamed, &mut |_| true).unwrap();
+        prop_assert_eq!(streamed_count, n);
+        prop_assert_eq!(&streamed, &out);
         let edits = collect_edits(&s, &snap, 0..len, &repl, usize::MAX, &mut |_| true)
             .unwrap()
             .unwrap();
@@ -206,9 +210,80 @@ fn replacement_templates() {
     assert_eq!(run("a\\tb\\nc"), "a\tb\nc");
     assert!(Replacement::parse("$3", &s).is_err());
     assert!(Replacement::parse("${nope}", &s).is_err());
+    assert!(Replacement::parse(&format!("${}", "9".repeat(512)), &s).is_err());
     assert_eq!(
         Replacement::literal("$1\\n").as_literal(),
         Some(&b"$1\\n"[..])
+    );
+}
+
+#[test]
+fn streaming_capture_expansion_stops_within_one_match_and_keeps_unicode_state() {
+    use std::io::{self, Write};
+    struct Limited {
+        written: usize,
+        max: usize,
+        largest: usize,
+    }
+    impl Write for Limited {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.largest = self.largest.max(bytes.len());
+            if self.written + bytes.len() > self.max {
+                return Err(io::Error::other("limit/cancel"));
+            }
+            self.written += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let text = "a".repeat(64 * 1024);
+    let snap = snapshot(&text, 1024);
+    let s = Searcher::new(&query("(a+)")).unwrap();
+    let repl = Replacement::parse(&"$1".repeat(256), &s).unwrap();
+    let mut writer = Limited {
+        written: 0,
+        max: 10000,
+        largest: 0,
+    };
+    assert!(
+        yy_search::rewrite_streaming(&s, &snap, 0..snap.len(), &repl, &mut writer, &mut |_| true)
+            .is_err()
+    );
+    assert!(writer.written <= writer.max);
+    assert!(writer.largest <= 4108);
+
+    let text = format!("{}ß猫İ", "é".repeat(2047));
+    let snap = snapshot(&text, 11);
+    let s = Searcher::new(&query("(?<all>.+)")).unwrap();
+    for template in [
+        r"\U${all}\E/\l$0",
+        r"\u${all}/\L$0\E",
+        r"$$-\0\n\t\r\\",
+        r"$0$0",
+    ] {
+        let repl = Replacement::parse(template, &s).unwrap();
+        let mut expected = Vec::new();
+        let mut actual = Vec::new();
+        rewrite(&s, &snap, 0..snap.len(), &repl, &mut expected, &mut |_| {
+            true
+        })
+        .unwrap();
+        yy_search::rewrite_streaming(&s, &snap, 0..snap.len(), &repl, &mut actual, &mut |_| true)
+            .unwrap();
+        assert_eq!(actual, expected, "{template}");
+    }
+    assert!(
+        yy_search::rewrite_streaming(
+            &s,
+            &snap,
+            0..snap.len(),
+            &Replacement::literal("x"),
+            &mut Vec::new(),
+            &mut |_| false
+        )
+        .is_err()
     );
 }
 

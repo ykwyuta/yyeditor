@@ -1192,10 +1192,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gen-tables"
-version = "0.1.0"
-
-[[package]]
 name = "generic-array"
 version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4080,10 +4076,10 @@ dependencies = [
 [[package]]
 name = "yy-encoding"
 version = "0.1.0"
+source = "git+https://github.com/ykwyuta/YYLibrary?rev=57deca92c834227f705496fd7c5c4a226ec8dc97#57deca92c834227f705496fd7c5c4a226ec8dc97"
 dependencies = [
  "chardetng",
  "encoding_rs",
- "proptest",
  "unicode-normalization",
 ]
 

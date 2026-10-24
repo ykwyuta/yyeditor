@@ -19,7 +19,7 @@ use regex_automata::util::syntax;
 use regex_automata::{Input, Match};
 use yy_buffer::Snapshot;
 
-pub use replace::{Edit, ReplaceError, Replacement, collect_edits, rewrite};
+pub use replace::{Edit, ReplaceError, Replacement, collect_edits, rewrite, rewrite_streaming};
 
 /// 検索条件。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

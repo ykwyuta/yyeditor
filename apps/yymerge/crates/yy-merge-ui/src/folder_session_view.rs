@@ -259,7 +259,7 @@ pub(crate) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
         &right,
         None,
         true,
-        &Filter::new(".csv".into(), Default::default())?,
+        &Filter::wildcard("*.csv".into(), Default::default())?,
         Some("nested/selected.csv".into()),
         &cancel,
     )?;
@@ -279,7 +279,7 @@ pub(crate) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     begin_load(a, path.clone())?;
     wait(a)?;
     if selected_path(a).as_deref() != Some(std::path::Path::new("nested/selected.csv"))
-        || a.folders.as_ref().unwrap().filter.query() != ".csv"
+        || a.folders.as_ref().unwrap().filter.glob() != Some("*.csv")
         || a.folders.as_ref().unwrap().plan.is_some()
         || exit_code(a) != Some(1)
     {
@@ -299,7 +299,9 @@ pub(crate) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(2));
     }
     let saved_config = Session::open(&saved, &cancel)?;
-    if saved_config.selected.as_deref() != Some(std::path::Path::new("nested/selected.csv")) {
+    if saved_config.selected.as_deref() != Some(std::path::Path::new("nested/selected.csv"))
+        || saved_config.filter()?.glob() != Some("*.csv")
+    {
         return Err("folder session save lost selected path".into());
     }
     std::fs::write(right.join("nested/selected.csv"), "left").map_err(|e| e.to_string())?;

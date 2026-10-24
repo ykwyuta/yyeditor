@@ -91,11 +91,15 @@ fn render(
     let rows = alignment::align(&compared.diff, cancel)?;
     let a = crate::lines(&left.text);
     let b = crate::lines(&right.text);
-    let metadata_equal = left.encoding == right.encoding && left.bom == right.bom;
-    let identical = left.text == right.text && metadata_equal;
-    let equivalent = compared.diff.edits.is_empty() && metadata_equal;
-    let (status, label) = if identical {
+    let identical = left.original_identical(right);
+    let equivalent = left.equivalent(right, compared.diff.edits.is_empty());
+    let (status, label) = if identical && equivalent {
         ("Identical", "元データ一致")
+    } else if equivalent && left.office.is_some() && left.text == right.text {
+        (
+            "EquivalentOfficeContent",
+            "Office抽出データ一致（元パッケージは異なります）",
+        )
     } else if equivalent {
         (
             "EquivalentUnderRules",
@@ -113,15 +117,24 @@ fn render(
     out.push("</style></head><body><header><h1>yymerge 比較レポート</h1>")?;
     out.push(&format!("<p class=status data-status=\"{status}\">{label}</p><p>変更領域 {} / 規則で無視した行対 {}</p><p>適用規則: ", compared.diff.edits.len(), compared.ignored.len()))?;
     out.escaped(&rules.label(), cancel)?;
-    out.push("</p><p class=note>原文の表示用レポートです。規則上の同値は元バイト一致を意味しません。文字コードとBOMは厳密に判定します。行末のLF・CRLF・改行なしを明示し、タブは4桁幅、その他の制御文字は &#92;u{XXXX} で表示します。</p><dl>")?;
+    if let Some(mode) = left.review {
+        out.push(&format!("</p><p>読み取り専用バイト表示 / 文字コード・BOM差を無視: {}。不正バイトは &#92;xHH、制御文字は &#92;u{{XXXX}}、元のバックスラッシュは二重化。パック十進数の数値解釈は行いません。", mode.ignore_encoding))?;
+    }
+    if left.office.is_some() {
+        out.push("</p><p class=note>Office抽出データの読み取り専用比較です。表示行番号は原本の行番号ではありません。書式・画像・ノート等の内部データも比較しますが、Officeで描画した見た目の比較ではありません。数式は再計算せず、マクロ・外部リンクは実行しません。ZIPの順序・圧縮・日時だけの差は同値になります。元ファイルは変更しません。</p><p>")?;
+    }
+    out.push("</p><p class=note>比較用テキストの表示レポートです。同値は元バイト一致を意味しません。通常のテキスト入力では文字コードとBOMも判定します。行末のLF・CRLF・改行なしを明示し、タブは4桁幅、その他の制御文字は &#92;u{XXXX} で表示します。</p><dl>")?;
     for (side, input) in [("LEFT", left), ("RIGHT", right)] {
         out.push(&format!("<dt>{side}</dt><dd>"))?;
         out.escaped(&input.path.to_string_lossy(), cancel)?;
         out.push("<br>")?;
-        out.escaped(&input.encoding.to_string(), cancel)?;
+        if let Some(kind) = input.office {
+            out.escaped(&format!("{}抽出 / 表示テキスト: ", kind.label()), cancel)?;
+        }
+        out.escaped(&input.encoding.spec(), cancel)?;
         out.push(&format!(" / BOM: {:?}</dd>", input.bom))?;
     }
-    out.push("</dl><p class=legend>同一 / <span class=changed>変更</span> / <span class=deleted>左のみ</span> / <span class=inserted>右のみ</span> / <span class=ignored>≈ 規則で無視</span></p></header><main><div class=table-scroll><table><colgroup><col class=line-number><col><col class=line-number><col></colgroup><thead><tr><th colspan=2>LEFT（左原文）</th><th colspan=2>RIGHT（右原文）</th></tr></thead><tbody>")?;
+    out.push("</dl><p class=legend>同一 / <span class=changed>変更</span> / <span class=deleted>左のみ</span> / <span class=inserted>右のみ</span> / <span class=ignored>≈ 規則で無視</span></p></header><main><div class=table-scroll><table><colgroup><col class=line-number><col><col class=line-number><col></colgroup><thead><tr><th colspan=2>LEFT（左表示）</th><th colspan=2>RIGHT（右表示）</th></tr></thead><tbody>")?;
     for (i, row) in rows.iter().enumerate() {
         if i & 1023 == 0 {
             cancel.check()?;
@@ -140,7 +153,7 @@ fn render(
         out.cell(row.right, &b, cancel)?;
         out.push("</tr>")?;
     }
-    out.push("</tbody></table></div></main><footer>yymerge HTML report v1 · 全行を原文の順序で表示 · 空ファイルは0行 · 比較入力は変更しません</footer></body></html>\n")?;
+    out.push("</tbody></table></div></main><footer>yymerge HTML report v1 · 全行を比較表示の順序で表示 · 空ファイルは0行 · 比較入力は変更しません</footer></body></html>\n")?;
     cancel.check()?;
     Ok(out.text)
 }

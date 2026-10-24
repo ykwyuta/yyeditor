@@ -24,8 +24,13 @@ use yy_ui_win::editor::Editor;
 
 #[path = "comparison_session_view.rs"]
 mod comparison_session_view;
+#[path = "encoding_view.rs"]
+mod encoding_view;
+const INPUT_ENCODING: u16 = 158;
 #[path = "folders_view.rs"]
 mod folders_view;
+#[path = "office_view.rs"]
+mod office_view;
 #[path = "replace_view.rs"]
 mod replace_view;
 #[path = "report_view.rs"]
@@ -90,6 +95,7 @@ const COMPARISON_SESSION_OPEN: u16 = 149;
 const COMPARISON_SESSION_SAVE: u16 = 150;
 const FOLDER_SESSION_OPEN: u16 = 151;
 const FOLDER_SESSION_SAVE: u16 = 152;
+const OPEN_IMAGES: u16 = 153;
 const HELP_MD: &str = include_str!("../../../help/help.md");
 const SS_LEFTNOWORDWRAP: u32 = 12;
 thread_local! {static APP:RefCell<Option<App>>=const{RefCell::new(None)};}
@@ -266,18 +272,33 @@ fn load_with_encodings(
     }
     let left = g.left.as_ref().ok_or("左ファイルを選択してください")?;
     let right = g.right.as_ref().ok_or("右ファイルを選択してください")?;
-    let mut inputs = vec![
-        Snapshot::open(
-            left,
-            encodings.map(|e| e[0].as_str()).or(g.encoding.as_deref()),
-            c,
-        )?,
-        Snapshot::open(
-            right,
-            encodings.map(|e| e[1].as_str()).or(g.encoding.as_deref()),
-            c,
-        )?,
-    ];
+    if g.inputs.active() && (g.base.is_some() || g.git_diff || g.git_merge) {
+        return Err("文字コード別のバイト表示は通常の2方向比較専用です".into());
+    }
+    let mut inputs = if g.inputs.active() {
+        g.inputs
+            .open_pair(left, right, g.encoding.as_deref(), c)?
+            .into()
+    } else {
+        let open_input = if g.base.is_some() {
+            Snapshot::open
+        } else {
+            Snapshot::open_comparison
+        };
+        vec![
+            open_input(
+                left,
+                encodings.map(|e| e[0].as_str()).or(g.encoding.as_deref()),
+                c,
+            )?,
+            open_input(
+                right,
+                encodings.map(|e| e[1].as_str()).or(g.encoding.as_deref()),
+                c,
+            )?,
+        ]
+    };
+    inputs[0].ensure_comparable(&inputs[1])?;
     let rules = g.rules.core();
     if g.base.is_some() && rules.active() {
         return Err("比較規則は2方向比較専用です。マージは厳密比較で行います。".into());
@@ -375,8 +396,8 @@ fn begin_options(a: &mut App, g: Gui) {
         })
         .map(|data| {
             [
-                data.inputs[0].encoding.name().to_string(),
-                data.inputs[1].encoding.name().to_string(),
+                data.inputs[0].encoding.spec(),
+                data.inputs[1].encoding.spec(),
             ]
         });
     std::thread::spawn(move || {
@@ -429,7 +450,7 @@ fn install(a: &mut App, mut data: Loaded) -> Result<()> {
             left: Some(data.inputs[0].path.clone()),
             right: Some(data.inputs[1].path.clone()),
             base: Some(data.inputs[2].path.clone()),
-            encoding: Some(data.inputs[2].encoding.name().into()),
+            encoding: Some(data.inputs[2].encoding.spec()),
             ..Default::default()
         };
         a.folder_mode = false;
@@ -440,6 +461,15 @@ fn install(a: &mut App, mut data: Loaded) -> Result<()> {
         a.options = Gui {
             left: Some(data.inputs[0].path.clone()),
             right: Some(data.inputs[1].path.clone()),
+            inputs: if let Some(mode) = data.inputs[0].review {
+                yy_merge_cli::InputOptions {
+                    left_encoding: Some(data.inputs[0].encoding.spec()),
+                    right_encoding: Some(data.inputs[1].encoding.spec()),
+                    ignore_encoding: mode.ignore_encoding,
+                }
+            } else {
+                Default::default()
+            },
             rules: yy_merge_cli::RuleArgs::from_core(data.rules),
             ..Default::default()
         };
@@ -560,17 +590,20 @@ fn refresh(a: &mut App) {
                 }
             }
             let same = a.options.git_left_missing == a.options.git_right_missing
-                && data.diff.edits.is_empty()
-                && data.inputs[0].encoding == data.inputs[1].encoding
-                && data.inputs[0].bom == data.inputs[1].bom;
-            let identical = data.inputs[0].text == data.inputs[1].text && same;
+                && data.inputs[0].equivalent(&data.inputs[1], data.diff.edits.is_empty());
+            let identical = data.inputs[0].original_identical(&data.inputs[1]) && same;
             a.exit = i32::from(!same);
             text(
                 a.status,
                 &format!(
-                    "{} | {} 差分 / ≈ 無視 {} 行対 | {} | 左 {} / 右 {} | 文字コード・BOMは厳密判定",
+                    "{} | {} 差分 / ≈ 無視 {} 行対 | {} | 左 {} / 右 {} | {}",
                     if identical {
                         "元データ一致"
+                    } else if same
+                        && data.inputs[0].office.is_some()
+                        && data.inputs[0].text == data.inputs[1].text
+                    {
+                        "Office抽出データ一致（元パッケージは異なります）"
                     } else if same {
                         "規則上は同値（元データは異なります）"
                     } else {
@@ -579,8 +612,17 @@ fn refresh(a: &mut App) {
                     data.diff.edits.len(),
                     data.ignored.len(),
                     data.rules.label(),
-                    data.inputs[0].encoding,
-                    data.inputs[1].encoding
+                    data.inputs[0].encoding.spec(),
+                    data.inputs[1].encoding.spec(),
+                    if data.inputs[0].review.is_some_and(|m| m.ignore_encoding) {
+                        "バイト可視化・読取専用 / 文字コード・BOM差を無視"
+                    } else if data.inputs[0].review.is_some() {
+                        "バイト可視化・読取専用 / 文字コード・BOM差を判定"
+                    } else if data.inputs[0].office.is_some() {
+                        "Office抽出データ比較（原本ではない／編集不可）"
+                    } else {
+                        "文字コード・BOMは厳密判定"
+                    }
                 ),
             );
         }
@@ -956,7 +998,7 @@ fn choose_file_ext(save: bool, title: &str, extension: Option<&str>) -> Option<P
     }
 }
 fn git_blocked(id: u16) -> bool {
-    matches!(id, OPEN | OPEN_MERGE) || (OPEN_FOLDERS..=SESSION_SAVE).contains(&id)
+    matches!(id, OPEN | OPEN_MERGE | OPEN_IMAGES) || (OPEN_FOLDERS..=SESSION_SAVE).contains(&id)
 }
 fn git_exit(a: &App) -> i32 {
     if a.receiver.is_some() {
@@ -1081,6 +1123,9 @@ fn command(id: u16) -> Result<()> {
         }
         return Ok(());
     }
+    if id == INPUT_ENCODING {
+        return encoding_view::show();
+    }
     if (RULE_RESET..=RULE_EOL).contains(&id) {
         return app(|a| set_rule(a, id)).unwrap_or(Ok(()));
     }
@@ -1133,7 +1178,7 @@ fn command(id: u16) -> Result<()> {
         }
         return Ok(());
     }
-    if matches!(id, OPEN | OPEN_MERGE) {
+    if matches!(id, OPEN | OPEN_MERGE | OPEN_IMAGES) {
         if app(|a| a.receiver.is_some()).unwrap_or(false) {
             return Err("比較中です。停止してから開いてください。".into());
         }
@@ -1156,6 +1201,13 @@ fn command(id: u16) -> Result<()> {
         let Some(right) = choose_file(false, "RIGHT: 右ファイルを選択") else {
             return Ok(());
         };
+        if id == OPEN_IMAGES
+            || base.is_none()
+                && (yy_merge_core::images::is_image(&left)
+                    || yy_merge_core::images::is_image(&right))
+        {
+            return super::image_view::spawn(&left, &right);
+        }
         app(|a| {
             a.folder_mode = false;
             let rules = if base.is_none() {
@@ -1164,6 +1216,11 @@ fn command(id: u16) -> Result<()> {
                 Default::default()
             };
             a.options = Gui {
+                inputs: if base.is_none() {
+                    a.options.inputs.clone()
+                } else {
+                    Default::default()
+                },
                 base,
                 rules,
                 left: Some(left),
@@ -1468,7 +1525,8 @@ fn menu() -> Result<HMENU> {
             (
                 "ファイル(&F)",
                 vec![
-                    (OPEN, "2方向比較を開く…"),
+                    (OPEN, "2方向比較を開く（テキスト／Excel／PowerPoint）…"),
+                    (OPEN_IMAGES, "画像・PDF・Officeの見た目比較を開く…"),
                     (OPEN_MERGE, "3方向マージを開く…"),
                     (OPEN_FOLDERS, "フォルダー比較を開く…"),
                     (OPEN_THREE_FOLDERS, "3方向フォルダー比較を開く…"),
@@ -1499,6 +1557,7 @@ fn menu() -> Result<HMENU> {
             (
                 "比較規則(&R)",
                 vec![
+                    (INPUT_ENCODING, "入力の文字コード…"),
                     (RULE_RESET, "厳密比較に戻す"),
                     (RULE_SPACE, "空白・タブを無視"),
                     (RULE_TRAILING, "行末の空白・タブを無視"),
@@ -2250,6 +2309,8 @@ unsafe extern "system" fn pane_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
 fn smoke(a: &mut App) -> Result<()> {
     let dir = a.smoke.clone().unwrap();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    office_view::smoke(a, &dir)?;
+    encoding_view::smoke(a, &dir)?;
     folders_view::smoke(a, &dir)?;
     rules_smoke(a, &dir)?;
     session_view::smoke(a, &dir)?;

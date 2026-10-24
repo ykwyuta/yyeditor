@@ -8,6 +8,12 @@
 - `crates/`の共有部品を変更した場合、利用する独立アプリへの影響と各ワークフローのpath条件を確認する。Windowsで成功してもLinux固有のコードを検証済みとはしない。
 - 書式・Clippyの失敗を広い`allow`や検査の除外で回避しない。警告対象の計算・型・API利用を修正する。
 
+## 共有ライブラリ
+
+- `yy-encoding`と対応表生成ツールの本体はYYLibraryで管理する。このリポジトリやYYSortへ実装を複製して修正しない。
+- 参照は`https://github.com/ykwyuta/YYLibrary`の完全なコミットSHAで固定する。参照更新時はルート、yymerge、yydbmanager、YY3Designer、YYSortのCargo.toml/Cargo.lockの整合性を確認する。
+- ライブラリ自体の試験はYYLibraryのWindows/Linux CIで行う。利用側の依存更新では各ワークスペースの書式・Clippyと影響する回帰試験を実施する。
+
 ## 非同期UI試験
 
 - 固定時間のsleep、ウィンドウの存在・可視化、親画面の`IsWindowEnabled`だけを処理完了の条件にしない。ダイアログ終了後でもモデル反映とレイアウトが残っている場合がある。

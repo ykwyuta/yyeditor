@@ -14,7 +14,11 @@ pub struct Snapshot {
     pub text: Arc<str>,
     pub encoding: Encoding,
     pub bom: Vec<u8>,
+    pub office: Option<crate::office::Kind>,
+    pub review: Option<crate::review::Mode>,
+    pub review_info: crate::review::Info,
     bytes: Vec<u8>,
+    binary: bool,
 }
 pub fn read_bounded(path: &Path, cancel: &Cancellation) -> Result<Vec<u8>> {
     cancel.check()?;
@@ -42,6 +46,126 @@ pub fn read_bounded(path: &Path, cancel: &Cancellation) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 impl Snapshot {
+    pub(crate) fn binary(path: &Path, cancel: &Cancellation) -> Result<Self> {
+        let bytes = read_bounded(path, cancel)?;
+        Ok(Self {
+            path: fs::canonicalize(path).map_err(|e| e.to_string())?,
+            text: "".into(),
+            encoding: Encoding::Utf8,
+            bom: Vec::new(),
+            office: None,
+            review: None,
+            review_info: Default::default(),
+            bytes,
+            binary: true,
+        })
+    }
+    pub(crate) fn raw(&self) -> &[u8] {
+        &self.bytes
+    }
+    /// Comparison-only projection; original bytes still protect saves and sessions.
+    pub fn open_comparison(
+        path: &Path,
+        charset: Option<&str>,
+        cancel: &Cancellation,
+    ) -> Result<Self> {
+        let Some(kind) = crate::office::Kind::detect(path) else {
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "xls" | "xlsb" | "ppt"))
+            {
+                return Err(
+                    "Legacy Office format unsupported: save as .xlsx/.xlsm or .pptx/.pptm first"
+                        .into(),
+                );
+            }
+            return Self::open(path, charset, cancel);
+        };
+        if charset.is_some_and(|s| Encoding::from_name(s) != Some(Encoding::Utf8)) {
+            return Err("Office comparison does not accept legacy text --encoding".into());
+        }
+        let bytes = read_bounded(path, cancel)?;
+        let text = crate::office::extract(&bytes, kind, cancel)?;
+        let input = Self {
+            path: fs::canonicalize(path).map_err(|e| e.to_string())?,
+            text: text.into(),
+            encoding: Encoding::Utf8,
+            bom: Vec::new(),
+            bytes,
+            office: Some(kind),
+            review: None,
+            review_info: Default::default(),
+            binary: false,
+        };
+        input.verify(cancel)?;
+        Ok(input)
+    }
+    pub fn ensure_comparable(&self, other: &Self) -> Result<()> {
+        if self.office != other.office || self.review != other.review {
+            return Err(
+                "Compare two Excel files, two PowerPoint files, or two text files of the same mode"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+    pub fn original_identical(&self, other: &Self) -> bool {
+        if self.office.is_some() || other.office.is_some() || self.binary || other.binary {
+            self.office == other.office && self.bytes == other.bytes
+        } else {
+            self.text == other.text && self.encoding == other.encoding && self.bom == other.bom
+        }
+    }
+    pub fn equivalent(&self, other: &Self, text_equal: bool) -> bool {
+        text_equal
+            && (self.review.is_some_and(|m| m.ignore_encoding)
+                && other.review.is_some_and(|m| m.ignore_encoding)
+                || self.encoding == other.encoding && self.bom == other.bom)
+    }
+    /// Packed/nontext bytes remain visible; this projection can never be saved or merged.
+    pub fn open_review(
+        path: &Path,
+        charset: Option<&str>,
+        mode: crate::review::Mode,
+        cancel: &Cancellation,
+    ) -> Result<Self> {
+        if crate::office::Kind::detect(path).is_some() || crate::images::is_image(path) {
+            return Err(
+                "per-file encoding/byte review is for two-way text/data comparisons only".into(),
+            );
+        }
+        let mut source = Self::binary(path, cancel)?;
+        let (auto, skip) = if source.bytes.starts_with(&[0xff, 0xfe, 0, 0]) {
+            (Encoding::Utf32Le, 4)
+        } else if source.bytes.starts_with(&[0, 0, 0xfe, 0xff]) {
+            (Encoding::Utf32Be, 4)
+        } else if source.bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            (Encoding::Utf8, 3)
+        } else if source.bytes.starts_with(&[0xff, 0xfe]) {
+            (Encoding::Utf16Le, 2)
+        } else if source.bytes.starts_with(&[0xfe, 0xff]) {
+            (Encoding::Utf16Be, 2)
+        } else {
+            (Encoding::Utf8, 0)
+        };
+        let encoding = match charset {
+            Some(name) => {
+                Encoding::from_name(name).ok_or_else(|| format!("unknown encoding: {name}"))?
+            }
+            None => auto,
+        };
+        // Only a matching Unicode encoding interprets these bytes as a BOM.
+        let skip = if encoding == auto { skip } else { 0 };
+        let (text, info) = crate::review::decode(encoding, &source.bytes[skip..], cancel)?;
+        source.encoding = encoding;
+        source.bom = source.bytes[..skip].to_vec();
+        source.text = text.into();
+        source.review = Some(mode);
+        source.review_info = info;
+        source.verify(cancel)?;
+        Ok(source)
+    }
     /// Hash captured source bytes, with cancellation between bounded chunks.
     pub fn fingerprint(&self, cancel: &Cancellation) -> Result<String> {
         let mut hash = blake3::Hasher::new();
@@ -54,6 +178,9 @@ impl Snapshot {
     }
     /// No heuristic encoding guesses. BOM, otherwise UTF-8; legacy encodings explicit.
     pub fn open(path: &Path, charset: Option<&str>, cancel: &Cancellation) -> Result<Self> {
+        if crate::office_render::is_pdf(path) {
+            return Err("PDF is read-only visual comparison; use pdf-diff or image-diff".into());
+        }
         let bytes = read_bounded(path, cancel)?;
         let (auto, bom_len) = if bytes.starts_with(&[0xff, 0xfe, 0, 0]) {
             (Encoding::Utf32Le, 4)
@@ -95,9 +222,18 @@ impl Snapshot {
             encoding,
             bom: bytes[..bom_len].to_vec(),
             bytes,
+            office: None,
+            review: None,
+            review_info: Default::default(),
+            binary: false,
         })
     }
     pub fn encode(&self, text: &str) -> Result<Vec<u8>> {
+        if self.office.is_some() || self.binary {
+            return Err(
+                "Rendered and Office comparisons are read-only; merge and source export are unsupported".into(),
+            );
+        }
         let mut out = self.bom.clone();
         out.extend(
             encode_all(self.encoding, text.as_bytes(), EscapeMode::Reject)

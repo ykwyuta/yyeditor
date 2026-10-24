@@ -8,7 +8,6 @@ members = [
     "crates/yy-buffer",
     "crates/yy-jobs",
     "crates/yy-config",
-    "crates/yy-encoding",
     "crates/yy-io",
     "crates/yy-search",
     "crates/yy-delimited",
@@ -42,7 +41,6 @@ members = [
     "apps/yyfilemanager",
     "apps/yybrowser",
     "tools/gen-bigfile",
-    "tools/gen-tables",
 ]
 
 [workspace.package]
@@ -59,7 +57,7 @@ yy-draw = { path = "crates/yy-draw" }
 yy-buffer = { path = "crates/yy-buffer" }
 yy-jobs = { path = "crates/yy-jobs" }
 yy-config = { path = "crates/yy-config" }
-yy-encoding = { path = "crates/yy-encoding" }
+yy-encoding = { git = "https://github.com/ykwyuta/YYLibrary", rev = "57deca92c834227f705496fd7c5c4a226ec8dc97" }
 yy-3270 = { path = "crates/yy-3270" }
 yy-3270-macro = { path = "crates/yy-3270-macro" }
 yy-3270-tls = { path = "crates/yy-3270-tls", default-features = false }

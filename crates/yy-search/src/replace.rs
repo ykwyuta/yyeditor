@@ -144,7 +144,12 @@ impl Replacement {
                         let mut j = i + 1;
                         let mut n = 0usize;
                         while let Some(d) = chars.get(j).and_then(|c| c.to_digit(10)) {
-                            n = n * 10 + d as usize;
+                            n = n
+                                .checked_mul(10)
+                                .and_then(|n| n.checked_add(d as usize))
+                                .ok_or_else(|| {
+                                    ReplaceError::Template("キャプチャ番号が大きすぎます".into())
+                                })?;
                             j += 1;
                         }
                         toks.push(group(n)?);
@@ -222,6 +227,72 @@ impl Replacement {
                 Tok::NextLower => next = Case::Lower,
             }
         }
+    }
+
+    // Bound temporary expansion independently of capture length or repetition count.
+    fn write_expansion(
+        &self,
+        hay: &[u8],
+        caps: Option<&Captures>,
+        out: &mut dyn Write,
+    ) -> io::Result<()> {
+        let mut case = Case::None;
+        let mut next = Case::None;
+        let mut buffer = Vec::with_capacity(4096);
+        for tok in &self.toks {
+            let bytes = match tok {
+                Tok::Lit(bytes) => bytes.as_slice(),
+                Tok::Group(i) => caps
+                    .and_then(|c| c.get_group(*i))
+                    .map_or(&[][..], |span| &hay[span.start..span.end]),
+                Tok::Upper => {
+                    case = Case::Upper;
+                    continue;
+                }
+                Tok::Lower => {
+                    case = Case::Lower;
+                    continue;
+                }
+                Tok::End => {
+                    case = Case::None;
+                    continue;
+                }
+                Tok::NextUpper => {
+                    next = Case::Upper;
+                    continue;
+                }
+                Tok::NextLower => {
+                    next = Case::Lower;
+                    continue;
+                }
+            };
+            if case == Case::None && next == Case::None {
+                out.write_all(&buffer)?;
+                buffer.clear();
+                for chunk in bytes.chunks(4096) {
+                    out.write_all(chunk)?;
+                }
+                continue;
+            }
+            // utf8_chunks keeps Unicode scalars intact even near output chunk boundaries.
+            for chunk in bytes.utf8_chunks() {
+                for c in chunk.valid().chars() {
+                    let mut scalar = [0; 4];
+                    emit(
+                        c.encode_utf8(&mut scalar).as_bytes(),
+                        &mut case,
+                        &mut next,
+                        &mut buffer,
+                    );
+                    if buffer.len() >= 4096 {
+                        out.write_all(&buffer)?;
+                        buffer.clear();
+                    }
+                }
+                buffer.extend_from_slice(chunk.invalid());
+            }
+        }
+        out.write_all(&buffer)
     }
 }
 
@@ -343,5 +414,62 @@ pub fn rewrite(
         return Err(e.into());
     }
     copy(w, copied..snap.len())?;
+    Ok(count)
+}
+
+/// Like [`rewrite`], but expands captures in bounded chunks directly into the writer.
+/// A limiting/cancellable writer can stop even within a single repeated capture.
+/// On error the writer may contain partial output; publish it only after success.
+pub fn rewrite_streaming(
+    searcher: &Searcher,
+    snap: &Snapshot,
+    range: Range<u64>,
+    repl: &Replacement,
+    writer: &mut dyn Write,
+    step: &mut dyn FnMut(u64) -> bool,
+) -> Result<u64, ReplaceError> {
+    if !step(range.start) {
+        return Err(ReplaceError::Cancelled);
+    }
+    let mut caps = repl
+        .needs_captures()
+        .then(|| searcher.regex().create_captures());
+    let mut copied = 0;
+    let mut count = 0;
+    let mut error = None;
+    searcher.scan(
+        snap,
+        range.clone(),
+        range.start,
+        caps.as_mut(),
+        step,
+        &mut |m, window| {
+            let result = (|| {
+                for chunk in snap.chunks(copied..m.start) {
+                    writer.write_all(chunk)?;
+                }
+                match window {
+                    Some((window, caps)) => {
+                        repl.write_expansion(&window.buf, Some(caps), writer)?
+                    }
+                    None => repl.write_expansion(&[], None, writer)?,
+                }
+                Ok::<_, io::Error>(())
+            })();
+            if let Err(e) = result {
+                error = Some(e);
+                return false;
+            }
+            copied = m.end;
+            count += 1;
+            true
+        },
+    )?;
+    if let Some(error) = error {
+        return Err(error.into());
+    }
+    for chunk in snap.chunks(copied..snap.len()) {
+        writer.write_all(chunk)?;
+    }
     Ok(count)
 }

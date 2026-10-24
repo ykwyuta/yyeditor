@@ -197,6 +197,7 @@ pub fn run(
             let code = if headless {
                 crate::execute(
                     Command::Diff {
+                        inputs: Default::default(),
                         left: local,
                         right: remote,
                         encoding,

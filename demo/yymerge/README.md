@@ -128,3 +128,33 @@ yymerge gui --folder-session folders.json --wait
 ```
 
 保存先は全比較対象の外に指定します。再開時は現在の内容を再走査し、表示条件と選択項目を復元します。過去の比較結果・同期計画・実行記録は復元せず、背後の未保存RESULTは保持します。CLIの`create`／`inspect`は設定の保存・検証だけです。
+
+
+## Excel・PowerPoint（読み取り専用）
+
+`office/left.xlsx`と`office/right.xlsx`は数量・書式・非表示シートの値とシート追加、`office/left.pptx`と`office/right.pptx`は文章・ノート・画像・スライド順が異なります。Excel／PowerPoint本体は不要です。2方向比較から選ぶか、次を実行してください。
+
+```powershell
+apps/yymerge/target/debug/yymerge.exe gui --left demo/yymerge/office/left.xlsx --right demo/yymerge/office/right.xlsx --wait
+apps/yymerge/target/debug/yymerge.exe diff demo/yymerge/office/left.pptx demo/yymerge/office/right.pptx --format html --report slides.html
+```
+
+差異ありの終了コードは1です。見た目の再現ではなく、セル・スライドの文章と内部データを比較します。原本の編集・マージは行いません。例はこのリポジトリー用に作成したものです。再生成する場合のみPythonのopenpyxl、python-pptx、Pillowを用意して`python demo/yymerge/office/generate.py`を実行します。これらはアプリ実行時やCIで比較するためには不要です。
+
+
+## 画像比較
+
+`images/left.png`と`images/right.png`は、四角の色・円の位置・赤い小さい領域が異なります。背景には透明部分があります。
+
+```powershell
+apps/yymerge/target/debug/yymerge.exe gui --image --left demo/yymerge/images/left.png --right demo/yymerge/images/right.png --wait
+apps/yymerge/target/debug/yymerge.exe image-diff demo/yymerge/images/left.png demo/yymerge/images/right.png --diff-image difference.png --report images.json
+```
+
+差異ありは終了コード1です。`left.webp`・`right.webp`はPNGと同じ画素の可逆WebPです。`sample.jpg`・`sample.bmp`・`sample-lossy.webp`は別形式の読み込み確認用です。`oriented.jpg`はEXIFの向きを持つ2×3画像で、比較時には3×2になります。`animated.png`・`animated.webp`・`sixteen-bit.png`は未対応形式の拒否確認用で、通常の比較作例ではありません。再生成する場合だけPillowを用意して`python demo/yymerge/images/generate.py`を実行します。画像比較は原本を書き換えず、出力も原本と異なる場所を指定してください。
+
+Officeの見た目も比較する場合はLibreOfficeを準備し、`yymerge gui --image --left demo/yymerge/office/left.xlsx --right demo/yymerge/office/right.xlsx --wait`を実行してください。右Excelの追加シートは追加ページになり、PageDownで欠落比較を確認できます。PowerPointは`.pptx`の組を指定すると2スライドの画像比較になります。CLIの例: `yymerge image-diff demo/yymerge/office/left.pptx demo/yymerge/office/right.pptx --page 2 --diff-image slide-2.png`。出力は選択ページが対象です。
+
+## PDF比較
+
+`pdf/left.pdf`と`pdf/right.pdf`を通常の2方向比較で開くと、外部ツールなしでページごとの見た目を比較できます。CLIは`yymerge pdf-diff demo/yymerge/pdf/left.pdf demo/yymerge/pdf/right.pdf --format html --report pdf.html`で全ページを出力します。差異ありは終了コード1です。`pdf/later.pdf`は先頭が同じで2ページ目だけ異なる確認用です。`pdf/password.pdf`（パスワード`yymerge-demo`）はパスワード入力未対応の拒否確認用です。通常の作例はPython標準ライブラリだけで`python demo/yymerge/pdf/generate.py`から再生成できます。暗号化作例だけ、pypdfがある環境で`python demo/yymerge/pdf/generate-password.py`を実行します。いずれもyymergeの実行時やCIにはPython不要です。

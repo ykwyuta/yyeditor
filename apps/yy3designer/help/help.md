@@ -73,7 +73,7 @@ YY3Designerは、ドット絵を編集して厚みを持たせ、最大6方向�
 
 「丸み付きドットをPNGへ」は1ドットを8×8画素に拡大し、外周の角を2Dの角丸として出力します。連続するドットの間に透明な溝は作りません。通常のPNG出力は元のドットと透明度を保ちます。
 
-作例はリポジトリの`demo/yy3designer/examples.yy3d`（配布版では`examples/examples.yy3d`）を「開く」で読み込みます。オブジェクトの一覧から椅子・テーブル・子供・車・猫を選べます。それぞれ6方向の画像、厚みの削り情報、丸みを保存しているので、そのまま描画・厚みの調整ができます。`chair.yy3d`、`table.yy3d`、`child.yy3d`、`car.yy3d`、`cat.yy3d`は個別ファイルです。
+作例はリポジトリの`demo/yy3designer/examples.yy3d`（配布版では`examples/examples.yy3d`）を「開く」で読み込みます。オブジェクトの一覧から椅子・テーブル・子供・車・猫・ロンドンの時計塔を選べます。それぞれ6方向の画像、厚みの削り情報、丸みを保存しているので、そのまま描画・厚みの調整ができます。`chair.yy3d`、`table.yy3d`、`child.yy3d`、`car.yy3d`、`cat.yy3d`、`london-clock-tower.yy3d`は個別ファイルです。
 
 ## 保存と出力 {#files}
 
