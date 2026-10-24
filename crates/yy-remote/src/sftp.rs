@@ -366,6 +366,7 @@ impl Pending {
 
 /// SFTP のクライアント。
 pub struct Sftp {
+    trace: crate::diagnostics::Context,
     shared: Arc<Shared>,
     version: u32,
     extensions: Vec<(String, String)>,
@@ -381,11 +382,21 @@ impl Drop for Sftp {
 impl Sftp {
     /// `sftp` サブシステムを起動して始める。
     pub fn connect(t: &dyn Transport) -> io::Result<Sftp> {
-        Sftp::start(t.sftp()?)
+        let trace = t.diagnostics();
+        trace
+            .span("sftp.handshake")
+            .run(|| Sftp::start_traced(t.sftp()?, trace))
     }
 
     /// 起動したサブシステム（または sftp-server）と、初期化のやり取りをする。
     pub fn start(p: Process) -> io::Result<Sftp> {
+        let trace = crate::diagnostics::Context::default();
+        trace
+            .span("sftp.handshake")
+            .run(|| Self::start_traced(p, trace))
+    }
+
+    fn start_traced(p: Process, trace: crate::diagnostics::Context) -> io::Result<Sftp> {
         let (stdin, stdout, finish) = p.into_parts();
         let mut reader = BufReader::with_capacity(256 << 10, stdout);
         let mut writer = BufWriter::with_capacity(256 << 10, stdin);
@@ -402,6 +413,14 @@ impl Sftp {
         }
         let mut c = Cursor { b: &body, pos: 0 };
         let version = c.u32().ok_or_else(|| bad_reply("SFTP の初期化"))?;
+        trace.event(
+            "sftp.version",
+            "received",
+            &[(
+                "version",
+                crate::diagnostics::Value::Number(u64::from(version)),
+            )],
+        );
         let mut extensions = Vec::new();
         while let (Some(n), Some(d)) = (c.bytes(), c.bytes()) {
             extensions.push((
@@ -443,6 +462,7 @@ impl Sftp {
             let _ = finish();
         });
         Ok(Sftp {
+            trace,
             shared,
             version,
             extensions,
@@ -496,7 +516,32 @@ impl Sftp {
     }
 
     fn call(&self, kind: u8, build: impl FnOnce(Packet) -> Packet) -> io::Result<Reply> {
-        self.send(kind, build)?.wait()
+        let result = self.send(kind, build).and_then(Pending::wait);
+        if let Ok(Reply::Status { code, .. }) = &result
+            && *code != SSH_FX_OK
+            && *code != SSH_FX_EOF
+        {
+            self.trace.event(
+                "sftp.status",
+                "failed",
+                &[
+                    (
+                        "request",
+                        crate::diagnostics::Value::Number(u64::from(kind)),
+                    ),
+                    ("code", crate::diagnostics::Value::Number(u64::from(*code))),
+                ],
+            );
+        }
+        if let Err(error) = &result {
+            let mut span = self.trace.span("sftp.request");
+            span.metadata(&[(
+                "request",
+                crate::diagnostics::Value::Number(u64::from(kind)),
+            )]);
+            span.finish(&Err::<(), _>(io::Error::from(error.kind())));
+        }
+        result
     }
 
     fn status(r: Reply, what: &str) -> io::Result<()> {

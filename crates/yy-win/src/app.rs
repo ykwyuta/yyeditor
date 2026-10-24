@@ -650,6 +650,7 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         item(help, ID_HELP_KEYS, w!("キーボードショートカット(&K)"))?;
         item(help, ID_OPEN_SETTINGS, w!("設定ファイルを開く(&S)"))?;
         item(help, crate::sites::ID_MANAGE, w!("SSH接続先を管理…"))?;
+        crate::diagnosticui::append_menu(help)?;
         item(
             help,
             crate::explorer::ID_REGISTER,
@@ -4666,6 +4667,9 @@ fn on_command_now(hwnd: HWND, id: u16) {
 }
 
 fn execute_command(hwnd: HWND, id: u16) {
+    if crate::diagnosticui::command(hwnd, id) {
+        return;
+    }
     // 検索や矩形選択・バイナリ表示など、既存ビュー固有の操作は原文で行う。
     if matches!(id, ID_GOTO | ID_HEX_MODE | ID_CODE_MODE | ID_RECORD_MODE)
         || (ID_CUT..=ID_DEDUP_LINES).contains(&id)

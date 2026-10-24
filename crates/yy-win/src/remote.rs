@@ -847,6 +847,18 @@ pub(crate) fn set_use_agent(on: bool) {
 /// `target` のファイル操作（一覧・情報・作成・名前の変更・削除）。エージェントを使う設定なら
 /// エージェント（[`session`]）、でなければ SFTP（接続先に何も置かない）。
 pub(crate) fn fs(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<dyn RemoteFs>, String> {
+    let listing = listing_command(target)?;
+    let inner = base_fs(target, show)?;
+    match listing {
+        Some(listing) => Ok(Arc::new(yy_remote::listing::CommandListFs::new(
+            inner,
+            transport(target, show)?,
+            listing,
+        ))),
+        None => Ok(inner),
+    }
+}
+pub(crate) fn base_fs(target: &Target, show: &dyn Fn(&str)) -> Result<Arc<dyn RemoteFs>, String> {
     if agent_for(target) {
         return session(target, show).map(|s| s as Arc<dyn RemoteFs>);
     }

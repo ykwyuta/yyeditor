@@ -706,7 +706,7 @@ pub struct RemoteHost {
     pub sftp_server: Option<String>,
     /// yysftpの一覧だけを置き換えるリモートコマンド。対象ディレクトリで実行。
     pub list_command: Option<String>,
-    /// list_commandのファイル名区切り。lines（既定）またはnul。
+    /// list_commandのファイル名区切り。lines（既定）、nul、またはls（ls -la長形式）。
     pub list_format: Option<String>,
     /// この接続先に使うプロキシ（`none` で共通のプロキシも使わない）
     pub proxy: Option<String>,

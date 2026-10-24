@@ -6,6 +6,7 @@
 //! 依存しないので、UI からも、SSH を使わないテスト（[`local`]）からも使える。
 
 pub mod deploy;
+pub mod diagnostics;
 pub mod file_access;
 pub mod forward;
 pub mod fs;
@@ -41,6 +42,9 @@ pub use yy_proto::{DirEntry, FileId, FileInfo, FileKind, ZipProgress, ZipState};
 
 /// SSH 接続（またはテスト用の代わり）。コマンドを起動して標準入出力でやり取りできる。
 pub trait Transport: Send + Sync {
+    fn diagnostics(&self) -> diagnostics::Context {
+        diagnostics::Context::default()
+    }
     /// 接続先のログインシェルでコマンドを起動する（コマンドはバイト列。パスが UTF-8 とは限らない）。
     fn exec(&self, command: &[u8]) -> io::Result<Process>;
     /// 接続が切れているか。

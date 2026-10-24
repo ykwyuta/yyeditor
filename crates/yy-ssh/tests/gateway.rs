@@ -363,7 +363,7 @@ fn transfers_binary_through_gateway_using_tunnel_command_or_sftp_proxy() {
             HostOverride {
                 hostname: Some("127.0.0.1".into()),
                 port: Some(gw.port),
-                user: Some("operator@target-user@target-host".into()),
+                user: Some("operator@target-user@target-host-user@target-host".into()),
                 jump_command: (route == "command").then(|| "relay %h %p".into()),
                 sftp_subsystem: Some("gateway-sftp".into()),
                 ..Default::default()
@@ -417,7 +417,7 @@ fn transfers_binary_through_gateway_using_tunnel_command_or_sftp_proxy() {
         assert!(
             events
                 .iter()
-                .any(|e| e == "auth:operator@target-user@target-host")
+                .any(|e| e == "auth:operator@target-user@target-host-user@target-host")
         );
         assert!(events.iter().any(|e| match route {
             "tunnel" | "default" => e == "direct-tcpip",
@@ -460,7 +460,7 @@ fn shell_request_mode_strips_login_banner_and_keeps_binary_bytes_without_exec_or
         HostOverride {
             hostname: Some("127.0.0.1".into()),
             port: Some(server.port),
-            user: Some("operator@target".into()),
+            user: Some("operator@target-user@target-host".into()),
             ..Default::default()
         },
     ));
@@ -481,7 +481,11 @@ fn shell_request_mode_strips_login_banner_and_keeps_binary_bytes_without_exec_or
     assert_eq!(finish().unwrap().status, Some(0));
     let events = server.events.lock().unwrap();
     assert!(events.iter().any(|e| e == "shell:no-pty"));
-    assert!(events.iter().any(|e| e == "auth:operator@target"));
+    assert!(
+        events
+            .iter()
+            .any(|e| e == "auth:operator@target-user@target-host")
+    );
     assert!(
         !events
             .iter()

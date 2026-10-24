@@ -679,6 +679,7 @@ fn create_menu() -> Result<HMENU> {
         item(help, ID_HELP_KEYS, w!("キーボードショートカット(&K)"))?;
         item(help, ID_SETTINGS, w!("設定ファイルを開く(&S)"))?;
         item(help, crate::sites::ID_MANAGE, w!("SSH接続先を管理…"))?;
+        crate::diagnosticui::append_menu(help)?;
         item(
             help,
             crate::explorer::ID_REGISTER,
@@ -2968,6 +2969,9 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
 }
 
 fn command(hwnd: HWND, id: u16) {
+    if crate::diagnosticui::command(hwnd, id) {
+        return;
+    }
     if sessionmenu::command(id) {
         return;
     }

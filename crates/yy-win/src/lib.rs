@@ -18,6 +18,7 @@ mod browser;
 mod clipboard;
 mod crash;
 mod credstore;
+mod diagnosticui;
 mod diffview;
 mod download;
 mod draw;

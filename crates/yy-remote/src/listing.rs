@@ -9,6 +9,7 @@ use crate::{DirEntry, FileInfo, RemoteFs, Transport, run, shell_quote};
 pub struct ListCommand {
     command: String,
     nul: bool,
+    long: bool,
 }
 
 impl ListCommand {
@@ -24,18 +25,39 @@ impl ListCommand {
         if command.trim().is_empty() || command.contains('\0') {
             return Err(invalid("list_commandに空文字列やNULは指定できません"));
         }
-        let nul = match format.unwrap_or("lines") {
-            "lines" => false,
-            "nul" => true,
-            _ => return Err(invalid("list_formatはlinesまたはnulを指定してください")),
+        let (nul, long) = match format.unwrap_or("lines") {
+            "lines" => (false, false),
+            "nul" => (true, false),
+            "ls" => (false, true),
+            _ => return Err(invalid("list_formatはlines、nul、lsを指定してください")),
         };
         Ok(Some(Self {
             command: command.to_owned(),
             nul,
+            long,
         }))
     }
 
     fn names(&self, output: &[u8]) -> io::Result<Vec<Vec<u8>>> {
+        if self.long {
+            let mut names = Vec::new();
+            for line in output.split(|&b| b == b'\n') {
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                if line.is_empty() {
+                    continue;
+                }
+                if let Some(name) = ls_name(line)? {
+                    names.extend(name);
+                    names.push(b'\n');
+                }
+            }
+            return Self {
+                command: String::new(),
+                nul: false,
+                long: false,
+            }
+            .names(&names);
+        }
         if output.is_empty() {
             return Ok(vec![]);
         }
@@ -73,6 +95,84 @@ impl ListCommand {
         }
         Ok(names)
     }
+}
+
+fn ls_name(mut line: &[u8]) -> io::Result<Option<&[u8]>> {
+    fn bad() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ls長形式の一覧を解析できません（ls -la、LC_ALL=C、引用形式、バナーを確認してください）",
+        )
+    }
+    fn token<'a>(line: &mut &'a [u8]) -> io::Result<&'a [u8]> {
+        *line = line.trim_ascii_start();
+        let end = line
+            .iter()
+            .position(u8::is_ascii_whitespace)
+            .unwrap_or(line.len());
+        if end == 0 {
+            return Err(bad());
+        }
+        let value = &line[..end];
+        *line = &line[end..];
+        Ok(value)
+    }
+    if let Some(total) = line.strip_prefix(b"total ") {
+        if total.trim_ascii().iter().all(u8::is_ascii_digit) {
+            return Ok(None);
+        }
+        return Err(bad());
+    }
+    let mode = token(&mut line)?;
+    if !(10..=11).contains(&mode.len())
+        || !b"-dlbcps".contains(&mode[0])
+        || mode[1..10].iter().any(|b| !b"rwxstST-".contains(b))
+    {
+        return Err(bad());
+    }
+    for _ in 0..3 {
+        token(&mut line)?;
+    } // link count, owner, group
+    let size = token(&mut line)?;
+    if matches!(mode[0], b'b' | b'c') && size.ends_with(b",") {
+        token(&mut line)?;
+    }
+    let date = token(&mut line)?;
+    let iso = date.len() == 10 && date[4] == b'-' && date[7] == b'-';
+    token(&mut line)?;
+    if !iso {
+        token(&mut line)?;
+    } else {
+        let probe = line.trim_ascii_start();
+        let zone = probe
+            .split(u8::is_ascii_whitespace)
+            .next()
+            .unwrap_or_default();
+        if zone.len() == 5
+            && matches!(zone[0], b'+' | b'-')
+            && zone[1..].iter().all(u8::is_ascii_digit)
+        {
+            token(&mut line)?;
+        }
+    }
+    let mut name = line.trim_ascii_start();
+    if mode[0] == b'l' {
+        let delimiter = b" -> ";
+        let mut positions = name
+            .windows(delimiter.len())
+            .enumerate()
+            .filter_map(|(i, w)| (w == delimiter).then_some(i));
+        let end = positions.next().ok_or_else(bad)?;
+        if positions.next().is_some() {
+            return Err(bad());
+        }
+        name = &name[..end];
+    }
+    if name.is_empty() || name.starts_with(b"'") || name.starts_with(b"\"") || name.contains(&b'\\')
+    {
+        return Err(bad());
+    }
+    Ok(Some(name))
 }
 
 /// Override read_dir only; metadata and all other operations retain their backend.
@@ -125,6 +225,26 @@ impl RemoteFs for CommandListFs {
         self.inner.hash(path, len)
     }
     fn read_dir(&self, path: &[u8]) -> io::Result<Vec<DirEntry>> {
+        let span = self.transport.diagnostics().span("directory.list");
+        span.metadata(&[
+            ("custom_command", crate::diagnostics::Value::Flag(true)),
+            (
+                "format",
+                crate::diagnostics::Value::Code(if self.listing.long {
+                    "ls"
+                } else if self.listing.nul {
+                    "nul"
+                } else {
+                    "lines"
+                }),
+            ),
+        ]);
+        span.run(|| self.read_dir_inner(path))
+    }
+}
+
+impl CommandListFs {
+    fn read_dir_inner(&self, path: &[u8]) -> io::Result<Vec<DirEntry>> {
         let path = self.inner.expand_home(path);
         if path.contains(&0) {
             return Err(io::Error::new(
@@ -168,6 +288,57 @@ impl RemoteFs for CommandListFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ls_long_names_support_spaces_links_iso_dates_and_reject_banners_and_paths() {
+        let listing = ListCommand::from_settings(Some("ls -la"), Some("ls"))
+            .unwrap()
+            .unwrap();
+        let data = "total 12\n-rw-r--r-- 1 user group 12 Oct 25 09:40 a b.txt\nlrwxrwxrwx 1 user group 3 Oct 25 2026 link -> a b.txt\ndrwxr-xr-x 2 user group 4096 2026-10-25 09:40:12.000 +0900 日本語\n-rw-r--r-- 1 u g 0 2026-10-25 09:40 long-iso\n";
+        assert_eq!(
+            listing.names(data.as_bytes()).unwrap(),
+            [
+                b"a b.txt".to_vec(),
+                b"link".to_vec(),
+                "日本語".as_bytes().to_vec(),
+                b"long-iso".to_vec()
+            ]
+        );
+        for bad in [
+            b"Welcome to gateway\n".as_slice(),
+            b"-rw-r--r-- 1 u g 1 Oct 25 12:30 ../escape\n",
+            b"-rw-r--r-- 1 u g 1 Oct 25 12:30 'quoted name'\n",
+        ] {
+            assert!(listing.names(bad).is_err());
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn real_ls_long_listing_retains_names_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a b.txt"), b"abc").unwrap();
+        std::fs::create_dir(dir.path().join("日本語")).unwrap();
+        std::os::unix::fs::symlink("a b.txt", dir.path().join("link")).unwrap();
+        let transport = Arc::new(crate::local::LocalTransport::new());
+        let inner = Arc::new(crate::shellfs::ShellFs::connect(transport.clone()).unwrap());
+        let listing = ListCommand::from_settings(Some("LC_ALL=C ls -la"), Some("ls"))
+            .unwrap()
+            .unwrap();
+        let fs = CommandListFs::new(inner, transport, listing);
+        use std::os::unix::ffi::OsStrExt;
+        let entries = fs.read_dir(dir.path().as_os_str().as_bytes()).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.name == b"a b.txt" && e.info.as_ref().unwrap().id.len == 3)
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.name == b"link" && e.info.as_ref().unwrap().link)
+        );
+        assert!(entries.iter().any(|e| e.name == "日本語".as_bytes()));
+    }
     #[test]
     fn formats_preserve_names_and_reject_paths_duplicates_and_malformed_output() {
         let lines = ListCommand::from_settings(Some("ls -1A"), None)

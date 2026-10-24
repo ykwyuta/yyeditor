@@ -301,7 +301,7 @@ fn choices(field: usize) -> &'static [&'static str] {
     match field {
         4 => &["", "sftp", "scp"],
         10 => &["", "false", "true"],
-        15 => &["", "lines", "nul"],
+        15 => &["", "lines", "nul", "ls"],
         18 => &["none", "tmux", "screen"],
         27..=29 | 34..=35 => &["false", "true"],
         _ => &[],

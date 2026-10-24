@@ -157,9 +157,9 @@ pub fn validate_host(h: &RemoteHost) -> Result<(), String> {
     }
     if h.list_format
         .as_deref()
-        .is_some_and(|s| !matches!(s, "lines" | "nul"))
+        .is_some_and(|s| !matches!(s, "lines" | "nul" | "ls"))
     {
-        return Err("一覧形式はlinesまたはnulです".into());
+        return Err("一覧形式はlines、nul、lsです".into());
     }
     if h.terminal_multiplexer != crate::TerminalMultiplexer::None
         && h.terminal_session_prefix.trim().is_empty()

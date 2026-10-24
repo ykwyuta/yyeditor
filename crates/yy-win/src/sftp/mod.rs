@@ -637,6 +637,7 @@ fn create_menu() -> Result<HMENU> {
         item(xfer, ID_CANCEL_JOB, w!("取り消し(&C)"))?;
         item(xfer, ID_CLEAR_DONE, w!("完了したものを一覧から消す(&L)"))?;
         let help = CreatePopupMenu()?;
+        crate::diagnosticui::append_menu(help)?;
         item(help, ID_TRANSFER_LOG, w!("転送の記録を開く(&T)"))?;
         item(help, ID_CONNECT_LOG, w!("リモート接続の記録を開く(&R)"))?;
         item(
@@ -1214,7 +1215,7 @@ fn browser(target: &Target) -> std::result::Result<(Arc<dyn RemoteFs>, Vec<u8>),
         .map(|fs| Arc::new(fs) as Arc<dyn RemoteFs>)
         .map_err(|e| e.to_string())?
     } else {
-        crate::remote::fs(target, &set_status)?
+        crate::remote::base_fs(target, &set_status)?
     };
     // 転送に使う接続（エージェントのセッションの接続か、同じ SSH の接続）
     let t = crate::remote::transport(target, &set_status)?;
@@ -1465,6 +1466,9 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
 }
 
 fn command(hwnd: HWND, id: u16) {
+    if crate::diagnosticui::command(hwnd, id) {
+        return;
+    }
     match id {
         ID_BACK => {
             let Some(loc) = with(|a| {

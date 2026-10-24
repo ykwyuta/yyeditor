@@ -35,6 +35,10 @@ impl ShellFs {
 }
 
 fn checked(t: &dyn Transport, command: &[u8]) -> io::Result<Vec<u8>> {
+    let span = t.diagnostics().span("filesystem.shell");
+    span.run(|| checked_inner(t, command))
+}
+fn checked_inner(t: &dyn Transport, command: &[u8]) -> io::Result<Vec<u8>> {
     let out = run(t, command, b"")?;
     if out.success() {
         return Ok(out.stdout);
@@ -337,6 +341,22 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(custom.read_dir(b".").unwrap().len(), 2);
+        let long = crate::listing::CommandListFs::new(
+            fs.clone(),
+            t.clone(),
+            crate::listing::ListCommand::from_settings(Some("LC_ALL=C ls -la"), Some("ls"))
+                .unwrap()
+                .unwrap(),
+        );
+        let entries = long.read_dir(b".").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == name.as_bytes()
+                    && entry.info.as_ref().unwrap().len() == 8)
+        );
+
         let subset = crate::listing::CommandListFs::new(
             fs.clone(),
             t.clone(),
