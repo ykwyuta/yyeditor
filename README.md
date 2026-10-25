@@ -19,6 +19,7 @@ Windows tools for editing, terminals, transfer, spreadsheets, diagrams, database
 | **yydbmanager** | SQL for seven databases, execution plans, ER diagrams and import/export | [Guide](docs/user/yydbmanager.md) |
 | **yymerge** | 2/3-way merge, disk-backed huge-file comparison, SSH inputs, folder sync, Office/images/PDF | [Guide](docs/user/yymerge.md) |
 | **YY3Designer** | Pixel art, image conversion, six-view 3D, thickness/rounding and PNG/OBJ | [Guide](docs/user/yy3designer.md) |
+| **yyproject** | Tasks, issues, Kanban, Gantt, dependencies, progress charts and SQLite; Windows GUI and Windows/Linux MCP | [Separate repository](https://github.com/ykwyuta/YYproject) |
 | **yy-agent** | Linux helper deployed to SSH hosts | [Guide](docs/developer/guide.ja.md) |
 
 ## Documentation

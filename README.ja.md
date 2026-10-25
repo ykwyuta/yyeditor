@@ -19,6 +19,7 @@ Windows向けの編集・端末・転送・表計算・作図・DB・比較ツ�
 | **yydbmanager** | 7DBのSQL・実行計画・ER図、データ入出力、保存計画の表示 | [ガイド](docs/user/yydbmanager.md) |
 | **yymerge** | 2/3方向マージ、巨大ファイル・SSH入力・フォルダー・Office・画像・PDFの比較 | [ガイド](docs/user/yymerge.md) |
 | **YY3Designer** | ドット絵、画像変換、最大6方向の3D化、厚み・丸み、PNG/OBJ | [ガイド](docs/user/yy3designer.md) |
+| **yyproject** | タスク・課題・進捗・SQLite。Windows GUIとWindows／LinuxのMCP | [独立リポジトリ](https://github.com/ykwyuta/YYproject) |
 | **yy-agent** | SSH接続先で使うLinux補助プログラム | [ガイド](docs/developer/guide.ja.md) |
 
 ## 文書を探す

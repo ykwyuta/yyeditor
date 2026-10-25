@@ -15,6 +15,7 @@
 | yybrowser | [同梱ヘルプ](../../crates/yy-win/help/browser.md) | プロファイル・接続経路を設定 |
 | yydraw | [使い方](yydraw.md) / [同梱ヘルプ](../../crates/yy-win/help/draw.md) | [業務・ITアイコン](yydraw-business-icons.md) / [イラスト](yydraw-friendly-icons.md) |
 | yydbmanager | [使い方](yydbmanager.md) / [同梱ヘルプ](../../apps/yydbmanager/help/help.md) | [7DBデモ](../../demo/yydbmanager/README.md) / [実行計画](../../demo/yydbmanager/plans/README.md) |
+| yyproject | [独立リポジトリの使い方](https://github.com/ykwyuta/YYproject/blob/master/docs/user/yyproject.md) / [ヘルプ・MCP](https://github.com/ykwyuta/YYproject/blob/master/help/help.md) | `yyproject --init-demo NEW_DATABASE` |
 | yymerge | [使い方](yymerge.md) / [同梱ヘルプ](../../apps/yymerge/help/help.md) | [テキスト・Office・画像・PDF](../../demo/yymerge/README.md) |
 | YY3Designer | [使い方](yy3designer.md) / [同梱ヘルプ](../../apps/yy3designer/help/help.md) | [椅子・車・猫・時計塔など](../../demo/yy3designer/README.md) |
 

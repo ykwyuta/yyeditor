@@ -13,6 +13,7 @@
 | [素材と描画](assets.md) | アイコン生成、フォント、プレビュー、描画性能の調査方法 |
 | [yydbmanager](yydbmanager.md) | ネイティブDB、DuckDBのツールチェーン、CLI/UI/実DB試験 |
 | [yymerge](yymerge.md) | GUI/CLIのビルドとヘッドレス構成 |
+| [yyproject（独立リポジトリ）](https://github.com/ykwyuta/YYproject/blob/master/docs/developer/yyproject.md) | SQLite・MCP・ネイティブGUIの構成と検証 |
 | [YY3Designer](yy3designer.md) | 画像・3DコアとWindows UIの検証 |
 | [yydraw](yydraw.md) | アプリ・作例のビルド |
 
