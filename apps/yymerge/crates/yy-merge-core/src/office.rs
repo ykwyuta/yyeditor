@@ -540,37 +540,6 @@ pub fn extract(bytes: &[u8], kind: Kind, cancel: &Cancellation) -> Result<String
     Ok(out.text)
 }
 
-/// External rendering is opt-in and accepts inert OOXML packages only.
-pub(crate) fn validate_render(bytes: &[u8], kind: Kind, cancel: &Cancellation) -> Result<()> {
-    extract(bytes, kind, cancel)?;
-    let package = Package::read(bytes, cancel)?;
-    for (name, bytes) in &package.parts {
-        cancel.check()?;
-        let lower = name.to_ascii_lowercase();
-        if lower.contains("vbaproject")
-            || lower.contains("/activex/")
-            || lower.contains("/embeddings/")
-            || lower.contains("/externallinks/")
-        {
-            return Err("Office image rendering refuses macros, embedded objects and external links; use content comparison".into());
-        }
-        if lower.ends_with(".rels") {
-            let text =
-                std::str::from_utf8(bytes).map_err(|_| "render relationship XML requires UTF-8")?;
-            if parse(text)?.descendants().any(|n| {
-                n.attribute("TargetMode")
-                    .is_some_and(|m| m.eq_ignore_ascii_case("external"))
-            }) {
-                return Err(
-                    "Office image rendering refuses external relationships; use content comparison"
-                        .into(),
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Human-readable changes to the extracted representation, never a source patch.
 pub fn changes(
     left: &str,
@@ -676,31 +645,6 @@ mod tests {
             zip.write_all(&data).unwrap();
         }
         zip.finish().unwrap().into_inner()
-    }
-    #[test]
-    fn image_renderer_preflight_rejects_active_and_external_parts() {
-        let c = Cancellation::new();
-        validate_render(EXCEL, Kind::Excel, &c).unwrap();
-        validate_render(PPT, Kind::PowerPoint, &c).unwrap();
-        for name in [
-            "xl/vbaProject.bin",
-            "xl/activeX/control.bin",
-            "xl/embeddings/object.bin",
-            "xl/externalLinks/link.bin",
-        ] {
-            let bytes = rewrite(EXCEL, |parts| {
-                parts.insert(name.into(), vec![1, 2, 3]);
-            });
-            assert!(validate_render(&bytes, Kind::Excel, &c).is_err());
-        }
-        let bytes = rewrite(EXCEL, |parts| {
-            parts.insert("xl/_rels/external.rels".into(), br#"<Relationships><Relationship TargetMode="External" Target="https://example.invalid/data"/></Relationships>"#.to_vec());
-        });
-        assert!(
-            validate_render(&bytes, Kind::Excel, &c)
-                .unwrap_err()
-                .contains("external")
-        );
     }
     #[test]
     fn independent_excel_and_powerpoint_fixtures_include_cells_order_notes_and_images() {

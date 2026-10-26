@@ -71,7 +71,7 @@ pub enum Command {
     ImageDiff {
         left: PathBuf,
         right: PathBuf,
-        /// One-based PDF / Office print page / slide number. Raster images require 1.
+        /// One-based PDF page number. Raster images require 1.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=128))]
         page: u16,
         #[arg(long, default_value_t = 0)]
@@ -541,11 +541,11 @@ fn pdf_diff(
     stdout: &mut impl Write,
     c: &Cancellation,
 ) -> Result<i32> {
-    use yy_merge_core::{images::Settings, office_render};
-    if !office_render::is_pdf(&left) || !office_render::is_pdf(&right) {
+    use yy_merge_core::{images::Settings, pdf_render};
+    if !pdf_render::is_pdf(&left) || !pdf_render::is_pdf(&right) {
         return Err("pdf-diff requires two PDF files".into());
     }
-    let pair = office_render::Pair::open(&left, &right, c)?;
+    let pair = pdf_render::Pair::open(&left, &right, c)?;
     let mut results = Vec::new();
     let mut equivalent = true;
     let mut html = String::from(
@@ -590,7 +590,7 @@ fn pdf_diff(
     }
     let identical = pair.left.source.original_identical(&pair.right.source);
     let text = match output.format {
-        ImageReport::Json => serde_json::to_string_pretty(&serde_json::json!({"mode":"pdf","pdf_rendered":true,"office_rendered":false,"pages":pair.pages(),"left_pages":pair.left.pages,"right_pages":pair.right.pages,"original_identical":identical,"equivalent":equivalent,"page_results":results})).map_err(|e|e.to_string())? + "\n",
+        ImageReport::Json => serde_json::to_string_pretty(&serde_json::json!({"mode":"pdf","pdf_rendered":true,"pages":pair.pages(),"left_pages":pair.left.pages,"right_pages":pair.right.pages,"original_identical":identical,"equivalent":equivalent,"page_results":results})).map_err(|e|e.to_string())? + "\n",
         ImageReport::Text => {
             let mut text = format!("PDF {}: {} pages (LEFT {}, RIGHT {}) | raw file identical: {identical}\n", if equivalent { "equivalent" } else { "different" }, pair.pages(), pair.left.pages, pair.right.pages);
             for row in results { text.push_str(&format!("page {}: {} | changed {} pixels | missing {}\n", row["page"], if row["comparison"]["equivalent"] == true { "equivalent" } else { "different" }, row["comparison"]["changed_pixels"], row["missing"])); }
@@ -622,12 +622,17 @@ fn image_diff(
     if !(1..=128).contains(&output.page) {
         return Err("image page must be in 1..128".into());
     }
-    let office = yy_merge_core::office::Kind::detect(&left).is_some()
-        || yy_merge_core::office::Kind::detect(&right).is_some();
-    let pdf =
-        yy_merge_core::office_render::is_pdf(&left) || yy_merge_core::office_render::is_pdf(&right);
-    let (a, b, missing, pages) = if office || pdf {
-        let docs = yy_merge_core::office_render::Pair::open(&left, &right, cancel)?;
+    if yy_merge_core::office::Kind::detect(&left).is_some()
+        || yy_merge_core::office::Kind::detect(&right).is_some()
+    {
+        return Err(
+            "Excel/PowerPoint image comparison is unsupported; use diff for content comparison"
+                .into(),
+        );
+    }
+    let pdf = yy_merge_core::pdf_render::is_pdf(&left) || yy_merge_core::pdf_render::is_pdf(&right);
+    let (a, b, missing, pages) = if pdf {
+        let docs = yy_merge_core::pdf_render::Pair::open(&left, &right, cancel)?;
         let page = docs.page(usize::from(output.page - 1), cancel)?;
         (page.left, page.right, page.missing, docs.pages())
     } else {
@@ -641,14 +646,14 @@ fn image_diff(
             1,
         )
     };
-    let comparison = yy_merge_core::office_render::compare(&a, &b, missing, settings, cancel)?;
+    let comparison = yy_merge_core::pdf_render::compare(&a, &b, missing, settings, cancel)?;
     let original_identical = a.source.original_identical(&b.source);
     let text = match output.format {
-        ImageReport::Json => serde_json::to_string_pretty(&serde_json::json!({"mode":"image","office_rendered":office,"pdf_rendered":pdf,"page":output.page,"pages":pages,"missing":missing,"original_identical":original_identical,"left":a.source.path,"right":b.source.path,"comparison":comparison.summary})).map_err(|e| e.to_string())? + "\n",
+        ImageReport::Json => serde_json::to_string_pretty(&serde_json::json!({"mode":"image","pdf_rendered":pdf,"page":output.page,"pages":pages,"missing":missing,"original_identical":original_identical,"left":a.source.path,"right":b.source.path,"comparison":comparison.summary})).map_err(|e| e.to_string())? + "\n",
         ImageReport::Text => format!("image {}: {} <> {} | {} / {} changed pixels | threshold {} | offset {},{} | raw file identical: {}\n", if comparison.summary.equivalent { "equivalent" } else { "different" }, left.display(),right.display(),comparison.summary.changed_pixels,comparison.summary.compared_pixels,settings.threshold,settings.offset_x,settings.offset_y,original_identical),
         ImageReport::Html => {
             let html = images::html(&a,&b,&comparison,cancel)?;
-            if office || pdf { html.replacen("<main>", &format!("<p>{} rendered page {} / {} | missing LEFT={} RIGHT={} | embedded Hayro</p><main>", if pdf { "PDF" } else { "Office" }, output.page, pages, missing[0], missing[1]), 1) } else { html }
+            if pdf { html.replacen("<main>", &format!("<p>PDF rendered page {} / {} | missing LEFT={} RIGHT={} | embedded Hayro</p><main>", output.page, pages, missing[0], missing[1]), 1) } else { html }
         },
     };
     let png = output
@@ -1060,8 +1065,8 @@ pub fn execute(
                 && yy_merge_core::office::Kind::detect(&right).is_none()
                 && !yy_merge_core::images::is_image(&left)
                 && !yy_merge_core::images::is_image(&right)
-                && !yy_merge_core::office_render::is_pdf(&left)
-                && !yy_merge_core::office_render::is_pdf(&right)
+                && !yy_merge_core::pdf_render::is_pdf(&left)
+                && !yy_merge_core::pdf_render::is_pdf(&right)
             {
                 if rules.active()
                     || profile_input.is_some()
@@ -1098,8 +1103,8 @@ pub fn execute(
                         return Err("image comparison cannot generate text patches".into());
                     }
                 };
-                if yy_merge_core::office_render::is_pdf(&left)
-                    || yy_merge_core::office_render::is_pdf(&right)
+                if yy_merge_core::pdf_render::is_pdf(&left)
+                    || yy_merge_core::pdf_render::is_pdf(&right)
                 {
                     return pdf_diff(
                         left,

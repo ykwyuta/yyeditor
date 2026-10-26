@@ -29,7 +29,6 @@ openpyxl, python-pptx and Pillow; these generators are not required at runtime.
 Image comparison uses image (MIT selected), png, zune-jpeg, image-webp, quick-error and the codec dependencies
 listed in Cargo.lock. License texts and attributions: LICENSE-IMAGE-DEPS.txt.
 Raster image comparison does not require a system image viewer or Office.
-Optional Office image rendering invokes a separately installed LibreOffice.
 PDF page counting and rasterization use embedded Hayro (MIT selected), with
 Vello CPU and its Rust dependencies. No Poppler executable or shared library
 is used. See LICENSE-PDF-DEPS.txt for dependency and bundled font/CMap/ICC notices.

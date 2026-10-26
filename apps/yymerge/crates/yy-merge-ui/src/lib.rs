@@ -86,7 +86,7 @@ fn use_large(g: &yy_merge_cli::Gui) -> bool {
             yy_merge_cli::large_command::required(l, r)
                 && [l, r].iter().all(|p| {
                     yy_merge_core::office::Kind::detect(p).is_none()
-                        && !yy_merge_core::office_render::is_pdf(p)
+                        && !yy_merge_core::pdf_render::is_pdf(p)
                 })
         })
 }

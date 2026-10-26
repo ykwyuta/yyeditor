@@ -178,7 +178,7 @@ impl Snapshot {
     }
     /// No heuristic encoding guesses. BOM, otherwise UTF-8; legacy encodings explicit.
     pub fn open(path: &Path, charset: Option<&str>, cancel: &Cancellation) -> Result<Self> {
-        if crate::office_render::is_pdf(path) {
+        if crate::pdf_render::is_pdf(path) {
             return Err("PDF is read-only visual comparison; use pdf-diff or image-diff".into());
         }
         let bytes = read_bounded(path, cancel)?;

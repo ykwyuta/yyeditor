@@ -83,13 +83,13 @@ struct Pair {
     left: Input,
     right: Input,
     bitmaps: [Bitmap; 2],
-    documents: Option<Arc<yy_merge_core::office_render::Pair>>,
+    documents: Option<Arc<yy_merge_core::pdf_render::Pair>>,
     page: usize,
     missing: [bool; 2],
 }
 impl Pair {
     fn page(
-        documents: Arc<yy_merge_core::office_render::Pair>,
+        documents: Arc<yy_merge_core::pdf_render::Pair>,
         page: usize,
         c: &Cancellation,
     ) -> Result<Arc<Self>> {
@@ -99,7 +99,7 @@ impl Pair {
     fn new(
         left: Input,
         right: Input,
-        documents: Option<Arc<yy_merge_core::office_render::Pair>>,
+        documents: Option<Arc<yy_merge_core::pdf_render::Pair>>,
         page: usize,
         missing: [bool; 2],
         c: &Cancellation,
@@ -118,12 +118,9 @@ impl Pair {
         }))
     }
     fn open(paths: &[PathBuf; 2], c: &Cancellation) -> Result<Arc<Self>> {
-        if paths
-            .iter()
-            .any(|p| yy_merge_core::office_render::is_document(p))
-        {
+        if paths.iter().any(|p| yy_merge_core::pdf_render::is_pdf(p)) {
             Self::page(
-                Arc::new(yy_merge_core::office_render::Pair::open(
+                Arc::new(yy_merge_core::pdf_render::Pair::open(
                     &paths[0], &paths[1], c,
                 )?),
                 0,
@@ -222,7 +219,7 @@ fn calculate(
     c: &Cancellation,
 ) -> Result<Completed> {
     let result =
-        yy_merge_core::office_render::compare(&pair.left, &pair.right, pair.missing, settings, c)?;
+        yy_merge_core::pdf_render::compare(&pair.left, &pair.right, pair.missing, settings, c)?;
     let raster = if mode == Mode::Overlay {
         images::overlay(&pair.left.raster, &pair.right.raster, settings, c)?
     } else {
@@ -642,7 +639,7 @@ fn export(s: &mut State, path: PathBuf, kind: usize) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let thread = std::thread::spawn(move || {
         let result = (|| {
-            let result = yy_merge_core::office_render::compare(
+            let result = yy_merge_core::pdf_render::compare(
                 &pair.left,
                 &pair.right,
                 pair.missing,
@@ -688,7 +685,7 @@ fn command(s: &mut State, id: usize) -> Result<()> {
             let pair = s
                 .display
                 .as_ref()
-                .ok_or("PDF・Officeファイルを開いてください")?
+                .ok_or("PDFファイルを開いてください")?
                 .pair
                 .clone();
             let docs = pair.documents.clone().ok_or("通常の画像は1ページです")?;
@@ -1039,7 +1036,7 @@ pub(super) fn run(g: Gui) -> Result<i32> {
             (
                 "ファイル(&F)",
                 vec![
-                    (OPEN, "画像・PDF・Officeを開く…"),
+                    (OPEN, "画像・PDFを開く…"),
                     (SAVE, "差分PNGを保存…"),
                     (HTML, "HTMLレポートを保存…"),
                     (JSON, "JSONレポートを保存…"),
@@ -1056,8 +1053,8 @@ pub(super) fn run(g: Gui) -> Result<i32> {
                     (DIFF, "差分"),
                     (OVERLAY, "重ね合わせ（50%）"),
                     (BLINK, "点滅切り替え"),
-                    (PREVIOUS_PAGE, "前のページ／スライド\tPageUp"),
-                    (NEXT_PAGE, "次のページ／スライド\tPageDown"),
+                    (PREVIOUS_PAGE, "前のページ\tPageUp"),
+                    (NEXT_PAGE, "次のページ\tPageDown"),
                 ],
             ),
             (
@@ -1288,17 +1285,16 @@ fn smoke(s: &mut State) -> Result<()> {
                 while s.job.is_some() {
                     poll(s);
                     if Instant::now() > deadline {
-                        return Err("Office page navigation timed out".into());
+                        return Err("PDF page navigation timed out".into());
                     }
                     std::thread::sleep(Duration::from_millis(2));
                 }
                 if s.display.as_ref().is_none_or(|d| d.pair.page != expected) {
-                    return Err(format!("Office page navigation failed: {}", s.status));
+                    return Err(format!("PDF page navigation failed: {}", s.status));
                 }
             }
         }
-        let pdf = yy_merge_core::office_render::is_pdf(&pair.left.source.path);
-        std::fs::write(dir.join(if pdf { "pdf-smoke.txt" } else { "office-image-smoke.txt" }), format!("PASS: {} input, cached PDF page navigation, missing-page-aware comparison, original-source verification\n", if pdf { "direct PDF" } else { "real Office rendering" })).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join("pdf-smoke.txt"), "PASS: direct PDF input, cached PDF page navigation, missing-page-aware comparison, original-source verification\n").map_err(|e| e.to_string())?;
     }
     for (w, h) in [(680, 420), (1180, 760)] {
         unsafe {

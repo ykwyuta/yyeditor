@@ -307,12 +307,6 @@ jobs:
         with:
           name: yymerge-ssh-verification
           path: ${{ runner.temp }}/yymerge-ssh-live/
-      - name: Install Office image renderers
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends libreoffice-calc libreoffice-impress fonts-noto-cjk
-      - name: Real Excel and PowerPoint image comparison
-        run: cargo test --manifest-path apps/yymerge/Cargo.toml --workspace --no-default-features --locked office_render -- --ignored --nocapture
       - name: Build console without UI
         run: cargo build --manifest-path apps/yymerge/Cargo.toml -p yymerge --no-default-features --bin yymerge --release --locked
       - name: Package console and license notices

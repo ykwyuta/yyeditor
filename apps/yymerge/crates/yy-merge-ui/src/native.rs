@@ -1556,7 +1556,7 @@ fn menu() -> Result<HMENU> {
                 vec![
                     (OPEN, "2方向比較を開く（テキスト／Excel／PowerPoint）…"),
                     (OPEN_REMOTE, "SSH/パスを指定して比較…"),
-                    (OPEN_IMAGES, "画像・PDF・Officeの見た目比較を開く…"),
+                    (OPEN_IMAGES, "画像・PDFの見た目比較を開く…"),
                     (OPEN_MERGE, "3方向マージを開く…"),
                     (OPEN_FOLDERS, "フォルダー比較を開く…"),
                     (OPEN_THREE_FOLDERS, "3方向フォルダー比較を開く…"),

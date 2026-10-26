@@ -80,6 +80,11 @@ fn dimensions(width: u32, height: u32) -> Result<()> {
 }
 impl Input {
     pub fn open(path: &Path, cancel: &Cancellation) -> Result<Self> {
+        if crate::office::Kind::detect(path).is_some() {
+            return Err(
+                "Excel/PowerPoint image comparison is unsupported; use content comparison".into(),
+            );
+        }
         let source = Snapshot::binary(path, cancel)?;
         let format = image::guess_format(source.raw()).map_err(|e| format!("image: {e}"))?;
         let mut limits = image::Limits::default();

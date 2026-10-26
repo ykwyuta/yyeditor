@@ -34,11 +34,9 @@ GUIの[ファイル] → [フォルダー比較を開く]で、子フォルダ�
 
 フォルダー比較の表示パスは部分一致のほか、ワイルドカードでも絞れます。GUIの方式欄で切り替え、CLIでは`folders LEFT RIGHT --recursive --path-glob "*.csv"`を指定します。`*`は区切りを含む任意の文字列、`?`は1文字です。条件はフォルダー作業セッションにも保存されます。表示だけの条件で、比較全体の終了コード・未比較件数・同期対象は変わりません。
 
-Excel（`.xlsx` / `.xlsm`）・PowerPoint（`.pptx` / `.pptm`）を2方向の読み取り専用比較で開けます。Excelはシート・セル値・数式、PowerPointはスライド順・図形の文章・ノートを抽出し、書式等の内部XMLと画像等の指紋も比較します。GUI・CLI・HTMLレポート・比較作業セッションに対応します。Office本体は不要です。この内容比較では画面描画・数式再計算・マージ・旧形式（`.xls` / `.xlsb` / `.ppt`）・暗号化ファイルは未対応です。[範囲と制限](../../apps/yymerge/help/help.md#office-compare)を参照してください。
+Excel（`.xlsx` / `.xlsm`）・PowerPoint（`.pptx` / `.pptm`）を2方向の読み取り専用比較で開けます。Excelはシート・セル値・数式、PowerPointはスライド順・図形の文章・ノートを抽出し、書式等の内部XMLと画像等の指紋も比較します。GUI・CLI・HTMLレポート・比較作業セッションに対応します。Office本体は不要です。Excel・PowerPointの画像比較には対応しません。この内容比較では画面描画・数式再計算・マージ・旧形式（`.xls` / `.xlsb` / `.ppt`）・暗号化ファイルは未対応です。[範囲と制限](../../apps/yymerge/help/help.md#office-compare)を参照してください。
 
-PNG・JPEG・BMP・WebPの読み取り専用画像比較にも対応します。[ファイル] → [画像・PDF・Officeの見た目比較を開く…]で、左右・差分を並べ、重ね合わせ・点滅・連動ズーム／移動・色差閾値・整数位置合わせを利用できます。CLIは`image-diff LEFT RIGHT --threshold 8 --diff-image difference.png --report result.json`です。差分PNG・HTML・JSONを出力でき、原本は変更しません。[形式・規則・上限](../../apps/yymerge/help/help.md#image-compare)を参照してください。
-
-Excel・PowerPointの見た目もページ単位で比較できます。別途LibreOfficeを導入し、上記の見た目比較メニューまたは`gui --image`から開きます。PageUp / PageDownで印刷ページ・スライドを切り替えます。CLIは`image-diff before.pptx after.pptx --page 2 --diff-image slide-2.png`です。通常の内容比較は引き続き外部ツール不要です。[準備・制限](../../apps/yymerge/help/help.md#office-image-compare)を参照してください。
+PNG・JPEG・BMP・WebPの読み取り専用画像比較にも対応します。[ファイル] → [画像・PDFの見た目比較を開く…]で、左右・差分を並べ、重ね合わせ・点滅・連動ズーム／移動・色差閾値・整数位置合わせを利用できます。CLIは`image-diff LEFT RIGHT --threshold 8 --diff-image difference.png --report result.json`です。差分PNG・HTML・JSONを出力でき、原本は変更しません。[形式・規則・上限](../../apps/yymerge/help/help.md#image-compare)を参照してください。
 
 PDFの画像比較は外部ツール不要です。通常の[開く]でPDFを選び、PageUp / PageDownでページを移動できます。CLIの`pdf-diff before.pdf after.pdf`と通常の`diff`は全ページを比較し、JSON・テキスト・全ページ入りHTMLを出力します。選択ページのPNG出力は`image-diff --page 2 --diff-image page-2.png`を使います。[PDFの比較範囲と上限](../../apps/yymerge/help/help.md#pdf-compare)を参照してください。
 

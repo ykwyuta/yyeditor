@@ -171,7 +171,7 @@ Test the file manager core with `cargo test -p yy-files`, browser settings, rule
 - Builds static Linux x86_64 / aarch64 agents and verifies their versions, hashes, and static linking.
 - Runs formatting checks, Clippy, workspace tests, and release builds for the eight main Windows applications on Windows.
 - Runs core tests, x3270 / GnuCOBOL compatibility checks, and Windows UI type checks on Linux.
-- Runs the independent yymerge Windows/Linux checks, native UI and Office rendering tests, and yydbmanager Windows/Linux checks in the same workflow. yydbmanager stays on `windows-2022` for DuckDB's C++ toolchain.
+- Runs the independent yymerge Windows/Linux checks, native UI, Office content comparison and embedded PDF rendering tests, and yydbmanager Windows/Linux checks in the same workflow. yydbmanager stays on `windows-2022` for DuckDB's C++ toolchain.
 - Packages yyeditor / yyterm / yysftp / yysheet / yyfilemanager / yyclip / yybrowser / yydraw / yydbmanager / yymerge / yymergew and both agent architectures in `yyeditor-windows-x64`, after all Windows component jobs pass. Component notices/help stay under `yymerge/` and `yydbmanager/`.
 - Keeps the standalone yymerge/yydbmanager artifacts as well. Manual dispatch with `docker_databases=true` runs the five remote DB integration jobs.
 

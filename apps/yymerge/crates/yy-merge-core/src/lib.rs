@@ -7,7 +7,7 @@ pub mod folders;
 pub mod images;
 pub mod large;
 pub mod office;
-pub mod office_render;
+pub mod pdf_render;
 pub mod profile;
 pub mod remote;
 pub mod report;

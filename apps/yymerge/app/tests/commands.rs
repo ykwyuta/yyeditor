@@ -323,7 +323,6 @@ fn pdf_cli_compares_pages_without_external_tools_and_preserves_sources() {
         Command::new(env!("CARGO_BIN_EXE_yymerge"))
             .current_dir(p)
             .args(args)
-            .env("YYMERGE_SOFFICE", p.join("must-not-run"))
             .env("YYMERGE_PDFINFO", p.join("must-not-run"))
             .env("YYMERGE_PDFTOPPM", p.join("must-not-run"))
             .output()
@@ -338,7 +337,6 @@ fn pdf_cli_compares_pages_without_external_tools_and_preserves_sources() {
     );
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["pdf_rendered"], true);
-    assert_eq!(json["office_rendered"], false);
     assert_eq!(json["pages"], 3);
     assert_eq!(json["equivalent"], false);
     assert_eq!(json["page_results"].as_array().unwrap().len(), 3);
@@ -439,7 +437,7 @@ fn pdf_cli_compares_pages_without_external_tools_and_preserves_sources() {
     assert!(!p.join("result.pdf").exists());
 }
 #[test]
-fn office_render_cli_validates_page_and_document_kind_before_launch() {
+fn image_diff_rejects_office_inputs_and_invalid_pages() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path();
     fs::write(
@@ -452,10 +450,33 @@ fn office_render_cli_validates_page_and_document_kind_before_launch() {
         include_bytes!("../../../../demo/yymerge/office/left.pptx"),
     )
     .unwrap();
-    assert_eq!(
-        run(&["image-diff", "a.xlsx", "b.pptx"], p).status.code(),
-        Some(2)
-    );
+    for (left, right) in [
+        ("a.xlsx", "a.xlsx"),
+        ("b.pptx", "b.pptx"),
+        ("a.xlsx", "b.pptx"),
+        ("a.xlsx", "missing.pdf"),
+        ("missing.pdf", "b.pptx"),
+    ] {
+        let output = run(
+            &[
+                "image-diff",
+                left,
+                right,
+                "--report",
+                "result.json",
+                "--diff-image",
+                "difference.png",
+            ],
+            p,
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("use diff for content comparison")
+        );
+        assert!(output.stdout.is_empty());
+        assert!(!p.join("result.json").exists());
+        assert!(!p.join("difference.png").exists());
+    }
     assert_eq!(
         run(&["image-diff", "a.xlsx", "a.xlsx", "--page", "0"], p)
             .status
@@ -468,79 +489,6 @@ fn office_render_cli_validates_page_and_document_kind_before_launch() {
             .code(),
         Some(64)
     );
-}
-#[test]
-#[ignore = "requires LibreOffice; explicitly run in renderer CI"]
-fn office_render_cli_real_html_and_source_protection() {
-    // Obsolete Poppler settings must not be consulted by the embedded renderer.
-    let run = |args: &[&str], dir: &Path| {
-        Command::new(env!("CARGO_BIN_EXE_yymerge"))
-            .current_dir(dir)
-            .args(args)
-            .env("YYMERGE_PDFINFO", dir.join("poppler-must-not-run"))
-            .env("YYMERGE_PDFTOPPM", dir.join("poppler-must-not-run"))
-            .output()
-            .unwrap()
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path();
-    let left = include_bytes!("../../../../demo/yymerge/office/left.pptx");
-    fs::write(p.join("a.pptx"), left).unwrap();
-    fs::write(
-        p.join("b.pptx"),
-        include_bytes!("../../../../demo/yymerge/office/right.pptx"),
-    )
-    .unwrap();
-    let out = run(
-        &[
-            "image-diff",
-            "a.pptx",
-            "b.pptx",
-            "--page",
-            "2",
-            "--diff-image",
-            "difference.png",
-        ],
-        p,
-    );
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["page"], 2);
-    assert_eq!(v["pages"], 2);
-    assert_eq!(v["office_rendered"], true);
-    assert!(
-        yy_merge_core::images::Input::open(
-            &p.join("difference.png"),
-            &yy_merge_core::Cancellation::new()
-        )
-        .is_ok()
-    );
-    let out = run(&["image-diff", "a.pptx", "a.pptx", "--format", "html"], p);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(String::from_utf8_lossy(&out.stdout).contains("Office rendered page 1 / 2"));
-    let out = run(
-        &[
-            "image-diff",
-            "a.pptx",
-            "a.pptx",
-            "--report",
-            "a.pptx",
-            "--overwrite",
-        ],
-        p,
-    );
-    assert_eq!(out.status.code(), Some(2));
-    assert_eq!(fs::read(p.join("a.pptx")).unwrap(), left);
 }
 #[test]
 fn image_cli_rejects_unsafe_outputs_unsupported_modes_and_bad_inputs() {

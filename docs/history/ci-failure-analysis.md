@@ -51,3 +51,7 @@
 今回はローカル検証で確認した失敗であり、該当するCI失敗実行URLはない。ODBC削除後、DuckDBの `RmStartSession` 等がLNK2019となったため、yy-db-coreのbuild.rsからWindows Restart Managerを明示的にリンクした。Windowsワークスペース全体のClippy・試験・実行ファイルビルドで検証した。
 
 Db2の新ドライバーはCRRTKNが固定で、異なる接続のAPPLICATION_IDとUOW/activityキーが衝突したことをサーバーログで確認した。繰り返し実測取得時にはEXPLAIN_FROM_ACTIVITY内でサーバーがSIGSEGVとなったが、衝突からトラップに至る内部経路の全容は未確定。上流へ一意な接続識別子と並列・再接続の回帰試験を追加した。[修正PR](https://github.com/ykwyuta/rust-db2-driver/pull/1)、[修正SHAのCI成功](https://github.com/ykwyuta/rust-db2-driver/actions/runs/40299413772)。過去のモニターレコードを残した同じ専用Db2を含む5DB回帰が成功した。詳細と検証範囲は[移行の検証記録](verification/yydbmanager-db2-driver-2026-10-26.md)を参照。
+
+## 2026-10-26: Office変換ツール導入による長時間化
+
+[実行40284650502](https://github.com/ykwyuta/yyeditor/actions/runs/40284650502)ではLibreOffice・日本語フォントの導入に約68分を要した。aptログの160 MB取得に1時間7分41秒という記録から、Ubuntuミラーの転送待ちが主因と確認した。利用者の指示によりExcel・PowerPointの画像比較を廃止し、変換コードとCIの導入・専用試験を削除する。Office内容比較・通常画像・PDF比較の試験は維持する。[変更と検証記録](verification/yymerge-no-office-images-2026-10-26.md)を参照。変更後CIの所要時間は未測定。

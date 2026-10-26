@@ -153,7 +153,6 @@ apps/yymerge/target/debug/yymerge.exe image-diff demo/yymerge/images/left.png de
 
 差異ありは終了コード1です。`left.webp`・`right.webp`はPNGと同じ画素の可逆WebPです。`sample.jpg`・`sample.bmp`・`sample-lossy.webp`は別形式の読み込み確認用です。`oriented.jpg`はEXIFの向きを持つ2×3画像で、比較時には3×2になります。`animated.png`・`animated.webp`・`sixteen-bit.png`は未対応形式の拒否確認用で、通常の比較作例ではありません。画像比較は原本を書き換えず、出力も原本と異なる場所を指定してください。
 
-Officeの見た目も比較する場合はLibreOfficeを準備し、`yymerge gui --image --left demo/yymerge/office/left.xlsx --right demo/yymerge/office/right.xlsx --wait`を実行してください。右Excelの追加シートは追加ページになり、PageDownで欠落比較を確認できます。PowerPointは`.pptx`の組を指定すると2スライドの画像比較になります。CLIの例: `yymerge image-diff demo/yymerge/office/left.pptx demo/yymerge/office/right.pptx --page 2 --diff-image slide-2.png`。出力は選択ページが対象です。
 
 ## PDF比較
 

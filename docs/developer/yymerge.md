@@ -21,7 +21,7 @@ cargo test --manifest-path apps/yymerge/Cargo.toml --workspace --locked
 ```
 
 Linuxは`--no-default-features`を付けたヘッドレス構成も検証します。
-Officeの実レンダリングはLibreOfficeを導入した専用試験で行い、通常試験のignoreを成功扱いにしません。
+Excel・PowerPointは内容比較のみです。PDFは内蔵Hayroで直接描画し、通常のコア・CLI試験とWindows UIスモークで検証します。外部Office変換ツールは不要です。
 Git連携のプロセス試験は`apps/yymerge/app/tests/git_tools.rs`の一時リポジトリを使います。
 
 | 作例 | 再生成コマンド | 生成時の追加ライブラリ |
