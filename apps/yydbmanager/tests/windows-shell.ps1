@@ -582,15 +582,10 @@ try {
     $taskKind=[DbShellTest]::GetDlgItem($taskDialog,101)
     [DbShellTest]::SendMessage($taskKind,0x14E,4,0)|Out-Null
     [DbShellTest]::SendMessage($taskDialog,0x111,(101 -bor (1 -shl 16)),$taskKind)|Out-Null
-    $taskMode=[DbShellTest]::GetDlgItem($taskDialog,112)
-    if($taskMode -eq [IntPtr]::Zero -or [DbShellTest]::SendMessage($taskMode,0x147,0,0).ToInt64() -ne 0){throw 'Rust direct connection is not the default for a new external connection'}
-    if([DbShellTest]::IsWindowVisible([DbShellTest]::GetDlgItem($taskDialog,103))){throw 'Rust direct connection exposes an ODBC driver field'}
-    [DbShellTest]::SendMessage($taskMode,0x14E,1,0)|Out-Null
-    [DbShellTest]::SendMessage($taskDialog,0x111,(112 -bor (1 -shl 16)),$taskMode)|Out-Null
-    if(![DbShellTest]::IsWindowVisible([DbShellTest]::GetDlgItem($taskDialog,103))){throw 'ODBC connection no longer exposes its driver field'}
-    [DbShellTest]::SendMessage($taskMode,0x14E,0,0)|Out-Null
-    [DbShellTest]::SendMessage($taskDialog,0x111,(112 -bor (1 -shl 16)),$taskMode)|Out-Null
-    foreach($taskField in @(@{Id=100;Text='検証 PostgreSQL'},@{Id=103;Text='PostgreSQL Unicode'},@{Id=104;Text='db.example'},@{Id=106;Text='sales'},@{Id=107;Text='developer'},@{Id=108;Text='test-secret;}'})){
+    foreach($taskRemovedControl in @(103,110,111,112)) {
+        if([DbShellTest]::GetDlgItem($taskDialog,$taskRemovedControl) -ne [IntPtr]::Zero){throw "Removed connection control still exists: $taskRemovedControl"}
+    }
+    foreach($taskField in @(@{Id=100;Text='検証 PostgreSQL'},@{Id=104;Text='db.example'},@{Id=106;Text='sales'},@{Id=107;Text='developer'},@{Id=108;Text='test-secret;}'})){
         [DbShellTest]::TextMessage([DbShellTest]::GetDlgItem($taskDialog,$taskField.Id),0xC,0,$taskField.Text)|Out-Null
     }
     $taskPort=[Text.StringBuilder]::new(64);[DbShellTest]::ReadMessage([DbShellTest]::GetDlgItem($taskDialog,105),0xD,64,$taskPort)|Out-Null

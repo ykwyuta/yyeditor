@@ -5,12 +5,7 @@
 ```powershell
 docker compose -p yydbmanager-validation -f apps/yydbmanager/tests/docker/compose.yml up -d
 docker build -t yydbmanager-validation-runner -f apps/yydbmanager/tests/docker/runner.Dockerfile .
-./apps/yydbmanager/tests/docker/prepare-db2.ps1 -OutputDirectory target/yydbmanager-docker/profile
-# ランナーが使う専用ボリュームへ、検証Db2のインスタンス設定を渡します。
 docker volume create yydbmanager-validation-build
-docker run --rm -v "${PWD}/target/yydbmanager-docker/profile:/profile:ro" `
-  -v yydbmanager-validation-build:/build rust:1.99.0-bookworm `
-  cp /profile/db2-instance.tgz /build/db2-instance.tgz
 docker run --rm --network yydbmanager-validation_default --name yydbmanager-validation-runner `
   -v "${PWD}:/workspace" -v yydbmanager-validation-build:/build `
   -v yydbmanager-validation-registry:/usr/local/cargo/registry `
@@ -22,13 +17,13 @@ docker run --rm --network yydbmanager-validation_default --name yydbmanager-vali
 
 Oracle Free、Db2 Community、SQL Server Developerの利用条件に従う開発・検証用途です。Oracle／Db2の初期化には時間がかかります。Db2は公式の起動手順に従い専用コンテナーにprivilegedを付けています。ホストディレクトリやDockerソケットをDBへマウントしません。
 
-ホストへの公開ポートは127.0.0.1に限定しています。検証ランナーにはPostgreSQL ODBC、MariaDB ODBC（MySQLへ接続）、Microsoft ODBC、Oracle Instant Client ODBC、IBM Db2公式コンテナーの64bit ODBC互換ライブラリーを導入します。Windowsホストのドライバー登録は変更しません。
-
-Db2の`libdb2.so`はunixODBCの64bit SQLLENとABIが異なるため、`libdb2o.so`を利用します。このライブラリーの初期化に必要なインスタンス設定は`prepare-db2.ps1`で検証コンテナーから取得し、ランナー起動時にホスト名を合わせます。通常のアプリのDb2接続では、利用者が導入したWindows用64bit ODBCドライバーを使います。検証用イメージ・設定アーカイブを製品に同梱しません。
+ホストへの公開ポートは127.0.0.1に限定しています。検証ランナーは製品と同じRust直接接続を使います。各DBの追加クライアント・ドライバー・Db2インスタンス設定は不要です。
 
 試験は接続・DDL/DML・DECIMAL(31,8)の精度・日本語・NULL・メタデータ・型付きバインド投入・CSV／Parquet出力を検証します。5DBすべてで推定計画、PostgreSQL／SQL Serverでは実測計画も検証します。Db2のEXPLAIN表は試験側が検証DBに明示的に作成し、通常のアプリ操作は自動作成しません。
 
 `YYDB_EXPECT_DATABASES`は既定5です。DBごとのジョブでは、設定ファイルを1DB分にし、同変数を1に設定します。接続情報の絶対パスを指定してください。結果JSONは`/build/reports/remote-databases.json`です。
+
+Db2のTLS・バイナリNULLを含むバインド投入・実行中取消は、専用Db2にテスト証明書とTLSリスナーを設定し、`YYDB_DB2_CONFIG`に`yy_db_core::native::Config`形式のJSONファイルを指定して検証します。`tls`は`require`、`ca_file`はテストCAのPEMファイル、`port`はTLSポートです。実行コマンドは`cargo test --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --test db2_transport --locked -- --ignored --nocapture`です。サーバーの`MON_GET_APPL_LOCKWAIT`で実際のロック待機を確認してから取消し、証明書の不信頼時に接続が拒否されることも確認します。
 
 終了後は、この検証環境だけを停止・削除できます。
 
@@ -36,7 +31,7 @@ Db2の`libdb2.so`はunixODBCの64bit SQLLENとABIが異なるため、`libdb2o.s
 docker compose -p yydbmanager-validation -f apps/yydbmanager/tests/docker/compose.yml down -v
 ```
 
-Dockerイメージはタグに加えて、実行時のdigestとサーバー版を結果レポートに記録します。WindowsのSQL Serverドライバー経由の試験と、Linux検証ランナーの試験結果は区別して扱います。
+Dockerイメージはタグに加えて、実行時のdigestとサーバー版を結果レポートに記録します。WindowsとLinuxの試験結果は区別して扱います。過去の検証記録は当時の接続経路の結果であり、現行ドライバーの検証結果ではありません。
 
 実行済みの結果は[2026-10-20の検証記録](../../../../docs/history/verification/yydbmanager-docker-2026-10-20.md)を参照してください。DBイメージの取得・初回ビルド・初期化時間と、テスト本体の実行時間は別です。
 

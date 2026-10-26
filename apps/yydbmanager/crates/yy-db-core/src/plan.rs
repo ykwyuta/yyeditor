@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 mod json;
 
 /// Reviewed in a SQL tab; callers must never execute this automatically.
-pub const DB2_ACTUAL_SETUP_SQL: &str = "-- DB管理者が必要な文を選択して実行してください。既存オブジェクトの再作成は不要です。\n-- EXPLAIN表がない場合のみ：\nCALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN','C',CAST(NULL AS VARCHAR(128)),CURRENT SCHEMA);\n-- 行編成のactivity収集用。既存ワークロードの収集にも影響するため運用方針を確認してください。\nCREATE EVENT MONITOR YYDBMANAGER_ACTIVITY FOR ACTIVITIES WRITE TO TABLE MANUALSTART;\nSET EVENT MONITOR YYDBMANAGER_ACTIVITY STATE 1;\n-- DB全体のSECTION_ACTUALS設定変更は不要です。接続単位で有効化し、取得後に復元します。\n";
+pub const DB2_ACTUAL_SETUP_SQL: &str = "-- DB管理者が必要な文を選択して実行してください。既存オブジェクトの再作成は不要です。\n-- USER TEMPORARY表スペースがない場合のみ（既存はSYSCAT.TABLESPACESのDATATYPE=Uで確認）：\nCREATE USER TEMPORARY TABLESPACE YYDBMANAGER_TEMP MANAGED BY AUTOMATIC STORAGE;\n-- 必要に応じて利用者へ表スペースのUSE権限を付与してください。\n-- EXPLAIN表がない場合のみ：\nCALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN','C',CAST(NULL AS VARCHAR(128)),CURRENT SCHEMA);\n-- 行編成のactivity収集用。既存ワークロードの収集にも影響するため運用方針を確認してください。\nCREATE EVENT MONITOR YYDBMANAGER_ACTIVITY FOR ACTIVITIES WRITE TO TABLE MANUALSTART;\n-- 新規モニターの作成を確定してから起動します。他の未確定変更も確定するため専用接続で実行してください。\nCOMMIT;\nSET EVENT MONITOR YYDBMANAGER_ACTIVITY STATE 1;\n-- DB全体のSECTION_ACTUALS設定変更は不要です。接続単位で有効化し、取得後に復元します。\n";
 
 pub fn drawing_renderer() -> yy_draw::render::Renderer {
     yy_draw::render::Renderer::new(Some(include_bytes!(

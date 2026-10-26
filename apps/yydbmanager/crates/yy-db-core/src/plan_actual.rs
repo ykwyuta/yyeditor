@@ -64,7 +64,7 @@ impl Database {
             if cancel.load(Ordering::Relaxed) {
                 return Err("取り消されました".into());
             }
-            // Oracle ODBC removes ordinary comments; an ignored tracking hint survives.
+            // Keep the tracking token in the hint alongside the statistics hint.
             // Isolate shared-cursor LAST_* counters from simultaneous identical user SQL.
             let sql = oracle_tag(statement, &marker())?;
             executed = true;
@@ -136,15 +136,20 @@ impl Database {
         statement: &str,
         cancel: &AtomicBool,
     ) -> Result<crate::plan::Plan> {
-        // EXPLAIN_FROM_ACTIVITY needs ODBC output parameters; refuse before running the statement.
-        #[cfg(feature = "odbc")]
-        let odbc = matches!(self, Database::Odbc(..));
-        #[cfg(not(feature = "odbc"))]
-        let odbc = false;
-        if !odbc {
-            return Err("Db2の実測計画にはODBC接続が必要です。SQLは実行していません".into());
-        }
-        let monitor = "YYDBMANAGER_ACTIVITY";
+        let table = format!("SESSION.{}", marker());
+        // Fail before executing user SQL when the DB lacks a usable user temporary tablespace.
+        self.query(&format!("DECLARE GLOBAL TEMPORARY TABLE {table} (R VARCHAR(128), T TIMESTAMP, N VARCHAR(128), S VARCHAR(128), V VARCHAR(64)) ON COMMIT PRESERVE ROWS NOT LOGGED"), cancel)
+            .map_err(|e| format!("Db2実測収集の一時表を準備できません。USER TEMPORARY表スペースとUSE権限を確認してください。SQLは実行していません。\n{e}"))?;
+        let result = self.db2_actual_with_table(statement, cancel, &table);
+        let cleanup = self.query(&format!("DROP TABLE {table}"), &AtomicBool::new(false));
+        restored(result, cleanup)
+    }
+    fn db2_actual_with_table(
+        &mut self,
+        statement: &str,
+        cancel: &AtomicBool,
+        key_table: &str,
+    ) -> Result<crate::plan::Plan> {
         let targets=self.query("SELECT TABSCHEMA,TABNAME FROM SYSCAT.EVENTTABLES WHERE EVMONNAME='YYDBMANAGER_ACTIVITY' AND LOGICAL_GROUP='ACTIVITYSTMT'",cancel)?;
         let table=first(&targets).map_err(|_|"Db2の実測取得には稼働中のYYDBMANAGER_ACTIVITYモニターが必要です。実行計画メニューの『Db2実測収集の準備SQL』をDB管理者が実行してください".to_owned())?;
         let state = first(&self.query("VALUES EVENT_MON_STATE('YYDBMANAGER_ACTIVITY')", cancel)?)?;
@@ -157,7 +162,7 @@ impl Database {
             "SELECT OPERATOR_ID,ACTUAL_TYPE,ACTUAL_VALUE FROM EXPLAIN_ACTUALS WHERE 1=0",
             cancel,
         )?;
-        let before=first(&self.query("SELECT XMLSERIALIZE(XMLPARSE(DOCUMENT DETAILS) AS CLOB(8192)) FROM TABLE(SYSPROC.WLM_GET_CONN_ENV(CAST(NULL AS BIGINT))) AS E",cancel)?).map_err(|e|format!("WLM設定取得: {e}"))?[0].display();
+        let before=first(&self.query("SELECT XMLSERIALIZE(XMLPARSE(DOCUMENT DETAILS) AS VARCHAR(8192)) FROM TABLE(SYSPROC.WLM_GET_CONN_ENV(CAST(NULL AS BIGINT))) AS E",cancel)?).map_err(|e|format!("WLM設定取得: {e}"))?[0].display();
         let restore = connection_environment(&before)?;
         let appl = first(&self.query("VALUES APPLICATION_ID()", cancel)?)
             .map_err(|e| format!("Application ID取得: {e}"))?[0]
@@ -226,7 +231,7 @@ impl Database {
                 .parse::<u64>()
                 .map_err(|e| e.to_string())?;
             let schema = first(&self.query("VALUES CURRENT SCHEMA", cancel)?)?[0].display();
-            let stmt = explain_activity_key(self, &appl, uow, id, monitor, &schema)?;
+            let stmt = explain_activity_key(self, &appl, uow, id, &schema, key_table)?;
             self.db2_captured_plan(&stmt, cancel)
         })();
         result.map_err(|e| {
@@ -279,12 +284,21 @@ impl Database {
                 node.actual_rows = Some(node.actual_rows.unwrap_or(0.) + n);
             }
         }
-        let predicates=self.query(&format!("WITH stmt AS ({stmt}) SELECT p.OPERATOR_ID,p.PREDICATE_ID,p.HOW_APPLIED,p.PREDICATE_TEXT FROM EXPLAIN_PREDICATE p JOIN stmt t ON {} ORDER BY p.OPERATOR_ID,p.PREDICATE_ID",key("p")),cancel)?;
+        let predicates=self.query(&format!("WITH stmt AS ({stmt}) SELECT p.OPERATOR_ID,p.PREDICATE_ID,p.HOW_APPLIED,CAST(p.PREDICATE_TEXT AS VARCHAR(32672)),OCTET_LENGTH(p.PREDICATE_TEXT) FROM EXPLAIN_PREDICATE p JOIN stmt t ON {} ORDER BY p.OPERATOR_ID,p.PREDICATE_ID",key("p")),cancel)?;
         let predicates = predicates
             .first()
             .ok_or("述語の結果がありません")?
             .page(0, 10_000)?;
         for row in &predicates {
+            if row
+                .get(4)
+                .is_some_and(|v| v.display().parse::<u64>().is_ok_and(|n| n > 32672))
+            {
+                return Err(
+                    "Db2の述語サイズ上限（32672バイト）を超えています。保存計画を使用してください"
+                        .into(),
+                );
+            }
             if let Ok(id) = row[0].display().parse::<u64>()
                 && let Some(node) = plan.nodes.iter_mut().find(|n| n.id == id)
             {
@@ -349,96 +363,45 @@ fn connection_environment(xml: &str) -> Result<String> {
     Ok(out)
 }
 
-#[cfg(not(feature = "odbc"))]
-fn explain_activity_key(
-    _: &mut Database,
-    _: &str,
-    _: u64,
-    _: u64,
-    _: &str,
-    _: &str,
-) -> Result<String> {
-    Err("Db2 ODBC接続が必要です".into())
-}
-#[cfg(feature = "odbc")]
+// The SQL block receives procedure OUT values on the server. The exact returned
+// statement key crosses the wire through a connection-local temporary table.
 fn explain_activity_key(
     db: &mut Database,
     appl: &str,
     uow: u64,
     id: u64,
-    monitor: &str,
     schema: &str,
+    table: &str,
 ) -> Result<String> {
-    use odbc_api::{
-        InOut, Out,
-        parameter::{VarWCharArray, VarWCharBox},
-    };
-    let Database::Odbc(_, c, _) = db else {
-        return Err("Db2 ODBC接続が必要です".into());
-    };
-    let mut e = VarWCharBox::from_str_slice(schema);
-    let mut requester = VarWCharArray::<256>::NULL;
-    let mut time = odbc_api::parameter::WithDataType {
-        value: odbc_api::sys::Timestamp {
-            year: 0,
-            month: 0,
-            day: 0,
-            hour: 0,
-            minute: 0,
-            second: 0,
-            fraction: 0,
-        },
-        data_type: odbc_api::DataType::Timestamp { precision: 6 },
-    };
-    let mut name = VarWCharArray::<256>::NULL;
-    let mut source = VarWCharArray::<256>::NULL;
-    let mut version = VarWCharArray::<128>::NULL;
-    let query = format!(
-        "CALL SYSPROC.EXPLAIN_FROM_ACTIVITY({}, {uow}, {id}, {}, ?,?,?,?,?,?)",
+    let cancel = AtomicBool::new(false);
+    let block = format!(
+        "BEGIN ATOMIC
+            DECLARE e VARCHAR(128) DEFAULT {};
+            DECLARE r VARCHAR(128);
+            DECLARE t TIMESTAMP;
+            DECLARE n VARCHAR(128);
+            DECLARE s VARCHAR(128);
+            DECLARE v VARCHAR(64);
+            CALL SYSPROC.EXPLAIN_FROM_ACTIVITY({}, {uow}, {id}, {}, e, r, t, n, s, v);
+            INSERT INTO {table} VALUES (r,t,n,s,v);
+            END",
+        literal(schema),
         literal(appl),
-        literal(monitor)
+        literal("YYDBMANAGER_ACTIVITY")
     );
-    let mut cursor = c
-        .execute(
-            &query,
-            (
-                InOut(&mut e),
-                Out(&mut requester),
-                Out(&mut time),
-                Out(&mut name),
-                Out(&mut source),
-                Out(&mut version),
-            ),
-            Some(60),
-        )
-        .map_err(|e| e.to_string())?;
-    while let Some(next) = cursor {
-        cursor = next.more_results().map_err(|e| e.to_string())?;
+    // query sends a single compound statement without the SQL editor splitter.
+    db.query(&block, &cancel)?;
+    let row = first(&db.query(&format!("SELECT R,CHAR(T),N,S,V FROM {table}"), &cancel)?)?;
+    if row.len() != 5 || row.contains(&Value::Null) {
+        return Err("EXPLAIN_FROM_ACTIVITYが完全なステートメントキーを返しませんでした".into());
     }
-    let t = time.value;
-    if t.year == 0 {
-        return Err("EXPLAIN_TIMEがありません".into());
-    }
-    let t = format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
-        t.year, t.month, t.day, t.hour, t.minute, t.second, t.fraction
-    );
-    let text = |p: &[u16]| String::from_utf16(p).map_err(|e| e.to_string());
-    let r = text(
-        requester
-            .as_slice()
-            .ok_or("EXPLAIN_REQUESTERがありません")?,
-    )?;
-    let n = text(name.as_slice().ok_or("SOURCE_NAMEがありません")?)?;
-    let s = text(source.as_slice().ok_or("SOURCE_SCHEMAがありません")?)?;
-    let v = text(version.as_slice().ok_or("SOURCE_VERSIONがありません")?)?;
     Ok(format!(
         "SELECT * FROM EXPLAIN_STATEMENT WHERE EXPLAIN_REQUESTER={} AND EXPLAIN_TIME=TIMESTAMP({}) AND SOURCE_NAME={} AND SOURCE_SCHEMA={} AND SOURCE_VERSION={}",
-        literal(&r),
-        literal(&t),
-        literal(&n),
-        literal(&s),
-        literal(&v)
+        literal(&row[0].display()),
+        literal(&row[1].display()),
+        literal(&row[2].display()),
+        literal(&row[3].display()),
+        literal(&row[4].display())
     ))
 }
 

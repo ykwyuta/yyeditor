@@ -1,6 +1,5 @@
-//! Native wire-protocol connections. No external ODBC/JVM runtime.
+//! Native wire-protocol connections. Rust database drivers.
 mod query;
-pub mod zeus;
 use crate::{DbKind, Result, ResultSet, Value};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -68,7 +67,7 @@ pub enum Driver {
     Mysql(mysql::Conn),
     SqlServer(Box<SqlServer>),
     Oracle(oracledb::Connection),
-    Db2(zeus::client::Connection),
+    Db2(rust_db2_driver::Connection),
 }
 pub struct Connection {
     pub(super) driver: Driver,
@@ -193,24 +192,14 @@ impl Connection {
                 Driver::Oracle(oracledb::connect(c).map_err(|e| e.to_string())?)
             }
             DbKind::Db2 => {
-                let p = zeus::client::Params {
+                let p = rust_db2_driver::Params {
                     host: config.host.clone(),
                     port: config.port,
                     database: config.database.clone(),
                     user: config.username.clone(),
                     password: config.password.clone(),
                 };
-                Driver::Db2(
-                    zeus::client::Connection::connect_tls(
-                        &p,
-                        if config.tls == "disable" {
-                            None
-                        } else {
-                            Some(config.tls_connector()?)
-                        },
-                    )
-                    .map_err(|e| e.to_string())?,
-                )
+                Driver::Db2(db2_connect(&config, &p)?)
             }
             _ => return Err("SQLite/DuckDBは同梱エンジンを使用します".into()),
         };
@@ -233,11 +222,9 @@ impl Connection {
                 })
             }
             Driver::Db2(c) => {
-                let socket = c.interrupt_socket().ok();
+                let handle = c.cancel_handle();
                 Box::new(move || {
-                    if let Some(s) = &socket {
-                        let _ = s.shutdown(std::net::Shutdown::Both);
-                    }
+                    let _ = handle.cancel();
                 })
             }
             _ => Box::new(|| {}),
@@ -298,7 +285,30 @@ impl Connection {
         let result = (|| {
             let mut start = 0;
             while start < set.row_count {
-                for row in set.page(start, 256)? {
+                for (offset, row) in set.page(start, 256)?.into_iter().enumerate() {
+                    if let Driver::Db2(c) = &mut connection.driver {
+                        // The driver sends untyped NULL as VARCHAR, which Db2 cannot
+                        // coerce to binary. SQL NULL lets the destination determine its type.
+                        let markers = row
+                            .iter()
+                            .map(|v| if *v == Value::Null { "NULL" } else { "?" })
+                            .collect::<Vec<_>>();
+                        let params = row
+                            .iter()
+                            .filter(|v| **v != Value::Null)
+                            .map(db2_parameter)
+                            .collect::<Result<Vec<_>>>()?;
+                        let sql = format!(
+                            "INSERT INTO {table} ({}) VALUES ({})",
+                            fields.join(","),
+                            markers.join(",")
+                        );
+                        let ca = c.execute_params(&sql, &params).map_err(|e| e.to_string())?;
+                        query::check_ca(&ca).map_err(|e| {
+                            format!("インポートの{}行目: {e}", start + offset as u64 + 1)
+                        })?;
+                        continue;
+                    }
                     let values = row
                         .iter()
                         .map(|v| literal(self.kind, v))
@@ -323,6 +333,71 @@ impl Connection {
         result
     }
 }
+fn db2_connect(
+    config: &Config,
+    params: &rust_db2_driver::Params,
+) -> Result<rust_db2_driver::Connection> {
+    validate_db2_tls(config)?;
+    let result = if config.tls == "disable" {
+        rust_db2_driver::Connection::connect(params)
+    } else if let Some(path) = &config.ca_file {
+        use rust_db2_driver::rustls::{
+            self,
+            pki_types::{CertificateDer, pem::PemObject},
+        };
+        let mut roots =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let certs = CertificateDer::pem_file_iter(path).map_err(|e| e.to_string())?;
+        let mut count = 0;
+        for cert in certs {
+            roots
+                .add(cert.map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            count += 1;
+        }
+        if count == 0 {
+            return Err("CAファイルに証明書がありません".into());
+        }
+        let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        rust_db2_driver::Connection::connect_with_tls(params, std::sync::Arc::new(tls))
+    } else {
+        rust_db2_driver::Connection::connect_tls(params)
+    };
+    result.map_err(|e| e.to_string())
+}
+pub fn validate_db2_tls(config: &Config) -> Result<()> {
+    if config.trust_server_certificate {
+        return Err(
+            "Db2では証明書検証を省略できません。ca_fileでCA証明書を指定してください".into(),
+        );
+    }
+    if config.tls == "prefer" {
+        return Err("Db2のTLS方式はrequireまたはdisableを指定してください".into());
+    }
+    if config.tls == "disable" && config.ca_file.is_some() {
+        return Err("Db2のCA証明書はTLS接続で指定してください".into());
+    }
+    Ok(())
+}
+fn db2_parameter(value: &Value) -> Result<rust_db2_driver::Value> {
+    use rust_db2_driver::Value as V;
+    Ok(match value {
+        Value::Null => V::Null,
+        Value::Integer(s) => V::Int(s.parse::<i64>().map_err(|e| e.to_string())?),
+        Value::Decimal(s) => V::Dec(s.clone()),
+        Value::Float(n) => V::Float(*n),
+        Value::Bool(b) => V::Int(i64::from(*b)),
+        Value::Text(s) | Value::Temporal(s) => V::Str(s.clone()),
+        Value::Binary(b) => V::Bytes(b.clone()),
+    })
+}
+
 fn column_type(kind: DbKind, t: &str) -> String {
     let t = t.to_ascii_lowercase();
     if t.contains("decimal") || t.contains("numeric") || t.contains("number") {
@@ -411,6 +486,50 @@ fn literal(kind: DbKind, v: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn db2_bound_values_preserve_precision_unicode_and_binary() {
+        use rust_db2_driver::Value as V;
+        for (value, expected) in [
+            (Value::Null, V::Null),
+            (Value::Integer(i64::MAX.to_string()), V::Int(i64::MAX)),
+            (
+                Value::Decimal("12345678901234567890123.12345678".into()),
+                V::Dec("12345678901234567890123.12345678".into()),
+            ),
+            (
+                Value::Text("日本語'); DELETE FROM t; -- ?".into()),
+                V::Str("日本語'); DELETE FROM t; -- ?".into()),
+            ),
+            (Value::Binary(vec![0, 255]), V::Bytes(vec![0, 255])),
+        ] {
+            assert_eq!(db2_parameter(&value).unwrap(), expected);
+        }
+        assert!(db2_parameter(&Value::Integer("1;DELETE FROM t".into())).is_err());
+    }
+    #[test]
+    fn db2_tls_rejects_unsupported_settings_before_connecting() {
+        let mut config = Config {
+            host: "localhost".into(),
+            port: 50001,
+            database: "YYTEST".into(),
+            username: "db2inst1".into(),
+            password: "secret".into(),
+            tls: "require".into(),
+            ca_file: None,
+            trust_server_certificate: false,
+        };
+        validate_db2_tls(&config).unwrap();
+        config.tls = "prefer".into();
+        assert!(validate_db2_tls(&config).is_err());
+        config.tls = "require".into();
+        config.trust_server_certificate = true;
+        assert!(validate_db2_tls(&config).is_err());
+        config.trust_server_certificate = false;
+        config.ca_file = Some("test-ca.pem".into());
+        validate_db2_tls(&config).unwrap();
+        config.tls = "disable".into();
+        assert!(validate_db2_tls(&config).is_err());
+    }
     #[test]
     fn profiles_roundtrip_credentials_and_explicit_transport_settings() {
         let original = Config {

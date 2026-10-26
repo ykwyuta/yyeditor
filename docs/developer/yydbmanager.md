@@ -23,7 +23,7 @@ WindowsのビルドにはVisual Studio 2022のC++ビルドツールを使用し�
 
 SQLiteとDuckDBは静的リンクしており、別途DBサーバー・CLIを導入せず使えます。
 
-`yy-db-core` の既定機能 `odbc` は `odbc-api` を有効にし、汎用ODBC接続文字列とDb2の実測計画（`EXPLAIN_FROM_ACTIVITY` の出力パラメーター）に使用します。この機能はWindowsの `odbc32`、Linuxの unixODBC（`libodbc.so.2`）へリンクします。yydbmanagerは既定のまま使用します。ODBCのドライバーマネージャーに依存させない利用側は `default-features = false` を指定します。その場合も `yynative:` の直接接続、SQLite、DuckDB、計画ファイル、ER、転送は使用できます。ODBC接続文字列は接続時にエラーとなり、Db2の実測計画は対象SQLを実行する前に拒否します。
+外部DBはRust製ドライバーを使用し、ODBC依存・機能フラグ・接続経路は廃止しました。Db2は `rust-db2-driver` を完全なコミットSHAで固定したGit依存です。TLSはドライバーのrustlsを使い、公開CAと `ca_file` の追加CAを検証します。取消は `cancel_handle()` でソケットを閉じるため再接続が必要です。Db2インポートは別接続で `execute_params` を使い、成功時にCOMMIT、失敗時にROLLBACKします。バイナリ列のNULLはドライバーの未型付けVARCHAR NULLでは変換できないため、SQL NULLを使って格納先に型を決定させます。実測計画のOUT引数はサーバー側のSQLブロックで受け、接続内一時表から取得した完全なステートメントキーで計画を検索します。一時表はSQL実行前に準備し、成否にかかわらず削除します。USER TEMPORARY表スペースとUSE権限が必要です。最新時刻だけの検索で代替しません。旧接続文字列は接続前に拒否し、設定の再入力を案内します。
 同梱フォントは他のyyシリーズと同じUDEV Gothicです。
 アプリアイコンも共通のYYデザインを使い、青緑の背景とデータベースの記号で識別できます。
 

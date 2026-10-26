@@ -470,7 +470,7 @@ fn oracle_query(
     Ok(vec![set])
 }
 fn db2_query(
-    c: &mut zeus::client::Connection,
+    c: &mut rust_db2_driver::Connection,
     sql: &str,
     cancel: &AtomicBool,
 ) -> Result<Vec<ResultSet>> {
@@ -529,12 +529,12 @@ fn db2_query(
             .into_iter()
             .zip(&rows.columns)
             .map(|(v, c)| match v {
-                zeus::sql::Value::Null => Value::Null,
-                zeus::sql::Value::Int(n) => Value::Integer(n.to_string()),
-                zeus::sql::Value::Dec(s) => Value::Decimal(s),
-                zeus::sql::Value::Float(n) => Value::Float(n),
-                zeus::sql::Value::Bytes(b) => Value::Binary(b),
-                zeus::sql::Value::Str(s) => {
+                rust_db2_driver::Value::Null => Value::Null,
+                rust_db2_driver::Value::Int(n) => Value::Integer(n.to_string()),
+                rust_db2_driver::Value::Dec(s) => Value::Decimal(s),
+                rust_db2_driver::Value::Float(n) => Value::Float(n),
+                rust_db2_driver::Value::Bytes(b) => Value::Binary(b),
+                rust_db2_driver::Value::Str(s) => {
                     if [0x20, 0x22, 0x24].contains(&c.drda_type) {
                         Value::Temporal(s)
                     } else {
@@ -564,7 +564,7 @@ fn leading_sql(mut sql: &str) -> &str {
         }
     }
 }
-fn check_ca(ca: &zeus::sql::SqlCa) -> Result<()> {
+pub(super) fn check_ca(ca: &rust_db2_driver::SqlCa) -> Result<()> {
     if ca.sqlcode < 0 {
         Err(format!(
             "Db2 SQLCODE={} SQLSTATE={} {}",

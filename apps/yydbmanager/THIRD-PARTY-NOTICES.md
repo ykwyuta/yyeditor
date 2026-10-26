@@ -1,6 +1,51 @@
 # Native database driver notices
 
-Zeus DRDA code: https://github.com/ykwyuta/Zeus at 99a30e6e0748357eb2aeecb7a584785d023e0935 (GPL-3.0-or-later). The client, DDM framing, SQL decoder and CP037 table are adapted with local TLS, limits, metadata and cancellation changes.
+## rust-db2-driver (MIT)
+
+https://github.com/ykwyuta/rust-db2-driver at 14999cd983a666b209f0446b398005b141bebb08.
+The Db2 transport is used as a pinned Git dependency.
+
+MIT License
+
+Copyright (c) 2026 ykwyuta
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+Source provenance
+=================
+
+The DRDA/DDM client, SQL implementation, original protocol tests, and
+CCSID 37 conversion table were extracted from ykwyuta/Zeus,
+commit bc18da0cf2c3e429d4458062c96f959a87b2f376:
+
+- crates/zeus-drda/src/{client,ddm,sql}.rs
+- crates/zeus-drda/tests/db2.rs
+- crates/zeus-cobol/src/ebcdic.rs
+
+Upstream: https://github.com/ykwyuta/Zeus
+
+This standalone distribution is licensed under the MIT License; see LICENSE.
+The standalone adaptation removes all Zeus workspace and runtime dependencies,
+uses fixed CCSID 37 for DDM control strings, and provides independent packaging,
+documentation, examples, configuration, and tests.
+
 
 
 ## postgres-0.19.14 / LICENSE-MIT

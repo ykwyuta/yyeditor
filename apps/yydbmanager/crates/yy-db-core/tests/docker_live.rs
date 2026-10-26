@@ -37,9 +37,7 @@ fn all_five_remote_databases() {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             validate(&connection, &directory)
         }))
-        .unwrap_or_else(|_| {
-            Err("ODBCドライバーで例外が発生しました。64bit SQLLENのABIを確認してください".into())
-        });
+        .unwrap_or_else(|_| Err("DBドライバーで予期しない例外が発生しました".into()));
         match result {
             Ok(summary) => {
                 println!("{}: {summary}", kind.name());
@@ -146,12 +144,6 @@ fn validate(config: &Connection, directory: &std::path::Path) -> yy_db_core::Res
         match Database::open(&options) {
             Ok(db) => break db,
             Err(error) => {
-                if error.contains("SQLAllocHandle")
-                    || error.contains("Can't open lib")
-                    || error.contains("IM002")
-                {
-                    return Err(error);
-                }
                 if started.elapsed() > Duration::from_secs(300) {
                     return Err(error);
                 }
@@ -234,6 +226,16 @@ fn validate(config: &Connection, directory: &std::path::Path) -> yy_db_core::Res
         return Err("列メタデータが一致しません".into());
     }
     if config.kind == DbKind::Db2 {
+        let temporary = db.execute(
+            "SELECT COUNT(*) FROM SYSCAT.TABLESPACES WHERE DATATYPE='U'",
+            &cancel,
+        )?;
+        if temporary[0].page(0, 1)?[0][0].display().trim() == "0" {
+            db.execute(
+                "CREATE USER TEMPORARY TABLESPACE YYDBMANAGER_TEMP MANAGED BY AUTOMATIC STORAGE",
+                &cancel,
+            )?;
+        }
         let counts=db.execute("SELECT COUNT(*) FROM SYSCAT.TABLES WHERE TABSCHEMA=CURRENT SCHEMA AND TABNAME='EXPLAIN_OPERATOR'",&cancel)?;
         if counts[0].page(0, 1)?[0][0].display().trim() == "0" {
             db.execute("CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN','C',CAST(NULL AS VARCHAR(128)),CURRENT SCHEMA)",&cancel)?;
@@ -245,10 +247,16 @@ fn validate(config: &Connection, directory: &std::path::Path) -> yy_db_core::Res
         if monitor[0].page(0, 1)?[0][0].display().trim() == "0" {
             db.execute("CREATE EVENT MONITOR YYDBMANAGER_ACTIVITY FOR ACTIVITIES WRITE TO TABLE MANUALSTART",&cancel)?;
         }
+        // DRDA uses explicit transactions; event monitors must be committed before activation.
+        db.execute("COMMIT", &cancel)?;
         db.execute("SET EVENT MONITOR YYDBMANAGER_ACTIVITY STATE 1", &cancel)?;
     }
     let imported_table = yy_db_core::sql::identifier_for(config.kind, "YYDB_IMPORTED")?;
     let _ = db.execute(&format!("DROP TABLE {imported_table}"), &cancel);
+    if config.kind == DbKind::Db2 {
+        // Release DDL locks before the import opens its own connection.
+        db.execute("COMMIT", &cancel)?;
+    }
     db.import_into(set, "YYDB_IMPORTED", true)?;
     let imported = db.execute(
         &format!("SELECT * FROM {imported_table} ORDER BY 1"),
@@ -587,7 +595,7 @@ fn collection_setting(
     let query = match kind {
         DbKind::Oracle => "SELECT VALUE FROM V$PARAMETER WHERE NAME='statistics_level'",
         DbKind::Db2 => {
-            "SELECT XMLSERIALIZE(XMLPARSE(DOCUMENT DETAILS) AS CLOB(8192)) FROM TABLE(SYSPROC.WLM_GET_CONN_ENV(CAST(NULL AS BIGINT))) AS E"
+            "SELECT XMLSERIALIZE(XMLPARSE(DOCUMENT DETAILS) AS VARCHAR(8192)) FROM TABLE(SYSPROC.WLM_GET_CONN_ENV(CAST(NULL AS BIGINT))) AS E"
         }
         _ => return Ok(String::new()),
     };

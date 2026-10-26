@@ -1,7 +1,7 @@
 # yydbmanager third-party notices
 
 yydbmanager and the yy series shared components are GPL-3.0-or-later.
-Native database drivers and the Zeus DRDA port are described in the bundled
+Native database drivers, including rust-db2-driver, are described in the bundled
 THIRD-PARTY-NOTICES.md, including the exact upstream source revision and licenses.
 See the repository's COPYING. Source: https://github.com/ykwyuta/yyeditor
 
@@ -17,9 +17,8 @@ License 1.1; see crates/yy-win/fonts/LICENSE-UDEVGothic.txt.
 The database workspace uses SQLite (public domain) through rusqlite and
 libsqlite3-sys, and DuckDB through duckdb-rs and libduckdb-sys (MIT).
 The exact versions and transitive dependencies are in this workspace's Cargo.lock.
-ODBC drivers for external databases are supplied by the user and are not part
-of the yydbmanager application distribution. The Docker validation image is
-separate from the application distribution.
+External databases use Rust drivers. The Docker validation image is separate
+from the application distribution.
 
 ## DuckDB
 

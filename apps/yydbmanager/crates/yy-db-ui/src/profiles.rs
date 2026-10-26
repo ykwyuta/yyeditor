@@ -13,9 +13,6 @@ pub struct Profile {
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ConnectionDetails {
-    #[serde(default)]
-    pub native: bool,
-    pub driver: String,
     pub server: String,
     pub port: String,
     pub database: String,
@@ -114,14 +111,12 @@ fn demo_profiles(path: &Path) -> Result<Vec<Profile>> {
             kind,
             target: config.encode()?,
             details: Some(ConnectionDetails {
-                native: true,
                 server: config.host,
                 port: port.to_string(),
                 database: config.database,
                 username: config.username,
                 password: config.password,
                 options: r#"{"tls":"disable"}"#.into(),
-                ..Default::default()
             }),
         })
     })
@@ -273,7 +268,6 @@ mod tests {
             config.validate().unwrap();
             assert_eq!(config.host, "127.0.0.1");
             assert_eq!(config.tls, "disable");
-            assert!(profile.details.as_ref().unwrap().native);
         }
         profiles[0].name = "自分の接続".into();
         profiles.remove(1);

@@ -1,6 +1,4 @@
 use crate::{Column, Result, ResultSet, Value};
-#[cfg(feature = "odbc")]
-use odbc_api::{Cursor, ResultSetMetadata};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -44,24 +42,6 @@ impl DbKind {
         }
     }
 }
-#[cfg(not(feature = "odbc"))]
-const ODBC_DISABLED: &str =
-    "このビルドはODBCに対応していません。yynative:の直接接続を使用してください";
-#[cfg(not(feature = "odbc"))]
-pub fn odbc_drivers() -> Result<Vec<String>> {
-    Err(ODBC_DISABLED.into())
-}
-#[cfg(feature = "odbc")]
-pub fn odbc_drivers() -> Result<Vec<String>> {
-    Ok(odbc_api::environment()
-        .map_err(|e| e.to_string())?
-        .drivers()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|d| d.description)
-        .collect())
-}
-
 #[derive(Clone, Debug)]
 pub struct Options {
     pub kind: DbKind,
@@ -83,8 +63,6 @@ impl Options {
 pub enum Database {
     Sqlite(rusqlite::Connection),
     Duck(duckdb::Connection),
-    #[cfg(feature = "odbc")]
-    Odbc(DbKind, odbc_api::Connection<'static>, String),
     Native(DbKind, Box<crate::native::Connection>),
 }
 pub struct Cancellation {
@@ -150,45 +128,14 @@ impl Database {
                         Box::new(crate::native::Connection::open(kind, config, o.read_only)?),
                     ));
                 }
-                Self::open_odbc(kind, o)
+                Err("接続設定を開き、サーバー・ポート・DB名・認証情報を入力し直してください。外部DBはRust直接接続を使用します".into())
             }
         }
-    }
-    #[cfg(feature = "odbc")]
-    fn open_odbc(kind: DbKind, o: &Options) -> Result<Self> {
-        if o.connection_string.trim().is_empty() {
-            return Err(
-                "ODBC接続文字列を指定してください（対応する64bitドライバーが必要です）".into(),
-            );
-        }
-        let c = odbc_api::environment()
-            .map_err(|e| e.to_string())?
-            .connect_with_connection_string(
-                &o.connection_string,
-                odbc_api::ConnectionOptions {
-                    login_timeout_sec: Some(30),
-                    ..Default::default()
-                },
-            )
-            .map_err(|e| e.to_string())?;
-        if o.read_only {
-            return Err(
-                "ODBC接続の読み取り専用強制は未実装です。DB側の読み取り専用権限を使用してください"
-                    .into(),
-            );
-        }
-        Ok(Self::Odbc(kind, c, o.connection_string.clone()))
-    }
-    #[cfg(not(feature = "odbc"))]
-    fn open_odbc(_: DbKind, _: &Options) -> Result<Self> {
-        Err(ODBC_DISABLED.into())
     }
     pub fn kind(&self) -> DbKind {
         match self {
             Self::Sqlite(_) => DbKind::Sqlite,
             Self::Duck(_) => DbKind::DuckDb,
-            #[cfg(feature = "odbc")]
-            Self::Odbc(k, ..) => *k,
             Self::Native(k, ..) => *k,
         }
     }
@@ -202,8 +149,6 @@ impl Database {
                 let h = c.interrupt_handle();
                 Box::new(move || h.interrupt())
             }
-            #[cfg(feature = "odbc")]
-            Self::Odbc(..) => Box::new(|| {}),
             Self::Native(_, c) => c.interrupter(),
         };
         Cancellation {
@@ -297,80 +242,6 @@ impl Database {
                 }
                 set.finish()?;
                 results.push(set);
-            }
-            #[cfg(feature = "odbc")]
-            Self::Odbc(_, c, _) => {
-                let mut next = c.execute(sql, (), Some(60)).map_err(|e| e.to_string())?;
-                while let Some(mut cursor) = next {
-                    let count = cursor.num_result_cols().map_err(|e| e.to_string())? as usize;
-                    let names = cursor
-                        .column_names()
-                        .map_err(|e| e.to_string())?
-                        .collect::<std::result::Result<Vec<_>, _>>()
-                        .map_err(|e| e.to_string())?;
-                    let mut types = vec![];
-                    for i in 1..=count {
-                        types.push(cursor.col_data_type(i as u16).map_err(|e| e.to_string())?);
-                    }
-                    let mut set = ResultSet::new(
-                        names
-                            .into_iter()
-                            .zip(&types)
-                            .map(|(name, t)| Column {
-                                name,
-                                type_name: format!("{t:?}"),
-                            })
-                            .collect(),
-                    )?;
-                    while let Some(mut row) = cursor.next_row().map_err(|e| e.to_string())? {
-                        if cancel.load(Ordering::Relaxed) {
-                            return Err(
-                                "取消要求を受け付けました。ODBCの実行中取消には未対応です".into()
-                            );
-                        }
-                        let mut values = vec![];
-                        for (i, t) in types.iter().enumerate() {
-                            let mut text = vec![];
-                            let mut binary = vec![];
-                            let v = if matches!(
-                                t,
-                                odbc_api::DataType::Binary { .. }
-                                    | odbc_api::DataType::Varbinary { .. }
-                                    | odbc_api::DataType::LongVarbinary { .. }
-                            ) {
-                                if row
-                                    .get_binary((i + 1) as u16, &mut binary)
-                                    .map_err(|e| e.to_string())?
-                                {
-                                    Value::Binary(binary)
-                                } else {
-                                    Value::Null
-                                }
-                            } else if row
-                                .get_wide_text((i + 1) as u16, &mut text)
-                                .map_err(|e| e.to_string())?
-                            {
-                                let text = String::from_utf16(&text).map_err(|e| e.to_string())?;
-                                match t {
-                                    odbc_api::DataType::Numeric { .. }
-                                    | odbc_api::DataType::Decimal { .. } => Value::Decimal(text),
-                                    odbc_api::DataType::Integer
-                                    | odbc_api::DataType::SmallInt
-                                    | odbc_api::DataType::BigInt
-                                    | odbc_api::DataType::TinyInt => Value::Integer(text),
-                                    _ => Value::Text(text),
-                                }
-                            } else {
-                                Value::Null
-                            };
-                            values.push(v);
-                        }
-                        set.push(&values)?;
-                    }
-                    set.finish()?;
-                    results.push(set);
-                    next = cursor.more_results().map_err(|e| e.to_string())?;
-                }
             }
         }
         Ok(results)
@@ -549,11 +420,7 @@ impl Database {
                     DbKind::Db2,
                     sets.first().ok_or("計画がありません")?,
                 )?;
-                let predicate_column = if matches!(self, Self::Native(..)) {
-                    "CAST(p.PREDICATE_TEXT AS VARCHAR(32672)) AS PREDICATE_TEXT,OCTET_LENGTH(p.PREDICATE_TEXT) AS PREDICATE_BYTES"
-                } else {
-                    "p.PREDICATE_TEXT"
-                };
+                let predicate_column = "CAST(p.PREDICATE_TEXT AS VARCHAR(32672)) AS PREDICATE_TEXT,OCTET_LENGTH(p.PREDICATE_TEXT) AS PREDICATE_BYTES";
                 let predicates=self.query(&format!("WITH stmt AS (SELECT * FROM EXPLAIN_STATEMENT WHERE QUERYNO={queryno} AND EXPLAIN_REQUESTER=CURRENT USER AND EXPLAIN_LEVEL='P' ORDER BY EXPLAIN_TIME DESC FETCH FIRST 1 ROW ONLY) SELECT p.OPERATOR_ID,p.PREDICATE_ID,p.HOW_APPLIED,{predicate_column} FROM EXPLAIN_PREDICATE p JOIN stmt t ON {} ORDER BY p.OPERATOR_ID,p.PREDICATE_ID",key("p")),cancel)?;
                 if let Some(set) = predicates.first() {
                     let rows = set.page(0, 10_000)?;
@@ -562,7 +429,7 @@ impl Database {
                             .get(4)
                             .is_some_and(|v| v.display().parse::<u64>().is_ok_and(|n| n > 32672))
                         {
-                            return Err("Db2直接接続の述語サイズ上限（32672バイト）を超えています。ODBC接続または保存計画を使用してください".into());
+                            return Err("Db2直接接続の述語サイズ上限（32672バイト）を超えています。保存計画を使用してください".into());
                         }
                         if let Some(node) = row
                             .first()
@@ -589,10 +456,6 @@ impl Database {
     pub fn import_into(&mut self, set: &ResultSet, table: &str, create: bool) -> Result<u64> {
         if let Self::Native(_, c) = self {
             return c.import(set, table, create);
-        }
-        #[cfg(feature = "odbc")]
-        if let Self::Odbc(kind, _, connection) = self {
-            return import_odbc(*kind, connection, set, table, create);
         }
         let table = crate::sql::identifier(table)?;
         let fields = set
@@ -653,10 +516,6 @@ impl Database {
                             c.execute(&sql, duckdb::params_from_iter(values))
                                 .map_err(|e| e.to_string())?;
                         }
-                        #[cfg(feature = "odbc")]
-                        Self::Odbc(..) => {
-                            return Err("外部DBは専用インポートを使用してください".into());
-                        }
                         Self::Native(..) => {
                             return Err("外部DBは専用インポートを使用してください".into());
                         }
@@ -683,123 +542,11 @@ impl Database {
     }
 }
 
-// Imports use a separate connection so they cannot commit a SQL tab's transaction.
-#[cfg(feature = "odbc")]
-fn import_odbc(
-    kind: DbKind,
-    connection: &str,
-    set: &ResultSet,
-    table: &str,
-    create: bool,
-) -> Result<u64> {
-    use odbc_api::IntoParameter;
-    use odbc_api::parameter::{InputParameter, VarWCharBox};
-    let c = odbc_api::environment()
-        .map_err(|e| e.to_string())?
-        .connect_with_connection_string(
-            connection,
-            odbc_api::ConnectionOptions {
-                login_timeout_sec: Some(30),
-                ..Default::default()
-            },
-        )
-        .map_err(|e| e.to_string())?;
-    let table = crate::sql::identifier_for(kind, table)?;
-    let fields = set
-        .columns
-        .iter()
-        .map(|c| crate::sql::identifier_for(kind, &c.name))
-        .collect::<Result<Vec<_>>>()?;
-    if create {
-        let definitions = set
-            .columns
-            .iter()
-            .zip(&fields)
-            .map(|(column, name)| {
-                let t = column.type_name.to_ascii_lowercase();
-                let ty = if t.contains("decimal") || t.contains("numeric") {
-                    let nums = t
-                        .split(|c: char| !c.is_ascii_digit())
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>();
-                    if nums.len() >= 2 {
-                        format!("DECIMAL({},{})", nums[0], nums[1])
-                    } else {
-                        "DECIMAL(31,8)".into()
-                    }
-                } else if t.contains("int") {
-                    if kind == DbKind::Oracle {
-                        "NUMBER(19)".into()
-                    } else {
-                        "BIGINT".into()
-                    }
-                } else {
-                    match kind {
-                        DbKind::SqlServer => "NVARCHAR(1024)",
-                        DbKind::Oracle => "VARCHAR2(1024 CHAR)",
-                        _ => "VARCHAR(1024)",
-                    }
-                    .into()
-                };
-                format!("{name} {ty}")
-            })
-            .collect::<Vec<_>>();
-        c.execute(
-            &format!("CREATE TABLE {table} ({})", definitions.join(",")),
-            (),
-            Some(60),
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    c.set_autocommit(false).map_err(|e| e.to_string())?;
-    let sql = format!(
-        "INSERT INTO {table} ({}) VALUES ({})",
-        fields.join(","),
-        vec!["?"; fields.len()].join(",")
-    );
-    let run = (|| -> Result<()> {
-        let mut start = 0;
-        while start < set.row_count {
-            for row in set.page(start, 512)? {
-                let params = row
-                    .into_iter()
-                    .map(|v| -> Box<dyn InputParameter> {
-                        match v {
-                            Value::Null => Box::new(VarWCharBox::null()),
-                            Value::Binary(b) => Box::new(b.into_parameter()),
-                            v => Box::new(VarWCharBox::from_str_slice(&v.display())),
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                c.execute(&sql, params.as_slice(), Some(60))
-                    .map_err(|e| e.to_string())?;
-            }
-            start += 512;
-        }
-        Ok(())
-    })();
-    match run {
-        Ok(()) => {
-            c.commit().map_err(|e| e.to_string())?;
-            Ok(set.row_count)
-        }
-        Err(e) => {
-            let rollback = c.rollback();
-            Err(if let Err(r) = rollback {
-                format!("{e}; rollback failed: {r}")
-            } else {
-                e
-            })
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(not(feature = "odbc"))]
     #[test]
-    fn odbc_connection_strings_fail_without_the_odbc_feature() {
+    fn legacy_connection_strings_require_reconfiguration() {
         let options = Options {
             kind: DbKind::PostgreSql,
             path: None,
@@ -807,10 +554,9 @@ mod tests {
             read_only: false,
         };
         let Err(error) = Database::open(&options) else {
-            panic!("ODBC connection opened without the odbc feature");
+            panic!("legacy connection opened");
         };
-        assert_eq!(error, ODBC_DISABLED);
-        assert_eq!(odbc_drivers().unwrap_err(), ODBC_DISABLED);
+        assert!(error.contains("入力し直してください"));
     }
     #[test]
     fn failed_import_rolls_back_partial_data() {

@@ -394,18 +394,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: ODBC build dependency
-        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "apps/yydbmanager -> target"
           key: yydbmanager-linux
       - name: Test
         run: cargo test --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --locked
-      - name: Lint and test without ODBC
+      - name: Format and lint
         run: |
-          cargo clippy --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --all-targets --no-default-features --locked -- -D warnings
-          cargo test --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --no-default-features --locked
+          cargo fmt --manifest-path apps/yydbmanager/Cargo.toml --all -- --check
+          cargo clippy --manifest-path apps/yydbmanager/Cargo.toml --workspace --all-targets --locked -- -D warnings
   dbmanager-docker-live:
     name: yydbmanager real DB (${{ matrix.name }})
     if: github.event_name == 'workflow_dispatch' && inputs.docker_databases
@@ -426,10 +426,6 @@ jobs:
         run: docker compose -p yydbmanager-validation -f apps/yydbmanager/tests/docker/compose.yml up -d ${{ matrix.service }}
       - name: Build validation runner
         run: docker build -t yydbmanager-validation-runner -f apps/yydbmanager/tests/docker/runner.Dockerfile .
-      - name: Prepare Db2 ODBC instance profile
-        if: matrix.service == 'db2'
-        shell: pwsh
-        run: ./apps/yydbmanager/tests/docker/prepare-db2.ps1 -OutputDirectory '${{ runner.temp }}/db-build'
       - name: Real connection, types, import, export and plans
         env:
           YYDB_FILTER: ${{ matrix.name }}
