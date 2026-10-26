@@ -136,6 +136,14 @@ impl Database {
         statement: &str,
         cancel: &AtomicBool,
     ) -> Result<crate::plan::Plan> {
+        // EXPLAIN_FROM_ACTIVITY needs ODBC output parameters; refuse before running the statement.
+        #[cfg(feature = "odbc")]
+        let odbc = matches!(self, Database::Odbc(..));
+        #[cfg(not(feature = "odbc"))]
+        let odbc = false;
+        if !odbc {
+            return Err("Db2の実測計画にはODBC接続が必要です。SQLは実行していません".into());
+        }
         let monitor = "YYDBMANAGER_ACTIVITY";
         let targets=self.query("SELECT TABSCHEMA,TABNAME FROM SYSCAT.EVENTTABLES WHERE EVMONNAME='YYDBMANAGER_ACTIVITY' AND LOGICAL_GROUP='ACTIVITYSTMT'",cancel)?;
         let table=first(&targets).map_err(|_|"Db2の実測取得には稼働中のYYDBMANAGER_ACTIVITYモニターが必要です。実行計画メニューの『Db2実測収集の準備SQL』をDB管理者が実行してください".to_owned())?;
@@ -341,6 +349,18 @@ fn connection_environment(xml: &str) -> Result<String> {
     Ok(out)
 }
 
+#[cfg(not(feature = "odbc"))]
+fn explain_activity_key(
+    _: &mut Database,
+    _: &str,
+    _: u64,
+    _: u64,
+    _: &str,
+    _: &str,
+) -> Result<String> {
+    Err("Db2 ODBC接続が必要です".into())
+}
+#[cfg(feature = "odbc")]
 fn explain_activity_key(
     db: &mut Database,
     appl: &str,

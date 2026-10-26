@@ -22,6 +22,8 @@ cargo clippy --manifest-path apps/yydbmanager/Cargo.toml --workspace --all-targe
 WindowsのビルドにはVisual Studio 2022のC++ビルドツールを使用します。固定しているDuckDB 1.4.1の同梱fmtは、Visual Studio 2026で削除された`stdext::checked_array_iterator`を使用するため、共通CI内のDBジョブも`windows-2022`を指定しています。DuckDB側の[修正](https://github.com/duckdb/duckdb/pull/23261)を含む版への更新と検証後に、新しいツールチェーンへ移行します。
 
 SQLiteとDuckDBは静的リンクしており、別途DBサーバー・CLIを導入せず使えます。
+
+`yy-db-core` の既定機能 `odbc` は `odbc-api` を有効にし、汎用ODBC接続文字列とDb2の実測計画（`EXPLAIN_FROM_ACTIVITY` の出力パラメーター）に使用します。この機能はWindowsの `odbc32`、Linuxの unixODBC（`libodbc.so.2`）へリンクします。yydbmanagerは既定のまま使用します。ODBCのドライバーマネージャーに依存させない利用側は `default-features = false` を指定します。その場合も `yynative:` の直接接続、SQLite、DuckDB、計画ファイル、ER、転送は使用できます。ODBC接続文字列は接続時にエラーとなり、Db2の実測計画は対象SQLを実行する前に拒否します。
 同梱フォントは他のyyシリーズと同じUDEV Gothicです。
 アプリアイコンも共通のYYデザインを使い、青緑の背景とデータベースの記号で識別できます。
 

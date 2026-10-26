@@ -1,4 +1,5 @@
 use crate::{Column, Result, ResultSet, Value};
+#[cfg(feature = "odbc")]
 use odbc_api::{Cursor, ResultSetMetadata};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,6 +44,14 @@ impl DbKind {
         }
     }
 }
+#[cfg(not(feature = "odbc"))]
+const ODBC_DISABLED: &str =
+    "このビルドはODBCに対応していません。yynative:の直接接続を使用してください";
+#[cfg(not(feature = "odbc"))]
+pub fn odbc_drivers() -> Result<Vec<String>> {
+    Err(ODBC_DISABLED.into())
+}
+#[cfg(feature = "odbc")]
 pub fn odbc_drivers() -> Result<Vec<String>> {
     Ok(odbc_api::environment()
         .map_err(|e| e.to_string())?
@@ -74,6 +83,7 @@ impl Options {
 pub enum Database {
     Sqlite(rusqlite::Connection),
     Duck(duckdb::Connection),
+    #[cfg(feature = "odbc")]
     Odbc(DbKind, odbc_api::Connection<'static>, String),
     Native(DbKind, Box<crate::native::Connection>),
 }
@@ -140,34 +150,46 @@ impl Database {
                         Box::new(crate::native::Connection::open(kind, config, o.read_only)?),
                     ));
                 }
-                if o.connection_string.trim().is_empty() {
-                    return Err(
-                        "ODBC接続文字列を指定してください（対応する64bitドライバーが必要です）"
-                            .into(),
-                    );
-                }
-                let c = odbc_api::environment()
-                    .map_err(|e| e.to_string())?
-                    .connect_with_connection_string(
-                        &o.connection_string,
-                        odbc_api::ConnectionOptions {
-                            login_timeout_sec: Some(30),
-                            ..Default::default()
-                        },
-                    )
-                    .map_err(|e| e.to_string())?;
-                if o.read_only {
-                    return Err("ODBC接続の読み取り専用強制は未実装です。DB側の読み取り専用権限を使用してください".into());
-                }
-                Ok(Self::Odbc(kind, c, o.connection_string.clone()))
+                Self::open_odbc(kind, o)
             }
         }
+    }
+    #[cfg(feature = "odbc")]
+    fn open_odbc(kind: DbKind, o: &Options) -> Result<Self> {
+        if o.connection_string.trim().is_empty() {
+            return Err(
+                "ODBC接続文字列を指定してください（対応する64bitドライバーが必要です）".into(),
+            );
+        }
+        let c = odbc_api::environment()
+            .map_err(|e| e.to_string())?
+            .connect_with_connection_string(
+                &o.connection_string,
+                odbc_api::ConnectionOptions {
+                    login_timeout_sec: Some(30),
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        if o.read_only {
+            return Err(
+                "ODBC接続の読み取り専用強制は未実装です。DB側の読み取り専用権限を使用してください"
+                    .into(),
+            );
+        }
+        Ok(Self::Odbc(kind, c, o.connection_string.clone()))
+    }
+    #[cfg(not(feature = "odbc"))]
+    fn open_odbc(_: DbKind, _: &Options) -> Result<Self> {
+        Err(ODBC_DISABLED.into())
     }
     pub fn kind(&self) -> DbKind {
         match self {
             Self::Sqlite(_) => DbKind::Sqlite,
             Self::Duck(_) => DbKind::DuckDb,
-            Self::Odbc(k, ..) | Self::Native(k, ..) => *k,
+            #[cfg(feature = "odbc")]
+            Self::Odbc(k, ..) => *k,
+            Self::Native(k, ..) => *k,
         }
     }
     pub fn cancellation(&self) -> Cancellation {
@@ -180,6 +202,7 @@ impl Database {
                 let h = c.interrupt_handle();
                 Box::new(move || h.interrupt())
             }
+            #[cfg(feature = "odbc")]
             Self::Odbc(..) => Box::new(|| {}),
             Self::Native(_, c) => c.interrupter(),
         };
@@ -275,6 +298,7 @@ impl Database {
                 set.finish()?;
                 results.push(set);
             }
+            #[cfg(feature = "odbc")]
             Self::Odbc(_, c, _) => {
                 let mut next = c.execute(sql, (), Some(60)).map_err(|e| e.to_string())?;
                 while let Some(mut cursor) = next {
@@ -566,6 +590,7 @@ impl Database {
         if let Self::Native(_, c) = self {
             return c.import(set, table, create);
         }
+        #[cfg(feature = "odbc")]
         if let Self::Odbc(kind, _, connection) = self {
             return import_odbc(*kind, connection, set, table, create);
         }
@@ -628,7 +653,11 @@ impl Database {
                             c.execute(&sql, duckdb::params_from_iter(values))
                                 .map_err(|e| e.to_string())?;
                         }
-                        Self::Odbc(..) | Self::Native(..) => {
+                        #[cfg(feature = "odbc")]
+                        Self::Odbc(..) => {
+                            return Err("外部DBは専用インポートを使用してください".into());
+                        }
+                        Self::Native(..) => {
                             return Err("外部DBは専用インポートを使用してください".into());
                         }
                     }
@@ -655,6 +684,7 @@ impl Database {
 }
 
 // Imports use a separate connection so they cannot commit a SQL tab's transaction.
+#[cfg(feature = "odbc")]
 fn import_odbc(
     kind: DbKind,
     connection: &str,
@@ -767,6 +797,21 @@ fn import_odbc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "odbc"))]
+    #[test]
+    fn odbc_connection_strings_fail_without_the_odbc_feature() {
+        let options = Options {
+            kind: DbKind::PostgreSql,
+            path: None,
+            connection_string: "Driver={PostgreSQL Unicode};Server=127.0.0.1".into(),
+            read_only: false,
+        };
+        let Err(error) = Database::open(&options) else {
+            panic!("ODBC connection opened without the odbc feature");
+        };
+        assert_eq!(error, ODBC_DISABLED);
+        assert_eq!(odbc_drivers().unwrap_err(), ODBC_DISABLED);
+    }
     #[test]
     fn failed_import_rolls_back_partial_data() {
         let mut db = Database::open(&Options::memory(DbKind::Sqlite)).unwrap();
