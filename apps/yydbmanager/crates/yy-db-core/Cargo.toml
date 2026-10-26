@@ -13,7 +13,7 @@ thiserror.workspace = true
 tempfile.workspace = true
 rusqlite = { version = "=0.40.2", features = ["bundled", "column_decltype"] }
 duckdb = { version = "=1.4.1", features = ["bundled"] }
-odbc-api = { version = "=29.2.0", features = ["wide"] }
+odbc-api = { version = "=29.2.0", features = ["wide"], optional = true }
 postgres = { version = "=0.19.14", features = ["with-chrono-0_4"] }
 chrono = "0.4"
 postgres-native-tls = "0.5"
@@ -30,6 +30,12 @@ roxmltree = "0.21"
 yy-cobol = { path = "../../../../crates/yy-cobol" }
 yy-draw = { path = "../../../../crates/yy-draw" }
 yy-sheet = { path = "../../../../crates/yy-sheet" }
+
+[features]
+# Generic ODBC connections and Db2 actual plans link the system ODBC driver manager.
+# Direct (yynative:) connections, SQLite and DuckDB do not need it.
+default = ["odbc"]
+odbc = ["dep:odbc-api"]
 
 [lints.rust]
 unsafe_code = "deny"

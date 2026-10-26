@@ -402,6 +402,10 @@ jobs:
           key: yydbmanager-linux
       - name: Test
         run: cargo test --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --locked
+      - name: Lint and test without ODBC
+        run: |
+          cargo clippy --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --all-targets --no-default-features --locked -- -D warnings
+          cargo test --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --no-default-features --locked
   dbmanager-docker-live:
     name: yydbmanager real DB (${{ matrix.name }})
     if: github.event_name == 'workflow_dispatch' && inputs.docker_databases
