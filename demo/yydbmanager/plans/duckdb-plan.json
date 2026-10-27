@@ -1,0 +1,116 @@
+{
+    "query_name": "SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id",
+    "blocked_thread_time": 0.0,
+    "system_peak_buffer_memory": 8734720,
+    "system_peak_temp_dir_size": 0,
+    "cpu_time": 0.000131,
+    "extra_info": {},
+    "cumulative_cardinality": 3648,
+    "cumulative_rows_scanned": 1200,
+    "result_set_size": 288,
+    "latency": 0.0018831,
+    "rows_returned": 24,
+    "total_bytes_read": 0,
+    "total_bytes_written": 0,
+    "children": [
+        {
+            "cpu_time": 0.000131,
+            "extra_info": {
+                "Projections": [
+                    "__internal_decompress_integral_integer(#0, 1)",
+                    "#1"
+                ],
+                "Estimated Cardinality": "24"
+            },
+            "cumulative_cardinality": 3648,
+            "operator_name": "PROJECTION",
+            "operator_type": "PROJECTION",
+            "operator_cardinality": 24,
+            "cumulative_rows_scanned": 1200,
+            "operator_rows_scanned": 0,
+            "operator_timing": 0.0000058,
+            "result_set_size": 288,
+            "total_bytes_read": 0,
+            "total_bytes_written": 0,
+            "children": [
+                {
+                    "cpu_time": 0.0001252,
+                    "extra_info": {
+                        "Groups": "#0",
+                        "Aggregates": "count_star()"
+                    },
+                    "cumulative_cardinality": 3624,
+                    "operator_name": "PERFECT_HASH_GROUP_BY",
+                    "operator_type": "PERFECT_HASH_GROUP_BY",
+                    "operator_cardinality": 24,
+                    "cumulative_rows_scanned": 1200,
+                    "operator_rows_scanned": 0,
+                    "operator_timing": 0.0000463,
+                    "result_set_size": 216,
+                    "total_bytes_read": 0,
+                    "total_bytes_written": 0,
+                    "children": [
+                        {
+                            "cpu_time": 0.0000789,
+                            "extra_info": {
+                                "Projections": "customer_id",
+                                "Estimated Cardinality": "1200"
+                            },
+                            "cumulative_cardinality": 3600,
+                            "operator_name": "PROJECTION",
+                            "operator_type": "PROJECTION",
+                            "operator_cardinality": 1200,
+                            "cumulative_rows_scanned": 1200,
+                            "operator_rows_scanned": 0,
+                            "operator_timing": 9e-7,
+                            "result_set_size": 1200,
+                            "total_bytes_read": 0,
+                            "total_bytes_written": 0,
+                            "children": [
+                                {
+                                    "cpu_time": 0.000078,
+                                    "extra_info": {
+                                        "Projections": "__internal_compress_integral_utinyint(#0, 1)",
+                                        "Estimated Cardinality": "1200"
+                                    },
+                                    "cumulative_cardinality": 2400,
+                                    "operator_name": "PROJECTION",
+                                    "operator_type": "PROJECTION",
+                                    "operator_cardinality": 1200,
+                                    "cumulative_rows_scanned": 1200,
+                                    "operator_rows_scanned": 0,
+                                    "operator_timing": 0.0000127,
+                                    "result_set_size": 1200,
+                                    "total_bytes_read": 0,
+                                    "total_bytes_written": 0,
+                                    "children": [
+                                        {
+                                            "cpu_time": 0.0000653,
+                                            "extra_info": {
+                                                "Table": "orders",
+                                                "Type": "Sequential Scan",
+                                                "Projections": "customer_id",
+                                                "Estimated Cardinality": "1200"
+                                            },
+                                            "cumulative_cardinality": 1200,
+                                            "operator_name": "SEQ_SCAN ",
+                                            "operator_type": "TABLE_SCAN",
+                                            "operator_cardinality": 1200,
+                                            "cumulative_rows_scanned": 1200,
+                                            "operator_rows_scanned": 1200,
+                                            "operator_timing": 0.0000653,
+                                            "result_set_size": 4800,
+                                            "total_bytes_read": 0,
+                                            "total_bytes_written": 0,
+                                            "children": []
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

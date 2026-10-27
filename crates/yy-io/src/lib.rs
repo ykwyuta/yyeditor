@@ -2,7 +2,7 @@
 //!
 //! 巨大ファイルは読み込まずにメモリマップし、ピースツリーから直接参照する。
 //! 保存は一時ファイルに書き出してから置き換える（06 章 3）。
-//! 詳細は `docs/proposal/02-buffer-large-file.md` 4 章を参照。
+//! 詳細は `docs/developer/buffer-io-jobs.md`を参照。
 
 // mmap の作成は unsafe を必要とする（ファイルが外部で変更されないことを共有モードで保証する）
 #![allow(unsafe_code)]

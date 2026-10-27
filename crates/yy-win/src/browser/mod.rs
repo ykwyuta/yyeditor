@@ -3853,6 +3853,8 @@ mod tests {
         let options: ICoreWebView2EnvironmentOptions = options.into();
         let result: Rc<RefCell<Option<bool>>> = Rc::default();
         let failed: Rc<RefCell<Option<String>>> = Rc::default();
+        let controller: Rc<RefCell<Option<ICoreWebView2Controller>>> = Rc::default();
+        let controller_for_callback = controller.clone();
         let (r, f) = (result.clone(), failed.clone());
         let url = url.to_owned();
         let profile = profile.clone();
@@ -3863,6 +3865,7 @@ mod tests {
                     return Ok(());
                 };
                 let (r, f, url, profile) = (r.clone(), f.clone(), url.clone(), profile.clone());
+                let controller = controller_for_callback.clone();
                 let on_controller = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
                     move |res: Result<()>, c: Option<ICoreWebView2Controller>| {
                         let Some(c) = c.filter(|_| res.is_ok()) else {
@@ -3908,7 +3911,7 @@ mod tests {
                             )?;
                         }
                         // 環境・表示を手放さないよう、終わるまで持っておく
-                        std::mem::forget(c);
+                        *controller.borrow_mut() = Some(c);
                         unsafe { w.Navigate(&HSTRING::from(url.as_str()))? };
                         Ok(())
                     },
@@ -3916,7 +3919,6 @@ mod tests {
                 unsafe {
                     env.CreateCoreWebView2Controller(parent, &on_controller)?;
                 }
-                std::mem::forget(env);
                 Ok(())
             },
         ));
@@ -3935,6 +3937,11 @@ mod tests {
         crate::preview::testing::pump_until(Duration::from_secs(60), || {
             result.borrow().is_some() || failed.borrow().is_some()
         });
+        if let Some(c) = controller.borrow_mut().take() {
+            unsafe {
+                let _ = c.Close();
+            }
+        }
         if let Some(why) = failed.borrow_mut().take() {
             return Err(why);
         }

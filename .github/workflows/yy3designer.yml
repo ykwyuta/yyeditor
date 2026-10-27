@@ -1,0 +1,93 @@
+name: YY3Designer
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "apps/yy3designer/**"
+      - "demo/yy3designer/**"
+      - "crates/**"
+      - "apps/yyeditor/build.rs"
+      - "tools/gen-icon/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/yy3designer.yml"
+  pull_request:
+    paths:
+      - "apps/yy3designer/**"
+      - "demo/yy3designer/**"
+      - "crates/**"
+      - "apps/yyeditor/build.rs"
+      - "tools/gen-icon/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/yy3designer.yml"
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/yy3designer -> target"
+          key: yy3designer-windows
+      - name: Format
+        run: cargo fmt --manifest-path apps/yy3designer/Cargo.toml --all -- --check
+      - name: Lint
+        run: cargo clippy --manifest-path apps/yy3designer/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - name: Pixel editing, image conversion, reconstruction and file tests
+        run: cargo test --manifest-path apps/yy3designer/Cargo.toml --workspace --locked
+      - name: Build
+        run: cargo build --manifest-path apps/yy3designer/Cargo.toml --release --workspace --locked
+      - name: Native interaction, resizing, rendering and help
+        shell: pwsh
+        run: |
+          $taskExe = (Resolve-Path apps/yy3designer/target/release/yy3designer.exe).Path
+          foreach ($taskMode in @('0', '1')) {
+            if ($taskMode -eq '1') { $env:YY_HELP_TEXT_ONLY = '1' }
+            else { Remove-Item Env:YY_HELP_TEXT_ONLY -ErrorAction SilentlyContinue }
+            $taskProbe = Start-Process -FilePath $taskExe -ArgumentList '--ui-smoke-test',"ui-smoke-$taskMode" -WindowStyle Hidden -PassThru
+            if (-not $taskProbe.WaitForExit(60000)) { $taskProbe.Kill(); throw 'YY3Designer UI smoke timed out' }
+            if ($taskProbe.ExitCode -ne 0) { throw "YY3Designer UI smoke failed: $($taskProbe.ExitCode)" }
+            Get-Content "ui-smoke-$taskMode/ui-smoke.txt"
+          }
+          Remove-Item Env:YY_HELP_TEXT_ONLY -ErrorAction SilentlyContinue
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/yy3designer | Out-Null
+          Copy-Item apps/yy3designer/target/release/yy3designer.exe dist/yy3designer/
+          Copy-Item apps/yy3designer/README.md,apps/yy3designer/NOTICE.md dist/yy3designer/
+          Copy-Item -Recurse apps/yy3designer/help dist/yy3designer/
+          Copy-Item -Recurse demo/yy3designer dist/yy3designer/examples
+          Copy-Item COPYING,COPYING.EXCEPTION,crates/yy-win/fonts/LICENSE-UDEVGothic.txt dist/yy3designer/
+          Copy-Item crates/yy-preview/assets/LICENSE-*.txt dist/yy3designer/
+          Copy-Item crates/yy-config/LICENSE-FS2.txt dist/yy3designer/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yy3designer-windows-x64
+          path: dist/yy3designer/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yy3designer-ui-verification
+          path: ui-smoke-*/
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/yy3designer -> target"
+          key: yy3designer-linux
+      - name: Portable core lint
+        run: cargo clippy --manifest-path apps/yy3designer/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - name: Pixel, PNG, project and 3D regression tests
+        run: cargo test --manifest-path apps/yy3designer/Cargo.toml --workspace --locked

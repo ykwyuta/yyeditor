@@ -1,0 +1,112 @@
+name: yydbmanager-demo
+services:
+  postgres:
+    image: postgres:17-alpine
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+    environment:
+      POSTGRES_USER: yy_demo
+      POSTGRES_PASSWORD: YyDemo_2026!
+      POSTGRES_DB: yydemo
+    ports: ["127.0.0.1:${YYDEMO_POSTGRES_PORT:-25432}:5432"]
+    volumes:
+      - ./sql:/demo/sql:ro
+      - postgres_data:/var/lib/postgresql/data
+      - ./init/postgres.sql:/docker-entrypoint-initdb.d/10-demo.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=$$POSTGRES_PASSWORD psql -h 127.0.0.1 -U yy_demo -d yydemo -Atc 'SELECT dataset_version FROM demo_ready WHERE id=1' | grep -qx yydbmanager-demo-v1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 5s
+  mysql:
+    profiles: [mysql]
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: YyDemo_2026!
+      MYSQL_USER: yy_demo
+      MYSQL_PASSWORD: YyDemo_2026!
+      MYSQL_DATABASE: yydemo
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    ports: ["127.0.0.1:${YYDEMO_MYSQL_PORT:-23306}:3306"]
+    volumes:
+      - ./sql:/demo/sql:ro
+      - mysql_data:/var/lib/mysql
+      - ./init/mysql.sql:/docker-entrypoint-initdb.d/10-demo.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysql -h 127.0.0.1 -u yy_demo -D yydemo -Nse 'SELECT dataset_version FROM demo_ready WHERE id=1' | grep -qx yydbmanager-demo-v1"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+      start_period: 15s
+  sqlserver:
+    profiles: [sqlserver]
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: YyDemo_2026!
+      SQLCMDPASSWORD: YyDemo_2026!
+    entrypoint: ["/bin/bash", "/demo/sqlserver-start.sh"]
+    ports: ["127.0.0.1:${YYDEMO_SQLSERVER_PORT:-21433}:1433"]
+    volumes:
+      - ./sql:/demo/sql:ro
+      - sqlserver_data:/var/opt/mssql
+      - ./docker/sqlserver-start.sh:/demo/sqlserver-start.sh:ro
+      - ./init/sqlserver.sql:/demo/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /var/opt/mssql/yy-demo-ready && /opt/mssql-tools18/bin/sqlcmd -S 127.0.0.1 -U sa -C -b -d yydemo -Q 'SELECT dataset_version FROM demo_ready WHERE id=1' -h -1 | grep -q yydbmanager-demo-v1"]
+      interval: 3s
+      timeout: 5s
+      retries: 80
+      start_period: 10s
+  oracle:
+    profiles: [oracle]
+    image: container-registry.oracle.com/database/free:latest-lite
+    environment:
+      ORACLE_PWD: YyDemo_2026!
+      ORACLE_CHARACTERSET: AL32UTF8
+      NLS_LANG: .AL32UTF8
+    shm_size: 1gb
+    ports: ["127.0.0.1:${YYDEMO_ORACLE_PORT:-21521}:1521"]
+    volumes:
+      - ./sql:/demo/sql:ro
+      - oracle_data:/opt/oracle/oradata
+      - ./init/oracle.sql:/demo/init.sql:ro
+      - ./docker/oracle-startup.sh:/opt/oracle/scripts/startup/10-demo.sh:ro
+      - ./docker/oracle-health.sql:/demo/health.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "sqlplus -L -s 'yy_demo/\"YyDemo_2026!\"@//127.0.0.1:1521/FREEPDB1' @/demo/health.sql | grep -q yydbmanager-demo-v1"]
+      interval: 10s
+      timeout: 10s
+      retries: 90
+      start_period: 30s
+  db2:
+    profiles: [db2]
+    build:
+      context: .
+      dockerfile: docker/db2.Dockerfile
+    privileged: true
+    environment:
+      LICENSE: accept
+      DB2INSTANCE: db2inst1
+      DB2INST1_PASSWORD: YyDemo_2026!
+      DBNAME: YYDEMO
+      BLU: "false"
+      ENABLE_ORACLE_COMPATIBILITY: "false"
+      TO_CREATE_SAMPLEDB: "false"
+      PERSISTENT_HOME: "true"
+    ports: ["127.0.0.1:${YYDEMO_DB2_PORT:-25000}:50000"]
+    volumes:
+      - db2_data:/database
+    healthcheck:
+      test: ["CMD", "/demo/db2-health.sh"]
+      interval: 10s
+      timeout: 15s
+      retries: 90
+      start_period: 40s
+volumes:
+  postgres_data:
+  mysql_data:
+  sqlserver_data:
+  oracle_data:
+  db2_data:

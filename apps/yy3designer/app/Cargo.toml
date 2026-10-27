@@ -1,0 +1,15 @@
+[package]
+name = "yy3designer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "../../yyeditor/build.rs"
+
+[dependencies]
+yy3-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+yy3-ui.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

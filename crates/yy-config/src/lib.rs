@@ -3,6 +3,7 @@
 //! `%APPDATA%\yyeditor\config.toml`（Windows 以外では `$XDG_CONFIG_HOME/yyeditor/config.toml`）
 //! から読み込む。ファイルがない・項目が欠けている場合は既定値を使う。
 
+pub mod connections;
 pub mod recent;
 pub mod workspace;
 
@@ -668,10 +669,27 @@ impl Default for RemoteConfig {
     }
 }
 
+/// 接続先で端末のセッションを維持するプログラム。1 ホストにつきいずれか 1 つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalMultiplexer {
+    #[default]
+    None,
+    Tmux,
+    Screen,
+}
+
 /// 接続先ごとの設定。書いていない項目は `~/.ssh/config`、それもなければ既定値を使う。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RemoteHost {
+    pub ssh: SshSettings,
+    /// ファイル転送方式。指定時は専用エージェントを使わない。
+    pub protocol: Option<TransferProtocol>,
+    /// 接続先ごとのエージェント利用（protocol指定時はfalseにする）。
+    pub use_agent: Option<bool>,
+    /// 接続時のリモートフォルダー。
+    pub remote_directory: Option<String>,
     /// 接続するホスト名（省略すると設定の名前）
     pub hostname: Option<String>,
     pub user: Option<String>,
@@ -680,6 +698,16 @@ pub struct RemoteHost {
     pub identity_file: Option<String>,
     /// 踏み台（`[ユーザー@]ホスト[:ポート]` のカンマ区切り。`none` で ~/.ssh/config の指定も使わない）
     pub proxy_jump: Option<String>,
+    /// 踏み台上で次ホストへ中継するコマンド（%h、%p、%%）。未指定ならdirect-tcpip。
+    pub jump_command: Option<String>,
+    /// SFTPサブシステム名（既定sftp）。sftp_serverとは排他。
+    pub sftp_subsystem: Option<String>,
+    /// SFTPサーバーを起動するリモートコマンド。PTYは使わない。
+    pub sftp_server: Option<String>,
+    /// yysftpの一覧だけを置き換えるリモートコマンド。対象ディレクトリで実行。
+    pub list_command: Option<String>,
+    /// list_commandのファイル名区切り。lines（既定）、nul、またはls（ls -la長形式）。
+    pub list_format: Option<String>,
     /// この接続先に使うプロキシ（`none` で共通のプロキシも使わない）
     pub proxy: Option<String>,
     /// この接続先でエージェントを置くフォルダ（ホームが noexec の場合など）
@@ -687,6 +715,53 @@ pub struct RemoteHost {
     /// ポートフォワーディング（ターミナルだけが使う。`L 8080:localhost:80`・`R 9000:localhost:3000`・
     /// `D 1080`。`~/.ssh/config` の LocalForward なども使う）
     pub forward: Vec<String>,
+    /// タブと永続セッションの対応（none / tmux / screen のいずれか 1 つ）。
+    pub terminal_multiplexer: TerminalMultiplexer,
+    /// セッション名に付けるプレフィクス。有効にするときは必須。
+    pub terminal_session_prefix: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransferProtocol {
+    Sftp,
+    Scp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SshSettings {
+    /// exec要求の代わりにPTYなしのshell要求でコマンドを開始する。
+    pub exec_via_shell: bool,
+    pub connect_timeout_secs: u32,
+    pub keepalive_secs: Option<u32>,
+    pub keepalive_max: u32,
+    pub public_key_auth: bool,
+    pub keyboard_interactive_auth: bool,
+    pub password_auth: bool,
+    pub ciphers: Vec<String>,
+    pub key_exchange: Vec<String>,
+    pub host_key_algorithms: Vec<String>,
+    pub macs: Vec<String>,
+    pub compression: bool,
+}
+impl Default for SshSettings {
+    fn default() -> Self {
+        Self {
+            exec_via_shell: false,
+            connect_timeout_secs: 20,
+            keepalive_secs: None,
+            keepalive_max: 3,
+            public_key_auth: true,
+            keyboard_interactive_auth: true,
+            password_auth: true,
+            ciphers: Vec::new(),
+            key_exchange: Vec::new(),
+            host_key_algorithms: Vec::new(),
+            macs: Vec::new(),
+            compression: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -750,7 +825,7 @@ impl Config {
 
     /// `path` から読み込む。ファイルが存在しなければ既定値を返す。
     pub fn load_from(path: &Path) -> Result<Config, ConfigError> {
-        match std::fs::read_to_string(path) {
+        let mut config = match std::fs::read_to_string(path) {
             Ok(s) => Config::from_toml(&s).map_err(|source| ConfigError::Parse {
                 path: path.to_owned(),
                 source,
@@ -760,7 +835,10 @@ impl Config {
                 path: path.to_owned(),
                 source,
             }),
-        }
+        }?;
+        let profiles = connections::Profiles::load(&connections::beside(path))?;
+        profiles.merge_into(&mut config.remote);
+        Ok(config)
     }
 
     /// 設定ファイルがないときに作る内容（既定値をすべて書き出したもの）。
@@ -874,6 +952,12 @@ mod tests {
             proxy_jump = "bastion,admin@gw:2022"
             [remote.host.lab]
             proxy = "none"
+            jump_command = "nc -- %h %p"
+            sftp_server = "/usr/lib/openssh/sftp-server"
+            [remote.host.gateway]
+            sftp_subsystem = "gateway-sftp"
+            list_command = "ls -1A"
+            list_format = "lines"
             "#,
         )
         .unwrap();
@@ -891,12 +975,77 @@ mod tests {
         assert_eq!(h.proxy_jump.as_deref(), Some("bastion,admin@gw:2022"));
         assert_eq!(c.remote.proxy, "socks5://socks.example.co.jp:1080");
         assert_eq!(c.remote.host["lab"].proxy.as_deref(), Some("none"));
+        assert_eq!(
+            c.remote.host["lab"].jump_command.as_deref(),
+            Some("nc -- %h %p")
+        );
+        assert_eq!(
+            c.remote.host["lab"].sftp_server.as_deref(),
+            Some("/usr/lib/openssh/sftp-server")
+        );
+        assert_eq!(
+            c.remote.host["gateway"].sftp_subsystem.as_deref(),
+            Some("gateway-sftp")
+        );
+        assert_eq!(
+            c.remote.host["gateway"].list_command.as_deref(),
+            Some("ls -1A")
+        );
+        assert_eq!(
+            c.remote.host["gateway"].list_format.as_deref(),
+            Some("lines")
+        );
+        assert!(c.remote.host["lab"].list_command.is_none());
+        let saved = toml::to_string(&c).unwrap();
+        assert_eq!(Config::from_toml(&saved).unwrap().remote, c.remote);
         assert!(
             Config::from_toml(
                 "[remote.host.x]
 portt = 1"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_multiplexer_is_exclusive_per_host() {
+        let c = Config::from_toml(
+            r#"
+            [remote.host.build]
+            terminal_multiplexer = "tmux"
+            terminal_session_prefix = "yyterm-"
+            [remote.host.lab]
+            terminal_multiplexer = "screen"
+            terminal_session_prefix = "work-"
+            [remote.host.plain]
+            terminal_multiplexer = "none"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            c.remote.host["build"].terminal_multiplexer,
+            TerminalMultiplexer::Tmux
+        );
+        assert_eq!(c.remote.host["build"].terminal_session_prefix, "yyterm-");
+        assert_eq!(
+            c.remote.host["lab"].terminal_multiplexer,
+            TerminalMultiplexer::Screen
+        );
+        assert_eq!(
+            c.remote.host["plain"].terminal_multiplexer,
+            TerminalMultiplexer::None
+        );
+        assert_eq!(Config::from_toml(&toml::to_string(&c).unwrap()).unwrap(), c);
+        for value in ["\"tmux,screen\"", "[\"tmux\", \"screen\"]", "\"other\""] {
+            assert!(
+                Config::from_toml(&format!("[remote.host.x]\nterminal_multiplexer = {value}"))
+                    .is_err()
+            );
+        }
+        let legacy = Config::from_toml("[remote.host.x]\nuser = 'me'").unwrap();
+        assert_eq!(
+            legacy.remote.host["x"].terminal_multiplexer,
+            TerminalMultiplexer::None
         );
     }
 

@@ -1,0 +1,51 @@
+# yydbmanager 実DB検証（2026-10-20）
+
+> 検討・作業記録です。現在の操作・内部仕様は[文書案内](../../README.md)を参照してください。
+
+Windows x64／Docker DesktopのLinuxコンテナーで、専用の`yydbmanager-validation`環境を作成して検証した。既存のユーザー用コンテナーには接続していない。
+
+## 結果
+
+| DB | 実サーバー版 | 接続・SQL・型・入出力 | 推定計画 | 実測計画 |
+|---|---|---|---|---|
+| PostgreSQL | 17.11 | 成功 | 成功 | 成功 |
+| MySQL | 8.4.11 | 成功 | 成功 | 未対応 |
+| SQL Server | 2022 CU27-GDR / 16.0.4305.5 | 成功 | 成功 | 成功 |
+| Oracle | AI Database 26ai Free / 23.26.3.0.0 | 成功 | 成功 | 未対応 |
+| IBM Db2 | 12.1.5.0 | 成功 | 成功 | 未対応 |
+
+上表はLinux検証ランナーからアプリと同じ`yy-db-core`のODBC経路を実行した結果。WindowsからもODBC Driver 17でSQL Serverに接続し、同じ試験を通した。Windows版で5DBすべてを画面から操作したという意味ではない。Windows Db2の未登録ポータブルドライバーをパスで指定する接続はIM002で失敗し、成功件数には含めていない。
+
+通常のテストでignoreされる`all_five_remote_databases`を、明示的に`--ignored --nocapture`で実行した。最終実行は5DBすべて成功、テスト本体3.26秒（取得・ビルド・初期化を除く）。機械可読の結果は[実行結果JSON](../../../apps/yydbmanager/tests/docker/results/2026-10-20.json)。この小規模試験は性能評価ではない。
+
+## 検証内容
+
+- 実接続、サーバー版取得、テーブル作成、INSERT、SELECT、テーブル一覧取得。
+- `DECIMAL(31,8)`の`12345678901234567890123.12345678`が丸められないこと。
+- 日本語、SQL NULL、型付きパラメーターでの別テーブルへの投入。
+- CSV出力と再読込で数値の文字列表現・日本語・NULLを保持すること。
+- Parquet出力と再読込で全セルの値とNULLを保持すること。整数はDECIMAL(38,0)に正規化する。
+- 5DBの推定計画にノードが存在すること。PostgreSQL／SQL Serverの実測計画に実測行数があること。
+- Db2のEXPLAIN表は検証側で明示的に準備。アプリは自動作成しない。
+
+SQLite／DuckDBはWindowsで同梱エンジンの単体テスト・スモークテストを別途実施する。TSV・任意区切り・COBOL固定長の境界値は単体テストの範囲であり、外部5DBそれぞれへの全形式投入・全ドライバー版・大規模結果・LOB・日時型・取消・障害復旧を網羅した試験ではない。
+
+## 検証ランナー
+
+Rust 1.99.0 / Debian bookworm / unixODBC 2.3.11。PostgreSQL ODBC 13.02、MariaDB ODBC 3.1.15、Microsoft ODBC 18.7.1.1、Oracle Instant Client 23系、Db2 12.1.5の64bit ODBC互換ライブラリーを使用。Db2は公式コンテナーの使い捨てインスタンス設定をランナーへ渡して初期化した。
+
+## 使用イメージのdigest
+
+| タグ | digest（sha256） |
+|---|---|
+| postgres:17-alpine | `18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73` |
+| mysql:8.4 | `0f51e63e537a1f176423fa03ef559aabe6fa4372a53160a44bc7e75da7d15364` |
+| mcr.microsoft.com/mssql/server:2022-latest | `cf8f0ab2ebe61feec2eed2629061a07d247f791c2a8ddda74a4ac9f06a291718` |
+| container-registry.oracle.com/database/free:latest-lite | `cf540c3fa190d7cffad08c491652ac07fc70314e510f6b87890449517d565e94` |
+| icr.io/db2_community/db2:12.1.5.0 | `2de8151713c261843868c5c3411b57be6ae79d99d70a5b3022337836776bfda6` |
+
+再実行方法は[Docker検証手順](../../../apps/yydbmanager/tests/docker/README.md)を参照。専用CIの`workflow_dispatch`で`docker_databases=true`を選ぶとDB別ジョブを実行する。CI上の実行結果は、このローカル検証とは別に確認が必要。
+
+## オブジェクト エクスプローラーの追試
+
+UI追加時にDocker環境を再作成し、上記5DBでオブジェクト一覧に検証テーブルが含まれること、正しいスキーマから3列の名前・型・NULL可否を取得できることを追加検証した。既存の入出力・計画を含めて全5DBが成功した（テスト本体8.11秒）。[追試結果JSON](../../../apps/yydbmanager/tests/docker/results/2026-10-21.json)を保存している。

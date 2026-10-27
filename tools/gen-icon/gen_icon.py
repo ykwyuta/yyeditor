@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""yyeditor・yyterm・yysftp・yysheet・yyclip・yyfilemanager・yybrowser のアイコンを作る。
+"""yyeditor・yyterm・yysftp・yysheet・yyclip・yyfilemanager・yybrowser・yydbmanager のアイコンを作る。
 
     python3 tools/gen-icon/gen_icon.py
 
 角丸の四角に白の「YY」を描く。エディタは青地にテキストの行を表す線、ターミナルは黒地に
 プロンプト（`>_`）、ファイル転送は緑地に上下の矢印、スプレッドシートは橙地に表の格子、
-クリップボード履歴は紫地にクリップボード、ファイル管理は水色地にフォルダ、ブラウザはローズ地に地球。
+クリップボード履歴は紫地にクリップボード、ファイル管理は水色地にフォルダ、ブラウザはローズ地に地球、DB管理は青緑地にデータベース。
 どのサイズ（16 px も）でも YY の下に記号を描き、色だけの違いにしない。文字は図形で描くのでフォントに依存しない。各サイズを 4 倍で描いて縮小する。
 Pillow が必要。
 """
@@ -25,6 +25,9 @@ SHEET = ((0xF5, 0x9E, 0x0B), (0xB4, 0x53, 0x09))
 CLIP = ((0xA8, 0x55, 0xF7), (0x6B, 0x21, 0xA8))
 FILES = ((0x06, 0xB6, 0xD4), (0x0E, 0x74, 0x90))
 BROWSER = ((0xF4, 0x3F, 0x5E), (0x9F, 0x12, 0x39))  # ローズ（ほかの色と重ならない）
+DRAW = ((0x63, 0x66, 0xF1), (0x37, 0x30, 0xA3))
+DATABASE = ((0x14, 0xB8, 0xA6), (0x0F, 0x76, 0x6E))
+MERGE = ((0x84, 0xCC, 0x16), (0x3F, 0x62, 0x12))
 PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
@@ -66,6 +69,20 @@ def draw_symbol(d, kind, x, y, w, h, t, ot):
             d.rectangle([cx - t / 2, y0 + (ah * 0.6 if up else 0), cx + t / 2, y1 - (0 if up else ah * 0.6)], fill=WHITE)
             tip, base = (y0, y0 + ah) if up else (y1, y1 - ah)
             d.polygon([(cx, tip), (cx - ah * 0.65, base), (cx + ah * 0.65, base)], fill=WHITE)
+    elif kind == "merge":
+        width = max(1, round(ot))
+        for start in (x + w * .12, x + w * .88):
+            d.line([(start, y), (start, y + h * .22), (x + w * .5, y + h * .60), (x + w * .5, y + h)], fill=WHITE, width=width)
+        d.polygon([(x + w * .5, y + h), (x + w * .35, y + h * .75), (x + w * .65, y + h * .75)], fill=WHITE)
+    elif kind == "database":
+        # 円柱でデータベースを示す。YYロゴは他アプリと共通。
+        left, right = x + w * 0.13, x + w * 0.87
+        arc_h = h * 0.38
+        d.arc([left, y + h - arc_h, right, y + h], 0, 180, fill=WHITE, width=round(ot))
+        d.line([(left, y + arc_h / 2), (left, y + h - arc_h / 2)], fill=WHITE, width=round(ot))
+        d.line([(right, y + arc_h / 2), (right, y + h - arc_h / 2)], fill=WHITE, width=round(ot))
+        d.ellipse([left, y, right, y + arc_h], outline=WHITE, width=round(ot))
+        d.arc([left, y + h * 0.34, right, y + h * 0.34 + arc_h], 0, 180, fill=WHITE, width=round(ot))
     elif kind == "sheet":
         # 表の格子（3 列 × 2 行）
         for i in range(4):
@@ -86,6 +103,15 @@ def draw_symbol(d, kind, x, y, w, h, t, ot):
         # フォルダ（つまみ付き）
         d.rounded_rectangle([x, y, x + w * 0.45, y + h * 0.4], radius=t / 2, fill=WHITE)
         d.rounded_rectangle([x, y + h * 0.18, x + w, y + h], radius=t / 2, fill=WHITE)
+    elif kind == "draw":
+        # 接続線で結ぶ二つの構成要素
+        bw, bh = w * 0.32, h * 0.55
+        d.line([(x + bw, y + bh / 2), (x + w / 2, y + bh / 2),
+                (x + w / 2, y + h - bh / 2), (x + w - bw, y + h - bh / 2)],
+               fill=WHITE, width=max(1, round(ot)))
+        for bx, by in [(x, y), (x + w - bw, y + h - bh)]:
+            d.rounded_rectangle([bx, by, bx + bw, by + bh], radius=ot,
+                                outline=WHITE, width=max(1, round(ot)))
     elif kind == "browser":
         # 地球（円と経線・緯線）
         r = h / 2
@@ -114,6 +140,9 @@ def render(size, kind="editor"):
         "clip": CLIP,
         "files": FILES,
         "browser": BROWSER,
+        "draw": DRAW,
+        "database": DATABASE,
+        "merge": MERGE,
     }[kind]
     n = size * SCALE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
@@ -196,8 +225,11 @@ def main():
         ("yyclip", "clip"),
         ("yyfilemanager", "files"),
         ("yybrowser", "browser"),
+        ("yydraw", "draw"),
+        ("yydbmanager", "database"),
+        ("yymerge", "merge"),
     ]:
-        res = root / "apps" / app / "res"
+        res = root / "apps" / app / ("app/res" if app in ("yydbmanager", "yymerge") else "res")
         res.mkdir(parents=True, exist_ok=True)
         images = [render(s, kind) for s in SIZES]
         write_ico(res / f"{app}.ico", images)

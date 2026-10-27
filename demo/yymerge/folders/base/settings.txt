@@ -1,0 +1,2 @@
+server=localhost
+timeout=45

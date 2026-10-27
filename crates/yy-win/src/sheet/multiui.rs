@@ -41,6 +41,8 @@ const M_SUMMARY: u16 = 19;
 const M_LEN: u16 = 20;
 const M_CATLOAD: u16 = 21;
 const M_CATSAVE: u16 = 22;
+const M_INFER: u16 = 23;
+const M_GUESS_LEN: u16 = 24;
 
 struct MultiState {
     layouts: Vec<(String, String)>,
@@ -251,15 +253,25 @@ fn load_current(hwnd: HWND, st: &mut MultiState) {
 fn multi_dialog(owner: HWND, open: Option<(Vec<u8>, u64)>, title: &str) -> Option<FixedSpec> {
     let (layouts, data_len, charset, sep, le) = initial();
     let mut t = Template::dialog(title, 460, 360);
-    label(&mut t, 7, 8, 118, 0, "1 行のデータ長（バイト・必須）:");
+    label(&mut t, 7, 8, 118, 0, "1 行のデータ長（バイト）:");
     edit(&mut t, 127, 6, 50, M_LEN);
-    label(
+    button(
         &mut t,
         183,
-        8,
-        270,
-        0,
-        "どのレイアウトもこの長さに収め、短いレイアウトの残りは空白で書きます。",
+        4,
+        120,
+        M_GUESS_LEN,
+        "レコード長を推定(&R)...",
+        false,
+    );
+    button(
+        &mut t,
+        310,
+        4,
+        143,
+        M_INFER,
+        "全レイアウトを推定(&E)",
+        false,
     );
     let y = 20;
     label(&mut t, 7, 8 + y, 110, 0, "レイアウト:");
@@ -389,6 +401,14 @@ extern "system" fn multi_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                     }
                 }
                 let open = st.open.is_some();
+                if !open {
+                    for id in [M_INFER, M_GUESS_LEN] {
+                        if let Ok(h) = GetDlgItem(Some(hwnd), id as i32) {
+                            let _ =
+                                windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(h, false);
+                        }
+                    }
+                }
                 if open {
                     add_string(hwnd, M_SEP, CB_ADDSTRING, "自動（推定する）");
                 }
@@ -491,6 +511,52 @@ extern "system" fn multi_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                         if let Some(text) = load_copybook(hwnd) {
                             let _ =
                                 SetDlgItemTextW(hwnd, M_TEXT as i32, &HSTRING::from(crlf(&text)));
+                            update_summary(hwnd, st);
+                        }
+                        1
+                    }
+                    M_INFER => {
+                        read_controls(hwnd, st);
+                        if let Some((sample, _)) = &st.open {
+                            let result = super::fixedui::infer_sample(
+                                sample,
+                                &st.data_len,
+                                Codec {
+                                    charset: st.charset,
+                                    little_endian: st.little_endian,
+                                },
+                                st.sep,
+                                true,
+                            );
+                            match result {
+                                Ok(layouts) => {
+                                    st.layouts = layouts;
+                                    st.cur = 0;
+                                    refresh_list(hwnd, st);
+                                    load_current(hwnd, st);
+                                }
+                                Err(e) => message(hwnd, &e),
+                            }
+                        }
+                        1
+                    }
+                    M_GUESS_LEN => {
+                        read_controls(hwnd, st);
+                        if let Some((sample, len)) = &st.open
+                            && let Some(guess) =
+                                super::fixedui::guess_length(hwnd, sample, *len, st.charset)
+                        {
+                            let sel = RecordSep::ALL
+                                .iter()
+                                .position(|s| *s == guess.separator)
+                                .unwrap_or(0)
+                                + 1;
+                            send(hwnd, M_SEP, CB_SETCURSEL, sel, 0);
+                            let _ = SetDlgItemTextW(
+                                hwnd,
+                                M_LEN as i32,
+                                &HSTRING::from(guess.data_len.to_string()),
+                            );
                             update_summary(hwnd, st);
                         }
                         1

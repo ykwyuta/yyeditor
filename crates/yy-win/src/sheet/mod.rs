@@ -497,6 +497,8 @@ fn create_menu() -> Result<HMENU> {
         add(data, ID_TO_NUMBER, "列を数値に変換(&V)");
         add(data, ID_TO_TEXT, "列を文字列に変換(&T)");
         let help = CreatePopupMenu()?;
+        add(help, crate::sites::ID_MANAGE, "SSH接続先を管理…");
+        crate::diagnosticui::append_menu(help)?;
         add(help, ID_HELP, "yysheet ヘルプ(&H)\tF1");
         add(help, ID_HELP_FUNCS, "関数の一覧(&F)");
         add(help, ID_HELP_COBOL, "COBOL の型の一覧(&C)");
@@ -2879,6 +2881,21 @@ fn show_memory() {
 }
 
 fn command(id: u16) {
+    if let Some(frame) = with(|a| a.frame) {
+        if crate::diagnosticui::command(frame, id) {
+            return;
+        }
+        if id == crate::sites::ID_MANAGE {
+            if let Some(config) = crate::sites::manage(frame) {
+                with(|a| {
+                    a.config.remote = config;
+                    a.sidebar.rebuild();
+                });
+            }
+            return;
+        }
+    }
+
     if workspace::command(id) || delimui::command(id) {
         return;
     }
@@ -3868,6 +3885,18 @@ extern "system" fn grid_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sheet_help_exposes_shared_connection_manager_and_diagnostics() {
+        unsafe {
+            let menu = create_menu().unwrap();
+            // Menu command lookup recursively visits the Help submenu.
+            for id in [crate::sites::ID_MANAGE, 62004, 62005, 62006] {
+                assert_ne!(GetMenuState(menu, id as u32, MF_BYCOMMAND), u32::MAX);
+            }
+            DestroyMenu(menu).unwrap();
+        }
+    }
 
     #[test]
     fn tsv_parsing() {

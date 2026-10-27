@@ -28,6 +28,8 @@ pub enum Loc {
     Remote(Arc<Session>, Vec<u8>),
     /// 接続先の SFTP（エージェントを置かない）と、その中の絶対パス
     Sftp(Arc<SftpFs>, Vec<u8>),
+    /// Shared protocol-aware SFTP/SCP access, including configured directory listing.
+    Native(Arc<crate::file_access::FileAccess>, Vec<u8>),
 }
 
 /// コピーした量。
@@ -107,6 +109,7 @@ impl Loc {
             Loc::Local(_) => None,
             Loc::Remote(s, p) => Some((s.as_ref() as &dyn RemoteFs, p.as_slice())),
             Loc::Sftp(s, p) => Some((s.as_ref() as &dyn RemoteFs, p.as_slice())),
+            Loc::Native(s, p) => Some((s.remote_fs(), p.as_slice())),
         }
     }
 
@@ -116,7 +119,7 @@ impl Loc {
                 Name::Os(n) => n.clone(),
                 Name::Bytes(b) => local_file_name(b)?,
             })),
-            Loc::Remote(_, p) | Loc::Sftp(_, p) => {
+            Loc::Remote(_, p) | Loc::Sftp(_, p) | Loc::Native(_, p) => {
                 let n = match name {
                     Name::Os(n) => n.to_string_lossy().into_owned().into_bytes(),
                     Name::Bytes(b) => b.clone(),
@@ -126,6 +129,7 @@ impl Loc {
                 match self {
                     Loc::Remote(s, _) => Loc::Remote(s.clone(), path),
                     Loc::Sftp(s, _) => Loc::Sftp(s.clone(), path),
+                    Loc::Native(s, _) => Loc::Native(s.clone(), path),
                     Loc::Local(_) => unreachable!(),
                 }
             }
@@ -358,7 +362,11 @@ pub fn copy(
         Ok(()) => Ok(ticker.stats),
         Err(e) => {
             // 作りかけのコピーを消す（コピー先は新しく作ったものなので、消してよい）
-            let _ = to.remove_all();
+            // Native uploads own their staging files and never publish partial files.
+            // A concurrent creator at the final name must not be removed on conflict.
+            if !(kind == Kind::File && matches!(to, Loc::Native(..))) {
+                let _ = to.remove_all();
+            }
             Err(e)
         }
     }
@@ -407,6 +415,13 @@ fn create_new(p: &std::path::Path) -> io::Result<File> {
 
 fn copy_file(from: &Loc, to: &Loc, t: &mut Ticker) -> io::Result<()> {
     match (from, to) {
+        (Loc::Local(f), Loc::Native(s, d)) => native_upload(s, f, d, None, t, true),
+        (_, Loc::Native(s, d)) => {
+            let mut spool = tempfile::NamedTempFile::new()?;
+            read_remote(from, spool.as_file_mut(), t)?;
+            spool.as_file_mut().flush()?;
+            native_upload(s, spool.path(), d, None, t, false)
+        }
         (Loc::Local(f), Loc::Local(d)) => {
             let mut src = Counting {
                 inner: File::open(f)?,
@@ -460,6 +475,23 @@ fn read_remote(from: &Loc, out: &mut dyn Write, t: &mut Ticker) -> io::Result<()
     match from {
         Loc::Remote(s, f) => download(s, f, out, t),
         Loc::Sftp(s, f) => sftp_download(s.sftp(), f, out, t),
+        Loc::Native(s, f) => {
+            let mut last = 0;
+            let mut stopped = false;
+            let result = s.download(f, out, &mut |done, _| {
+                let delta = done.saturating_sub(last);
+                last = done;
+                if t.add_bytes(delta).is_err() {
+                    stopped = true;
+                }
+                !stopped
+            });
+            if stopped {
+                Err(cancelled())
+            } else {
+                result.map(|_| ())
+            }
+        }
         Loc::Local(_) => unreachable!(),
     }
 }
@@ -469,8 +501,43 @@ fn write_remote(to: &Loc, src: &mut dyn Read) -> io::Result<()> {
     match to {
         Loc::Remote(s, d) => upload(s, src, d),
         Loc::Sftp(s, d) => sftp_upload(s.sftp(), src, d),
+        Loc::Native(..) => unreachable!("native uploads are dispatched before stream copies"),
         Loc::Local(_) => unreachable!(),
     }
+}
+
+fn native_upload(
+    access: &crate::file_access::FileAccess,
+    local: &std::path::Path,
+    path: &[u8],
+    expected: Option<crate::FileId>,
+    ticker: &mut Ticker<'_>,
+    count: bool,
+) -> io::Result<()> {
+    let mut last = 0;
+    let mut stopped = false;
+    let result = access.upload(local, path, expected, false, &mut |done, _| {
+        let delta = done.saturating_sub(last);
+        last = done;
+        let step = if count {
+            ticker.add_bytes(delta)
+        } else {
+            ticker.tick()
+        };
+        if step.is_err() {
+            stopped = true;
+        }
+        !stopped
+    });
+    if stopped {
+        return Err(cancelled());
+    }
+    result?.map(|_| ()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "接続先が変更されたか、同じ名前のファイルが作成されました",
+        )
+    })
 }
 
 /// 1 回に読み書きする大きさと、返事を待たずに送る数（SFTP）。
@@ -614,6 +681,10 @@ pub fn replace(
         stats: CopyStats::default(),
         step,
     };
+    if let Loc::Native(access, path) = to {
+        let expected = access.remote_fs().try_stat(path)?.map(|info| info.id);
+        return native_upload(access, local, path, expected, &mut ticker, true);
+    }
     let mut src = Counting {
         inner: File::open(local)?,
         ticker: &mut ticker,
@@ -641,6 +712,7 @@ pub fn replace(
             // 既にある（置き換える）
             UploadOutcome::Conflict { pending, .. } => pending.force().map(|_| ()),
         },
+        Loc::Native(..) => unreachable!("handled before stream replacement"),
         Loc::Sftp(s, d) => {
             let sftp = s.sftp();
             let tmp = sibling_temp(d);
@@ -914,5 +986,119 @@ mod tests {
             String::from_utf8(sibling_temp(b"a.csv")).unwrap(),
             format!(".a.csv.yy-{}.tmp", std::process::id())
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod native_tests {
+    use super::*;
+    use crate::{
+        Process, Transport, file_access::FileAccess, local::LocalTransport, xfer::Protocol,
+    };
+    use std::os::unix::ffi::OsStrExt;
+    struct SelectedOnly {
+        local: LocalTransport,
+        protocol: Protocol,
+    }
+    impl Transport for SelectedOnly {
+        fn exec(&self, command: &[u8]) -> io::Result<Process> {
+            assert_eq!(
+                self.protocol,
+                Protocol::Scp,
+                "native SFTP must not require shell or agent"
+            );
+            self.local.exec(command)
+        }
+        fn subsystem(&self, name: &str) -> io::Result<Process> {
+            assert_eq!(self.protocol, Protocol::Sftp, "SCP must not start SFTP");
+            self.local.subsystem(name)
+        }
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+    fn round_trip(protocol: Protocol) {
+        if protocol == Protocol::Sftp && crate::local::sftp_server().is_none() {
+            assert!(
+                std::env::var_os("YY_REQUIRE_SFTP").is_none(),
+                "sftp-server required"
+            );
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local.csv");
+        let bytes = vec![b'x'; 128 * 1024];
+        fs::write(&local, &bytes).unwrap();
+        let access = FileAccess::connect(
+            Arc::new(SelectedOnly {
+                local: LocalTransport::new(),
+                protocol,
+            }),
+            protocol,
+        )
+        .unwrap();
+        let access = Arc::new(access.with_listing(if protocol == Protocol::Scp {
+            crate::listing::ListCommand::from_settings(Some("LC_ALL=C ls -la"), Some("ls")).unwrap()
+        } else {
+            None
+        }));
+        let remote =
+            |p: &std::path::Path| Loc::Native(access.clone(), p.as_os_str().as_bytes().to_vec());
+        let dest = root.path().join("remote 日本語.csv");
+        let location = remote(&dest);
+        let stats = copy(&Loc::Local(local.clone()), &location, &mut |_| true).unwrap();
+        assert_eq!(stats.bytes, bytes.len() as u64);
+        let downloaded = root.path().join("download.csv");
+        copy(&location, &Loc::Local(downloaded.clone()), &mut |_| true).unwrap();
+        assert_eq!(fs::read(downloaded).unwrap(), bytes);
+        fs::write(&local, b"new contents").unwrap();
+        replace(&local, &location, &mut |_| true).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"new contents");
+        let err = replace(&local, &location, &mut |_| false).unwrap_err();
+        assert!(is_cancelled(&err));
+        assert_eq!(fs::read(&dest).unwrap(), b"new contents");
+        // A final-name creator during staging must survive conflict cleanup.
+        let raced = root.path().join("concurrent.csv");
+        let mut created = false;
+        assert!(
+            copy(&Loc::Local(local.clone()), &remote(&raced), &mut |_| {
+                if !created {
+                    fs::write(&raced, b"other writer").unwrap();
+                    created = true;
+                }
+                true
+            })
+            .is_err()
+        );
+        assert_eq!(fs::read(&raced).unwrap(), b"other writer");
+        let source_dir = root.path().join("source dir");
+        fs::create_dir(&source_dir).unwrap();
+        fs::write(source_dir.join("a b.csv"), b"one,two\n").unwrap();
+        let copy_dir = root.path().join("copied dir");
+        let stats = copy(
+            &remote(&source_dir),
+            &Loc::Local(copy_dir.clone()),
+            &mut |_| true,
+        )
+        .unwrap();
+        assert_eq!(stats.files, 1);
+        assert_eq!(fs::read(copy_dir.join("a b.csv")).unwrap(), b"one,two\n");
+        let second = root.path().join("remote-copy.csv");
+        assert!(crosses_network(&location, &remote(&second)));
+        assert_eq!(
+            copy(&location, &remote(&second), &mut |_| true)
+                .unwrap()
+                .bytes,
+            12
+        );
+        assert_eq!(fs::read(second).unwrap(), b"new contents");
+    }
+    #[test]
+    fn native_scp_sheet_save_workspace_copy_and_download_use_no_sftp() {
+        round_trip(Protocol::Scp);
+    }
+    #[test]
+    fn native_sftp_sheet_save_workspace_copy_and_download_use_no_shell() {
+        round_trip(Protocol::Sftp);
     }
 }

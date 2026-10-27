@@ -5,8 +5,8 @@
 //! - 保存: 写しに書いてから接続先に送る。接続先では同じフォルダに一時の名前で書いてから置き換えるので、
 //!   途中で切れても元のファイルは残る。開いた（前に送った）あとで接続先のファイルが変わっていれば、
 //!   置き換えてよいかを確かめる。送れなければ、写しには保存したまま未保存の印を残す。
-//! - 読み書きは、エージェントを使う設定（`[sheet] use_agent`・ワークスペース メニュー）ならエージェント、
-//!   でなければ SFTP（接続先に何も置かない）。
+//! - 読み書きは共通のホスト別設定（SFTP／SCP・エージェント指定）を優先する。
+//!   未指定の場合だけ`[sheet] use_agent`・ワークスペースメニューの既定値を使う。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -87,15 +87,9 @@ pub(super) fn open_item(path: &Path, how: How, confirm: bool) {
     }
 }
 
-/// 読み書きする場所（エージェントか SFTP）。
+/// 共通のホスト別設定で読み書きする場所を選ぶ。
 fn loc(uri: &RemoteUri) -> Result<Loc, String> {
-    let target = uri.target();
-    let show = crate::remote::show_status;
-    Ok(if crate::remote::use_agent() {
-        Loc::Remote(crate::remote::session(&target, &show)?, uri.path.clone())
-    } else {
-        Loc::Sftp(crate::remote::sftp_fs(&target, &show)?, uri.path.clone())
-    })
+    crate::remote::file_location(uri, &crate::remote::show_status)
 }
 
 /// Windows のファイル名に使えない文字を `_` にする。

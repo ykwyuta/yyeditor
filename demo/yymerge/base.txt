@@ -1,0 +1,4 @@
+アプリケーション設定
+server=localhost
+timeout=30
+theme=light

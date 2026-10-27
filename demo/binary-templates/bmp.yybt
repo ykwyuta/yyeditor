@@ -1,0 +1,24 @@
+// Windows BMP header (BITMAPINFOHEADER and later). File header only: 14 bytes.
+LittleEndian();
+typedef struct {
+    char signature[2];
+    uint fileSize;
+    ushort reserved1;
+    ushort reserved2;
+    uint pixelOffset;
+} BMP_FILE_HEADER;
+BMP_FILE_HEADER header;
+typedef struct {
+    uint headerSize;
+    int width;
+    int height;
+    ushort planes;
+    ushort bitsPerPixel;
+    uint compression;
+    uint imageSize;
+    int xPixelsPerMeter;
+    int yPixelsPerMeter;
+    uint colorsUsed;
+    uint importantColors;
+} BMP_INFO_HEADER;
+BMP_INFO_HEADER info;

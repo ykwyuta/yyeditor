@@ -1,0 +1,12 @@
+[package]
+name = "yy3-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+png = "0.18"
+miniz_oxide = "0.9"

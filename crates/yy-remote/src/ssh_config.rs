@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::proxy::{self, Proxy, Route};
 use crate::uri::Target;
+pub use yy_config::SshSettings as HostSpecSettings;
 
 /// 踏み台をたどる深さの上限（設定の循環を止める）
 const MAX_JUMP_DEPTH: usize = 8;
@@ -25,6 +26,7 @@ const MAX_JUMP_DEPTH: usize = 8;
 /// 接続に使う値。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostSpec {
+    pub ssh: yy_config::SshSettings,
     /// 接続先として入力された名前（履歴やタイトルに使う）
     pub target: Target,
     /// 実際に接続するホスト名
@@ -45,6 +47,50 @@ pub struct HostSpec {
     pub forwards: Vec<crate::Forward>,
     /// 読めなかったポートフォワーディングの指定（ターミナルが警告する）
     pub forward_errors: Vec<String>,
+    /// このホストを踏み台として使う際のリモート中継コマンド。
+    pub jump_command: Option<String>,
+    /// SFTPの起動方法（一覧・アップロード・ダウンロードで共通）。
+    pub sftp: SftpStart,
+}
+
+/// PTYを使わずバイナリの標準入出力でSFTPサーバーを起動する。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SftpStart {
+    Subsystem(String),
+    Command(String),
+}
+
+impl Default for SftpStart {
+    fn default() -> Self {
+        Self::Subsystem("sftp".into())
+    }
+}
+
+/// 中継コマンドの置換値はPOSIXシェルの1引数として引用する。
+/// %h=次のホスト、%p=ポート、%%=リテラル%。未知の指定は拒否する。
+pub fn jump_command(template: &str, host: &str, port: u16) -> Result<String, String> {
+    let mut out = String::new();
+    let mut chars = template.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('h') => {
+                out.push('\'');
+                out.push_str(&host.replace('\'', "'\\''"));
+                out.push('\'');
+            }
+            Some('p') => out.push_str(&port.to_string()),
+            Some('%') => out.push('%'),
+            _ => return Err("jump_commandでは%h、%p、%%だけを使用できます".into()),
+        }
+    }
+    if out.trim().is_empty() || out.contains(['\0', '\r', '\n']) {
+        return Err("jump_commandには空でない1行のコマンドを指定してください".into());
+    }
+    Ok(out)
 }
 
 impl HostSpec {
@@ -127,6 +173,7 @@ impl HostSpec {
 /// yyeditor の接続設定（`config.toml` の `[remote.host.<名前>]`）の 1 項目。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostOverride {
+    pub ssh: yy_config::SshSettings,
     pub hostname: Option<String>,
     pub user: Option<String>,
     pub port: Option<u16>,
@@ -137,6 +184,9 @@ pub struct HostOverride {
     pub agent_dir: Option<String>,
     /// ポートフォワーディング（`L 8080:localhost:80`・`R 9000:localhost:3000`・`D 1080`）
     pub forward: Vec<String>,
+    pub jump_command: Option<String>,
+    pub sftp_subsystem: Option<String>,
+    pub sftp_server: Option<String>,
 }
 
 /// 接続先を解決するための材料。
@@ -219,6 +269,7 @@ impl Resolver {
             }
         }
         let mut spec = HostSpec {
+            ssh: own.ssh.clone(),
             target: target.clone(),
             hostname,
             port,
@@ -230,6 +281,8 @@ impl Resolver {
             agent_dir: own.agent_dir.clone().or_else(|| self.agent_dir.clone()),
             forwards: Vec::new(),
             forward_errors: Vec::new(),
+            jump_command: own.jump_command.clone(),
+            sftp: SftpStart::default(),
         };
         // ポートフォワーディング: yyeditor の設定と ~/.ssh/config の両方（同じものは 1 つに）
         let (own_forwards, mut errors) = crate::forward::parse_all(&own.forward);
@@ -268,6 +321,24 @@ impl Resolver {
                 None => {}
             },
             Err(e) => spec.route_error = Some(e),
+        }
+        let invalid = |s: &str| s.trim().is_empty() || s.contains(['\0', '\r', '\n']);
+        match (&own.sftp_subsystem, &own.sftp_server) {
+            (Some(_), Some(_)) => {
+                spec.route_error = Some("sftp_subsystemとsftp_serverは同時に指定できません".into())
+            }
+            (Some(s), None) if !invalid(s) => spec.sftp = SftpStart::Subsystem(s.clone()),
+            (None, Some(s)) if !invalid(s) => spec.sftp = SftpStart::Command(s.clone()),
+            (None, None) => {}
+            _ => {
+                spec.route_error =
+                    Some("SFTPの起動設定には空でない1行の値を指定してください".into())
+            }
+        }
+        if let Some(template) = &spec.jump_command
+            && let Err(e) = jump_command(template, "host.invalid", 22)
+        {
+            spec.route_error = Some(e);
         }
         spec
     }
@@ -501,6 +572,56 @@ pub fn user_known_hosts(home: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_settings_preserve_user_and_select_sftp_startup() {
+        let mut r = Resolver::default();
+        r.hosts.push((
+            "gw".into(),
+            HostOverride {
+                user: Some("operator@target-user@internal-host".into()),
+                jump_command: Some("nc -- %h %p".into()),
+                sftp_subsystem: Some("gateway-sftp".into()),
+                ..Default::default()
+            },
+        ));
+        let spec = r.resolve(&Target::parse("gw").unwrap());
+        assert_eq!(spec.user, "operator@target-user@internal-host");
+        assert_eq!(spec.sftp, SftpStart::Subsystem("gateway-sftp".into()));
+        assert!(spec.route_error.is_none());
+        r.hosts.push((
+            "db".into(),
+            HostOverride {
+                proxy_jump: Some("gw".into()),
+                sftp_server: Some("/usr/lib/openssh/sftp-server".into()),
+                ..Default::default()
+            },
+        ));
+        let spec = r.resolve(&Target::parse("db").unwrap());
+        assert_eq!(
+            spec.sftp,
+            SftpStart::Command("/usr/lib/openssh/sftp-server".into())
+        );
+        assert_eq!(spec.jumps[0].jump_command.as_deref(), Some("nc -- %h %p"));
+        assert_eq!(
+            jump_command("nc -- %h %p; echo %%", "x'; echo bad", 2022).unwrap(),
+            "nc -- 'x'\\''; echo bad' 2022; echo %"
+        );
+        assert!(jump_command("nc %x %p", "host", 22).is_err());
+        r.hosts[1].1.sftp_subsystem = Some("sftp".into());
+        assert!(
+            r.resolve(&Target::parse("db").unwrap())
+                .route_error
+                .is_some()
+        );
+        r.hosts[1].1.sftp_subsystem = None;
+        r.hosts[1].1.sftp_server = Some("\n".into());
+        assert!(
+            r.resolve(&Target::parse("db").unwrap())
+                .route_error
+                .is_some()
+        );
+    }
 
     const CONFIG: &str = r#"
 # comment

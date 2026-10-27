@@ -1,0 +1,22 @@
+[
+  {
+    "kind": "PostgreSql",
+    "connection": "yynative:{\"host\":\"postgres\",\"port\":5432,\"database\":\"yytest\",\"username\":\"yytest\",\"password\":\"Yydb_Test_2026!\",\"tls\":\"disable\"}"
+  },
+  {
+    "kind": "MySql",
+    "connection": "yynative:{\"host\":\"mysql\",\"port\":3306,\"database\":\"yytest\",\"username\":\"yytest\",\"password\":\"Yydb_Test_2026!\",\"tls\":\"disable\"}"
+  },
+  {
+    "kind": "SqlServer",
+    "connection": "yynative:{\"host\":\"sqlserver\",\"port\":1433,\"database\":\"master\",\"username\":\"sa\",\"password\":\"Yydb_Test_2026!\",\"tls\":\"disable\"}"
+  },
+  {
+    "kind": "Oracle",
+    "connection": "yynative:{\"host\":\"oracle\",\"port\":1521,\"database\":\"FREEPDB1\",\"username\":\"system\",\"password\":\"Yydb_Test_2026!\",\"tls\":\"disable\"}"
+  },
+  {
+    "kind": "Db2",
+    "connection": "yynative:{\"host\":\"db2\",\"port\":50000,\"database\":\"YYTEST\",\"username\":\"db2inst1\",\"password\":\"Yydb_Test_2026!\",\"tls\":\"disable\"}"
+  }
+]

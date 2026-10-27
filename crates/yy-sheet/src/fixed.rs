@@ -26,6 +26,9 @@ use crate::column::{Column, Piece};
 use crate::sheet::{Place, Sheet, Table};
 use crate::value::Value;
 
+mod infer;
+pub use infer::{RecordLengthGuess, infer_layouts, infer_record_lengths};
+
 /// レコードの区切り。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RecordSep {

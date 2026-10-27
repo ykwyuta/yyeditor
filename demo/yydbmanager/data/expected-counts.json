@@ -1,0 +1,11 @@
+{
+  "departments": 3,
+  "employees": 8,
+  "customers": 24,
+  "products": 8,
+  "orders": 1200,
+  "order_items": 3600,
+  "support_tickets": 6,
+  "exact_values": 3,
+  "demo_ready": 1
+}

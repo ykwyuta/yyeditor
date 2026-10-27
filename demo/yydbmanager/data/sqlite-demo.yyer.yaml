@@ -1,0 +1,561 @@
+# yydbmanager ER model — UTF-8 YAML
+format: yydbmanager-er
+format_version: 1
+model:
+  version: 4
+  kind: Sqlite
+  entities:
+  - size: null
+    id:
+      schema: main
+      name: customers
+    logical_name: 顧客
+    view: false
+    fields:
+    - important: false
+      name: customer_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: customer_code
+      logical_name: ""
+      data_type: VARCHAR(20)
+      nullable: false
+      default_sql: null
+    - important: true
+      name: name
+      logical_name: ""
+      data_type: VARCHAR(100)
+      nullable: false
+      default_sql: null
+    - important: false
+      name: region
+      logical_name: ""
+      data_type: VARCHAR(20)
+      nullable: false
+      default_sql: null
+    - important: false
+      name: email
+      logical_name: ""
+      data_type: VARCHAR(160)
+      nullable: true
+      default_sql: null
+    keys:
+    - name: PRIMARY
+      primary: true
+      columns:
+      - customer_id
+    - name: sqlite_autoindex_customers_1
+      primary: false
+      columns:
+      - customer_code
+    position:
+      x: 40.0
+      "y": 32.0
+    visible: true
+    indexes: []
+    catalog_definition: true
+  - size: null
+    id:
+      schema: main
+      name: demo_ready
+    logical_name: ""
+    view: false
+    fields:
+    - important: false
+      name: id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: dataset_version
+      logical_name: ""
+      data_type: VARCHAR(40)
+      nullable: false
+      default_sql: null
+    keys:
+    - name: PRIMARY
+      primary: true
+      columns:
+      - id
+    position:
+      x: 477.0
+      "y": 32.0
+    visible: false
+    indexes: []
+    catalog_definition: true
+  - size: null
+    id:
+      schema: main
+      name: departments
+    logical_name: 部門
+    view: false
+    fields:
+    - important: false
+      name: department_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: true
+      name: name
+      logical_name: ""
+      data_type: VARCHAR(100)
+      nullable: false
+      default_sql: null
+    keys:
+    - name: PRIMARY
+      primary: true
+      columns:
+      - department_id
+    position:
+      x: 477.0
+      "y": 32.0
+    visible: true
+    indexes: []
+    catalog_definition: true
+  - size: null
+    id:
+      schema: main
+      name: employees
+    logical_name: 社員
+    view: false
+    fields:
+    - important: false
+      name: employee_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: department_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: manager_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: true
+      default_sql: null
+    - important: true
+      name: name
+      logical_name: ""
+      data_type: VARCHAR(100)
+      nullable: false
+      default_sql: null
+    - important: false
+      name: email
+      logical_name: ""
+      data_type: VARCHAR(160)
+      nullable: false
+      default_sql: null
+    - important: false
+      name: salary
+      logical_name: ""
+      data_type: DECIMAL(18,2)
+      nullable: false
+      default_sql: null
+    - important: false
+      name: notes
+      logical_name: ""
+      data_type: VARCHAR(400)
+      nullable: true
+      default_sql: null
+    keys:
+    - name: PRIMARY
+      primary: true
+      columns:
+      - employee_id
+    - name: sqlite_autoindex_employees_1
+      primary: false
+      columns:
+      - email
+    position:
+      x: 914.0
+      "y": 32.0
+    visible: true
+    indexes: []
+    catalog_definition: true
+  - size: null
+    id:
+      schema: main
+      name: exact_values
+    logical_name: 精度検証
+    view: false
+    fields:
+    - important: false
+      name: value_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: big_integer
+      logical_name: ""
+      data_type: BIGINT
+      nullable: false
+      default_sql: null
+    - important: false
+      name: amount
+      logical_name: ""
+      data_type: TEXT
+      nullable: false
+      default_sql: null
+    - important: false
+      name: optional_text
+      logical_name: ""
+      data_type: VARCHAR(200)
+      nullable: true
+      default_sql: null
+    keys:
+    - name: PRIMARY
+      primary: true
+      columns:
+      - value_id
+    position:
+      x: 40.0
+      "y": 284.0
+    visible: true
+    indexes: []
+    catalog_definition: true
+  - size: null
+    id:
+      schema: main
+      name: order_items
+    logical_name: 受注明細
+    view: false
+    fields:
+    - important: false
+      name: order_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: line_no
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: product_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: quantity
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: unit_price
+      logical_name: ""
+      data_type: DECIMAL(18,2)
+      nullable: false
+      default_sql: null
+    keys:
+    - name: PRIMARY
+      primary: true
+      columns:
+      - order_id
+      - line_no
+    position:
+      x: 397.0
+      "y": 284.0
+    visible: true
+    indexes: []
+    catalog_definition: true
+  - size: null
+    id:
+      schema: main
+      name: orders
+    logical_name: 受注
+    view: false
+    fields:
+    - important: false
+      name: order_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: customer_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: sales_rep_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: ordered_on
+      logical_name: ""
+      data_type: DATE
+      nullable: false
+      default_sql: null
+    - important: true
+      name: status
+      logical_name: ""
+      data_type: VARCHAR(20)
+      nullable: false
+      default_sql: null
+    - important: true
+      name: total_amount
+      logical_name: ""
+      data_type: DECIMAL(18,2)
+      nullable: false
+      default_sql: null
+    - important: false
+      name: note
+      logical_name: ""
+      data_type: VARCHAR(400)
+      nullable: true
+      default_sql: null
+    keys:
+    - name: PRIMARY
+      primary: true
+      columns:
+      - order_id
+    position:
+      x: 770.0
+      "y": 284.0
+    visible: true
+    indexes: []
+    catalog_definition: true
+  - size: null
+    id:
+      schema: main
+      name: products
+    logical_name: 商品
+    view: false
+    fields:
+    - important: false
+      name: product_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: sku
+      logical_name: ""
+      data_type: VARCHAR(20)
+      nullable: false
+      default_sql: null
+    - important: true
+      name: name
+      logical_name: ""
+      data_type: VARCHAR(100)
+      nullable: false
+      default_sql: null
+    - important: false
+      name: unit_price
+      logical_name: ""
+      data_type: DECIMAL(18,2)
+      nullable: false
+      default_sql: null
+    - important: false
+      name: active
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    keys:
+    - name: PRIMARY
+      primary: true
+      columns:
+      - product_id
+    - name: sqlite_autoindex_products_1
+      primary: false
+      columns:
+      - sku
+    position:
+      x: 40.0
+      "y": 562.0
+    visible: true
+    indexes: []
+    catalog_definition: true
+  - size: null
+    id:
+      schema: main
+      name: support_tickets
+    logical_name: 問い合わせ
+    view: false
+    fields:
+    - important: false
+      name: ticket_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    - important: false
+      name: customer_code
+      logical_name: ""
+      data_type: VARCHAR(20)
+      nullable: false
+      default_sql: null
+    - important: true
+      name: subject
+      logical_name: ""
+      data_type: VARCHAR(200)
+      nullable: false
+      default_sql: null
+    - important: false
+      name: priority
+      logical_name: ""
+      data_type: INTEGER
+      nullable: false
+      default_sql: null
+    keys:
+    - name: PRIMARY
+      primary: true
+      columns:
+      - ticket_id
+    position:
+      x: 453.0
+      "y": 562.0
+    visible: true
+    indexes: []
+    catalog_definition: true
+  - size: null
+    id:
+      schema: main
+      name: customer_sales
+    logical_name: ""
+    view: true
+    fields:
+    - important: false
+      name: customer_id
+      logical_name: ""
+      data_type: INTEGER
+      nullable: true
+      default_sql: null
+    - important: true
+      name: name
+      logical_name: ""
+      data_type: VARCHAR(100)
+      nullable: true
+      default_sql: null
+    - important: false
+      name: order_count
+      logical_name: ""
+      data_type: ""
+      nullable: true
+      default_sql: null
+    - important: true
+      name: total_amount
+      logical_name: ""
+      data_type: ""
+      nullable: true
+      default_sql: null
+    keys: []
+    position:
+      x: 40.0
+      "y": 970.0
+    visible: false
+    indexes: []
+    catalog_definition: true
+  relations:
+  - logical: false
+    name: FK_0
+    child:
+      schema: main
+      name: employees
+    parent:
+      schema: main
+      name: employees
+    columns:
+    - manager_id
+    referenced_columns:
+    - employee_id
+  - logical: false
+    name: FK_1
+    child:
+      schema: main
+      name: employees
+    parent:
+      schema: main
+      name: departments
+    columns:
+    - department_id
+    referenced_columns:
+    - department_id
+  - logical: false
+    name: FK_0
+    child:
+      schema: main
+      name: order_items
+    parent:
+      schema: main
+      name: products
+    columns:
+    - product_id
+    referenced_columns:
+    - product_id
+  - logical: false
+    name: FK_1
+    child:
+      schema: main
+      name: order_items
+    parent:
+      schema: main
+      name: orders
+    columns:
+    - order_id
+    referenced_columns:
+    - order_id
+  - logical: false
+    name: FK_0
+    child:
+      schema: main
+      name: orders
+    parent:
+      schema: main
+      name: employees
+    columns:
+    - sales_rep_id
+    referenced_columns:
+    - employee_id
+  - logical: false
+    name: FK_1
+    child:
+      schema: main
+      name: orders
+    parent:
+      schema: main
+      name: customers
+    columns:
+    - customer_id
+    referenced_columns:
+    - customer_id
+  - logical: true
+    name: lr_ticket_customer
+    child:
+      schema: main
+      name: support_tickets
+    parent:
+      schema: main
+      name: customers
+    columns:
+    - customer_code
+    referenced_columns:
+    - customer_code
+  names: Both
+  level: Important
+view:
+  zoom: 0.8
+  origin:
+    x: 0.0
+    "y": 0.0
+  selected:
+    schema: main
+    name: customers

@@ -6,17 +6,23 @@
 //! 依存しないので、UI からも、SSH を使わないテスト（[`local`]）からも使える。
 
 pub mod deploy;
+pub mod diagnostics;
+pub mod file_access;
 pub mod forward;
 pub mod fs;
 pub mod known_hosts;
+pub mod listing;
 #[cfg(unix)]
 pub mod local;
 pub mod log;
+pub mod multiplex;
+pub mod policy;
 pub mod proxy;
 pub mod rpc;
 pub mod scp;
 pub mod session;
 pub mod sftp;
+pub mod shellfs;
 pub mod ssh_config;
 pub mod transfer;
 pub mod uri;
@@ -37,6 +43,9 @@ pub use yy_proto::{DirEntry, FileId, FileInfo, FileKind, ZipProgress, ZipState};
 
 /// SSH 接続（またはテスト用の代わり）。コマンドを起動して標準入出力でやり取りできる。
 pub trait Transport: Send + Sync {
+    fn diagnostics(&self) -> diagnostics::Context {
+        diagnostics::Context::default()
+    }
     /// 接続先のログインシェルでコマンドを起動する（コマンドはバイト列。パスが UTF-8 とは限らない）。
     fn exec(&self, command: &[u8]) -> io::Result<Process>;
     /// 接続が切れているか。
@@ -49,6 +58,10 @@ pub trait Transport: Send + Sync {
             io::ErrorKind::Unsupported,
             format!("この接続ではサブシステム {name} を起動できません"),
         ))
+    }
+    /// 設定された方法でSFTPを起動する。転送・一覧のすべてでこの入口を使う。
+    fn sftp(&self) -> io::Result<Process> {
+        self.subsystem("sftp")
     }
     fn shell(&self, _term: &str, _size: (u16, u16), _command: Option<&[u8]>) -> io::Result<Shell> {
         Err(io::Error::new(

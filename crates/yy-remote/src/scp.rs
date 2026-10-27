@@ -45,6 +45,19 @@ pub fn upload(
     input: &mut dyn Read,
     progress: &mut dyn FnMut(u64) -> bool,
 ) -> io::Result<()> {
+    let span = t.diagnostics().span("scp.upload");
+    span.metadata(&[("bytes", crate::diagnostics::Value::Number(size))]);
+    span.run(|| upload_inner(t, path, mode, size, input, progress))
+}
+
+fn upload_inner(
+    t: &dyn Transport,
+    path: &[u8],
+    mode: u32,
+    size: u64,
+    input: &mut dyn Read,
+    progress: &mut dyn FnMut(u64) -> bool,
+) -> io::Result<()> {
     let what = format!("SCP の送信 {}", crate::display(path));
     let mut cmd = b"scp -t ".to_vec();
     cmd.extend_from_slice(&shell_quote(path));
@@ -97,6 +110,18 @@ pub fn upload(
 /// 接続先の `path` を `offset` バイト目から `out` に受け取る。最初からなら `scp -f`、途中からは
 /// `tail -c +N`。受け取った量を返す。`expected` は残りの大きさ（途中からのときの確認に使う）。
 pub fn download(
+    t: &dyn Transport,
+    path: &[u8],
+    offset: u64,
+    out: &mut dyn Write,
+    progress: &mut dyn FnMut(u64) -> bool,
+) -> io::Result<u64> {
+    let span = t.diagnostics().span("scp.download");
+    span.metadata(&[("offset", crate::diagnostics::Value::Number(offset))]);
+    span.run(|| download_inner(t, path, offset, out, progress))
+}
+
+fn download_inner(
     t: &dyn Transport,
     path: &[u8],
     offset: u64,

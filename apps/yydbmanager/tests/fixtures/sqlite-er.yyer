@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "kind": "Sqlite",
+  "entities": [
+    {
+      "id": {
+        "schema": "main",
+        "name": "department"
+      },
+      "logical_name": "",
+      "view": false,
+      "fields": [
+        {
+          "name": "id",
+          "logical_name": "",
+          "data_type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "name",
+          "logical_name": "",
+          "data_type": "VARCHAR",
+          "nullable": true
+        }
+      ],
+      "keys": [
+        {
+          "name": "PRIMARY",
+          "primary": true,
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "position": {
+        "x": 84.37650359712231,
+        "y": 49.75060143884894
+      },
+      "visible": true
+    },
+    {
+      "id": {
+        "schema": "main",
+        "name": "employee"
+      },
+      "logical_name": "",
+      "view": false,
+      "fields": [
+        {
+          "name": "id",
+          "logical_name": "",
+          "data_type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "department_id",
+          "logical_name": "",
+          "data_type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "name",
+          "logical_name": "",
+          "data_type": "VARCHAR",
+          "nullable": true
+        }
+      ],
+      "keys": [
+        {
+          "name": "PRIMARY",
+          "primary": true,
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "position": {
+        "x": 660.0,
+        "y": 32.0
+      },
+      "visible": true
+    }
+  ],
+  "relations": [
+    {
+      "name": "FK_0",
+      "child": {
+        "schema": "main",
+        "name": "employee"
+      },
+      "parent": {
+        "schema": "main",
+        "name": "department"
+      },
+      "columns": [
+        "department_id"
+      ],
+      "referenced_columns": [
+        "id"
+      ]
+    }
+  ],
+  "names": "Physical",
+  "level": "Types"
+}

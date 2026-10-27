@@ -8,7 +8,10 @@
 //! リソース要求を横取りして返す）。文書と同じフォルダの画像などは `https://yy-doc.local/`
 //! （文書のフォルダを割り当てた仮想ホスト）から読む。
 
+pub mod help;
+pub mod live;
 mod markdown;
+pub mod outline;
 pub mod security;
 
 use std::borrow::Cow;
@@ -165,6 +168,38 @@ pub fn asset(path: &str) -> Option<(Cow<'static, [u8]>, &'static str)> {
         ),
         "preview.css" => (
             Cow::Borrowed(include_bytes!("../assets/preview.css").as_slice()),
+            css,
+        ),
+        "outline-model.js" => (
+            Cow::Borrowed(include_bytes!("../assets/outline-model.js").as_slice()),
+            js,
+        ),
+        "outline.js" => (
+            Cow::Borrowed(include_bytes!("../assets/outline.js").as_slice()),
+            js,
+        ),
+        "outline.css" => (
+            Cow::Borrowed(include_bytes!("../assets/outline.css").as_slice()),
+            css,
+        ),
+        "live.js" => (
+            Cow::Borrowed(include_bytes!("../assets/live.js").as_slice()),
+            js,
+        ),
+        "live-render.js" => (
+            Cow::Borrowed(include_bytes!("../assets/live-render.js").as_slice()),
+            js,
+        ),
+        "live-d3.js" => (
+            Cow::Borrowed(include_bytes!("../assets/live-d3.js").as_slice()),
+            js,
+        ),
+        "live-d3.html" => (
+            Cow::Borrowed(include_bytes!("../assets/live-d3.html").as_slice()),
+            "text/html; charset=utf-8",
+        ),
+        "live.css" => (
+            Cow::Borrowed(include_bytes!("../assets/live.css").as_slice()),
             css,
         ),
         _ => {

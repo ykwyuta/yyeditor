@@ -1,6 +1,50 @@
 //! 端末の動きのテスト。
 
 use crate::screen::{Color, flags};
+
+#[test]
+fn text_capture_records_final_lines_without_escape_sequences_or_view_duplicates() {
+    let mut t = Terminal::new(80, 3, 2);
+    t.feed(b"before\r\n");
+    assert!(t.take_text_capture().is_empty());
+    t.start_text_capture();
+    t.feed(b"\x1b[31mprogress 10%\r\x1b[2Kprogress 100%\x1b[0m\r\n");
+    t.feed(b"abc\x08X\r\n");
+    t.feed(b"same\r\nsame\r\n");
+    assert_eq!(t.take_text_capture(), "progress 100%\nabX\nsame\nsame\n");
+    for _ in 0..10 {
+        for row in 0..t.rows() {
+            let _ = t.view_line(2, row).text();
+            let _ = t.view_line(0, row).text();
+        }
+        let _ = t.screen_text();
+    }
+    assert!(t.take_text_capture().is_empty());
+    t.feed(b"partial");
+    assert!(t.take_text_capture().is_empty());
+    assert_eq!(t.stop_text_capture(), "partial\n");
+    assert!(t.stop_text_capture().is_empty());
+    t.feed(b"off\r\n");
+    assert!(t.take_text_capture().is_empty());
+}
+
+#[test]
+fn text_capture_joins_soft_wraps_and_handles_utf8_across_chunks() {
+    let mut t = Terminal::new(4, 2, 0);
+    t.start_text_capture();
+    let bytes = "日本語abcd\r\n".as_bytes();
+    let mut log = String::new();
+    for byte in bytes {
+        t.feed(&[*byte]);
+        log.push_str(&t.take_text_capture());
+    }
+    assert_eq!(log, "日本語abcd\n");
+    for _ in 0..1000 {
+        t.feed(b"x\r\n");
+    }
+    assert_eq!(t.take_text_capture(), "x\n".repeat(1000));
+    assert!(t.stop_text_capture().is_empty());
+}
 use crate::term::{CursorShape, MouseMode, Pos, Terminal};
 
 fn term(cols: usize, rows: usize) -> Terminal {

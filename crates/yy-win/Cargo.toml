@@ -7,7 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+yy-ui-win.workspace = true
 yy-buffer.workspace = true
+yy-draw.workspace = true
+blake3.workspace = true
 yy-config.workspace = true
 yy-core.workspace = true
 yy-encoding.workspace = true
@@ -34,6 +37,7 @@ yy-numfmt.workspace = true
 webview2-com.workspace = true
 crossbeam-channel.workspace = true
 windows-numerics.workspace = true
+tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
@@ -47,6 +51,7 @@ features = [
     "Win32_Graphics_Imaging",
     "Win32_Graphics_Printing",
     "Win32_System_Com",
+    "Win32_System_Registry",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_Security",

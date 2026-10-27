@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "kind": "MySql",
+  "actual": true,
+  "raw": "-> Sort: TOTAL DESC  (actual time=0.145..0.146 rows=5 loops=1)\n    -> Table scan on <temporary>  (actual time=0.135..0.135 rows=5 loops=1)\n        -> Aggregate using temporary table  (actual time=0.134..0.134 rows=5 loops=1)\n            -> Nested loop inner join  (cost=17.6 rows=26.7) (actual time=0.0276..0.104 rows=79 loops=1)\n                -> Filter: (b.AMOUNT > 10)  (cost=8.25 rows=26.7) (actual time=0.0197..0.0304 rows=79 loops=1)\n                    -> Table scan on b  (cost=8.25 rows=80) (actual time=0.0181..0.0247 rows=80 loops=1)\n                -> Single-row index lookup on a using PRIMARY (ID=b.ID)  (cost=0.254 rows=1) (actual time=621e-6..643e-6 rows=1 loops=79)\n",
+  "nodes": [
+    {
+      "id": 1,
+      "parent": null,
+      "operator": "Sort: TOTAL DESC",
+      "object": "",
+      "estimated_rows": null,
+      "actual_rows": 5.0,
+      "cost": null,
+      "properties": {
+        "Actual Loops": "1",
+        "Actual Startup Time": "0.145",
+        "Actual Total Time": "0.146",
+        "Native TREE": "Sort: TOTAL DESC  (actual time=0.145..0.146 rows=5 loops=1)",
+        "Query.Text": "SELECT a.GRP, COUNT(*) AS N, SUM(b.AMOUNT) AS TOTAL FROM YYDB_PLAN_A a JOIN YYDB_PLAN_B b ON a.ID=b.ID WHERE b.AMOUNT>10 GROUP BY a.GRP ORDER BY SUM(b.AMOUNT) DESC"
+      }
+    },
+    {
+      "id": 2,
+      "parent": 1,
+      "operator": "Table scan on <temporary>",
+      "object": "<temporary>",
+      "estimated_rows": null,
+      "actual_rows": 5.0,
+      "cost": null,
+      "properties": {
+        "Actual Loops": "1",
+        "Actual Startup Time": "0.135",
+        "Actual Total Time": "0.135",
+        "Native TREE": "Table scan on <temporary>  (actual time=0.135..0.135 rows=5 loops=1)"
+      }
+    },
+    {
+      "id": 3,
+      "parent": 2,
+      "operator": "Aggregate using temporary table",
+      "object": "",
+      "estimated_rows": null,
+      "actual_rows": 5.0,
+      "cost": null,
+      "properties": {
+        "Actual Loops": "1",
+        "Actual Startup Time": "0.134",
+        "Actual Total Time": "0.134",
+        "Native TREE": "Aggregate using temporary table  (actual time=0.134..0.134 rows=5 loops=1)"
+      }
+    },
+    {
+      "id": 4,
+      "parent": 3,
+      "operator": "Nested loop inner join",
+      "object": "",
+      "estimated_rows": 26.7,
+      "actual_rows": 79.0,
+      "cost": 17.6,
+      "properties": {
+        "Actual Loops": "1",
+        "Actual Startup Time": "0.0276",
+        "Actual Total Time": "0.104",
+        "Native TREE": "Nested loop inner join  (cost=17.6 rows=26.7) (actual time=0.0276..0.104 rows=79 loops=1)"
+      }
+    },
+    {
+      "id": 5,
+      "parent": 4,
+      "operator": "Filter: (b.AMOUNT > 10)",
+      "object": "",
+      "estimated_rows": 26.7,
+      "actual_rows": 79.0,
+      "cost": 8.25,
+      "properties": {
+        "Actual Loops": "1",
+        "Actual Startup Time": "0.0197",
+        "Actual Total Time": "0.0304",
+        "Native TREE": "Filter: (b.AMOUNT > 10)  (cost=8.25 rows=26.7) (actual time=0.0197..0.0304 rows=79 loops=1)"
+      }
+    },
+    {
+      "id": 6,
+      "parent": 5,
+      "operator": "Table scan on b",
+      "object": "b",
+      "estimated_rows": 80.0,
+      "actual_rows": 80.0,
+      "cost": 8.25,
+      "properties": {
+        "Actual Loops": "1",
+        "Actual Startup Time": "0.0181",
+        "Actual Total Time": "0.0247",
+        "Native TREE": "Table scan on b  (cost=8.25 rows=80) (actual time=0.0181..0.0247 rows=80 loops=1)"
+      }
+    },
+    {
+      "id": 7,
+      "parent": 4,
+      "operator": "Single-row index lookup on a using PRIMARY (ID=b.ID)",
+      "object": "a [PRIMARY]",
+      "estimated_rows": 1.0,
+      "actual_rows": 1.0,
+      "cost": 0.254,
+      "properties": {
+        "Actual Loops": "79",
+        "Actual Startup Time": "621e-6",
+        "Actual Total Time": "643e-6",
+        "Native TREE": "Single-row index lookup on a using PRIMARY (ID=b.ID)  (cost=0.254 rows=1) (actual time=621e-6..643e-6 rows=1 loops=79)"
+      }
+    }
+  ]
+}

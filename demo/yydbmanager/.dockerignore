@@ -1,0 +1,13 @@
+*
+!docker/
+!docker/db2.Dockerfile
+!docker/db2-init.sh
+!docker/db2-health.sh
+!init/
+!init/db2.sql
+!sql/
+!sql/*.sql
+!sql/performance/
+!sql/performance/*.sql
+!sql/plan-files/
+!sql/plan-files/*.sql

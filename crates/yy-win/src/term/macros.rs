@@ -48,6 +48,7 @@ pub(crate) struct MacroRun {
 
 /// スクリプトのスレッドから見たホスト。
 struct UiHost {
+    stream: bool,
     tx: Sender<Request>,
     frame: isize,
     message: u32,
@@ -71,11 +72,23 @@ impl UiHost {
 const GONE: &str = "タブが閉じられました";
 
 impl Host for UiHost {
+    fn is_stream(&self) -> bool {
+        self.stream
+    }
     fn snapshot(&self) -> Result<Snapshot, String> {
         let (tx, rx) = channel();
         self.tx.send(Request::Snapshot(tx)).map_err(|_| GONE)?;
         self.post();
-        rx.recv().map_err(|_| GONE.to_owned())?
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !self.stopped() => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err("停止しました".into());
+                }
+                Err(_) => return Err(GONE.into()),
+            }
+        }
     }
 
     fn generation(&self) -> u64 {
@@ -117,16 +130,17 @@ pub(crate) fn start(
     tab_id: u64,
     name: &str,
     script: String,
-    out_dir: PathBuf,
-    timeout: u64,
+    options: yy_3270_macro::Options,
     frame: HWND,
     message: u32,
+    stream: bool,
 ) -> MacroRun {
     let (tx, rx) = channel();
     let stop = Arc::new(AtomicBool::new(false));
     let generation = Arc::new(Generation::default());
     let frame_raw = frame.0 as isize;
     let host = UiHost {
+        stream,
         tx: tx.clone(),
         frame: frame.0 as isize,
         message,
@@ -135,11 +149,7 @@ pub(crate) fn start(
     };
     std::thread::spawn(move || {
         let host: Arc<dyn Host> = Arc::new(host);
-        let r = yy_3270_macro::run(
-            &script,
-            host.clone(),
-            yy_3270_macro::Options { out_dir, timeout },
-        );
+        let r = yy_3270_macro::run(&script, host.clone(), options);
         let _ = tx.send(Request::Finished(r));
         unsafe {
             let _ = PostMessageW(
@@ -158,6 +168,92 @@ pub(crate) fn start(
         rx,
         transfer_reply: None,
     }
+}
+
+/// Current live VT screen, independent of the user's scrollback position.
+pub(crate) fn stream_snapshot(term: &yy_term::Terminal, connected: bool) -> Snapshot {
+    let cells = (0..term.rows())
+        .map(|r| {
+            term.screen_row(r)
+                .cells
+                .iter()
+                .map(|c| {
+                    if c.width == 0 {
+                        String::new()
+                    } else if c.attr.has(yy_term::screen::flags::HIDDEN) {
+                        " ".into()
+                    } else {
+                        let mut text = c.ch.to_string();
+                        if let Some(extra) = &c.combining {
+                            text.push_str(extra);
+                        }
+                        text
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let (row, col) = term.cursor();
+    Snapshot {
+        cells,
+        cursor: (row + 1, col + 1),
+        locked: false,
+        connected,
+        fields: vec![],
+        ccsid: yy_encoding::Ccsid::Ibm930,
+    }
+}
+pub(crate) fn stream_key(name: &str, modes: &yy_term::Modes) -> Result<Vec<u8>, String> {
+    use yy_term::{Key, Mods};
+    let upper = name.trim().to_ascii_uppercase();
+    let mut parts = upper.split('+').collect::<Vec<_>>();
+    let main = parts.pop().unwrap_or("");
+    let literal = name.trim().rsplit('+').next().unwrap_or("");
+    let mut mods = Mods::default();
+    for part in parts {
+        match part {
+            "CTRL" | "CONTROL" => mods.ctrl = true,
+            "SHIFT" => mods.shift = true,
+            "ALT" => mods.alt = true,
+            _ => return Err(format!("不明な修飾キー: {part}")),
+        }
+    }
+    let key = match main {
+        "ENTER" | "NEWLINE" => Key::Enter,
+        "SPACE" => Key::Char(' '),
+        "TAB" => Key::Tab,
+        "BACKTAB" => {
+            mods.shift = true;
+            Key::Tab
+        }
+        "ESC" | "ESCAPE" => Key::Escape,
+        "BACKSPACE" => Key::Backspace,
+        "DELETE" => Key::Delete,
+        "INSERT" => Key::Insert,
+        "UP" => Key::Up,
+        "DOWN" => Key::Down,
+        "LEFT" => Key::Left,
+        "RIGHT" => Key::Right,
+        "HOME" => Key::Home,
+        "END" => Key::End,
+        "PAGEUP" | "PGUP" => Key::PageUp,
+        "PAGEDOWN" | "PGDN" => Key::PageDown,
+        _ => {
+            if let Some(number) = main
+                .strip_prefix("PF")
+                .or_else(|| main.strip_prefix('F'))
+                .and_then(|n| n.parse::<u8>().ok())
+                .filter(|n| (1..=12).contains(n))
+            {
+                Key::F(number)
+            } else if main.chars().count() == 1 {
+                Key::Char(literal.chars().next().unwrap())
+            } else {
+                return Err(format!("SSHではキー「{name}」を使用できません"));
+            }
+        }
+    };
+    Ok(yy_term::keys::encode(key, mods, modes))
 }
 
 /// マクロのフォルダ（既定は `%APPDATA%\yyeditor\macros`）。
@@ -264,6 +360,26 @@ pub(crate) fn pick_file(owner: HWND, folder: Option<&Path>, save: Option<&str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stream_snapshot_and_keys_use_live_screen_unicode_and_terminal_modes() {
+        let mut term = yy_term::Terminal::new(30, 3, 100);
+        term.feed("猫e\u{301}\r\nready> \x1b[8mhidden\x1b[0m".as_bytes());
+        let snapshot = stream_snapshot(&term, true);
+        assert!(snapshot.row(1).starts_with("猫e\u{301}"));
+        assert!(snapshot.row(2).starts_with("ready> "));
+        assert!(!snapshot.lines().join("\n").contains("hidden"));
+        assert!(!snapshot.locked);
+        assert!(snapshot.fields.is_empty());
+        assert_eq!(stream_key("Ctrl+C", term.modes()).unwrap(), [3]);
+        assert_eq!(stream_key("Escape", term.modes()).unwrap(), [27]);
+        assert_eq!(stream_key("Shift+Tab", term.modes()).unwrap(), b"\x1b[Z");
+        assert!(stream_key("PF24", term.modes()).is_err());
+        assert!(stream_key("Bad+Enter", term.modes()).is_err());
+        assert_eq!(stream_key("Up", term.modes()).unwrap(), b"\x1b[A");
+        term.feed(b"\x1b[?1h");
+        assert_eq!(stream_key("Up", term.modes()).unwrap(), b"\x1bOA");
+        assert!(!stream_snapshot(&term, false).connected);
+    }
 
     #[test]
     fn resolves_macro_names() {

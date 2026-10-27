@@ -1,0 +1,10 @@
+{
+  "cached_raster_p95_ms": 609.7523,
+  "first_raster_ms": 580.5658999999999,
+  "layout_ms": 46.4678,
+  "marker_assets": 8,
+  "move_p95_ms": 5.3551,
+  "relations": 2000,
+  "tables": 500,
+  "viewport": "1400x800 @ 100%"
+}

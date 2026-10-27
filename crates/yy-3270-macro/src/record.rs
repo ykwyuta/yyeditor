@@ -10,6 +10,7 @@ use yy_3270::Key;
 /// 記録中の操作。
 #[derive(Debug, Default)]
 pub struct Recorder {
+    stream: bool,
     lines: Vec<String>,
     text: String,
     /// 今のフィールドが非表示で、すでに `password` を入れた
@@ -27,6 +28,9 @@ fn quote(s: &str) -> String {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            c if c.is_ascii_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
             c => out.push(c),
         }
     }
@@ -74,6 +78,21 @@ fn is_aid(k: &Key) -> bool {
 impl Recorder {
     pub fn new() -> Recorder {
         Recorder::default()
+    }
+    pub fn stream() -> Self {
+        Self {
+            stream: true,
+            ..Self::default()
+        }
+    }
+    /// UTF-8 terminal input, including escaped control sequences. Recording is explicit.
+    pub fn stream_bytes(&mut self, bytes: &[u8]) {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            self.text.push_str(text);
+            if text.contains(['\r', '\n']) {
+                self.flush_text();
+            }
+        }
     }
 
     fn flush_text(&mut self) {
@@ -136,10 +155,19 @@ impl Recorder {
 
     /// スクリプトにする。`password_name` は `password("…")` に入れる資格情報の名前。
     pub fn finish(mut self, title: &str, password_name: &str) -> String {
+        let title: String = title
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
         self.flush_text();
         let mut out = format!(
             "// {title}\n// 記録したマクロ。待つ文字（wait_text）や繰り返しを書き足して仕上げてください。\n\nwait_unlocked();\n"
         );
+        if self.stream {
+            out = format!(
+                "// {title}\n// SSH input recording. Add wait_text(\"prompt\") between commands as needed.\n\n"
+            );
+        }
         for l in &self.lines {
             out.push_str(&l.replace(PASSWORD_MARK, &quote(password_name)));
             out.push('\n');
@@ -151,6 +179,17 @@ impl Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stream_recording_is_readable_rhai_with_unicode_and_escaped_controls() {
+        let mut record = Recorder::stream();
+        record.stream_bytes("echo 日本語\r".as_bytes());
+        record.stream_bytes(b"\x1b[A\x03\t\x7f");
+        let script = record.finish("SSH", "");
+        assert!(script.contains("echo 日本語\\r"));
+        assert!(script.contains("\\x1b[A\\x03\\t\\x7f"));
+        assert!(!script.contains("wait_unlocked()"));
+        crate::check(&script).unwrap();
+    }
 
     #[test]
     fn records_keys_text_moves_and_passwords() {

@@ -5,7 +5,7 @@
 //! エクスプローラーからドラッグ＆ドロップするか「アップロード」で送り、選んだ項目は
 //! 「ダウンロード」で受け取る。
 //!
-//! 一覧・フォルダの操作は SFTP（`yy_remote::sftp`）、転送はレジュームできる転送の仕組み
+//! 一覧・フォルダの操作は SFTP または SCP用シェル、転送はレジュームできる転送の仕組み
 //! （`yy_remote::xfer`。SFTP・SCP）を使う。接続（組み込みの SSH・踏み台・プロキシ・ホスト鍵・
 //! 保存したパスワード・接続の記録）、同梱フォント、設定、ダイアログはエディタ・ターミナルと共通。
 
@@ -177,10 +177,10 @@ struct Node {
     loaded: bool,
 }
 
-/// 接続先ごとの一覧用の SFTP。
+/// 接続先ごとの一覧用の接続。
 struct Browser {
     target: Target,
-    /// 一覧・ファイル操作（エージェントか SFTP）
+    /// 一覧・ファイル操作（エージェント、SFTPまたはSCP用シェル）
     fs: Arc<dyn RemoteFs>,
     transport: Arc<dyn yy_remote::Transport>,
     home: Vec<u8>,
@@ -587,6 +587,7 @@ fn create_menu() -> Result<HMENU> {
         let bar = CreateMenu()?;
         let file = CreatePopupMenu()?;
         item(file, ID_CONNECT, w!("接続(&C)...\tCtrl+N"))?;
+        item(file, crate::sites::ID_MANAGE, w!("SSH接続先を管理…"))?;
         item(file, ID_DISCONNECT, w!("切断(&D)"))?;
         sep(file)?;
         item(file, ID_TERMINAL, w!("ターミナルで開く(&T)"))?;
@@ -636,6 +637,7 @@ fn create_menu() -> Result<HMENU> {
         item(xfer, ID_CANCEL_JOB, w!("取り消し(&C)"))?;
         item(xfer, ID_CLEAR_DONE, w!("完了したものを一覧から消す(&L)"))?;
         let help = CreatePopupMenu()?;
+        crate::diagnosticui::append_menu(help)?;
         item(help, ID_TRANSFER_LOG, w!("転送の記録を開く(&T)"))?;
         item(help, ID_CONNECT_LOG, w!("リモート接続の記録を開く(&R)"))?;
         item(
@@ -808,9 +810,14 @@ impl App {
                         "{}　{} 個の項目{sel}　転送: {}　エージェント: {}",
                         l.target,
                         self.items.len(),
-                        self.protocol.name(),
-                        if crate::remote::use_agent() {
+                        crate::remote::protocol(&l.target, self.protocol).name(),
+                        if crate::remote::protocol(&l.target, self.protocol) != Protocol::Scp
+                            && crate::remote::agent_for(&l.target)
+                        {
                             "使う"
+                        } else if crate::remote::protocol(&l.target, self.protocol) == Protocol::Scp
+                        {
+                            "使わない（シェル）"
                         } else {
                             "使わない（SFTP）"
                         }
@@ -844,8 +851,11 @@ impl App {
                     (MF_BYCOMMAND | if on { MF_CHECKED } else { MF_UNCHECKED }).0,
                 );
             };
-            check(ID_PROTO_SFTP, self.protocol == Protocol::Sftp);
-            check(ID_PROTO_SCP, self.protocol == Protocol::Scp);
+            let protocol = self.loc.as_ref().map_or(self.protocol, |l| {
+                crate::remote::protocol(&l.target, self.protocol)
+            });
+            check(ID_PROTO_SFTP, protocol == Protocol::Sftp);
+            check(ID_PROTO_SCP, protocol == Protocol::Scp);
             check(ID_HIDDEN, self.show_hidden);
             check(ID_USE_AGENT, crate::remote::use_agent());
         }
@@ -1185,15 +1195,38 @@ fn local_time(secs: u64) -> String {
 
 // ---- 接続と移動 -------------------------------------------------------------------
 
-/// `target` の一覧・ファイル操作（エージェントを使う設定ならエージェント、でなければ SFTP。
+/// `target` の一覧・ファイル操作（エージェント、SFTPまたはSCP用シェル）。
 /// なければ接続する。接続中はアプリの状態を借りない）。
+fn protocol_for(target: &Target) -> Protocol {
+    crate::remote::protocol(target, with(|a| a.protocol).unwrap_or(Protocol::Sftp))
+}
+
 fn browser(target: &Target) -> std::result::Result<(Arc<dyn RemoteFs>, Vec<u8>), String> {
     if let Some(b) = with(|a| a.browser(target).map(|b| (b.fs.clone(), b.home.clone()))).flatten() {
         return Ok(b);
     }
-    let fs = crate::remote::fs(target, &set_status)?;
+    let scp = protocol_for(target) == Protocol::Scp;
+    let listing = crate::remote::listing_command(target)?;
+    let fs: Arc<dyn RemoteFs> = if scp {
+        let t = crate::remote::transport(target, &set_status)?;
+        crate::remote::wait(&set_status, move |_| {
+            yy_remote::shellfs::ShellFs::connect(t)
+        })
+        .map(|fs| Arc::new(fs) as Arc<dyn RemoteFs>)
+        .map_err(|e| e.to_string())?
+    } else {
+        crate::remote::base_fs(target, &set_status)?
+    };
     // 転送に使う接続（エージェントのセッションの接続か、同じ SSH の接続）
     let t = crate::remote::transport(target, &set_status)?;
+    let fs: Arc<dyn RemoteFs> = match listing {
+        Some(listing) => Arc::new(yy_remote::listing::CommandListFs::new(
+            fs,
+            t.clone(),
+            listing,
+        )),
+        None => fs,
+    };
     let home = fs.home().to_vec();
     with(|a| {
         a.browsers.retain(|b| !b.target.same(target));
@@ -1247,7 +1280,10 @@ fn go(mut loc: Loc, push: bool) {
         }
     };
     if loc.path.is_empty() {
-        loc.path = home;
+        loc.path = crate::remote::host_settings(&loc.target)
+            .and_then(|h| h.remote_directory)
+            .map(String::into_bytes)
+            .unwrap_or(home);
     }
     let path = loc.path.clone();
     let listed = remote_op(
@@ -1430,6 +1466,9 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
 }
 
 fn command(hwnd: HWND, id: u16) {
+    if crate::diagnosticui::command(hwnd, id) {
+        return;
+    }
     match id {
         ID_BACK => {
             let Some(loc) = with(|a| {
@@ -1497,6 +1536,16 @@ fn command(hwnd: HWND, id: u16) {
             }
         }
         ID_CONNECT => cmd_connect(hwnd),
+        crate::sites::ID_MANAGE => {
+            if let Some(config) = crate::sites::manage(hwnd) {
+                with(|a| {
+                    a.config.remote = config;
+                    a.browsers.clear();
+                    a.fill_tree();
+                    a.update_menu();
+                });
+            }
+        }
         ID_DISCONNECT => {
             with(|a| {
                 if let Some(l) = a.loc.take() {
@@ -1581,15 +1630,46 @@ fn command(hwnd: HWND, id: u16) {
             }
         }
         ID_PROTO_SFTP | ID_PROTO_SCP => {
-            with(|a| {
-                a.protocol = if id == ID_PROTO_SCP {
-                    Protocol::Scp
-                } else {
-                    Protocol::Sftp
+            if let Some(Some(target)) = with(|a| a.loc.as_ref().map(|l| l.target.clone())) {
+                let Some(path) = yy_config::connections::default_path() else {
+                    return;
                 };
+                let mut host = crate::remote::host_settings(&target).unwrap_or_default();
+                host.protocol = Some(if id == ID_PROTO_SCP {
+                    yy_config::TransferProtocol::Scp
+                } else {
+                    yy_config::TransferProtocol::Sftp
+                });
+                host.use_agent = Some(false);
+                if let Err(e) =
+                    yy_config::connections::Profiles::edit(&path, &target.host, Some(host))
+                {
+                    error_box(hwnd, &e);
+                    return;
+                }
+                let (config, error) = Config::load();
+                if let Some(error) = error {
+                    error_box(hwnd, &error.to_string());
+                    return;
+                }
+                crate::remote::reload_settings(config.remote.clone());
+                with(|a| a.config.remote = config.remote);
+            }
+            with(|a| {
+                if a.loc.is_none() {
+                    a.protocol = if id == ID_PROTO_SCP {
+                        Protocol::Scp
+                    } else {
+                        Protocol::Sftp
+                    };
+                }
                 a.update_menu();
                 a.set_status("");
+                a.browsers.clear();
             });
+            if with(|a| a.loc.is_some()) == Some(true) {
+                refresh();
+            }
         }
         ID_UPLOAD => {
             let files = pick_files(hwnd);

@@ -28,7 +28,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, CreateCoreWebView2ControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, NavigationCompletedEventHandler,
-    NavigationStartingEventHandler, NewWindowRequestedEventHandler,
+    NavigationStartingEventHandler, NewWindowRequestedEventHandler, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -52,6 +52,7 @@ use crate::util::Context;
 pub(crate) const WM_APP_PREVIEW_OPEN: u32 = WM_APP + 21;
 /// WebView2 を使えなかった（プレビューの欄には案内を表示している）。フレームに送る。
 pub(crate) const WM_APP_PREVIEW_FAILED: u32 = WM_APP + 22;
+pub(crate) const WM_APP_MARKDOWN_EDIT: u32 = WM_APP + 23;
 // Poll owned result channels on the UI thread; never post heap pointers to a dying HWND.
 const FETCH_TIMER: usize = 0x5959;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -235,6 +236,9 @@ struct Shared {
     visible: std::cell::Cell<bool>,
     /// WebView2 を使えなかった
     failed: std::cell::Cell<bool>,
+    editing: std::cell::Cell<bool>,
+    edit_messages: RefCell<Vec<String>>,
+    edit_initial: RefCell<Option<String>>,
 }
 
 /// プレビューの欄（子ウィンドウ）と、その中の WebView2。
@@ -274,6 +278,9 @@ impl Preview {
                 page: RefCell::new(Page::default()),
                 visible: std::cell::Cell::new(false),
                 failed: std::cell::Cell::new(false),
+                editing: std::cell::Cell::new(false),
+                edit_messages: RefCell::new(Vec::new()),
+                edit_initial: RefCell::new(None),
             }),
             started: false,
         })
@@ -323,6 +330,64 @@ impl Preview {
 
     fn web(&self) -> Option<Web> {
         self.shared.web.borrow().clone()
+    }
+
+    pub(crate) fn show_editor(
+        &self,
+        source: &str,
+        epoch: u64,
+        caret: usize,
+        read_only: bool,
+        folder: Option<DocBase>,
+    ) {
+        self.show_editor_page(
+            source,
+            epoch,
+            folder.clone(),
+            yy_preview::live::page(source, epoch, caret, read_only, folder.is_some()),
+        );
+    }
+
+    pub(crate) fn show_outline(&self, source: &str, epoch: u64, read_only: bool) {
+        self.show_editor_page(
+            source,
+            epoch,
+            None,
+            yy_preview::outline::page(source, epoch, read_only),
+        );
+    }
+
+    fn show_editor_page(&self, source: &str, epoch: u64, folder: Option<DocBase>, html: String) {
+        self.shared.editing.set(true);
+        self.shared.edit_messages.borrow_mut().clear();
+        *self.shared.edit_initial.borrow_mut() = Some(format!(
+            "{{\"epoch\":{epoch},\"initial\":{}}}",
+            yy_preview::live::source_json(source)
+        ));
+        {
+            let mut p = self.shared.page.borrow_mut();
+            p.html = html;
+            p.kind = None;
+            p.line = None;
+            p.folder = folder;
+            p.version += 1;
+        }
+        navigate(&self.shared);
+    }
+
+    pub(crate) fn take_edit_messages(&self) -> Vec<String> {
+        std::mem::take(&mut *self.shared.edit_messages.borrow_mut())
+    }
+    pub(crate) fn editor_post(&self, json: &str) {
+        self.post(json);
+    }
+    pub(crate) fn focus_action(&self) -> Option<Box<dyn FnOnce()>> {
+        let web = self.web()?;
+        Some(Box::new(move || unsafe {
+            let _ = web
+                .controller
+                .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }))
     }
 
     /// Markdown を表示する。同じ種類・同じフォルダのページを表示中なら本文だけを差し替える。
@@ -537,12 +602,54 @@ fn setup(
         let _ = settings.SetAreDefaultScriptDialogsEnabled(true);
 
         let filter = HSTRING::from(format!("https://{PREVIEW_HOST}/*"));
-        webview.AddWebResourceRequestedFilter(&filter, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)?;
+        // 分離した d3 フレームが読む埋め込み資源も対象にする。
+        if let Ok(all_frames) = webview.cast::<ICoreWebView2_22>() {
+            all_frames.AddWebResourceRequestedFilterWithRequestSourceKinds(
+                &filter,
+                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+                COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL,
+            )?;
+        } else {
+            webview
+                .AddWebResourceRequestedFilter(&filter, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)?;
+        }
         webview.AddWebResourceRequestedFilter(
             &HSTRING::from(format!("https://{DOC_HOST}/*")),
             COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
         )?;
         let mut token = 0i64;
+
+        let s = shared.clone();
+        webview.add_WebMessageReceived(
+            &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                if !s.editing.get() || !s.visible.get() {
+                    return Ok(());
+                }
+                let origin = take_string(|p| args.Source(p));
+                if origin != PAGE_URL {
+                    return Ok(());
+                }
+                let text = take_string(|p| args.TryGetWebMessageAsString(p));
+                if text.len() > yy_preview::live::MAX_BYTES + 256 {
+                    return Ok(());
+                }
+                if text.split('\n').nth(2) == Some("load") {
+                    let initial = s.edit_initial.borrow().clone();
+                    if let Some(initial) = initial
+                        && let Some(web) = s.web.borrow().clone()
+                    {
+                        let _ = web.webview.PostWebMessageAsJson(&HSTRING::from(initial));
+                    }
+                } else {
+                    // 入力の順序を保持する。ネイティブの文書はフレーム側で更新する。
+                    s.edit_messages.borrow_mut().push(text);
+                    let _ = PostMessageW(Some(s.frame), WM_APP_MARKDOWN_EDIT, WPARAM(0), LPARAM(0));
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
 
         let s = shared.clone();
         let env2 = env;
@@ -629,6 +736,7 @@ fn setup(
 
         // プレビューにフォーカスがあってもエディタのショートカット（保存など）を使えるようにする
         let frame = shared.frame;
+        let edit_shared = shared.clone();
         controller.add_AcceleratorKeyPressed(
             &AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
@@ -641,7 +749,7 @@ fn setup(
                 }
                 let mut vk = 0u32;
                 args.VirtualKey(&mut vk)?;
-                if crate::app::translate_preview_shortcut(frame, vk) {
+                if !edit_shared.editing.get() && crate::app::translate_preview_shortcut(frame, vk) {
                     args.SetHandled(true)?;
                 }
                 Ok(())
@@ -1329,6 +1437,699 @@ mod tests {
     use std::time::Duration;
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+
+    #[test]
+    fn outline_edit_bookmark_reference_zoom_and_readonly_in_webview2() {
+        let _serial = testing::webview2_lock();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            RegisterClassExW(&WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(preview_proc),
+                hInstance: GetModuleHandleW(None).unwrap().into(),
+                lpszClassName: PREVIEW_CLASS,
+                ..Default::default()
+            });
+        }
+        struct Parent(HWND);
+        impl Drop for Parent {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        let parent = Parent(unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PREVIEW_CLASS,
+                w!("outline test"),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                0,
+                0,
+                640,
+                480,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        });
+        let mut pane = Preview::new(parent.0, parent.0).unwrap();
+        pane.set_visible(true);
+        pane.set_bounds(0, 0, 620, 440);
+        pane.show_outline("", 91, false);
+        let mut messages = Vec::new();
+        let ready = pump_until(Duration::from_secs(45), || {
+            messages.extend(pane.take_edit_messages());
+            messages
+                .iter()
+                .any(|m| m.split('\n').nth(2) == Some("ready"))
+                || pane.is_unavailable()
+        });
+        if pane.is_unavailable() {
+            assert!(
+                std::env::var_os("YY_REQUIRE_WEBVIEW2").is_none(),
+                "WebView2: {}",
+                notice_of(pane.hwnd)
+            );
+            return;
+        }
+        assert!(
+            ready,
+            "outline did not become ready: {}",
+            notice_of(pane.hwnd)
+        );
+        assert_eq!(
+            eval(
+                &pane,
+                r#"
+            document.querySelector('[data-op=add]').click();
+            var input=document.querySelector('#tree input');
+            input.value='日本語😀';input.dispatchEvent(new Event('input'));
+            document.querySelector('[data-op=bookmark]').click();
+            document.querySelector('[data-op=add]').click();
+            document.querySelector('[data-op=indent]').click();
+            document.querySelector('[data-op=reference]').click();
+            document.querySelector('#picker button').click();
+            document.querySelectorAll('#tree input').length===2 &&
+            document.querySelectorAll('#bookmarks button').length===1 &&
+            document.querySelector('#tree .refs button').textContent.includes('日本語😀')
+        "#
+            )
+            .as_deref(),
+            Some("true")
+        );
+        pane.editor_post("{\"flush\":91}");
+        assert!(
+            pump_until(Duration::from_secs(10), || {
+                messages.extend(pane.take_edit_messages());
+                messages
+                    .iter()
+                    .any(|m| m.split('\n').nth(2) == Some("flush:91"))
+            }),
+            "outline flush missing: {messages:?}"
+        );
+        let saved = messages
+            .iter()
+            .rev()
+            .find(|m| m.split('\n').nth(2) == Some("flush:91"))
+            .unwrap()
+            .splitn(6, '\n')
+            .nth(5)
+            .unwrap()
+            .to_owned();
+        assert!(saved.contains("yyoutline") && saved.contains("日本語😀"));
+        assert_eq!(eval(&pane, "document.querySelector('#bookmarks button').click(); document.querySelector('#backlinks button')!==null && document.querySelectorAll('#crumbs button').length===2").as_deref(),Some("true"));
+        pane.show_outline(&saved, 92, true);
+        assert!(
+            pump_until(Duration::from_secs(20), || pane
+                .take_edit_messages()
+                .iter()
+                .any(|m| m.split('\n').nth(2) == Some("ready"))),
+            "readonly outline did not load"
+        );
+        assert_eq!(eval(&pane,"[...document.querySelectorAll('#tree input')].every(i=>i.readOnly) && document.querySelector('[data-op=add]').disabled && document.querySelector('#tree input').value==='日本語😀'").as_deref(),Some("true"));
+        pane.show_outline("invalid source", 93, false);
+        assert!(
+            pump_until(Duration::from_secs(20), || pane
+                .take_edit_messages()
+                .iter()
+                .any(|m| m.split('\n').nth(2) == Some("ready"))),
+            "invalid outline did not report ready"
+        );
+        assert_eq!(eval(&pane,"document.querySelector('[data-op=add]').disabled && document.querySelector('#tree').textContent.includes('読み込めません')").as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn live_markdown_preserves_source_ime_and_flush_in_webview2() {
+        let _serial = testing::webview2_lock();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let class = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(preview_proc),
+                hInstance: GetModuleHandleW(None).unwrap().into(),
+                lpszClassName: PREVIEW_CLASS,
+                ..Default::default()
+            };
+            RegisterClassExW(&class);
+        }
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PREVIEW_CLASS,
+                w!("live editor test"),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                0,
+                0,
+                900,
+                700,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let mut pane = Preview::new(parent, parent).unwrap();
+        pane.set_visible(true);
+        pane.set_bounds(0, 0, 880, 660);
+        let source = "# 見出し😀\r\n\r\n**太字** と本文\r\n\r\n<script>window.documentInjected=true</script>\r\n";
+        pane.show_editor(source, 71, 0, false, None);
+        let mut messages = Vec::new();
+        let loaded = pump_until(Duration::from_secs(45), || {
+            messages.extend(pane.take_edit_messages());
+            messages
+                .iter()
+                .any(|s| s.split('\n').nth(2) == Some("ready"))
+                || pane.is_unavailable()
+        });
+        if pane.is_unavailable() {
+            let why = notice_of(pane.hwnd);
+            assert!(
+                std::env::var_os("YY_REQUIRE_WEBVIEW2").is_none(),
+                "WebView2: {why}"
+            );
+            drop(pane);
+            unsafe {
+                let _ = DestroyWindow(parent);
+            }
+            return;
+        }
+        assert!(
+            loaded,
+            "ライブ編集ページが準備完了を通知しませんでした: {}",
+            notice_of(pane.hwnd)
+        );
+        let ready = messages
+            .iter()
+            .find(|s| s.split('\n').nth(2) == Some("ready"))
+            .unwrap();
+        assert_eq!(ready.splitn(6, '\n').nth(5), Some(source));
+        assert_eq!(eval(&pane,"document.querySelector('#blocks strong').textContent === '太字' && !window.documentInjected").as_deref(),Some("true"));
+        let seq: u64 = ready.lines().nth(1).unwrap().parse().unwrap();
+        pane.editor_post(&yy_preview::live::rendered(71, seq, source));
+        pump_until(Duration::from_millis(100), || false);
+        eval(
+            &pane,
+            "document.querySelector('[data-action=all]').click(); document.querySelector('textarea.editor').dispatchEvent(new CompositionEvent('compositionstart')); var t=document.querySelector('textarea.editor'); t.setSelectionRange(t.value.length,t.value.length); t.setRangeText('追記😃',t.value.length,t.value.length,'end'); t.dispatchEvent(new InputEvent('input',{bubbles:true,isComposing:true}));",
+        );
+        // IME 変換中はネイティブ文書に未確定文字を送らない。
+        assert!(
+            !pane
+                .take_edit_messages()
+                .iter()
+                .any(|s| s.split('\n').nth(2) == Some("edit"))
+        );
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new CompositionEvent('compositionend'));",
+        );
+        let mut edits = Vec::new();
+        assert!(pump_until(Duration::from_secs(5), || {
+            edits.extend(pane.take_edit_messages());
+            edits.iter().any(|s| s.split('\n').nth(2) == Some("edit"))
+        }));
+        let edit = edits
+            .iter()
+            .find(|s| s.split('\n').nth(2) == Some("edit"))
+            .unwrap();
+        assert_eq!(
+            edit.splitn(6, '\n').nth(5),
+            Some(format!("{source}追記😃").as_str())
+        );
+        let anchor: usize = edit.lines().nth(3).unwrap().parse().unwrap();
+        assert_eq!(anchor, format!("{source}追記😃").encode_utf16().count());
+        pane.editor_post("{\"flush\":71}");
+        let mut flushed = Vec::new();
+        assert!(pump_until(Duration::from_secs(5), || {
+            flushed.extend(pane.take_edit_messages());
+            flushed
+                .iter()
+                .any(|s| s.split('\n').nth(2) == Some("flush:71"))
+        }));
+        assert_eq!(
+            flushed
+                .iter()
+                .find(|s| s.split('\n').nth(2) == Some("flush:71"))
+                .unwrap()
+                .splitn(6, '\n')
+                .nth(5),
+            Some(format!("{source}追記😃").as_str())
+        );
+        pane.show_editor(source, 72, 0, true, None);
+        assert!(pump_until(Duration::from_secs(10), || {
+            eval(&pane,"document.body.dataset.epoch === '72' && !!document.querySelector('textarea.editor') && document.querySelector('textarea.editor').readOnly").as_deref()==Some("true")
+        }));
+        pane.show_editor("- [ ] 一行\r\n", 73, 0, false, None);
+        assert!(pump_until(Duration::from_secs(10), || {
+            eval(&pane,"document.body.dataset.epoch === '73' && !!document.querySelector('textarea.editor') && !document.querySelector('textarea.editor').readOnly").as_deref()==Some("true")
+        }));
+        pane.take_edit_messages();
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor'); t.setSelectionRange(t.value.length,t.value.length); t.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));",
+        );
+        let mut list_edits = Vec::new();
+        assert!(pump_until(Duration::from_secs(5), || {
+            list_edits.extend(pane.take_edit_messages());
+            list_edits
+                .iter()
+                .any(|s| s.split('\n').nth(2) == Some("newline"))
+        }));
+        assert_eq!(
+            list_edits
+                .iter()
+                .find(|s| s.split('\n').nth(2) == Some("newline"))
+                .unwrap()
+                .splitn(6, '\n')
+                .nth(5),
+            Some("- [ ] 一行\r\n- [ ] \r\n")
+        );
+        // セルのクリック位置を使い、構造編集の応答後もカーソルと原文を保持する。
+        let original_table = "# 前\r\n\r\n| A | B |\r\n| :--- | ---: |\r\n| x\\|y | 日本語 |\r\n";
+        let mut table_source = original_table.to_owned();
+        let mut table_epoch = 74;
+        pane.show_editor(&table_source, table_epoch, 0, false, None);
+        wait_live_message(&pane, "ready");
+        eval(
+            &pane,
+            "document.querySelector('#blocks td:nth-child(2)').click()",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut table_source,
+            "document.querySelector('textarea.editor')?.value.startsWith('| A | B |')"
+        ));
+        pane.take_edit_messages();
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new Event('select'))",
+        );
+        let selected = wait_live_message(&pane, "select");
+        let seq: u64 = selected.lines().nth(1).unwrap().parse().unwrap();
+        let caret = yy_preview::live::byte_offset(
+            &table_source,
+            selected.lines().nth(4).unwrap().parse().unwrap(),
+        );
+        assert_eq!(
+            yy_preview::live::table::context(&table_source, caret).map(|c| (c.row, c.column)),
+            Some((1, 1))
+        );
+        pane.editor_post(&yy_preview::live::rendered_at(
+            table_epoch,
+            seq,
+            &table_source,
+            Some(caret),
+        ));
+        assert!(pump_until(Duration::from_secs(5), || eval(
+            &pane,
+            "!document.querySelector('[data-table=column-after]').disabled"
+        )
+        .as_deref()
+            == Some("true")));
+        for operation in ["column-after", "row-after", "delete-row", "delete-column"] {
+            pane.take_edit_messages();
+            eval(
+                &pane,
+                &format!("document.querySelector('[data-table={operation}]').click()"),
+            );
+            let action = wait_live_message(&pane, &format!("table:{operation}"));
+            assert_eq!(
+                eval(&pane, "document.querySelector('textarea.editor').readOnly").as_deref(),
+                Some("true")
+            );
+            let fields: Vec<_> = action.splitn(6, '\n').collect();
+            assert_eq!(fields[5], table_source);
+            let caret = yy_preview::live::byte_offset(&table_source, fields[4].parse().unwrap());
+            let edited = yy_preview::live::table::edit(
+                &table_source,
+                caret,
+                yy_preview::live::table::Operation::parse(operation).unwrap(),
+            )
+            .unwrap();
+            let previous = table_epoch;
+            table_epoch += 1;
+            pane.editor_post(&yy_preview::live::replaced(
+                previous,
+                table_epoch,
+                &edited.source,
+                edited.caret,
+            ));
+            table_source = edited.source;
+            let ready = wait_live_message(&pane, "ready");
+            assert_eq!(ready.splitn(6, '\n').nth(5), Some(table_source.as_str()));
+            assert_eq!(
+                eval(&pane, "document.querySelector('textarea.editor').readOnly").as_deref(),
+                Some("false")
+            );
+        }
+        assert_eq!(table_source, original_table);
+        drop(pane);
+        unsafe {
+            let _ = DestroyWindow(parent);
+        }
+    }
+
+    #[test]
+    fn live_paragraph_navigation_and_diagrams_in_webview2() {
+        let _serial = testing::webview2_lock();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let class = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(preview_proc),
+                hInstance: GetModuleHandleW(None).unwrap().into(),
+                lpszClassName: PREVIEW_CLASS,
+                ..Default::default()
+            };
+            RegisterClassExW(&class);
+        }
+        let parent = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PREVIEW_CLASS,
+                w!("live paragraphs test"),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                0,
+                0,
+                900,
+                700,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let mut pane = Preview::new(parent, parent).unwrap();
+        pane.set_visible(true);
+        pane.set_bounds(0, 0, 880, 660);
+        let mut source = "First\n\nLast".to_owned();
+        pane.show_editor(&source, 81, 5, false, None);
+        let loaded = pump_until(Duration::from_secs(45), || {
+            eval(&pane, "!!document.querySelector('textarea.editor')").as_deref() == Some("true")
+                || pane.is_unavailable()
+        });
+        if pane.is_unavailable() {
+            assert!(
+                std::env::var_os("YY_REQUIRE_WEBVIEW2").is_none(),
+                "WebView2: {}",
+                notice_of(pane.hwnd)
+            );
+            drop(pane);
+            unsafe {
+                let _ = DestroyWindow(parent);
+            }
+            return;
+        }
+        assert!(
+            loaded,
+            "ライブ編集ページを読み込めません: {}",
+            notice_of(pane.hwnd)
+        );
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === '' && [...document.querySelectorAll('#blocks p')].some(p=>p.textContent==='Last')"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.setRangeText('Middle');t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === 'Middle'"
+        ));
+        // 明示的に反映を待つ。新しい段落が既存の Last と連結されていない。
+        reply_live_page(&pane, &mut source);
+        assert_eq!(source, "First\n\nMiddle\n\nLast");
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.setSelectionRange(2,2);t.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === 'Last'"
+        ));
+        assert_eq!(
+            eval(
+                &pane,
+                "document.querySelector('textarea.editor').selectionStart"
+            )
+            .as_deref(),
+            Some("2")
+        );
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === 'Middle'"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.setSelectionRange(t.value.length,t.value.length);t.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',shiftKey:true,bubbles:true,cancelable:true}));t.setRangeText('continued',t.selectionStart,t.selectionEnd,'end');t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === 'Middle  \\ncontinued'"
+        ));
+        reply_live_page(&pane, &mut source);
+        assert_eq!(source, "First\n\nMiddle  \ncontinued\n\nLast");
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.setSelectionRange(2,2);t.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value === 'First' && !!document.querySelector('#blocks br')"
+        ));
+        // 折り返しの途中では隣の段落へ飛ばず、最終表示行から移動する。
+        source = format!("{}\n\nTail", "wrapped words ".repeat(20));
+        pane.show_editor(&source, 82, 2, false, None);
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.body.dataset.epoch==='82' && !!document.querySelector('textarea.editor')"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.style.width='120px';t.dispatchEvent(new InputEvent('input',{bubbles:true}));t.setSelectionRange(2,2);t.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value.startsWith('wrapped words') && document.querySelector('textarea.editor').selectionStart===2"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.setSelectionRange(t.value.length-2,t.value.length-2);t.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor').value==='Tail'"
+        ));
+        source="# Title\n\n```mermaid\ngraph TD\n A-->B\n```\n\nInline $x^2$\n\n$$\\frac{1}{2}$$\n\n```latex\n\\sqrt{x}\n```\n".into();
+        pane.show_editor(&source, 83, 0, false, None);
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.body.dataset.epoch==='83' && document.querySelectorAll('#blocks pre.mermaid svg').length===1 && document.querySelectorAll('#blocks .katex').length===3"
+        ));
+        eval(
+            &pane,
+            "document.querySelector('#blocks pre.mermaid').click()",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "!!document.querySelector('.active .live-special-preview svg')"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.value=t.value.replace('A-->B','A-->C');t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "[...document.querySelectorAll('.active .live-special-preview svg')].some(svg=>svg.textContent.includes('C'))"
+        ));
+        assert!(source.contains("A-->C"));
+        eval(
+            &pane,
+            "document.querySelector('.block:not(.active) .math-inline').click()",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "!!document.querySelector('.active .live-special-preview .katex')"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.value=t.value.replace('x^2','x^3');t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "[...document.querySelectorAll('.active .katex annotation')].some(a=>a.textContent==='x^3')"
+        ));
+        assert!(source.contains("$x^3$"));
+        source = "# d3\n\n```d3\nconst svg=d3.create('svg').attr('width',width).attr('height',80);\nsvg.append('text').text('first');\nlet isolated=false;try{parent.document.body}catch(e){isolated=true}\nparent.postMessage({testD3:svg.node().outerHTML,isolated},'*');\nreturn svg;\n```\n".into();
+        pane.show_editor(&source, 84, 0, false, None);
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.body.dataset.epoch==='84' && !!document.querySelector('textarea.editor')"
+        ));
+        eval(
+            &pane,
+            "window.d3Tests=[];window.addEventListener('message',e=>{if(e.data?.testD3)window.d3Tests.push(e.data)})",
+        );
+        // 編集欄の下にも同じ図を表示し、分離したフレーム内で SVG が実際に生成される。
+        eval(&pane, "document.querySelector('.live-d3-edit').click()");
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "!!document.querySelector('.active .yy-d3[data-status=rendered]') && window.d3Tests.some(t=>t.testD3.includes('first') && t.testD3.includes('<svg') && t.isolated)"
+        ));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.value=t.value.replace(\"text('first')\",\"text('second')\");t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "!!document.querySelector('.active .yy-d3[data-status=rendered]') && window.d3Tests.some(t=>t.testD3.includes('second') && t.isolated)"
+        ));
+        assert!(source.contains("text('second')"));
+        eval(
+            &pane,
+            "var t=document.querySelector('textarea.editor');t.value='```d3\\nthrow new Error(\"invalid diagram\");\\n```';t.dispatchEvent(new InputEvent('input',{bubbles:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('.active .yy-d3[data-status=error] iframe')?.title.includes('invalid diagram')"
+        ));
+        let files = tempfile::tempdir().unwrap();
+        std::fs::write(files.path().join("values.csv"), "name,value\nlocal,7\n").unwrap();
+        source = "# Local data\n\n```d3\nconst rows=await d3.csv('values.csv');\nif(rows[0].name!=='local' || rows[0].value!=='7') throw new Error('CSV mismatch');\nreturn d3.create('svg').attr('height',40).append('text').text(rows[0].name);\n```\n".into();
+        pane.show_editor(
+            &source,
+            85,
+            0,
+            false,
+            Some(DocBase::Local(files.path().to_owned())),
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.body.dataset.epoch==='85' && !!document.querySelector('.yy-d3[data-status=rendered]')"
+        ));
+        source = "* first\n* ".into();
+        pane.show_editor(&source, 86, source.len(), false, None);
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.body.dataset.epoch==='86' && document.querySelector('textarea.editor')?.value==='* first\\n* '"
+        ));
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor')?.value===''"
+        ));
+        assert_eq!(source, "* first\n\n");
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor')?.value==='* first'"
+        ));
+        eval(
+            &pane,
+            "document.querySelector('textarea.editor').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}))",
+        );
+        assert!(wait_live_state(
+            &pane,
+            &mut source,
+            "document.querySelector('textarea.editor')?.value===''"
+        ));
+        drop(pane);
+        unsafe {
+            let _ = DestroyWindow(parent);
+        }
+    }
+
+    fn reply_live_page(pane: &Preview, source: &mut String) {
+        for message in pane.take_edit_messages() {
+            let fields: Vec<_> = message.splitn(6, '\n').collect();
+            if fields.len() != 6 {
+                continue;
+            }
+            *source = fields[5].to_owned();
+            let caret = yy_preview::live::byte_offset(source, fields[4].parse().unwrap());
+            pane.editor_post(&yy_preview::live::rendered_at(
+                fields[0].parse().unwrap(),
+                fields[1].parse().unwrap(),
+                source,
+                Some(caret),
+            ));
+        }
+    }
+
+    fn wait_live_state(pane: &Preview, source: &mut String, condition: &str) -> bool {
+        let ok = pump_until(Duration::from_secs(20), || {
+            reply_live_page(pane, source);
+            eval(pane, condition).as_deref() == Some("true")
+        });
+        if !ok {
+            eprintln!(
+                "live state: {:?}",
+                eval(
+                    pane,
+                    "JSON.stringify({d3:document.querySelector('.yy-d3')?.outerHTML,tests:window.d3Tests,editor:document.querySelector('textarea.editor')?.value,caret:document.querySelector('textarea.editor')?.selectionStart,width:document.querySelector('textarea.editor')?.clientWidth,blocks:[...document.querySelectorAll('#blocks > section')].map(b=>({...b.dataset,text:b.textContent.slice(0,30)}))})"
+                )
+            );
+        }
+        ok
+    }
+
+    fn wait_live_message(pane: &Preview, action: &str) -> String {
+        let mut found = None;
+        assert!(
+            pump_until(Duration::from_secs(10), || {
+                let messages = pane.take_edit_messages();
+                found = messages
+                    .into_iter()
+                    .rev()
+                    .find(|s| s.split('\n').nth(2) == Some(action));
+                found.is_some()
+            }),
+            "missing live editor message: {action}"
+        );
+        found.unwrap()
+    }
 
     /// WebView2 でページを表示し、mermaid・d3 の図と KaTeX の数式が描かれること、本文の差し替えが
     /// 反映されることを確かめる。WebView2 ランタイムがなければ飛ばす

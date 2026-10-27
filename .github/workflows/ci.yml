@@ -3,7 +3,21 @@ name: CI
 on:
   push:
     branches: [main, master, "claude/**"]
+    paths-ignore:
+      - "apps/yy3designer/**"
+      - "demo/yy3designer/**"
+      - ".github/workflows/yy3designer.yml"
   pull_request:
+    paths-ignore:
+      - "apps/yy3designer/**"
+      - "demo/yy3designer/**"
+      - ".github/workflows/yy3designer.yml"
+  workflow_dispatch:
+    inputs:
+      docker_databases:
+        description: Run real connections to all five remote databases
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -50,7 +64,7 @@ jobs:
         if: matrix.arch == 'aarch64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server
+          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server python3 tmux screen
           cargo test -p yy-proto -p yy-agent -p yy-remote
       - uses: actions/upload-artifact@v4
         with:
@@ -60,7 +74,7 @@ jobs:
   windows:
     name: Windows (build, lint, test)
     runs-on: windows-latest
-    needs: agent
+    needs: [agent, merge-windows]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -69,6 +83,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt
         run: cargo fmt --all -- --check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Outline model tests
+        run: node --test crates/yy-preview/tests/outline-model.cjs
+      - name: business icon catalog
+        run: |
+          python tools/business-icons/generate.py --check
+          python tools/friendly-icons/generate.py --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: WebView2 runtime
@@ -86,8 +109,18 @@ jobs:
           "YY_REQUIRE_SMB_SHARE=1" >> $env:GITHUB_ENV
       - name: test
         run: cargo test --workspace
+      - uses: actions/download-artifact@v4
+        with:
+          name: yymerge-windows-x64
+          path: target/yymerge-integration
+      - name: Editor snapshots in the real yymerge GUI
+        shell: pwsh
+        run: |
+          $env:YYMERGE_TEST_EXE = (Resolve-Path target/yymerge-integration/yymergew.exe).Path
+          cargo test -p yy-win --locked diffview::tests::real_yymerge_displays_editor_snapshots -- --ignored --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'yyeditor to yymerge integration failed' }
       - name: build release
-        run: cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser
+        run: cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw
       # エージェントは exe と同じフォルダの agents\ に置いて配布する（11 章 6.2）
       - uses: actions/download-artifact@v4
         with:
@@ -104,6 +137,12 @@ jobs:
           Copy-Item target/release/yyfilemanager.exe dist/
           Copy-Item target/release/yyclip.exe dist/
           Copy-Item target/release/yybrowser.exe dist/
+          Copy-Item target/release/yydraw.exe dist/
+          Copy-Item crates/yy-config/LICENSE-FS2.txt dist/
+          Copy-Item crates/yy-draw/assets/NOTICE.md dist/yydraw-cloud-icons-NOTICE.md
+          Copy-Item crates/yy-draw/assets/catalog-sources.json dist/yydraw-cloud-icons-sources.json
+          Copy-Item docs/user/yydraw-business-icons.md dist/yydraw-business-icons.md
+          Copy-Item docs/user/yydraw-friendly-icons.md dist/yydraw-friendly-icons.md
           # エージェントは x86_64 と aarch64 の両方を入れる
           foreach ($a in 'x86_64', 'aarch64') {
             if (-not (Test-Path "dist/agents/yy-agent-$a-linux")) { throw "yy-agent-$a-linux がありません" }
@@ -111,24 +150,31 @@ jobs:
           Get-ChildItem dist/agents
       - uses: actions/upload-artifact@v4
         with:
-          name: yyeditor-windows-x64
+          name: yy-series-base-windows-x64
           path: dist/
 
   linux-core:
     name: Linux (core crates)
     runs-on: ubuntu-latest
+    env:
+      YY_REQUIRE_SFTP: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Outline model tests
+        run: node --test crates/yy-preview/tests/outline-model.cjs
       # ファイル転送のテスト（13 章 9）は本物の sftp-server・scp を使う。3270 の模擬ホストは x3270 で、
       # 固定長ファイルの COBOL の解釈は GnuCOBOL で確かめる
       - name: OpenSSH (sftp-server, scp), x3270 (s3270, pr3287), GnuCOBOL
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server s3270 pr3287 gnucobol3
+          sudo apt-get install -y --no-install-recommends openssh-client openssh-sftp-server s3270 pr3287 gnucobol3 python3 tmux screen
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
@@ -145,4 +191,299 @@ jobs:
           # 組み込みの SSH と 3270 の TLS（ring）は C のビルドに Windows SDK が要るので、ここでは外して確かめる
           # （SSH・TLS を含むビルドは Windows のジョブで行う）
           # BLAKE3 のアセンブリ（ml64.exe）もないので、純粋な Rust の実装にする
-          cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser --no-default-features --features yy-files/blake3-pure --target x86_64-pc-windows-msvc
+          cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw --no-default-features --features yy-files/blake3-pure --target x86_64-pc-windows-msvc
+
+  merge-windows:
+    name: yymerge Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/yymerge -> target"
+          key: yymerge-windows
+      - name: Format
+        run: cargo fmt --manifest-path apps/yymerge/Cargo.toml --all -- --check
+      - name: Lint
+        run: cargo clippy --manifest-path apps/yymerge/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - name: Core and CLI tests, including Git patch application
+        run: cargo test --manifest-path apps/yymerge/Cargo.toml --workspace --locked
+      - name: Build independent executables
+        run: cargo build --manifest-path apps/yymerge/Cargo.toml --release --workspace --locked
+      - name: Native UI, folders, resize, conflict resolution, save, help and text fallback
+        shell: pwsh
+        run: |
+          $taskExe = (Resolve-Path apps/yymerge/target/release/yymergew.exe).Path
+          foreach ($taskTextHelp in @('0', '1')) {
+            if ($taskTextHelp -eq '1') { $env:YY_HELP_TEXT_ONLY = '1' }
+            else { Remove-Item Env:YY_HELP_TEXT_ONLY -ErrorAction SilentlyContinue }
+            $taskUi = Start-Process -FilePath $taskExe -ArgumentList '--ui-smoke-test',"ui-smoke-$taskTextHelp" -WindowStyle Hidden -PassThru
+            if (-not $taskUi.WaitForExit(60000)) { $taskUi.Kill(); throw 'yymerge UI smoke timed out' }
+            if ($taskUi.ExitCode -ne 0) { throw "yymerge UI smoke failed: $($taskUi.ExitCode)" }
+            Get-Content "ui-smoke-$taskTextHelp/ui-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/folders-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/sync-plan-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/sync-run-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/sync-resume-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/git-tool-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/rules-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/html-report-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/session-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/comparison-session-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/folder-session-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/folder-filter-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/search-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/replace-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/office-smoke.txt"
+            Get-Content "ui-smoke-$taskTextHelp/encoding-smoke.txt"
+            $taskImage = Start-Process -FilePath $taskExe -ArgumentList '--image','--left','demo/yymerge/images/left.webp','--right','demo/yymerge/images/right.webp','--ui-smoke-test',"ui-image-$taskTextHelp" -WindowStyle Hidden -PassThru
+            if (-not $taskImage.WaitForExit(60000)) { $taskImage.Kill(); $taskImage.WaitForExit(); throw 'yymerge image smoke timed out' }
+            if ($taskImage.ExitCode -ne 0) { Get-Content "ui-image-$taskTextHelp/image-error.txt" -ErrorAction SilentlyContinue; throw "yymerge image smoke failed: $($taskImage.ExitCode)" }
+            Get-Content "ui-image-$taskTextHelp/image-smoke.txt"
+            $taskPdf = Start-Process -FilePath $taskExe -ArgumentList '--left','demo/yymerge/pdf/left.pdf','--right','demo/yymerge/pdf/right.pdf','--ui-smoke-test',"ui-pdf-$taskTextHelp" -WindowStyle Hidden -PassThru
+            if (-not $taskPdf.WaitForExit(60000)) { $taskPdf.Kill(); $taskPdf.WaitForExit(); throw 'yymerge PDF smoke timed out' }
+            if ($taskPdf.ExitCode -ne 0) { Get-Content "ui-pdf-$taskTextHelp/image-error.txt" -ErrorAction SilentlyContinue; throw "yymerge PDF smoke failed: $($taskPdf.ExitCode)" }
+            Get-Content "ui-pdf-$taskTextHelp/pdf-smoke.txt"
+            Get-Content "ui-pdf-$taskTextHelp/image-smoke.txt"
+          }
+          Remove-Item Env:YY_HELP_TEXT_ONLY
+      - name: Automatic large-file viewer, disk index and resize
+        shell: pwsh
+        run: |
+          $taskData = [byte[]]::new(65536)
+          [Array]::Fill[byte]($taskData, 97)
+          $taskData[65535] = 10
+          $taskFile = [IO.File]::Create((Join-Path $pwd ui-large-input.txt))
+          try { for ($taskIndex = 0; $taskIndex -lt 530; $taskIndex++) { $taskFile.Write($taskData) } }
+          finally { $taskFile.Dispose() }
+          $taskUi = Start-Process -FilePath ./apps/yymerge/target/release/yymergew.exe -ArgumentList '--left','ui-large-input.txt','--right','ui-large-input.txt','--ui-smoke-test','ui-large-output' -WindowStyle Hidden -PassThru
+          if (-not $taskUi.WaitForExit(120000)) { $taskUi.Kill(); $taskUi.WaitForExit(); throw 'Large-file UI timeout' }
+          if ($taskUi.ExitCode -ne 0) { Get-Content ui-large-output/large-error.txt -ErrorAction SilentlyContinue; throw 'Large-file UI failed' }
+          Get-Content ui-large-output/large-smoke.txt
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/yymerge | Out-Null
+          Copy-Item apps/yymerge/target/release/yymerge.exe,apps/yymerge/target/release/yymergew.exe dist/yymerge/
+          Copy-Item apps/yymerge/README.md,apps/yymerge/NOTICE.md,apps/yymerge/LICENSE-BLAKE3-CC0.txt,apps/yymerge/LICENSE-OFFICE-DEPS.txt,apps/yymerge/LICENSE-IMAGE-DEPS.txt,apps/yymerge/LICENSE-PDF-DEPS.txt,apps/yymerge/LICENSE-SSH-DEPS.txt dist/yymerge/
+          Copy-Item -Recurse apps/yymerge/help dist/yymerge/
+          Copy-Item COPYING,COPYING.EXCEPTION,crates/yy-win/fonts/LICENSE-UDEVGothic.txt dist/yymerge/
+          Copy-Item crates/yy-preview/assets/LICENSE-*.txt dist/yymerge/
+          Copy-Item crates/yy-config/LICENSE-FS2.txt dist/yymerge/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yymerge-windows-x64
+          path: dist/yymerge/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yymerge-ui-verification
+          path: |
+            ui-smoke-*/
+            ui-image-*/
+            ui-pdf-*/
+            ui-large-output/
+  merge-linux:
+    env:
+      YYMERGE_REQUIRE_SFTP: "1"
+    name: yymerge Linux CLI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/yymerge -> target"
+          key: yymerge-linux-headless
+      - name: SFTP transport fixture
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends openssh-sftp-server
+      - name: Headless lint
+        run: cargo clippy --manifest-path apps/yymerge/Cargo.toml --workspace --all-targets --no-default-features --locked -- -D warnings
+      - name: Exact comparison, encodings, merge, folder and process tests
+        run: cargo test --manifest-path apps/yymerge/Cargo.toml --workspace --no-default-features --locked
+      - name: Real SSH large files and host-key rejection in an isolated container
+        run: |
+          mkdir -p "${{ runner.temp }}/yymerge-ssh-live"
+          docker run --rm -e YYMERGE_TEST_EXE=/workspace/apps/yymerge/target/debug/yymerge \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -v "${{ runner.temp }}/yymerge-ssh-live:/results" \
+            ubuntu:24.04 sh /workspace/apps/yymerge/tests/ssh-live.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yymerge-ssh-verification
+          path: ${{ runner.temp }}/yymerge-ssh-live/
+      - name: Build console without UI
+        run: cargo build --manifest-path apps/yymerge/Cargo.toml -p yymerge --no-default-features --bin yymerge --release --locked
+      - name: Package console and license notices
+        run: |
+          mkdir -p dist/yymerge-linux
+          cp apps/yymerge/target/release/yymerge apps/yymerge/README.md apps/yymerge/NOTICE.md apps/yymerge/LICENSE-*.txt COPYING COPYING.EXCEPTION dist/yymerge-linux/
+          cp crates/yy-config/LICENSE-FS2.txt dist/yymerge-linux/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yymerge-linux-x64-cli
+          path: dist/yymerge-linux/
+
+  dbmanager-windows:
+    name: yydbmanager Windows
+    # DuckDB 1.4.1 bundles fmt using stdext::checked_array_iterator, removed in
+    # VS 2026. Keep the supported VS 2022 toolchain until DuckDB is upgraded.
+    # Upstream fix: https://github.com/duckdb/duckdb/pull/23261
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/yydbmanager -> target"
+          key: yydbmanager-windows-vs2022
+      - name: Format
+        run: cargo fmt --manifest-path apps/yydbmanager/Cargo.toml --all -- --check
+      - name: Lint
+        run: cargo clippy --manifest-path apps/yydbmanager/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - name: Test embedded engines, plans and transfer
+        run: cargo test --manifest-path apps/yydbmanager/Cargo.toml --workspace --locked
+      - name: Build standalone app
+        run: cargo build --manifest-path apps/yydbmanager/Cargo.toml --release -p yydbmanager --locked
+      - name: Package and offline smoke test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/yydbmanager | Out-Null
+          Copy-Item apps/yydbmanager/target/release/yydbmanager.exe dist/yydbmanager/
+          Copy-Item apps/yydbmanager/README.md,apps/yydbmanager/NOTICE.md,apps/yydbmanager/THIRD-PARTY-NOTICES.md dist/yydbmanager/
+          Copy-Item crates/yy-win/fonts/LICENSE-UDEVGothic.txt dist/yydbmanager/
+          Copy-Item COPYING,COPYING.EXCEPTION dist/yydbmanager/
+          Copy-Item crates/yy-preview/assets/LICENSE-*.txt dist/yydbmanager/
+          Copy-Item crates/yy-config/LICENSE-FS2.txt dist/yydbmanager/
+          $taskResult = Start-Process -FilePath ./dist/yydbmanager/yydbmanager.exe -ArgumentList '--smoke-test','smoke-output' -WindowStyle Hidden -PassThru -Wait
+          if ($taskResult.ExitCode -ne 0) { throw "Embedded engine smoke test failed: $($taskResult.ExitCode)" }
+          Get-Content smoke-output/smoke-test.txt
+          $taskUiResult = Start-Process -FilePath ./dist/yydbmanager/yydbmanager.exe -ArgumentList '--ui-smoke-test','ui-smoke-output' -WindowStyle Hidden -PassThru -Wait
+          if ($taskUiResult.ExitCode -ne 0) { throw "Native UI smoke test failed: $($taskUiResult.ExitCode)" }
+          $env:YYDBMANAGER_PLAN_FIXTURE = (Resolve-Path apps/yydbmanager/tests/fixtures/sqlserver-hash-sort.sqlplan).Path
+          $taskPlanResult = Start-Process -FilePath ./dist/yydbmanager/yydbmanager.exe -ArgumentList '--ui-smoke-test','plan-ui-output' -WindowStyle Hidden -PassThru -Wait
+          if ($taskPlanResult.ExitCode -ne 0) { throw "Plan UI regression failed: $($taskPlanResult.ExitCode)" }
+          Get-Content plan-ui-output/plan-view-smoke.txt
+          foreach ($taskDb in @('postgresql','mysql','oracle','db2','duckdb','sqlite')) {
+            $env:YYDBMANAGER_PLAN_FIXTURE = (Resolve-Path "apps/yydbmanager/tests/fixtures/$taskDb-complex.yyplan").Path
+            $taskCrossPlan = Start-Process -FilePath ./dist/yydbmanager/yydbmanager.exe -ArgumentList '--ui-smoke-test',"$taskDb-plan-ui-output" -WindowStyle Hidden -PassThru -Wait
+            if ($taskCrossPlan.ExitCode -ne 0) { throw "$taskDb plan UI regression failed: $($taskCrossPlan.ExitCode)" }
+          }
+      - name: Windows shell and resize regression
+        shell: pwsh
+        run: ./apps/yydbmanager/tests/windows-shell.ps1 -Executable ./dist/yydbmanager/yydbmanager.exe -OutputDirectory shell-output -PlanFile apps/yydbmanager/tests/fixtures/sqlserver-hash-sort.sqlplan
+      - name: SQL/ER tabs, column spreadsheet, 7 DB type dropdowns and DDL generation
+        shell: pwsh
+        run: ./apps/yydbmanager/tests/windows-shell.ps1 -Executable ./dist/yydbmanager/yydbmanager.exe -OutputDirectory er-shell-output -PlanFile ui-smoke-output/edited-er.yyer.yaml
+      - name: Help without WebView2
+        shell: pwsh
+        run: |
+          $env:YY_HELP_TEXT_ONLY = '1'
+          try { ./apps/yydbmanager/tests/windows-shell.ps1 -Executable ./dist/yydbmanager/yydbmanager.exe -OutputDirectory text-help-output -HelpOnly }
+          finally { Remove-Item Env:YY_HELP_TEXT_ONLY }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yydbmanager-windows-x64
+          path: dist/yydbmanager/
+  dbmanager-core:
+    name: yydbmanager Linux core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/yydbmanager -> target"
+          key: yydbmanager-linux
+      - name: Test
+        run: cargo test --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --locked
+      - name: Format and lint
+        run: |
+          cargo fmt --manifest-path apps/yydbmanager/Cargo.toml --all -- --check
+          cargo clippy --manifest-path apps/yydbmanager/Cargo.toml --workspace --all-targets --locked -- -D warnings
+  dbmanager-docker-live:
+    name: yydbmanager real DB (${{ matrix.name }})
+    if: github.event_name == 'workflow_dispatch' && inputs.docker_databases
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {service: postgres, name: PostgreSQL}
+          - {service: mysql, name: MySQL}
+          - {service: sqlserver, name: SQL Server}
+          - {service: oracle, name: Oracle}
+          - {service: db2, name: IBM Db2}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start isolated database
+        run: docker compose -p yydbmanager-validation -f apps/yydbmanager/tests/docker/compose.yml up -d ${{ matrix.service }}
+      - name: Build validation runner
+        run: docker build -t yydbmanager-validation-runner -f apps/yydbmanager/tests/docker/runner.Dockerfile .
+      - name: Real connection, types, import, export and plans
+        env:
+          YYDB_FILTER: ${{ matrix.name }}
+        run: |
+          mkdir -p "${{ runner.temp }}/db-build"
+          docker run --rm --network yydbmanager-validation_default \
+            -v "$GITHUB_WORKSPACE:/workspace" -v "${{ runner.temp }}/db-build:/build" \
+            -e YYDB_CONNECTIONS=/workspace/apps/yydbmanager/tests/docker/connections.json \
+            -e YYDB_REPORT_DIR=/build/reports -e YYDB_EXPECT_DATABASES=1 -e YYDB_COMPLEX_PLANS=1 \
+            -e YYDB_DATABASE_FILTER="$YYDB_FILTER" -e CARGO_BUILD_JOBS=2 -e CXXFLAGS=-g0 \
+            yydbmanager-validation-runner \
+            cargo test --manifest-path apps/yydbmanager/Cargo.toml -p yy-db-core --test docker_live --locked -- --ignored --nocapture
+      - name: Collect service logs
+        if: always()
+        run: |
+          mkdir -p "${{ runner.temp }}/db-build/reports"
+          docker compose -p yydbmanager-validation -f apps/yydbmanager/tests/docker/compose.yml logs --no-color > "${{ runner.temp }}/db-build/reports/service.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yydbmanager-real-db-${{ matrix.service }}
+          path: ${{ runner.temp }}/db-build/reports/
+      - name: Stop validation database
+        if: always()
+        run: docker compose -p yydbmanager-validation -f apps/yydbmanager/tests/docker/compose.yml down -v
+
+  windows-distribution:
+    name: YY series Windows distribution
+    needs: [windows, merge-windows, dbmanager-windows]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: yy-series-base-windows-x64
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: yymerge-windows-x64
+          path: dist/yymerge
+      - uses: actions/download-artifact@v4
+        with:
+          name: yydbmanager-windows-x64
+          path: dist/yydbmanager
+      - name: Assemble sibling applications and retain component notices
+        shell: pwsh
+        run: |
+          foreach ($taskApp in @('yymerge', 'yymergew')) {
+            Move-Item -LiteralPath "dist/yymerge/$taskApp.exe" -Destination dist/
+          }
+          Move-Item -LiteralPath dist/yydbmanager/yydbmanager.exe -Destination dist/
+          foreach ($taskApp in @('yyeditor', 'yyterm', 'yysftp', 'yysheet', 'yyfilemanager', 'yyclip', 'yybrowser', 'yydraw', 'yymerge', 'yymergew', 'yydbmanager')) {
+            if (-not (Test-Path "dist/$taskApp.exe")) { throw "Missing application: $taskApp" }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yyeditor-windows-x64
+          path: dist/

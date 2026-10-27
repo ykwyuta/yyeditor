@@ -151,6 +151,7 @@ impl Host for TestHost {
         let mut s = self.state.lock().unwrap();
         match op {
             Op::Key(k) => self.key(&mut s, k),
+            Op::TerminalKey(_) => return Err("VT key requires a stream host".into()),
             Op::Type(t) => {
                 for c in t.chars() {
                     self.key(&mut s, Key::Char(c));
@@ -200,6 +201,27 @@ fn temp_dir(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("yy3270-macro-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     d
+}
+#[test]
+fn variables_functions_collections_conditions_and_error_handling_are_available() {
+    check(include_str!("../../../demo/yyterm/ssh-diagnostics.rhai")).unwrap();
+    let host = TestHost::new(Box::new(|_| None));
+    let script = r#"
+        const maximum = 3;
+        let values = #{names: ["alpha", "beta"], count: 0};
+        fn decorate(value) { return "[" + value + "]"; }
+        for value in values.names { log(decorate(value)); }
+        while values.count < maximum { values.count += 1; }
+        if values.count == 3 && !false { log(values.count); }
+        try { throw "expected"; } catch (error) { log(error); }
+        if ask("name") != "答え" { throw "ask variable"; }
+    "#;
+    run(script, host.clone(), opts(&std::env::temp_dir())).unwrap();
+    let log = host.log.lock().unwrap();
+    assert!(log.iter().any(|s| s == "[alpha]"));
+    assert!(log.iter().any(|s| s == "[beta]"));
+    assert!(log.iter().any(|s| s == "3"));
+    assert!(log.iter().any(|s| s.contains("expected")));
 }
 
 #[test]

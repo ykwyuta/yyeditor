@@ -1703,10 +1703,7 @@ fn is_dir_path(path: &Path) -> std::result::Result<bool, String> {
 fn loc_of(path: &Path) -> std::result::Result<yy_remote::transfer::Loc, String> {
     use yy_remote::transfer::Loc;
     Ok(match remote_uri(path) {
-        Some(u) => Loc::Remote(
-            crate::remote::session(&u.target(), &crate::remote::show_status)?,
-            u.path,
-        ),
+        Some(u) => crate::remote::file_location(&u, &crate::remote::show_status)?,
         None => Loc::Local(path.to_owned()),
     })
 }

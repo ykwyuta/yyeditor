@@ -1,0 +1,37 @@
+# Merge the entries you need into %APPDATA%\yyeditor\config.toml.
+# Replace all example hostnames and user names, then restart yysftp.
+[transfer]
+protocol = "sftp"
+use_agent = false
+
+# 1. SSH tunnel to an internal host.
+[remote.host.gateway]
+hostname = "gateway.example.com"
+user = "gateway-user"
+# Set only when the gateway requires a remote raw-stream relay command:
+# jump_command = "nc -- %h %p"
+
+[remote.host.internal]
+hostname = "internal.example.local"
+user = "server-user"
+proxy_jump = "gateway"
+# Optional yysftp listing override; output direct child names, not ls -la records.
+# Runs in the displayed directory; YY_LIST_DIRECTORY also contains its path.
+# list_command = "ls -1A"
+# list_format = "lines"  # or "nul" (each name ends in NUL)
+
+# 2. SFTP proxy with the product's composite SSH user name.
+# The syntax of this user name is an example, not a universal product syntax.
+[remote.host.sftp-proxy]
+hostname = "gateway.example.com"
+user = "operator@server-user@internal.example.local"
+# Set only if the product requires a different subsystem:
+# sftp_subsystem = "vendor-sftp"
+
+# 3. Explicit remote SFTP server command, if allowed by the server/gateway.
+[remote.host.sftp-command]
+hostname = "internal.example.local"
+user = "server-user"
+proxy_jump = "gateway"
+sftp_server = "/usr/lib/openssh/sftp-server"
+# Do not also specify sftp_subsystem on this host.

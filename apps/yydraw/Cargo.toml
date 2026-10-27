@@ -1,0 +1,14 @@
+[package]
+name = "yydraw"
+description = "Native Windows architecture diagram editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "../yyeditor/build.rs"
+
+[target.'cfg(windows)'.dependencies]
+yy-win.workspace = true
+
+[lints]
+workspace = true

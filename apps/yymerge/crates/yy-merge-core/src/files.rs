@@ -1,0 +1,433 @@
+//! Bounded snapshots, explicit encodings, lossless round trips and atomic output.
+use crate::{Cancellation, MAX_BYTES, Result};
+use std::{
+    fs::{self, File},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use yy_encoding::{Encoding, EscapeMode, decode_all, encode_all};
+
+#[derive(Clone)]
+pub struct Snapshot {
+    pub path: PathBuf,
+    pub text: Arc<str>,
+    pub encoding: Encoding,
+    pub bom: Vec<u8>,
+    pub office: Option<crate::office::Kind>,
+    pub review: Option<crate::review::Mode>,
+    pub review_info: crate::review::Info,
+    bytes: Vec<u8>,
+    binary: bool,
+}
+pub fn read_bounded(path: &Path, cancel: &Cancellation) -> Result<Vec<u8>> {
+    cancel.check()?;
+    let meta = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !meta.is_file() || meta.len() > MAX_BYTES {
+        return Err(format!(
+            "{}: regular files up to 32 MiB only",
+            path.display()
+        ));
+    }
+    let mut file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut bytes = Vec::new();
+    let mut block = [0; 64 * 1024];
+    loop {
+        cancel.check()?;
+        let n = file.read(&mut block).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        if bytes.len() + n > MAX_BYTES as usize {
+            return Err("file grew beyond 32 MiB limit".into());
+        }
+        bytes.extend_from_slice(&block[..n]);
+    }
+    Ok(bytes)
+}
+impl Snapshot {
+    pub(crate) fn binary(path: &Path, cancel: &Cancellation) -> Result<Self> {
+        let bytes = read_bounded(path, cancel)?;
+        Ok(Self {
+            path: fs::canonicalize(path).map_err(|e| e.to_string())?,
+            text: "".into(),
+            encoding: Encoding::Utf8,
+            bom: Vec::new(),
+            office: None,
+            review: None,
+            review_info: Default::default(),
+            bytes,
+            binary: true,
+        })
+    }
+    pub(crate) fn raw(&self) -> &[u8] {
+        &self.bytes
+    }
+    /// Comparison-only projection; original bytes still protect saves and sessions.
+    pub fn open_comparison(
+        path: &Path,
+        charset: Option<&str>,
+        cancel: &Cancellation,
+    ) -> Result<Self> {
+        let Some(kind) = crate::office::Kind::detect(path) else {
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "xls" | "xlsb" | "ppt"))
+            {
+                return Err(
+                    "Legacy Office format unsupported: save as .xlsx/.xlsm or .pptx/.pptm first"
+                        .into(),
+                );
+            }
+            return Self::open(path, charset, cancel);
+        };
+        if charset.is_some_and(|s| Encoding::from_name(s) != Some(Encoding::Utf8)) {
+            return Err("Office comparison does not accept legacy text --encoding".into());
+        }
+        let bytes = read_bounded(path, cancel)?;
+        let text = crate::office::extract(&bytes, kind, cancel)?;
+        let input = Self {
+            path: fs::canonicalize(path).map_err(|e| e.to_string())?,
+            text: text.into(),
+            encoding: Encoding::Utf8,
+            bom: Vec::new(),
+            bytes,
+            office: Some(kind),
+            review: None,
+            review_info: Default::default(),
+            binary: false,
+        };
+        input.verify(cancel)?;
+        Ok(input)
+    }
+    pub fn ensure_comparable(&self, other: &Self) -> Result<()> {
+        if self.office != other.office || self.review != other.review {
+            return Err(
+                "Compare two Excel files, two PowerPoint files, or two text files of the same mode"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+    pub fn original_identical(&self, other: &Self) -> bool {
+        if self.office.is_some() || other.office.is_some() || self.binary || other.binary {
+            self.office == other.office && self.bytes == other.bytes
+        } else {
+            self.text == other.text && self.encoding == other.encoding && self.bom == other.bom
+        }
+    }
+    pub fn equivalent(&self, other: &Self, text_equal: bool) -> bool {
+        text_equal
+            && (self.review.is_some_and(|m| m.ignore_encoding)
+                && other.review.is_some_and(|m| m.ignore_encoding)
+                || self.encoding == other.encoding && self.bom == other.bom)
+    }
+    /// Packed/nontext bytes remain visible; this projection can never be saved or merged.
+    pub fn open_review(
+        path: &Path,
+        charset: Option<&str>,
+        mode: crate::review::Mode,
+        cancel: &Cancellation,
+    ) -> Result<Self> {
+        if crate::office::Kind::detect(path).is_some() || crate::images::is_image(path) {
+            return Err(
+                "per-file encoding/byte review is for two-way text/data comparisons only".into(),
+            );
+        }
+        let mut source = Self::binary(path, cancel)?;
+        let (auto, skip) = if source.bytes.starts_with(&[0xff, 0xfe, 0, 0]) {
+            (Encoding::Utf32Le, 4)
+        } else if source.bytes.starts_with(&[0, 0, 0xfe, 0xff]) {
+            (Encoding::Utf32Be, 4)
+        } else if source.bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            (Encoding::Utf8, 3)
+        } else if source.bytes.starts_with(&[0xff, 0xfe]) {
+            (Encoding::Utf16Le, 2)
+        } else if source.bytes.starts_with(&[0xfe, 0xff]) {
+            (Encoding::Utf16Be, 2)
+        } else {
+            (Encoding::Utf8, 0)
+        };
+        let encoding = match charset {
+            Some(name) => {
+                Encoding::from_name(name).ok_or_else(|| format!("unknown encoding: {name}"))?
+            }
+            None => auto,
+        };
+        // Only a matching Unicode encoding interprets these bytes as a BOM.
+        let skip = if encoding == auto { skip } else { 0 };
+        let (text, info) = crate::review::decode(encoding, &source.bytes[skip..], cancel)?;
+        source.encoding = encoding;
+        source.bom = source.bytes[..skip].to_vec();
+        source.text = text.into();
+        source.review = Some(mode);
+        source.review_info = info;
+        source.verify(cancel)?;
+        Ok(source)
+    }
+    /// Hash captured source bytes, with cancellation between bounded chunks.
+    pub fn fingerprint(&self, cancel: &Cancellation) -> Result<String> {
+        let mut hash = blake3::Hasher::new();
+        for block in self.bytes.chunks(64 * 1024) {
+            cancel.check()?;
+            hash.update(block);
+        }
+        cancel.check()?;
+        Ok(hash.finalize().to_hex().to_string())
+    }
+    /// No heuristic encoding guesses. BOM, otherwise UTF-8; legacy encodings explicit.
+    pub fn open(path: &Path, charset: Option<&str>, cancel: &Cancellation) -> Result<Self> {
+        if crate::pdf_render::is_pdf(path) {
+            return Err("PDF is read-only visual comparison; use pdf-diff or image-diff".into());
+        }
+        let bytes = read_bounded(path, cancel)?;
+        let (auto, bom_len) = if bytes.starts_with(&[0xff, 0xfe, 0, 0]) {
+            (Encoding::Utf32Le, 4)
+        } else if bytes.starts_with(&[0, 0, 0xfe, 0xff]) {
+            (Encoding::Utf32Be, 4)
+        } else if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            (Encoding::Utf8, 3)
+        } else if bytes.starts_with(&[0xff, 0xfe]) {
+            (Encoding::Utf16Le, 2)
+        } else if bytes.starts_with(&[0xfe, 0xff]) {
+            (Encoding::Utf16Be, 2)
+        } else {
+            (Encoding::Utf8, 0)
+        };
+        let encoding = match charset {
+            Some(name) => {
+                Encoding::from_name(name).ok_or_else(|| format!("unknown encoding: {name}"))?
+            }
+            None => auto,
+        };
+        if bom_len > 0 && encoding != auto {
+            return Err("encoding conflicts with BOM".into());
+        }
+        let (decoded, _) = decode_all(encoding, &bytes[bom_len..], false);
+        let text = String::from_utf8(decoded).map_err(|_| "invalid text encoding")?;
+        if text.contains('\0')
+            || encode_all(encoding, text.as_bytes(), EscapeMode::Reject)
+                .map_err(|_| "invalid text encoding")?
+                != bytes[bom_len..]
+        {
+            return Err(format!(
+                "{}: binary, invalid or non-round-trip encoding; specify --encoding for legacy text",
+                path.display()
+            ));
+        }
+        Ok(Self {
+            path: fs::canonicalize(path).map_err(|e| e.to_string())?,
+            text: text.into(),
+            encoding,
+            bom: bytes[..bom_len].to_vec(),
+            bytes,
+            office: None,
+            review: None,
+            review_info: Default::default(),
+            binary: false,
+        })
+    }
+    pub fn encode(&self, text: &str) -> Result<Vec<u8>> {
+        if self.office.is_some() || self.binary {
+            return Err(
+                "Rendered and Office comparisons are read-only; merge and source export are unsupported".into(),
+            );
+        }
+        let mut out = self.bom.clone();
+        out.extend(
+            encode_all(self.encoding, text.as_bytes(), EscapeMode::Reject)
+                .map_err(|_| format!("text cannot be represented in {}", self.encoding))?,
+        );
+        Ok(out)
+    }
+    pub fn verify(&self, cancel: &Cancellation) -> Result<()> {
+        if read_bounded(&self.path, cancel)? != self.bytes {
+            return Err(format!("input changed: {}", self.path.display()));
+        }
+        Ok(())
+    }
+}
+
+/// Never follows an output symlink. Input snapshots are revalidated before commit.
+pub fn save(
+    path: &Path,
+    bytes: &[u8],
+    inputs: &[&Snapshot],
+    overwrite: bool,
+    cancel: &Cancellation,
+) -> Result<()> {
+    save_checked(path, bytes, inputs, overwrite, None, cancel)
+}
+/// Replace a known output only while it still has the captured bytes/existence.
+pub fn save_if_unchanged(
+    path: &Path,
+    bytes: &[u8],
+    inputs: &[&Snapshot],
+    expected: &Option<Vec<u8>>,
+    cancel: &Cancellation,
+) -> Result<()> {
+    save_checked(
+        path,
+        bytes,
+        inputs,
+        expected.is_some(),
+        Some(expected),
+        cancel,
+    )
+}
+fn save_checked(
+    path: &Path,
+    bytes: &[u8],
+    inputs: &[&Snapshot],
+    overwrite: bool,
+    expected: Option<&Option<Vec<u8>>>,
+    cancel: &Cancellation,
+) -> Result<()> {
+    cancel.check()?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("output exceeds the initial 32 MiB limit".into());
+    }
+    let parent = fs::canonicalize(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )
+    .map_err(|e| e.to_string())?;
+    let target = parent.join(path.file_name().ok_or("output file name required")?);
+    let previous = match fs::symlink_metadata(&target) {
+        Ok(meta) => {
+            if crate::folders::is_link(&target, meta.file_type())? || !meta.is_file() {
+                return Err("output must be a regular file, not a link".into());
+            }
+            if inputs
+                .iter()
+                .any(|s| s.path == fs::canonicalize(&target).unwrap_or_default())
+            {
+                return Err("output must differ from input paths".into());
+            }
+            if !overwrite {
+                return Err("output already exists; use --overwrite".into());
+            }
+            Some(read_bounded(&target, cancel)?)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.to_string()),
+    };
+    if expected.is_some_and(|expected| expected != &previous) {
+        return Err("output changed since the tool was started".into());
+    }
+    let permissions = if previous.is_some() {
+        Some(
+            fs::metadata(&target)
+                .map_err(|e| e.to_string())?
+                .permissions(),
+        )
+    } else {
+        None
+    };
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    temp.write_all(bytes)
+        .and_then(|_| temp.as_file().sync_all())
+        .map_err(|e| e.to_string())?;
+    if let Some(permissions) = permissions {
+        temp.as_file()
+            .set_permissions(permissions)
+            .and_then(|_| temp.as_file().sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+    for input in inputs {
+        input.verify(cancel)?;
+    }
+    cancel.check()?;
+    if let Some(old) = previous {
+        if fs::symlink_metadata(&target)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink()
+            || read_bounded(&target, cancel)? != old
+        {
+            return Err("output changed during operation".into());
+        }
+        temp.persist(target).map_err(|e| e.to_string())?;
+    } else {
+        temp.persist_noclobber(target).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn encodings_preserve_bytes_and_save_is_guarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("日本語.txt");
+        for encoding in [Encoding::Utf8, Encoding::Utf16Le, Encoding::Cp932] {
+            let data =
+                encode_all(encoding, "日本語\r\n末尾".as_bytes(), EscapeMode::Reject).unwrap();
+            fs::write(&path, &data).unwrap();
+            let s = Snapshot::open(&path, Some(encoding.name()), &Cancellation::default()).unwrap();
+            assert_eq!(s.encode(&s.text).unwrap(), data);
+            assert!(save(&path, b"oops", &[&s], true, &Cancellation::default()).is_err());
+            let out = dir.path().join("out");
+            fs::write(&out, b"keep").unwrap();
+            assert!(save(&out, b"oops", &[&s], false, &Cancellation::default()).is_err());
+            fs::write(&path, b"changed").unwrap();
+            assert!(save(&out, b"oops", &[&s], true, &Cancellation::default()).is_err());
+            assert_eq!(fs::read(&out).unwrap(), b"keep");
+        }
+    }
+    #[test]
+    fn bom_and_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f");
+        for bytes in [
+            b"\xef\xbb\xbfhello\r\n".to_vec(),
+            vec![255, 254, 65, 0, 10, 0],
+        ] {
+            fs::write(&p, &bytes).unwrap();
+            let s = Snapshot::open(&p, None, &Cancellation::default()).unwrap();
+            assert_eq!(s.encode(&s.text).unwrap(), bytes);
+        }
+        fs::write(&p, b"a\0b").unwrap();
+        assert!(Snapshot::open(&p, None, &Cancellation::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod conditional_save_tests {
+    use super::*;
+    #[test]
+    fn expected_output_existence_and_bytes_are_guarded_and_existing_permissions_survive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("MERGED");
+        let c = Cancellation::new();
+        fs::write(&path, b"old").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        save_if_unchanged(&path, b"resolved", &[], &Some(b"old".to_vec()), &c).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        assert!(save_if_unchanged(&path, b"overwritten", &[], &Some(b"old".to_vec()), &c).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"resolved");
+        assert!(save_if_unchanged(&path, b"overwritten", &[], &None, &c).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"resolved");
+        fs::remove_file(&path).unwrap();
+        assert!(
+            save_if_unchanged(&path, b"overwritten", &[], &Some(b"resolved".to_vec()), &c).is_err()
+        );
+        assert!(!path.exists());
+        save_if_unchanged(&path, b"new", &[], &None, &c).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+    }
+}

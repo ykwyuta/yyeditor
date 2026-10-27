@@ -1,0 +1,38 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "126.00"
+    },
+    "grouping_operation": {
+      "using_filesort": false,
+      "table": {
+        "table_name": "orders",
+        "access_type": "index",
+        "possible_keys": [
+          "ix_orders_customer_date"
+        ],
+        "key": "ix_orders_customer_date",
+        "used_key_parts": [
+          "customer_id",
+          "ordered_on"
+        ],
+        "key_length": "7",
+        "rows_examined_per_scan": 1200,
+        "rows_produced_per_join": 1200,
+        "filtered": "100.00",
+        "using_index": true,
+        "cost_info": {
+          "read_cost": "6.00",
+          "eval_cost": "120.00",
+          "prefix_cost": "126.00",
+          "data_read_per_join": "1M"
+        },
+        "used_columns": [
+          "order_id",
+          "customer_id"
+        ]
+      }
+    }
+  }
+}

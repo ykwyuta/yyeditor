@@ -42,6 +42,8 @@ pub(crate) enum TabMenu {
     Right,
     /// このタブより左側を閉じる
     Left,
+    /// ターミナルのテキストログを切り替える（ターミナル用メニューにだけ表示）。
+    ToggleLog,
 }
 
 impl TabMenu {
@@ -55,16 +57,37 @@ impl TabMenu {
             TabMenu::Others => (0..count).filter(|&i| i != index).collect(),
             TabMenu::Right => (index + 1..count).collect(),
             TabMenu::Left => (0..index).collect(),
+            TabMenu::ToggleLog => Vec::new(),
         }
     }
 }
 
 /// タブ `index` の右クリックのメニューを出して、選んだものを返す（`count` はタブの数）。
 pub(crate) fn menu(owner: HWND, index: usize, count: usize) -> Option<TabMenu> {
+    menu_impl(owner, index, count, None)
+}
+
+pub(crate) fn menu_with_log(
+    owner: HWND,
+    index: usize,
+    count: usize,
+    logging: bool,
+    running: bool,
+) -> Option<TabMenu> {
+    menu_impl(owner, index, count, Some((logging, running)))
+}
+
+fn menu_impl(
+    owner: HWND,
+    index: usize,
+    count: usize,
+    log: Option<(bool, bool)>,
+) -> Option<TabMenu> {
     const CLOSE: usize = 1;
     const OTHERS: usize = 2;
     const RIGHT: usize = 3;
     const LEFT: usize = 4;
+    const LOG: usize = 5;
     unsafe {
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -86,6 +109,22 @@ pub(crate) fn menu(owner: HWND, index: usize, count: usize) -> Option<TabMenu> {
             index + 1 < count,
         );
         item(LEFT, windows::core::w!("左側のタブを閉じる(&L)"), index > 0);
+        if let Some((logging, running)) = log {
+            let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+            let flags = MF_STRING
+                | if logging { MF_CHECKED } else { MF_UNCHECKED }
+                | if logging || running {
+                    MF_ENABLED
+                } else {
+                    MF_GRAYED
+                };
+            let _ = AppendMenuW(
+                m,
+                flags,
+                LOG,
+                windows::core::w!("テキストログをファイルに出力(&G)"),
+            );
+        }
         let cmd = TrackPopupMenu(
             m,
             TPM_RETURNCMD | TPM_RIGHTBUTTON,
@@ -101,6 +140,7 @@ pub(crate) fn menu(owner: HWND, index: usize, count: usize) -> Option<TabMenu> {
             OTHERS => Some(TabMenu::Others),
             RIGHT => Some(TabMenu::Right),
             LEFT => Some(TabMenu::Left),
+            LOG if log.is_some() => Some(TabMenu::ToggleLog),
             _ => None,
         }
     }

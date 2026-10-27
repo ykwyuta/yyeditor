@@ -14,6 +14,7 @@
 
 mod forward;
 mod proxy;
+mod settings;
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ use russh::{ChannelMsg, MethodKind};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
+use yy_remote::diagnostics::{Context as DiagnosticContext, Value as DiagnosticValue};
 use yy_remote::known_hosts::{self, HostKeyStatus};
 use yy_remote::{
     ConnectLog, Connector, ConnectorFactory, ConnectorOptions, Exit, HostKeyCheck, HostKeyQuestion,
@@ -146,6 +148,7 @@ impl SshConnector {
         key: &PublicKey,
         prompter: &dyn Prompter,
         log: &ConnectLog,
+        trace: DiagnosticContext,
     ) -> io::Result<()> {
         let openssh = key
             .to_openssh()
@@ -163,10 +166,12 @@ impl SshConnector {
         let status = known_hosts::check(&files, &name, algorithm, b64);
         let check = match status {
             HostKeyStatus::Known => {
+                trace.event("ssh.host_key", "known", &[]);
                 log.note("ホスト鍵は known_hosts の記録と一致しました");
                 return Ok(());
             }
             HostKeyStatus::Unknown => {
+                trace.event("ssh.host_key", "unknown", &[]);
                 let looked: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
                 log.note(format!(
                     "ホスト鍵の記録がありません（{}）。利用者に確かめます",
@@ -175,6 +180,7 @@ impl SshConnector {
                 HostKeyCheck::Unknown
             }
             HostKeyStatus::Changed { file, line } => {
+                trace.event("ssh.host_key", "changed", &[]);
                 log.note(format!(
                     "ホスト鍵が記録（{} の {line} 行目）と違います",
                     file.display()
@@ -226,10 +232,11 @@ impl SshConnector {
         rt: &Runtime,
         config: &Arc<client::Config>,
         spec: &HostSpec,
-        via: Option<&Handle<Client>>,
+        via: Option<(&Handle<Client>, &HostSpec)>,
         routes: forward::Routes,
         prompter: &dyn Prompter,
         log: &ConnectLog,
+        trace: DiagnosticContext,
     ) -> io::Result<Handle<Client>> {
         let host = spec.hostname.as_str();
         let port = spec.port;
@@ -240,17 +247,12 @@ impl SshConnector {
             (None, None) => "直接".to_owned(),
         };
         log.note(format!("{} に接続します（{how}）", spec.address()));
+        let timeout = Duration::from_secs(u64::from(spec.ssh.connect_timeout_secs.max(1)));
         // プロキシを使う場合は、先にプロキシを通した TCP 接続を作る（認証を尋ねてやり直せるように）
         let mut proxied = match proxy {
-            Some(p) => Some(connect_proxy(
-                rt,
-                p,
-                host,
-                port,
-                prompter,
-                self.passwords.as_deref(),
-                log,
-            )?),
+            Some(p) => Some(trace.span("ssh.proxy").run(|| {
+                connect_proxy(rt, p, host, port, prompter, self.passwords.as_deref(), log)
+            })?),
             None => None,
         };
         let server_key = Arc::new(Mutex::new(None));
@@ -261,32 +263,60 @@ impl SshConnector {
         let mut handle = rt.block_on(async {
             let connect = async {
                 let stream: Box<dyn Stream> = match (via, proxied.take()) {
-                    (Some(jump), _) => {
-                        let ch = jump
-                            .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0)
-                            .await
-                            .map_err(|e| {
-                                io::Error::new(
-                                    io::ErrorKind::ConnectionRefused,
-                                    format!("踏み台から {host}:{port} に接続できませんでした: {e}"),
-                                )
-                            })?;
-                        log.note(format!(
-                            "踏み台の上で {host}:{port} へのチャネル（direct-tcpip）を開きました"
-                        ));
-                        Box::new(ch.into_stream())
-                    }
-                    (None, Some(tcp)) => Box::new(tcp),
-                    (None, None) => {
-                        let tcp =
-                            tokio::net::TcpStream::connect((host, port))
+                    (Some((jump, hop)), _) => {
+                        trace.event(
+                            "ssh.jump",
+                            "begin",
+                            &[(
+                                "mode",
+                                DiagnosticValue::Code(if hop.jump_command.is_some() {
+                                    "command"
+                                } else {
+                                    "direct-tcpip"
+                                }),
+                            )],
+                        );
+                        if let Some(template) = &hop.jump_command {
+                            let command = yy_remote::ssh_config::jump_command(template, host, port)
+                                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+                            let ch = jump.channel_open_session().await.map_err(ssh_error)?;
+                            ch.exec(true, command.into_bytes())
+                                .await
+                                .map_err(ssh_error)?;
+                            // PTYは要求しない。次ホストの鍵確認・認証はこのストリーム上で行う。
+                            log.note("踏み台のリモート中継コマンドを使います（PTYなし）");
+                            Box::new(ch.into_stream()) as Box<dyn Stream>
+                        } else {
+                            let ch = jump
+                                .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0)
                                 .await
                                 .map_err(|e| {
                                     io::Error::new(
-                                        e.kind(),
-                                        format!("{host}:{port} に接続できませんでした: {e}"),
+                                        io::ErrorKind::ConnectionRefused,
+                                        format!(
+                                            "踏み台から {host}:{port} に接続できませんでした: {e}"
+                                        ),
                                     )
                                 })?;
+                            log.note(format!(
+                            "踏み台の上で {host}:{port} へのチャネル（direct-tcpip）を開きました"
+                        ));
+                            Box::new(ch.into_stream())
+                        }
+                    }
+                    (None, Some(tcp)) => Box::new(tcp),
+                    (None, None) => {
+                        let mut tcp_span = trace.span("ssh.tcp");
+                        let tcp = tokio::net::TcpStream::connect((host, port))
+                            .await
+                            .map_err(|e| {
+                                io::Error::new(
+                                    e.kind(),
+                                    format!("{host}:{port} に接続できませんでした: {e}"),
+                                )
+                            });
+                        tcp_span.finish(&tcp);
+                        let tcp = tcp?;
                         tcp.set_nodelay(true)?;
                         if let Ok(addr) = tcp.peer_addr() {
                             log.note(format!("TCP で接続しました（{addr}）"));
@@ -294,22 +324,25 @@ impl SshConnector {
                         Box::new(tcp)
                     }
                 };
+                let mut key_exchange = trace.span("ssh.key_exchange");
                 let handle = client::connect_stream(config.clone(), stream, handler)
                     .await
                     .map_err(|e| {
                         let e = ssh_error(e);
                         io::Error::new(e.kind(), format!("SSH の接続の確立に失敗しました: {e}"))
-                    })?;
+                    });
+                key_exchange.finish(&handle);
+                let handle = handle?;
                 log.note("SSH の鍵交換が済みました");
                 Ok(handle)
             };
-            match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+            match tokio::time::timeout(timeout, connect).await {
                 Ok(r) => r,
                 Err(_) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
                         "{host}:{port} に接続できませんでした（{} 秒で時間切れ）",
-                        CONNECT_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     ),
                 )),
             }
@@ -319,18 +352,24 @@ impl SshConnector {
             .unwrap()
             .take()
             .ok_or_else(|| io::Error::other("ホスト鍵を受け取れませんでした"))?;
-        if let Err(e) = self.verify_host_key(spec, &key, prompter, log) {
+        if let Err(e) = trace
+            .span("ssh.host_key")
+            .run(|| self.verify_host_key(spec, &key, prompter, log, trace))
+        {
             disconnect(rt, &handle);
             return Err(e);
         }
-        if let Err(e) = authenticate(
-            rt,
-            &mut handle,
-            spec,
-            prompter,
-            self.passwords.as_deref(),
-            log,
-        ) {
+        if let Err(e) = trace.span("ssh.auth").run(|| {
+            authenticate(
+                rt,
+                &mut handle,
+                spec,
+                prompter,
+                self.passwords.as_deref(),
+                log,
+                trace,
+            )
+        }) {
             disconnect(rt, &handle);
             return Err(e);
         }
@@ -345,6 +384,48 @@ impl Connector for SshConnector {
         prompter: &dyn Prompter,
         log: &ConnectLog,
     ) -> io::Result<Arc<dyn Transport>> {
+        let trace = DiagnosticContext::new();
+        trace.event(
+            "ssh.settings",
+            "resolved",
+            &[
+                ("hops", DiagnosticValue::Number(spec.jumps.len() as u64)),
+                ("port", DiagnosticValue::Number(u64::from(spec.port))),
+                (
+                    "username_at_count",
+                    DiagnosticValue::Number(spec.user.matches('@').count() as u64),
+                ),
+                (
+                    "identity_files",
+                    DiagnosticValue::Number(spec.identity_files.len() as u64),
+                ),
+                (
+                    "exec_via_shell",
+                    DiagnosticValue::Flag(spec.ssh.exec_via_shell),
+                ),
+                (
+                    "sftp_start",
+                    DiagnosticValue::Code(match &spec.sftp {
+                        yy_remote::ssh_config::SftpStart::Subsystem(_) => "subsystem",
+                        yy_remote::ssh_config::SftpStart::Command(_) => "command",
+                    }),
+                ),
+            ],
+        );
+        trace
+            .span("ssh.connect")
+            .run(|| self.connect_traced(spec, prompter, log, trace))
+    }
+}
+
+impl SshConnector {
+    fn connect_traced(
+        &self,
+        spec: &HostSpec,
+        prompter: &dyn Prompter,
+        log: &ConnectLog,
+        trace: DiagnosticContext,
+    ) -> io::Result<Arc<dyn Transport>> {
         for l in spec.describe() {
             log.note(l);
         }
@@ -353,24 +434,29 @@ impl Connector for SshConnector {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, e.clone()));
         }
         let rt = runtime()?;
-        let config = Arc::new(client::Config {
-            keepalive_interval: Some(self.keepalive),
-            keepalive_max: 3,
-            inactivity_timeout: None,
-            nodelay: true,
-            ..client::Config::default()
-        });
         let mut handles: Vec<Arc<Handle<Client>>> = Vec::new();
         // 接続先（最後のホップ）の -R の振り分け表
         let routes = forward::Routes::default();
         for (i, hop) in hops.iter().enumerate() {
-            let via = handles.last().map(|h| h.as_ref());
+            trace.event(
+                "ssh.hop",
+                "begin",
+                &[
+                    ("index", DiagnosticValue::Number(i as u64)),
+                    ("port", DiagnosticValue::Number(u64::from(hop.port))),
+                ],
+            );
+            let config = Arc::new(settings::client_config(&hop.ssh, self.keepalive)?);
+            let via = handles.last().map(|h| (h.as_ref(), hops[i - 1]));
             let r = if i + 1 == hops.len() {
                 routes.clone()
             } else {
                 forward::Routes::default()
             };
-            match self.connect_hop(rt, &config, hop, via, r, prompter, log) {
+            match trace
+                .span("ssh.transport")
+                .run(|| self.connect_hop(rt, &config, hop, via, r, prompter, log, trace))
+            {
                 Ok(h) => handles.push(Arc::new(h)),
                 Err(e) => {
                     for h in handles.iter().rev() {
@@ -391,6 +477,10 @@ impl Connector for SshConnector {
             handle,
             jumps: handles,
             routes,
+            sftp: spec.sftp.clone(),
+            exec_via_shell: spec.ssh.exec_via_shell,
+            timeout: Duration::from_secs(u64::from(spec.ssh.connect_timeout_secs)),
+            trace,
         }))
     }
 }
@@ -598,6 +688,7 @@ fn authenticate(
     prompter: &dyn Prompter,
     store: Option<&dyn PasswordStore>,
     log: &ConnectLog,
+    trace: DiagnosticContext,
 ) -> io::Result<()> {
     let user = spec.user.clone();
     log.note(format!("ユーザー {user} で認証します"));
@@ -611,6 +702,14 @@ fn authenticate(
         } = r
         {
             *m = Some(remaining_methods.iter().copied().collect());
+            trace.event(
+                "ssh.auth",
+                "method_rejected",
+                &[(
+                    "remaining_methods",
+                    DiagnosticValue::Number(remaining_methods.iter().count() as u64),
+                )],
+            );
             log.note(format!(
                 "{what}: 受け付けられませんでした（サーバーが受け付ける方法: {}）",
                 method_names(m)
@@ -618,11 +717,27 @@ fn authenticate(
         }
     };
     let succeeded = |what: &str| {
+        let method = if what.starts_with("公開鍵") {
+            "public_key"
+        } else if what.starts_with("keyboard-interactive") {
+            "keyboard_interactive"
+        } else {
+            "password"
+        };
+        trace.event(
+            "ssh.auth",
+            "accepted",
+            &[("method", DiagnosticValue::Code(method))],
+        );
         log.note(format!("{what}で認証しました"));
         Ok(())
     };
 
-    for path in &spec.identity_files {
+    for path in spec
+        .identity_files
+        .iter()
+        .filter(|_| spec.ssh.public_key_auth)
+    {
         if !path.is_file() {
             continue;
         }
@@ -651,7 +766,7 @@ fn authenticate(
         log.note("使える秘密鍵のファイルがありません");
     }
 
-    if allowed(&methods, MethodKind::KeyboardInteractive) {
+    if spec.ssh.keyboard_interactive_auth && allowed(&methods, MethodKind::KeyboardInteractive) {
         log.note("keyboard-interactive 認証を試します");
         let user_host = spec.user_host();
         let mut r = rt
@@ -677,6 +792,19 @@ fn authenticate(
                     instructions,
                     prompts,
                 } => {
+                    trace.event(
+                        "ssh.auth",
+                        "challenge",
+                        &[
+                            ("prompts", DiagnosticValue::Number(prompts.len() as u64)),
+                            (
+                                "echo_prompts",
+                                DiagnosticValue::Number(
+                                    prompts.iter().filter(|p| p.echo).count() as u64
+                                ),
+                            ),
+                        ],
+                    );
                     let answers = if prompts.is_empty() {
                         Vec::new()
                     } else {
@@ -703,7 +831,7 @@ fn authenticate(
         }
     }
 
-    if allowed(&methods, MethodKind::Password) {
+    if spec.ssh.password_auth && allowed(&methods, MethodKind::Password) {
         let key = yy_remote::ssh_password_key(spec);
         let mut notice = None;
         // 保存したパスワードがあれば、尋ねずに使う
@@ -843,11 +971,15 @@ fn load_key(
 
 /// 認証済みの SSH 接続。
 struct SshTransport {
+    trace: DiagnosticContext,
+    exec_via_shell: bool,
+    timeout: Duration,
     handle: Arc<Handle<Client>>,
     /// 経由している踏み台の接続（最初の踏み台から順に）
     jumps: Vec<Arc<Handle<Client>>>,
     /// `-R` の振り分け表
     routes: forward::Routes,
+    sftp: yy_remote::ssh_config::SftpStart,
 }
 
 impl Drop for SshTransport {
@@ -870,9 +1002,14 @@ impl Drop for SshTransport {
 
 /// チャネルで始めること。
 enum Start {
+    CommandShell {
+        script: Vec<u8>,
+        marker: Vec<u8>,
+    },
     Exec(Vec<u8>),
     /// サブシステム（`sftp` など）
     Subsystem(String),
+    Sftp(yy_remote::ssh_config::SftpStart),
     /// 端末つき（`command` がなければログインシェル）
     Shell {
         term: String,
@@ -893,12 +1030,98 @@ struct Opened {
 impl SshTransport {
     /// セッションのチャネルを開いて `start` を行う。`merge_stderr` なら標準エラー出力も出力に流す。
     fn open(&self, start: Start, merge_stderr: bool) -> io::Result<Opened> {
+        let span = self.trace.span("ssh.channel");
+        let (request, pty) = match &start {
+            Start::CommandShell { .. } => ("shell-command", false),
+            Start::Exec(_) => ("exec", false),
+            Start::Subsystem(_) => ("subsystem", false),
+            Start::Sftp(yy_remote::ssh_config::SftpStart::Subsystem(_)) => {
+                ("sftp-subsystem", false)
+            }
+            Start::Sftp(yy_remote::ssh_config::SftpStart::Command(_)) => ("sftp-command", false),
+            Start::Shell { .. } => ("terminal-shell", true),
+        };
+        span.metadata(&[
+            ("request", DiagnosticValue::Code(request)),
+            ("pty", DiagnosticValue::Flag(pty)),
+        ]);
+        let channel_tag = span.id();
+        span.run(|| self.open_inner(start, merge_stderr, channel_tag))
+    }
+
+    fn open_inner(&self, start: Start, merge_stderr: bool, channel_tag: u64) -> io::Result<Opened> {
         let rt = runtime()?;
         let channel = rt.block_on(async {
-            let ch = self.handle.channel_open_session().await?;
+            let mut ch = self.handle.channel_open_session().await?;
+            let mut pending = std::collections::VecDeque::new();
             match start {
+                Start::CommandShell { script, marker } => {
+                    let mut trace = self.trace.span("ssh.shell_ready");
+                    ch.request_shell(true).await?;
+                    let ready = tokio::time::timeout(self.timeout, async {
+                        let mut prefix = Vec::new();
+                        let mut sent = false;
+                        loop {
+                            match ch.wait().await {
+                                Some(ChannelMsg::Success) if !sent => { ch.data(script.as_slice()).await.map_err(ssh_error)?; sent = true; }
+                                Some(ChannelMsg::Data { data }) => {
+                                    prefix.extend_from_slice(&data);
+                                    if let Some(pos) = prefix.windows(marker.len()).position(|w| w == marker) {
+                                        let rest = prefix.split_off(pos + marker.len());
+                                        trace.metadata(&[("banner_bytes", DiagnosticValue::Number(pos as u64))]);
+                                        if !rest.is_empty() { pending.push_back(ChannelMsg::Data { data: rest.into() }); }
+                                        return Ok(());
+                                    }
+                                    if prefix.len() > STDERR_LIMIT { return Err(io::Error::new(io::ErrorKind::InvalidData, "shell開始前の出力が多すぎます")); }
+                                }
+                                Some(ChannelMsg::Failure) => return Err(io::Error::new(io::ErrorKind::PermissionDenied, "PTYなしshell要求が拒否されました")),
+                                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "shellのコマンド開始前に切断されました")),
+                                _ => {}
+                            }
+                        }
+                    }).await.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "shellコマンドの開始が時間切れです（対話メニューやポリシーを確認してください）")));
+                    trace.finish(&ready);
+                    if let Err(e) = ready { let _ = ch.close().await; return Err(russh::Error::IO(e)); }
+                }
                 Start::Exec(command) => ch.exec(true, command).await?,
                 Start::Subsystem(name) => ch.request_subsystem(true, name).await?,
+                Start::Sftp(mode) => {
+                    match mode {
+                    yy_remote::ssh_config::SftpStart::Subsystem(name) => {
+                        ch.request_subsystem(true, name).await?
+                    }
+                    yy_remote::ssh_config::SftpStart::Command(command) => {
+                        ch.exec(true, command.into_bytes()).await?
+                    }
+                    }
+                    // ゲートウェイによる要求拒否をSFTPパケットと取り違えない。
+                    // 応答より先に届くバナー・データは失わず、後段へ渡す。
+                    let accepted = tokio::time::timeout(CONNECT_TIMEOUT, async {
+                        let mut bytes = 0;
+                        loop {
+                            match ch.wait().await {
+                                Some(ChannelMsg::Success) => return Ok(()),
+                                Some(ChannelMsg::Failure) => return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                                    "SFTP起動要求が拒否されました。ゲートウェイのSFTP許可とsftp_subsystem / sftp_server設定を確認してください")),
+                                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => return Err(io::Error::new(io::ErrorKind::UnexpectedEof,"SFTP起動要求への応答前にチャネルが閉じられました")),
+                                Some(msg) => {
+                                    match &msg {
+                                        ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => bytes += data.len(),
+                                        _ => {},
+                                    }
+                                    if bytes > STDERR_LIMIT || pending.len() >= 256 {
+                                        return Err(io::Error::new(io::ErrorKind::InvalidData,"SFTP起動応答前の出力が多すぎます"));
+                                    }
+                                    pending.push_back(msg);
+                                }
+                            }
+                        }
+                    }).await.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut,"SFTP起動要求への応答がありません（20秒）")));
+                    if let Err(e) = accepted {
+                        let _ = ch.close().await;
+                        return Err(russh::Error::IO(e));
+                    }
+                },
                 Start::Shell {
                     term,
                     cols,
@@ -913,17 +1136,21 @@ impl SshTransport {
                     }
                 }
             }
-            Ok::<_, russh::Error>(ch)
+            Ok::<_, russh::Error>((ch, pending))
         });
-        let channel = channel.map_err(ssh_error)?;
+        let (channel, mut pending) = channel.map_err(ssh_error)?;
         let (mut read_half, write_half) = channel.split();
         // 出力は数を限った受け渡し口に流す（読む側が遅ければ SSH のウィンドウで送信を止める）
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
         let (exit_tx, exit_rx) = std::sync::mpsc::channel::<Exit>();
+        let trace = self.trace;
         rt.spawn(async move {
             let mut exit = Exit::default();
             let mut out = Some(out_tx);
-            while let Some(msg) = read_half.wait().await {
+            while let Some(msg) = match pending.pop_front() {
+                Some(msg) => Some(msg),
+                None => read_half.wait().await,
+            } {
                 match msg {
                     ChannelMsg::Data { data } => {
                         if let Some(tx) = &out
@@ -944,10 +1171,30 @@ impl SshTransport {
                         let room = STDERR_LIMIT.saturating_sub(exit.stderr.len());
                         exit.stderr.extend_from_slice(&data[..data.len().min(room)]);
                     }
-                    ChannelMsg::ExitStatus { exit_status } => exit.status = Some(exit_status),
+                    ChannelMsg::Success => trace.event(
+                        "ssh.channel_response",
+                        "accepted",
+                        &[("channel", DiagnosticValue::Number(channel_tag))],
+                    ),
+                    ChannelMsg::ExitStatus { exit_status } => {
+                        exit.status = Some(exit_status);
+                        trace.event(
+                            "ssh.channel_exit",
+                            "status",
+                            &[
+                                ("channel", DiagnosticValue::Number(channel_tag)),
+                                ("code", DiagnosticValue::Number(u64::from(exit_status))),
+                            ],
+                        );
+                    }
                     ChannelMsg::Eof => out = None,
                     // コマンドを起動できなかった
                     ChannelMsg::Failure => {
+                        trace.event(
+                            "ssh.channel_response",
+                            "rejected",
+                            &[("channel", DiagnosticValue::Number(channel_tag))],
+                        );
                         exit.stderr
                             .extend_from_slice("コマンドを実行できませんでした".as_bytes());
                         break;
@@ -957,6 +1204,21 @@ impl SshTransport {
                 }
             }
             drop(out);
+            trace.event(
+                "ssh.channel_exit",
+                "closed",
+                &[
+                    ("channel", DiagnosticValue::Number(channel_tag)),
+                    (
+                        "exit_status_received",
+                        DiagnosticValue::Flag(exit.status.is_some()),
+                    ),
+                    (
+                        "stderr_bytes",
+                        DiagnosticValue::Number(exit.stderr.len() as u64),
+                    ),
+                ],
+            );
             let _ = exit_tx.send(exit);
         });
         let half = Arc::new(write_half);
@@ -984,8 +1246,36 @@ impl SshTransport {
 }
 
 impl Transport for SshTransport {
+    fn diagnostics(&self) -> DiagnosticContext {
+        self.trace
+    }
+    fn sftp(&self) -> io::Result<Process> {
+        if self.exec_via_shell
+            && let yy_remote::ssh_config::SftpStart::Command(command) = &self.sftp
+        {
+            return self.exec(command.as_bytes());
+        }
+        let o = self.open(Start::Sftp(self.sftp.clone()), false)?;
+        Ok(Process::new(
+            Box::new(o.writer),
+            Box::new(o.reader),
+            o.finish,
+        ))
+    }
     fn exec(&self, command: &[u8]) -> io::Result<Process> {
-        let o = self.open(Start::Exec(command.to_vec()), false)?;
+        let start = if self.exec_via_shell {
+            let token = tempfile_token();
+            let marker = format!("\u{1}YYCMD{token}\u{2}").into_bytes();
+            let mut script = b"printf '%s' ".to_vec();
+            script.extend(yy_remote::shell_quote(&marker));
+            script.extend(b"; exec sh -c ");
+            script.extend(yy_remote::shell_quote(command));
+            script.push(b'\n');
+            Start::CommandShell { script, marker }
+        } else {
+            Start::Exec(command.to_vec())
+        };
+        let o = self.open(start, false)?;
         Ok(Process::new(
             Box::new(o.writer),
             Box::new(o.reader),
@@ -1103,6 +1393,15 @@ impl Transport for SshTransport {
     ) -> io::Result<yy_remote::ActiveForward> {
         forward::start(runtime()?, &self.handle, &self.routes, f, note)
     }
+}
+
+fn tempfile_token() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    format!(
+        "{:x}-{:x}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 struct ChannelReader {

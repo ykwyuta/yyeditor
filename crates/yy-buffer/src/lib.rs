@@ -1,7 +1,7 @@
 //! yyeditor のテキストバッファ。
 //!
 //! 元ファイル（mmap）や追記バッファを参照する「ピース」を永続 B+木に並べた
-//! ピースツリーを提供する。詳細は `docs/proposal/02-buffer-large-file.md` を参照。
+//! ピースツリーを提供する。詳細は `docs/developer/buffer-io-jobs.md` を参照。
 
 mod piece;
 mod tree;

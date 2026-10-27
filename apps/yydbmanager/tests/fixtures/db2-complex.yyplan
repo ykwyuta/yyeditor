@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "kind": "Db2",
+  "actual": true,
+  "raw": "{\"actuals\":[[{\"Integer\":\"1\"},{\"Integer\":\"0\"},\"Null\",{\"Text\":\"CARDINALITY\"},{\"Text\":\"5.00000000000000E+000\"}],[{\"Integer\":\"2\"},{\"Integer\":\"0\"},\"Null\",{\"Text\":\"CARDINALITY\"},{\"Text\":\"5.00000000000000E+000\"}],[{\"Integer\":\"3\"},{\"Integer\":\"0\"},\"Null\",{\"Text\":\"CARDINALITY\"},{\"Text\":\"5.00000000000000E+000\"}],[{\"Integer\":\"4\"},{\"Integer\":\"0\"},\"Null\",{\"Text\":\"CARDINALITY\"},{\"Text\":\"5.00000000000000E+000\"}],[{\"Integer\":\"5\"},{\"Integer\":\"0\"},\"Null\",{\"Text\":\"CARDINALITY\"},{\"Text\":\"5.00000000000000E+000\"}],[{\"Integer\":\"6\"},{\"Integer\":\"0\"},\"Null\",{\"Text\":\"CARDINALITY\"},{\"Text\":\"5.00000000000000E+000\"}],[{\"Integer\":\"7\"},{\"Integer\":\"0\"},\"Null\",{\"Text\":\"CARDINALITY\"},{\"Text\":\"7.90000000000000E+001\"}],[{\"Integer\":\"8\"},{\"Integer\":\"0\"},\"Null\",{\"Text\":\"CARDINALITY\"},{\"Text\":\"8.00000000000000E+001\"}],[{\"Integer\":\"9\"},{\"Integer\":\"0\"},\"Null\",{\"Text\":\"CARDINALITY\"},{\"Text\":\"7.90000000000000E+001\"}]],\"operators\":[[{\"Integer\":\"1\"},\"Null\",{\"Text\":\"RETURN\"},\"Null\",\"Null\",{\"Text\":\"9.49269027709961E+001\"},{\"Text\":\"-1.00000000000000E+000\"},{\"Text\":\"-1.00000000000000E+000\"}],[{\"Integer\":\"2\"},{\"Integer\":\"1\"},{\"Text\":\"TBSCAN\"},\"Null\",{\"Text\":\"3.33333320617676E+001\"},{\"Text\":\"9.49269027709961E+001\"},{\"Text\":\"-1.00000000000000E+000\"},{\"Text\":\"-1.00000000000000E+000\"}],[{\"Integer\":\"3\"},{\"Integer\":\"2\"},{\"Text\":\"SORT  \"},\"Null\",{\"Text\":\"3.33333320617676E+001\"},{\"Text\":\"9.49264755249023E+001\"},{\"Text\":\"-1.00000000000000E+000\"},{\"Text\":\"-1.00000000000000E+000\"}],[{\"Integer\":\"4\"},{\"Integer\":\"3\"},{\"Text\":\"GRPBY \"},\"Null\",{\"Text\":\"3.33333320617676E+001\"},{\"Text\":\"9.49240722656250E+001\"},{\"Text\":\"-1.00000000000000E+000\"},{\"Text\":\"-1.00000000000000E+000\"}],[{\"Integer\":\"5\"},{\"Integer\":\"4\"},{\"Text\":\"TBSCAN\"},\"Null\",{\"Text\":\"3.33333320617676E+001\"},{\"Text\":\"9.49235610961914E+001\"},{\"Text\":\"-1.00000000000000E+000\"},{\"Text\":\"-1.00000000000000E+000\"}],[{\"Integer\":\"6\"},{\"Integer\":\"5\"},{\"Text\":\"SORT  \"},\"Null\",{\"Text\":\"3.33333320617676E+001\"},{\"Text\":\"9.49231338500977E+001\"},{\"Text\":\"-1.00000000000000E+000\"},{\"Text\":\"-1.00000000000000E+000\"}],[{\"Integer\":\"7\"},{\"Integer\":\"6\"},{\"Text\":\"HSJOIN\"},\"Null\",{\"Text\":\"3.33333343505859E+002\"},{\"Text\":\"9.49016494750977E+001\"},{\"Text\":\"-1.00000000000000E+000\"},{\"Text\":\"-1.00000000000000E+000\"}],[{\"Integer\":\"8\"},{\"Integer\":\"7\"},{\"Text\":\"TBSCAN\"},{\"Text\":\"DB2INST1.YYDB_PLAN_A\"},{\"Text\":\"1.00000000000000E+003\"},{\"Text\":\"4.74352035522461E+001\"},{\"Text\":\"-1.00000000000000E+000\"},{\"Text\":\"-1.00000000000000E+000\"}],[{\"Integer\":\"9\"},{\"Integer\":\"7\"},{\"Text\":\"TBSCAN\"},{\"Text\":\"DB2INST1.YYDB_PLAN_B\"},{\"Text\":\"3.33333312988281E+002\"},{\"Text\":\"4.74544715881348E+001\"},{\"Text\":\"-1.00000000000000E+000\"},{\"Text\":\"-1.00000000000000E+000\"}]],\"predicates\":[[{\"Integer\":\"7\"},{\"Integer\":\"3\"},{\"Text\":\"JOIN      \"},{\"Text\":\"(Q2.ID = Q1.ID)\"}],[{\"Integer\":\"9\"},{\"Integer\":\"4\"},{\"Text\":\"SARG      \"},{\"Text\":\"(10 < Q1.AMOUNT)\"}]]}",
+  "nodes": [
+    {
+      "id": 1,
+      "parent": null,
+      "operator": "RETURN",
+      "object": "",
+      "estimated_rows": null,
+      "actual_rows": 5.0,
+      "cost": 94.9269027709961,
+      "properties": {
+        "Actual.0.CARDINALITY": "5.00000000000000E+000",
+        "CPU_COST": "-1.00000000000000E+000",
+        "IO_COST": "-1.00000000000000E+000",
+        "Query.Text": "SELECT a.GRP, COUNT(*) AS N, SUM(b.AMOUNT) AS TOTAL FROM YYDB_PLAN_A a JOIN YYDB_PLAN_B b ON a.ID=b.ID WHERE b.AMOUNT>10 GROUP BY a.GRP ORDER BY SUM(b.AMOUNT) DESC"
+      }
+    },
+    {
+      "id": 2,
+      "parent": 1,
+      "operator": "TBSCAN",
+      "object": "",
+      "estimated_rows": 33.3333320617676,
+      "actual_rows": 5.0,
+      "cost": 94.9269027709961,
+      "properties": {
+        "Actual.0.CARDINALITY": "5.00000000000000E+000",
+        "CPU_COST": "-1.00000000000000E+000",
+        "IO_COST": "-1.00000000000000E+000"
+      }
+    },
+    {
+      "id": 3,
+      "parent": 2,
+      "operator": "SORT",
+      "object": "",
+      "estimated_rows": 33.3333320617676,
+      "actual_rows": 5.0,
+      "cost": 94.9264755249023,
+      "properties": {
+        "Actual.0.CARDINALITY": "5.00000000000000E+000",
+        "CPU_COST": "-1.00000000000000E+000",
+        "IO_COST": "-1.00000000000000E+000"
+      }
+    },
+    {
+      "id": 4,
+      "parent": 3,
+      "operator": "GRPBY",
+      "object": "",
+      "estimated_rows": 33.3333320617676,
+      "actual_rows": 5.0,
+      "cost": 94.924072265625,
+      "properties": {
+        "Actual.0.CARDINALITY": "5.00000000000000E+000",
+        "CPU_COST": "-1.00000000000000E+000",
+        "IO_COST": "-1.00000000000000E+000"
+      }
+    },
+    {
+      "id": 5,
+      "parent": 4,
+      "operator": "TBSCAN",
+      "object": "",
+      "estimated_rows": 33.3333320617676,
+      "actual_rows": 5.0,
+      "cost": 94.9235610961914,
+      "properties": {
+        "Actual.0.CARDINALITY": "5.00000000000000E+000",
+        "CPU_COST": "-1.00000000000000E+000",
+        "IO_COST": "-1.00000000000000E+000"
+      }
+    },
+    {
+      "id": 6,
+      "parent": 5,
+      "operator": "SORT",
+      "object": "",
+      "estimated_rows": 33.3333320617676,
+      "actual_rows": 5.0,
+      "cost": 94.9231338500977,
+      "properties": {
+        "Actual.0.CARDINALITY": "5.00000000000000E+000",
+        "CPU_COST": "-1.00000000000000E+000",
+        "IO_COST": "-1.00000000000000E+000"
+      }
+    },
+    {
+      "id": 7,
+      "parent": 6,
+      "operator": "HSJOIN",
+      "object": "",
+      "estimated_rows": 333.333343505859,
+      "actual_rows": 79.0,
+      "cost": 94.9016494750977,
+      "properties": {
+        "Actual.0.CARDINALITY": "7.90000000000000E+001",
+        "CPU_COST": "-1.00000000000000E+000",
+        "IO_COST": "-1.00000000000000E+000",
+        "Predicate.JOIN.3": "(Q2.ID = Q1.ID)"
+      }
+    },
+    {
+      "id": 8,
+      "parent": 7,
+      "operator": "TBSCAN",
+      "object": "DB2INST1.YYDB_PLAN_A",
+      "estimated_rows": 1000.0,
+      "actual_rows": 80.0,
+      "cost": 47.4352035522461,
+      "properties": {
+        "Actual.0.CARDINALITY": "8.00000000000000E+001",
+        "CPU_COST": "-1.00000000000000E+000",
+        "IO_COST": "-1.00000000000000E+000"
+      }
+    },
+    {
+      "id": 9,
+      "parent": 7,
+      "operator": "TBSCAN",
+      "object": "DB2INST1.YYDB_PLAN_B",
+      "estimated_rows": 333.333312988281,
+      "actual_rows": 79.0,
+      "cost": 47.4544715881348,
+      "properties": {
+        "Actual.0.CARDINALITY": "7.90000000000000E+001",
+        "CPU_COST": "-1.00000000000000E+000",
+        "IO_COST": "-1.00000000000000E+000",
+        "Predicate.SARG.4": "(10 < Q1.AMOUNT)"
+      }
+    }
+  ]
+}

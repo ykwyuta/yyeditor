@@ -18,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use yy_cobol::{Charset, Codec};
 use yy_sheet::fixed::{self, FixedSpec, RecordSep};
 
-use super::filter::{add_string, button, combo, label, message, run, send, state};
+use super::filter::{add_string, button, combo, edit, label, message, run, send, state};
 use super::*;
 use crate::goto::{CLASS_BUTTON, CLASS_EDIT, Template};
 
@@ -32,6 +32,9 @@ const L_LE: u16 = 14;
 const L_SUMMARY: u16 = 15;
 const L_CATLOAD: u16 = 16;
 const L_CATSAVE: u16 = 17;
+const L_LEN: u16 = 18;
+const L_INFER: u16 = 19;
+const L_GUESS_LEN: u16 = 20;
 
 /// ダイアログの使い道。
 enum Purpose {
@@ -44,6 +47,7 @@ enum Purpose {
 struct LayoutState {
     purpose: Purpose,
     copybook: String,
+    data_len: String,
     charset: Charset,
     /// `None` は自動（開くときだけ）
     sep: Option<RecordSep>,
@@ -98,6 +102,122 @@ pub(super) fn crlf(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
+/// 単一・マルチで共通の推定。長さは入力または候補の選択で指定する。
+pub(super) fn infer_sample(
+    sample: &[u8],
+    length: &str,
+    codec: Codec,
+    separator: Option<RecordSep>,
+    multi: bool,
+) -> std::result::Result<Vec<(String, String)>, String> {
+    let len: usize = length
+        .trim()
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or("推定する前にレコード長（バイト）を正の整数で入力してください")?;
+    if len > sample.len() {
+        return Err(
+            "見本に完全なレコードがありません（見本は先頭 1 MB）。レコード長を確認してください"
+                .into(),
+        );
+    }
+    let sep = separator.unwrap_or_else(|| fixed::detect_separator(sample, len));
+    fixed::infer_layouts(sample, len, codec, sep, multi)
+}
+
+struct LengthState {
+    guesses: Vec<fixed::RecordLengthGuess>,
+    result: Option<fixed::RecordLengthGuess>,
+}
+
+/// 長さは一意に決まらないことがあるので、候補を確認して選んでもらう。
+pub(super) fn guess_length(
+    owner: HWND,
+    sample: &[u8],
+    file_len: u64,
+    charset: Charset,
+) -> Option<fixed::RecordLengthGuess> {
+    let guesses = fixed::infer_record_lengths(sample, file_len, charset);
+    if guesses.is_empty() {
+        message(
+            owner,
+            "長さの候補が見つかりませんでした。レコード長を手入力してください。",
+        );
+        return None;
+    }
+    let mut t = Template::dialog("レコード長の推定候補", 360, 105);
+    label(
+        &mut t,
+        7,
+        8,
+        346,
+        0,
+        "先頭 1 MB の推定候補です。一致度は確率ではありません。",
+    );
+    label(
+        &mut t,
+        7,
+        22,
+        346,
+        0,
+        "区切りなしは 65536 バイトまで。選択後も長さを手で修正できます。",
+    );
+    combo(&mut t, 7, 40, 346, 100);
+    button(&mut t, 230, 80, 58, IDOK_, "選択", true);
+    button(&mut t, 295, 80, 58, IDCANCEL_, "キャンセル", false);
+    let mut st = LengthState {
+        guesses,
+        result: None,
+    };
+    run(&t, owner, &mut st, Some(length_proc));
+    st.result
+}
+
+extern "system" fn length_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
+    unsafe {
+        match msg {
+            WM_INITDIALOG => {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, lparam.0);
+                let st = state::<LengthState>(hwnd);
+                for guess in &st.guesses {
+                    add_string(
+                        hwnd,
+                        100,
+                        CB_ADDSTRING,
+                        &format!(
+                            "{} バイト / 区切り {} / 一致度 {}",
+                            guess.data_len,
+                            guess.separator.label(),
+                            guess.score,
+                        ),
+                    );
+                }
+                send(hwnd, 100, CB_SETCURSEL, 0, 0);
+                1
+            }
+            WM_COMMAND if GetWindowLongPtrW(hwnd, GWLP_USERDATA) != 0 => {
+                let id = crate::loword(wparam.0) as u16;
+                let st = state::<LengthState>(hwnd);
+                if id == IDOK_ {
+                    let i = send(hwnd, 100, CB_GETCURSEL, 0, 0);
+                    st.result = usize::try_from(i)
+                        .ok()
+                        .and_then(|i| st.guesses.get(i).cloned());
+                    let _ = EndDialog(hwnd, IDOK_ as isize);
+                    return 1;
+                }
+                if id == IDCANCEL_ {
+                    let _ = EndDialog(hwnd, IDCANCEL_ as isize);
+                    return 1;
+                }
+                0
+            }
+            _ => 0,
+        }
+    }
+}
+
 /// ダイアログの値から設定を作る（自動の区切りは見本から推定）。
 fn spec_of(st: &LayoutState) -> std::result::Result<FixedSpec, String> {
     let codec = Codec {
@@ -105,6 +225,21 @@ fn spec_of(st: &LayoutState) -> std::result::Result<FixedSpec, String> {
         little_endian: st.little_endian,
     };
     let mut spec = FixedSpec::new(&st.copybook, codec, st.sep.unwrap_or(RecordSep::None))?;
+    if matches!(st.purpose, Purpose::Open { .. }) && !st.data_len.trim().is_empty() {
+        let len: usize = st
+            .data_len
+            .trim()
+            .parse()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or("レコード長は正の整数で指定してください")?;
+        if spec.data_len != len {
+            return Err(format!(
+                "指定したレコード長 {len} バイトと定義の長さ {} バイトが異なります。定義の項目長を修正してください",
+                spec.data_len
+            ));
+        }
+    }
     if st.sep.is_none()
         && let Purpose::Open { sample, .. } = &st.purpose
     {
@@ -115,6 +250,7 @@ fn spec_of(st: &LayoutState) -> std::result::Result<FixedSpec, String> {
 
 fn read_controls(hwnd: HWND, st: &mut LayoutState) {
     st.copybook = dlg_text_long(hwnd, L_TEXT);
+    st.data_len = dlg_text_long(hwnd, L_LEN);
     let cs = send(hwnd, L_CHARSET, CB_GETCURSEL, 0, 0);
     st.charset = Charset::all()
         .get(cs.max(0) as usize)
@@ -171,7 +307,7 @@ fn update_summary(hwnd: HWND, st: &mut LayoutState) {
 /// レイアウトのダイアログ。
 fn layout_dialog_with(owner: HWND, purpose: Purpose, title: &str) -> Option<FixedSpec> {
     let (copybook, charset, sep, le) = initial();
-    let mut t = Template::dialog(title, 430, 330);
+    let mut t = Template::dialog(title, 430, 358);
     label(
         &mut t,
         7,
@@ -192,14 +328,34 @@ fn layout_dialog_with(owner: HWND, purpose: Purpose, title: &str) -> Option<Fixe
     let multi = (WS_BORDER | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL).0
         | (ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_WANTRETURN) as u32;
     t.item(multi, 7, 20, 416, 110, L_TEXT, CLASS_EDIT, "");
-    label(&mut t, 7, 140, 50, 0, "文字コード:");
-    combo(&mut t, 55, 138, 175, L_CHARSET);
-    label(&mut t, 240, 140, 70, 0, "レコードの区切り:");
-    combo(&mut t, 308, 138, 115, L_SEP);
+    label(&mut t, 7, 140, 100, 0, "レコード長（バイト）:");
+    edit(&mut t, 110, 138, 55, L_LEN);
+    button(
+        &mut t,
+        175,
+        136,
+        110,
+        L_GUESS_LEN,
+        "レコード長を推定(&R)...",
+        false,
+    );
+    button(
+        &mut t,
+        295,
+        136,
+        128,
+        L_INFER,
+        "レイアウトを推定(&E)",
+        false,
+    );
+    label(&mut t, 7, 168, 50, 0, "文字コード:");
+    combo(&mut t, 55, 166, 175, L_CHARSET);
+    label(&mut t, 240, 168, 70, 0, "レコードの区切り:");
+    combo(&mut t, 308, 166, 115, L_SEP);
     t.item(
         WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32,
         7,
-        156,
+        184,
         416,
         10,
         L_LE,
@@ -210,7 +366,7 @@ fn layout_dialog_with(owner: HWND, purpose: Purpose, title: &str) -> Option<Fixe
         (WS_BORDER | WS_VSCROLL | WS_HSCROLL).0
             | (ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY) as u32,
         7,
-        170,
+        198,
         416,
         135,
         L_SUMMARY,
@@ -220,7 +376,7 @@ fn layout_dialog_with(owner: HWND, purpose: Purpose, title: &str) -> Option<Fixe
     button(
         &mut t,
         7,
-        311,
+        339,
         104,
         L_CATLOAD,
         "カタログから読み込む(&G)...",
@@ -229,14 +385,14 @@ fn layout_dialog_with(owner: HWND, purpose: Purpose, title: &str) -> Option<Fixe
     button(
         &mut t,
         115,
-        311,
+        339,
         90,
         L_CATSAVE,
         "カタログに保存(&V)...",
         false,
     );
-    button(&mut t, 316, 311, 50, IDOK_, "OK", true);
-    button(&mut t, 373, 311, 50, IDCANCEL_, "キャンセル", false);
+    button(&mut t, 316, 339, 50, IDOK_, "OK", true);
+    button(&mut t, 373, 339, 50, IDCANCEL_, "キャンセル", false);
     let mut st = LayoutState {
         sep: match purpose {
             Purpose::Open { .. } => None,
@@ -244,6 +400,7 @@ fn layout_dialog_with(owner: HWND, purpose: Purpose, title: &str) -> Option<Fixe
         },
         purpose,
         copybook,
+        data_len: String::new(),
         charset,
         little_endian: le,
         font: HFONT::default(),
@@ -323,6 +480,14 @@ extern "system" fn layout_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     }
                 }
                 let open = matches!(st.purpose, Purpose::Open { .. });
+                if !open {
+                    for id in [L_LEN, L_INFER, L_GUESS_LEN] {
+                        if let Ok(h) = GetDlgItem(Some(hwnd), id as i32) {
+                            let _ =
+                                windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(h, false);
+                        }
+                    }
+                }
                 if open {
                     add_string(hwnd, L_SEP, CB_ADDSTRING, "自動（推定する）");
                 }
@@ -357,7 +522,7 @@ extern "system" fn layout_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 let code = crate::hiword(wparam.0);
                 let st = state::<LayoutState>(hwnd);
                 match id {
-                    L_TEXT if code == EN_CHANGE => {
+                    L_TEXT | L_LEN if code == EN_CHANGE => {
                         update_summary(hwnd, st);
                         1
                     }
@@ -373,6 +538,53 @@ extern "system" fn layout_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         if let Some(text) = load_copybook(hwnd) {
                             let _ =
                                 SetDlgItemTextW(hwnd, L_TEXT as i32, &HSTRING::from(crlf(&text)));
+                            update_summary(hwnd, st);
+                        }
+                        1
+                    }
+                    L_INFER => {
+                        read_controls(hwnd, st);
+                        if let Purpose::Open { sample, .. } = &st.purpose {
+                            let result = infer_sample(
+                                sample,
+                                &st.data_len,
+                                Codec {
+                                    charset: st.charset,
+                                    little_endian: st.little_endian,
+                                },
+                                st.sep,
+                                false,
+                            );
+                            match result {
+                                Ok(layouts) => {
+                                    let _ = SetDlgItemTextW(
+                                        hwnd,
+                                        L_TEXT as i32,
+                                        &HSTRING::from(crlf(&layouts[0].1)),
+                                    );
+                                    update_summary(hwnd, st);
+                                }
+                                Err(e) => message(hwnd, &e),
+                            }
+                        }
+                        1
+                    }
+                    L_GUESS_LEN => {
+                        read_controls(hwnd, st);
+                        if let Purpose::Open { sample, len } = &st.purpose
+                            && let Some(guess) = guess_length(hwnd, sample, *len, st.charset)
+                        {
+                            let sel = RecordSep::ALL
+                                .iter()
+                                .position(|s| *s == guess.separator)
+                                .unwrap_or(0)
+                                + 1;
+                            send(hwnd, L_SEP, CB_SETCURSEL, sel, 0);
+                            let _ = SetDlgItemTextW(
+                                hwnd,
+                                L_LEN as i32,
+                                &HSTRING::from(guess.data_len.to_string()),
+                            );
                             update_summary(hwnd, st);
                         }
                         1

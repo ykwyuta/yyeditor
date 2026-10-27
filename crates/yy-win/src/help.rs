@@ -99,9 +99,7 @@ pub(crate) fn section_line(section: &str) -> Option<usize> {
 }
 
 fn section_line_in(md: &str, section: &str) -> Option<usize> {
-    let tag = format!("{{#{section}}}");
-    md.lines()
-        .position(|l| l.starts_with('#') && l.trim_end().ends_with(&tag))
+    yy_preview::help::section_line(md, section)
 }
 
 /// ヘルプを表示する（開いていれば前面に出す）。`section` があればその見出しへ移動する。
@@ -239,33 +237,7 @@ fn show_text_fallback(hwnd: HWND, line: usize) {
 /// テキスト欄に表示するための、Markdown の記号を減らした本文（行の対応は変えない）。
 /// `**強調**`・見出しの `{#id}`・リンクの `[文字](#先)` を取り除く。
 fn plain_text(md: &str) -> String {
-    let mut out = String::with_capacity(md.len());
-    for line in md.lines() {
-        let mut line = line.replace("**", "");
-        if line.starts_with('#')
-            && let Some(i) = line.rfind(" {#")
-        {
-            line.truncate(i);
-        }
-        // [文字](#先) → 文字
-        let mut rest = line.as_str();
-        let mut plain = String::new();
-        while let Some(open) = rest.find('[') {
-            let Some(mid) = rest[open..].find("](") else {
-                break;
-            };
-            let Some(close) = rest[open + mid..].find(')') else {
-                break;
-            };
-            plain.push_str(&rest[..open]);
-            plain.push_str(&rest[open + 1..open + mid]);
-            rest = &rest[open + mid + close + 1..];
-        }
-        plain.push_str(rest);
-        out.push_str(&plain);
-        out.push('\n');
-    }
-    out
+    yy_preview::help::plain_text(md)
 }
 
 fn scroll_text_to_line(edit: HWND, line: usize) {

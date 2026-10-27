@@ -1,0 +1,14 @@
+# Keep scripts executable by Linux containers when checked out on Windows.
+/docker/*.sh text eol=lf
+/docker/*.Dockerfile text eol=lf
+/init/*.sql text eol=lf
+/sql/**/*.sql text eol=lf
+/tools/*.py text eol=lf
+/data/*.csv -text whitespace=-blank-at-eol,cr-at-eol
+/data/*.tsv -text whitespace=-blank-at-eol,cr-at-eol
+/data/*.psv -text whitespace=-blank-at-eol,cr-at-eol
+/data/*.dat -text
+/data/*.sqlite -text
+/data/*.duckdb -text
+/data/*.parquet -text
+/plans/*.csv -text whitespace=-blank-at-eol,cr-at-eol

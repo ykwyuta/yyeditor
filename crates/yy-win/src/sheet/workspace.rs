@@ -152,9 +152,9 @@ pub(super) fn command(id: u16) -> bool {
             crate::remote::set_use_agent(!crate::remote::use_agent());
             check_use_agent(frame);
             set_status(if crate::remote::use_agent() {
-                "リモートのフォルダの一覧とファイルの読み書きに、接続先のエージェントを使います"
+                "ホスト別指定のない接続先でエージェントを使います（ホスト別のSFTP／SCP指定を優先）"
             } else {
-                "リモートのフォルダの一覧とファイルの読み書きに SFTP を使います（接続先に何も置きません）"
+                "ホスト別指定のない接続先でSFTPを使います（ホスト別のSFTP／SCP指定を優先）"
             });
         }
         ID_OPEN_REMOTE => open_remote_dialog(frame),

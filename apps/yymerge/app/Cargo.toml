@@ -1,0 +1,30 @@
+[package]
+name = "yymerge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "../../yyeditor/build.rs"
+
+[features]
+default = ["gui"]
+gui = ["dep:yy-merge-ui"]
+
+[dependencies]
+yy-merge-cli.workspace = true
+yy-merge-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+yy-merge-ui = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "yymerge"
+path = "src/bin/yymerge.rs"
+
+[[bin]]
+name = "yymergew"
+path = "src/bin/yymergew.rs"
+required-features = ["gui"]

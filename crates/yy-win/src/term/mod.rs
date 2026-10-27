@@ -17,6 +17,8 @@ mod macros;
 mod paint;
 mod printer;
 mod pty;
+mod sessionmenu;
+mod textlog;
 mod tn3270;
 
 use std::cell::RefCell;
@@ -40,6 +42,7 @@ use windows::core::{PCWSTR, PWSTR, Result, w};
 use yy_config::Config;
 use yy_config::workspace::{self, Workspace};
 use yy_remote::RemoteUri;
+use yy_remote::multiplex::{Binding, Kind as Multiplexer, OpenMode};
 use yy_remote::uri::Target;
 use yy_term::{Button, Key, Mods, MouseEvent, MouseMode, Pos, Terminal};
 
@@ -192,6 +195,10 @@ struct Tab {
     /// スクロールバックに送られた行の数（表示位置を保つのに使う）
     seen_pushed: u64,
     place: Place,
+    /// 固定のタブ名と、それに対応する接続先の永続セッション。
+    binding: Option<Binding>,
+    /// タブ単位の表示テキストのログ。新しいタブでは常に無効。
+    log: Option<textlog::TextLog>,
     /// 選択の始点と終点
     anchor: Option<Pos>,
     selection: Option<(Pos, Pos)>,
@@ -216,7 +223,9 @@ struct Tab {
 impl Tab {
     fn title(&self) -> String {
         let t = self.term.title().trim();
-        let s = if t.is_empty() {
+        let s = if let Some(binding) = &self.binding {
+            binding.tab_name().to_owned()
+        } else if t.is_empty() {
             self.place.label()
         } else {
             t.to_owned()
@@ -232,6 +241,13 @@ impl Tab {
         if !bytes.is_empty() {
             let _ = self.input.send(bytes);
         }
+    }
+}
+
+impl Drop for Tab {
+    fn drop(&mut self) {
+        // 単独・一括クローズとアプリ終了のどの経路でも、未改行の最後の行を保存する。
+        let _ = self.stop_log();
     }
 }
 
@@ -348,7 +364,7 @@ fn run_inner(initial: Option<String>, ssh: Option<yy_remote::ConnectorFactory>) 
     Ok(())
 }
 
-/// 残っているシェルを終わらせ、状態を捨てる。
+/// 残っている接続を閉じる。tmux / screen はクライアントだけ切断してセッションを残す。
 fn shutdown() {
     let tabs = with(|a| std::mem::take(&mut a.tabs)).unwrap_or_default();
     for t in tabs {
@@ -662,6 +678,18 @@ fn create_menu() -> Result<HMENU> {
         let help = CreatePopupMenu()?;
         item(help, ID_HELP_KEYS, w!("キーボードショートカット(&K)"))?;
         item(help, ID_SETTINGS, w!("設定ファイルを開く(&S)"))?;
+        item(help, crate::sites::ID_MANAGE, w!("SSH接続先を管理…"))?;
+        crate::diagnosticui::append_menu(help)?;
+        item(
+            help,
+            crate::explorer::ID_REGISTER,
+            w!("エクスプローラーの右クリックに登録"),
+        )?;
+        item(
+            help,
+            crate::explorer::ID_UNREGISTER,
+            w!("エクスプローラーの右クリックから解除"),
+        )?;
         item(help, ID_REMOTE_LOG, w!("リモート接続の記録を開く(&R)"))?;
         item(
             help,
@@ -674,6 +702,9 @@ fn create_menu() -> Result<HMENU> {
         AppendMenuW(bar, MF_POPUP, edit.0 as usize, w!("編集(&E)"))?;
         AppendMenuW(bar, MF_POPUP, view.0 as usize, w!("表示(&V)"))?;
         AppendMenuW(bar, MF_POPUP, ws.0 as usize, w!("ワークスペース(&W)"))?;
+        let sessions = CreatePopupMenu()?;
+        sessionmenu::init(sessions);
+        AppendMenuW(bar, MF_POPUP, sessions.0 as usize, w!("セッション(&S)"))?;
         AppendMenuW(bar, MF_POPUP, mac.0 as usize, w!("マクロ(&A)"))?;
         AppendMenuW(bar, MF_POPUP, help.0 as usize, w!("ヘルプ(&H)"))?;
         Ok(bar)
@@ -772,10 +803,110 @@ fn open_tab(place: Place) {
     open_tab_forwarding(place, &[]);
 }
 
+fn folder_open_mode(place: &Place) -> OpenMode {
+    if matches!(place, Place::Remote { dir: Some(_), .. }) {
+        OpenMode::Create
+    } else {
+        OpenMode::CreateOrAttach
+    }
+}
+
+/// ホスト別の指定がある場合、登録したプレフィクスと明示的なタブ名を使う。
+/// `Err(())` は設定エラーまたはキャンセルで、新しいタブ・接続は作らない。
+fn tab_binding(
+    frame: HWND,
+    place: &Place,
+    mode: OpenMode,
+) -> std::result::Result<Option<Binding>, ()> {
+    let Place::Remote { target, .. } = place else {
+        return Ok(None);
+    };
+    let (kind, prefix) = with(|a| {
+        a.config
+            .remote
+            .host
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&target.host))
+            .map(|(_, h)| (h.terminal_multiplexer, h.terminal_session_prefix.clone()))
+            .unwrap_or_default()
+    })
+    .unwrap_or_default();
+    let kind = match kind {
+        yy_config::TerminalMultiplexer::None => return Ok(None),
+        yy_config::TerminalMultiplexer::Tmux => Multiplexer::Tmux,
+        yy_config::TerminalMultiplexer::Screen => Multiplexer::Screen,
+    };
+    if let Err(e) = yy_remote::multiplex::validate_prefix(&prefix) {
+        error_box(
+            frame,
+            &format!(
+                "{e}。\n設定 [remote.host.{}] の terminal_session_prefix を登録してください。",
+                target.host
+            ),
+        );
+        return Err(());
+    }
+    let mut initial = String::new();
+    let action = if mode == OpenMode::Create {
+        "新規セッションを作成します。同名の既存セッションは使いません。"
+    } else {
+        "同じ名前で開くと再接続します。"
+    };
+    loop {
+        let Some(input) = crate::goto::prompt_text(
+            frame,
+            "永続セッションのタブ名",
+            &format!(
+                "{target} / {}\nタブ名は必須です。セッション名は「{prefix}＋タブ名」です。{action}",
+                kind.program()
+            ),
+            &initial,
+        ) else {
+            return Err(());
+        };
+        initial = input.trim().to_owned();
+        match Binding::new(kind, &prefix, &initial) {
+            Ok(binding) => {
+                let duplicate = with(|a| a.tabs.iter().any(|t| {
+                    t.exited.is_none()
+                        && matches!(&t.place, Place::Remote { target: other, .. } if target.same(other))
+                        && t.binding.as_ref().is_some_and(|b| b.kind == kind && b.session_name() == binding.session_name())
+                })).unwrap_or(false);
+                if !duplicate {
+                    return Ok(Some(binding));
+                }
+                error_box(
+                    frame,
+                    "この接続先・セッション名のタブはすでに開いています。別のタブ名を入力してください。",
+                );
+            }
+            Err(e) => error_box(frame, &e),
+        }
+    }
+}
+
 /// `place` で新しいタブを開く。SSH の接続先なら、接続設定・`~/.ssh/config` と `extra` の
 /// ポートフォワーディングを（その接続でまだ始めていなければ）始め、結果をタブの先頭に表示する。
 /// 始められなくても警告を表示するだけで、シェルはそのまま使う。
-fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
+fn open_tab_forwarding(mut place: Place, extra: &[yy_remote::Forward]) {
+    // A profile's default directory does not turn a normal connection into a new-session request.
+    let mode = folder_open_mode(&place);
+    if let Place::Remote { target, dir } = &mut place
+        && dir.is_none()
+    {
+        *dir = crate::remote::host_settings(target)
+            .and_then(|h| h.remote_directory)
+            .map(String::into_bytes);
+    }
+    open_tab_request(place, extra, None, mode);
+}
+
+fn open_tab_request(
+    place: Place,
+    extra: &[yy_remote::Forward],
+    selected: Option<Binding>,
+    mode: OpenMode,
+) {
     let Some((frame, size, shell, term, tx, pending)) = with(|a| {
         (
             a.frame,
@@ -787,6 +918,14 @@ fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
         )
     }) else {
         return;
+    };
+    let binding = match if let Some(binding) = selected {
+        Ok(Some(binding))
+    } else {
+        tab_binding(frame, &place, mode)
+    } {
+        Ok(binding) => binding,
+        Err(()) => return,
     };
     let mut reports: Vec<crate::remote::ForwardReport> = Vec::new();
     let mut tls = None;
@@ -814,8 +953,24 @@ fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
                             c.extend_from_slice(br#" && exec "${SHELL:-/bin/sh}" -l"#);
                             c
                         });
-                        let r = t
-                            .shell(&term, size, command.as_deref())
+                        let shell = if let Some(binding) = &binding {
+                            let binding = binding.clone();
+                            let transport = t.clone();
+                            let dir = dir.clone();
+                            let term = term.clone();
+                            crate::remote::wait(&set_status, move |_| {
+                                binding.open_mode(
+                                    transport.as_ref(),
+                                    &term,
+                                    size,
+                                    dir.as_deref(),
+                                    mode,
+                                )
+                            })
+                        } else {
+                            t.shell(&term, size, command.as_deref())
+                        };
+                        let r = shell
                             .map(Backend::from)
                             .map_err(|e| format!("{target} でシェルを起動できませんでした。\n{e}"));
                         set_status("");
@@ -851,11 +1006,21 @@ fn open_tab_forwarding(place: Place, extra: &[yy_remote::Forward]) {
     match backend {
         Ok(b) => {
             with(|a| {
-                a.add_tab(place, b);
+                a.add_tab(place, b, binding);
                 if let Some(info) = tls {
                     a.tn_set_tls(info);
                 }
                 if let Some(t) = a.tabs.last_mut() {
+                    if let Some(binding) = &t.binding {
+                        t.term.feed(&notice_bytes(
+                            true,
+                            &format!(
+                                "{} セッション {} に接続しました（タブを閉じるとデタッチ）",
+                                binding.kind.program(),
+                                binding.session_name(),
+                            ),
+                        ));
+                    }
                     for (ok, text) in &reports {
                         t.term.feed(&notice_bytes(*ok, text));
                     }
@@ -901,7 +1066,7 @@ impl TermApp {
         }
     }
 
-    fn add_tab(&mut self, place: Place, b: Backend) {
+    fn add_tab(&mut self, place: Place, b: Backend, binding: Option<Binding>) {
         let id = self.next_id;
         self.next_id += 1;
         let (cols, rows) = self.grid;
@@ -965,6 +1130,8 @@ impl TermApp {
             back: 0,
             seen_pushed: 0,
             place,
+            binding,
+            log: None,
             anchor: None,
             selection: None,
             selecting: false,
@@ -1040,6 +1207,13 @@ impl TermApp {
         if index >= self.tabs.len() {
             return;
         }
+        if self
+            .macro_run
+            .as_ref()
+            .is_some_and(|m| m.tab_id == self.tabs[index].id)
+        {
+            self.macro_stop();
+        }
         let t = self.tabs.remove(index);
         (t.kill)();
         unsafe {
@@ -1066,6 +1240,13 @@ impl TermApp {
         for &i in targets.iter().rev() {
             if i >= self.tabs.len() {
                 continue;
+            }
+            if self
+                .macro_run
+                .as_ref()
+                .is_some_and(|m| m.tab_id == self.tabs[i].id)
+            {
+                self.macro_stop();
             }
             let t = self.tabs.remove(i);
             (t.kill)();
@@ -1325,6 +1506,7 @@ impl TermApp {
                     if i == self.active {
                         active_dirty = true;
                     }
+                    self.macro_notify(i);
                 }
                 Event::Notice(target, text) => {
                     // 表示しているタブが同じ接続先ならそこに、でなければ最初のその接続先のタブに
@@ -1386,6 +1568,7 @@ impl TermApp {
                     if i == self.active {
                         active_dirty = true;
                     }
+                    self.macro_notify(i);
                 }
             }
             if budget == 0 {
@@ -1402,6 +1585,43 @@ impl TermApp {
         if active_dirty {
             self.update_scrollbar();
             self.invalidate();
+        }
+        self.write_text_logs();
+    }
+
+    fn write_text_logs(&mut self) {
+        let mut status_changed = false;
+        for i in 0..self.tabs.len() {
+            let tab = &mut self.tabs[i];
+            if tab.log.is_none() {
+                continue;
+            }
+            let finished = tab.exited.is_some();
+            let result = if finished {
+                tab.stop_log().map(|_| ())
+            } else {
+                tab.write_log()
+            };
+            if let Err(e) = result {
+                self.status_text = format!(
+                    "タブ「{}」のログ出力を停止しました。書き込みに失敗: {e}",
+                    tab.title()
+                );
+                tab.log = None;
+                tab.term.stop_text_capture();
+                status_changed = true;
+                self.update_tab_label(i);
+            } else if finished {
+                self.status_text = format!(
+                    "タブ「{}」のログを保存し、出力を終了しました",
+                    self.tabs[i].title()
+                );
+                status_changed = true;
+                self.update_tab_label(i);
+            }
+        }
+        if status_changed {
+            self.update_status();
         }
     }
 
@@ -1753,8 +1973,13 @@ impl TermApp {
             return Err("ほかのマクロを実行中です".into());
         }
         let t = self.tabs.get(i).ok_or("タブがありません")?;
-        let tn = t.tn.as_ref().ok_or("3270 のタブではありません")?;
-        if tn.target.printer {
+        if t.tn.is_none() && !matches!(t.place, Place::Remote { .. }) {
+            return Err("SSHまたは3270のタブで実行してください".into());
+        }
+        if t.exited.is_some() {
+            return Err("切断されています".into());
+        }
+        if t.tn.as_ref().is_some_and(|tn| tn.target.printer) {
             return Err("プリンターのタブではマクロを実行できません".into());
         }
         let script = std::fs::read_to_string(path)
@@ -1770,10 +1995,13 @@ impl TermApp {
             t.id,
             &name,
             script,
-            out_dir,
-            mc.timeout,
+            yy_3270_macro::Options {
+                out_dir,
+                timeout: mc.timeout,
+            },
             self.frame,
             WM_APP_TERM_MACRO,
+            t.tn.is_none(),
         );
         let label = t.place.label();
         self.macro_run = Some(run);
@@ -1838,8 +2066,11 @@ impl TermApp {
     fn macro_snapshot(&self) -> std::result::Result<yy_3270_macro::Snapshot, String> {
         let i = self.macro_tab().ok_or("タブが閉じられました")?;
         let t = &self.tabs[i];
-        let tn = t.tn.as_ref().ok_or("3270 のタブではありません")?;
-        Ok(yy_3270_macro::Snapshot::of(&tn.session, t.exited.is_none()))
+        Ok(if let Some(tn) = &t.tn {
+            yy_3270_macro::Snapshot::of(&tn.session, t.exited.is_none())
+        } else {
+            macros::stream_snapshot(&t.term, t.exited.is_none())
+        })
     }
 
     /// マクロの入力（`secret` なら記録に値を残さない）。
@@ -1847,6 +2078,25 @@ impl TermApp {
         let i = self.macro_tab().ok_or("タブが閉じられました")?;
         if self.tabs[i].exited.is_some() {
             return Err("切断されています".into());
+        }
+        if self
+            .macro_run
+            .as_ref()
+            .is_some_and(|m| m.stop.load(Ordering::Relaxed))
+        {
+            return Err("停止しました".into());
+        }
+        if self.tabs[i].tn.is_none() {
+            // Credentials and literal SSH input are never copied to the diagnostic log.
+            self.macro_log_line(if secret {
+                "SSH input ******"
+            } else {
+                "SSH input"
+            });
+            return self.tabs[i]
+                .input
+                .send(text.as_bytes().to_vec())
+                .map_err(|_| "切断されています".into());
         }
         // 先打ちはしない: ロック中に入れた文字は捨てられるので、誤りにする
         if self.tabs[i]
@@ -1893,7 +2143,56 @@ impl TermApp {
             let _ = tx.send(Err("タブが閉じられました".into()));
             return;
         };
+        if self
+            .macro_run
+            .as_ref()
+            .is_some_and(|m| m.stop.load(Ordering::Relaxed))
+        {
+            let _ = tx.send(Err("停止しました".into()));
+            return;
+        }
+        if self.tabs[i].tn.is_none() {
+            if self.tabs[i].exited.is_some() {
+                let _ = tx.send(Err("切断されています".into()));
+                return;
+            }
+            let result = match op {
+                Op::Type(text) => self.macro_type(&text, false).map(|_| Answer::Done),
+                Op::Key(key) => yy_3270_macro::record::key_name(&key)
+                    .ok_or_else(|| "SSHではこの3270キーを使用できません".to_string())
+                    .and_then(|name| macros::stream_key(&name, self.tabs[i].term.modes()))
+                    .and_then(|bytes| {
+                        self.tabs[i]
+                            .input
+                            .send(bytes)
+                            .map_err(|_| "切断されています".into())
+                    })
+                    .map(|_| Answer::Done),
+                Op::TerminalKey(name) => macros::stream_key(&name, self.tabs[i].term.modes())
+                    .and_then(|bytes| {
+                        if self.tabs[i].exited.is_some() {
+                            return Err("切断されています".into());
+                        }
+                        self.tabs[i]
+                            .input
+                            .send(bytes)
+                            .map_err(|_| "切断されています".into())
+                    })
+                    .map(|_| Answer::Done),
+                Op::Log(text) => {
+                    self.macro_log_line(&format!("{}: {text}", self.tabs[i].place.label()));
+                    self.status_text = format!("マクロ: {text}");
+                    self.update_status();
+                    Ok(Answer::Done)
+                }
+                Op::Ask(_) | Op::Message(_) | Op::Password(_) => Ok(Answer::Done),
+                _ => Err("この操作は3270専用です（SSHでは使用できません）".into()),
+            };
+            let _ = tx.send(result);
+            return;
+        }
         let r: std::result::Result<Answer, String> = match op {
+            Op::TerminalKey(_) => Err("VTキーはSSH専用です".into()),
             Op::Key(k) => {
                 self.macro_log_line(&format!(
                     "key {}",
@@ -2208,6 +2507,20 @@ impl TermApp {
 
     /// 入力をシェルに送る（最新の表示に戻し、選択を解く）。
     fn send_input(&mut self, bytes: Vec<u8>) {
+        if self
+            .tab()
+            .is_some_and(|t| self.macro_run.as_ref().is_some_and(|m| m.tab_id == t.id))
+        {
+            return;
+        }
+        if let Some((id, rec)) = &mut self.recorder
+            && self
+                .tabs
+                .get(self.active)
+                .is_some_and(|t| t.id == *id && t.tn.is_none() && t.exited.is_none())
+        {
+            rec.stream_bytes(&bytes);
+        }
         let Some(t) = self.tab_mut() else { return };
         if t.exited.is_some() {
             return;
@@ -2488,6 +2801,12 @@ impl TermApp {
     }
 
     fn report_mouse(&mut self, ev: MouseEvent, x: i32, y: i32) {
+        if self
+            .tab()
+            .is_some_and(|t| self.macro_run.as_ref().is_some_and(|m| m.tab_id == t.id))
+        {
+            return;
+        }
         let (r, c) = self.painter.cell_at(x, y, false);
         let Some(t) = self.tab_mut() else { return };
         let row = r.clamp(0, t.term.rows() as isize - 1) as usize;
@@ -2556,6 +2875,10 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             command(hwnd, loword(wparam.0) as u16);
             LRESULT(0)
         }
+        WM_INITMENUPOPUP => {
+            sessionmenu::populate(hwnd, HMENU(wparam.0 as *mut _));
+            LRESULT(0)
+        }
         WM_NOTIFY => {
             let hdr = unsafe { &*(lparam.0 as *const NMHDR) };
             if hdr.idFrom == ID_TABS as usize && hdr.code == TCN_SELCHANGE {
@@ -2609,11 +2932,17 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             LRESULT(0)
         }
         WM_CLOSE => {
-            let running =
-                with(|a| a.tabs.iter().filter(|t| t.exited.is_none()).count()).unwrap_or(0);
+            let running = with(|a| {
+                a.tabs
+                    .iter()
+                    .filter(|t| t.exited.is_none() && t.binding.is_none())
+                    .count()
+            })
+            .unwrap_or(0);
             if running > 1 {
-                let text =
-                    format!("{running} 個のタブでシェルが動いています。すべて終了しますか？");
+                let text = format!(
+                    "{running} 個のタブでシェルが動いています。すべて終了しますか？\ntmux / screen のタブはデタッチしてセッションを残します。"
+                );
                 let r = unsafe {
                     MessageBoxW(
                         Some(hwnd),
@@ -2640,6 +2969,12 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
 }
 
 fn command(hwnd: HWND, id: u16) {
+    if crate::diagnosticui::command(hwnd, id) {
+        return;
+    }
+    if sessionmenu::command(id) {
+        return;
+    }
     match id {
         ID_NEW_TAB => {
             // 選んでいるタブと同じ場所（手元のフォルダは分からないのでホーム）
@@ -2792,6 +3127,18 @@ fn command(hwnd: HWND, id: u16) {
         ID_WS_ADD => cmd_add_folder(hwnd),
         ID_WS_ADD_REMOTE => cmd_add_remote_folder(hwnd),
         ID_HELP_KEYS => info_box(hwnd, KEYS_HELP),
+        crate::sites::ID_MANAGE => {
+            if let Some(config) = crate::sites::manage(hwnd) {
+                with(|a| a.config.remote = config);
+            }
+        }
+        crate::explorer::ID_REGISTER | crate::explorer::ID_UNREGISTER => {
+            crate::explorer::menu(
+                hwnd,
+                crate::ExplorerApp::Terminal,
+                id == crate::explorer::ID_REGISTER,
+            );
+        }
         ID_SETTINGS => {
             let Some(path) = Config::default_path() else {
                 return;
@@ -2902,6 +3249,9 @@ fn tab_label(t: &Tab) -> String {
     if label.chars().count() > 32 {
         label = label.chars().take(29).collect::<String>() + "...";
     }
+    if t.log.is_some() {
+        label.push_str(" [ログ]");
+    }
     label + crate::tabclose::LABEL_PAD
 }
 
@@ -2909,12 +3259,20 @@ fn tab_label(t: &Tab) -> String {
 /// シェルが動いているタブがあれば確かめる。
 fn tab_menu(hwnd: HWND, index: usize) {
     use crate::tabclose::TabMenu;
-    let Some(count) = with(|a| a.tabs.len()) else {
+    let Some(Some((count, tab_id, logging, running))) = with(|a| {
+        a.tabs
+            .get(index)
+            .map(|t| (a.tabs.len(), t.id, t.log.is_some(), t.exited.is_none()))
+    }) else {
         return;
     };
-    let Some(which) = crate::tabclose::menu(hwnd, index, count) else {
+    let Some(which) = crate::tabclose::menu_with_log(hwnd, index, count, logging, running) else {
         return;
     };
+    if which == TabMenu::ToggleLog {
+        textlog::toggle(hwnd, tab_id);
+        return;
+    }
     let targets = which.targets(index, count);
     if targets.is_empty() {
         return;
@@ -2923,7 +3281,11 @@ fn tab_menu(hwnd: HWND, index: usize) {
         let running = with(|a| {
             targets
                 .iter()
-                .filter(|&&i| a.tabs.get(i).is_some_and(|t| t.exited.is_none()))
+                .filter(|&&i| {
+                    a.tabs
+                        .get(i)
+                        .is_some_and(|t| t.exited.is_none() && t.binding.is_none())
+                })
                 .count()
         })
         .unwrap_or(0);
@@ -2932,7 +3294,7 @@ fn tab_menu(hwnd: HWND, index: usize) {
                 MessageBoxW(
                     Some(hwnd),
                     &windows::core::HSTRING::from(format!(
-                        "{} 個のタブを閉じます。そのうち {running} 個ではシェルが動いています（終了させます）。よろしいですか？",
+                        "{} 個のタブを閉じます。そのうち {running} 個ではシェルが動いています（終了させます）。tmux / screen はデタッチします。よろしいですか？",
                         targets.len()
                     )),
                     w!("yyterm"),
@@ -3030,6 +3392,15 @@ fn macro_pump(hwnd: HWND) {
             return;
         };
         match req {
+            Request::Act(_, tx)
+                if with(|a| {
+                    a.macro_run
+                        .as_ref()
+                        .is_some_and(|m| m.stop.load(Ordering::Relaxed))
+                }) == Some(true) =>
+            {
+                let _ = tx.send(Err("停止しました".into()));
+            }
             Request::Snapshot(tx) => {
                 let s = with(|a| a.macro_snapshot()).unwrap_or_else(|| Err("終了しました".into()));
                 let _ = tx.send(s);
@@ -3044,13 +3415,21 @@ fn macro_pump(hwnd: HWND) {
             }
             Request::Act(Op::Password(name), tx) => {
                 let store = crate::credstore::WindowsCredentials;
-                let key = macros::password_key(&name);
+                let stream = with(|a| a.macro_tab().is_some_and(|i| a.tabs[i].tn.is_none()))
+                    .unwrap_or(false);
+                let key = if stream {
+                    format!("ssh-macro/{}", name.trim())
+                } else {
+                    macros::password_key(&name)
+                };
                 let password = match store.load(&key) {
                     Some(s) => Some(s.password),
                     None => crate::goto::prompt_secret_with_check(
                         hwnd,
                         "マクロのパスワード",
-                        &format!("「{name}」のパスワード（マクロには渡さず、画面のフィールドに入れます）:"),
+                        &format!(
+                            "「{name}」のパスワード（マクロには渡さず、対象タブへ直接送信します）:"
+                        ),
                         "資格情報マネージャーに保存する",
                     )
                     .map(|(p, save)| {
@@ -3081,6 +3460,7 @@ fn macro_pump(hwnd: HWND) {
                 let text = with(|a| a.macro_finished(&r)).unwrap_or_default();
                 if let Err(e) = &r
                     && !e.stopped
+                    && !QUIET.with(|quiet| quiet.get())
                 {
                     error_box(hwnd, &text);
                 }
@@ -3092,10 +3472,13 @@ fn macro_pump(hwnd: HWND) {
 /// 「マクロを実行」: マクロのファイルを選んで、表示している 3270 のタブで実行する。
 fn cmd_macro_run(hwnd: HWND) {
     let Some(Some(folder)) = with(|a| {
-        let tn = a.tab()?.tn.as_ref()?;
-        (!tn.target.printer).then(|| macros::macro_folder(&a.config.tn3270.macros.folder))
+        let t = a.tab()?;
+        (t.exited.is_none()
+            && (matches!(t.place, Place::Remote { .. })
+                || t.tn.as_ref().is_some_and(|tn| !tn.target.printer)))
+        .then(|| macros::macro_folder(&a.config.tn3270.macros.folder))
     }) else {
-        info_box(hwnd, "3270 の端末のタブを表示してから選んでください。");
+        info_box(hwnd, "接続中のSSHまたは3270の端末タブを表示してください。");
         return;
     };
     if with(|a| a.macro_run.is_some()) == Some(true) {
@@ -3117,18 +3500,28 @@ fn cmd_macro_record(hwnd: HWND) {
     if !recording {
         let started = with(|a| {
             let t = a.tab()?;
-            let tn = t.tn.as_ref()?;
-            if tn.target.printer {
+            if t.exited.is_some()
+                || (!matches!(t.place, Place::Remote { .. }) && t.tn.is_none())
+                || t.tn.as_ref().is_some_and(|tn| tn.target.printer)
+            {
                 return None;
             }
             let id = t.id;
-            a.recorder = Some((id, yy_3270_macro::Recorder::new()));
+            let stream = t.tn.is_none();
+            a.recorder = Some((
+                id,
+                if stream {
+                    yy_3270_macro::Recorder::stream()
+                } else {
+                    yy_3270_macro::Recorder::new()
+                },
+            ));
             a.tn_note("操作の記録を始めました（もう一度選ぶと終えて保存します）");
             Some(())
         })
         .flatten();
         if started.is_none() {
-            info_box(hwnd, "3270 の端末のタブを表示してから選んでください。");
+            info_box(hwnd, "接続中のSSHまたは3270の端末タブを表示してください。");
         }
         return;
     }
@@ -3745,15 +4138,14 @@ extern "system" fn view_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let vk = VIRTUAL_KEY(wparam.0 as u16);
             let m = mods();
+            if (vk == VK_CANCEL || vk == VK_PAUSE)
+                && with(|a| a.macro_tab() == Some(a.active)) == Some(true)
+            {
+                with(|a| a.macro_stop());
+                return LRESULT(0);
+            }
             // 3270 のタブは独自のキーの割り当て（14 章 7）
             if with(|a| a.is_tn()) == Some(true) {
-                // マクロの実行中は Ctrl+Break（Pause）で止める
-                if (vk == VK_CANCEL || vk == VK_PAUSE)
-                    && with(|a| a.macro_tab() == Some(a.active)) == Some(true)
-                {
-                    with(|a| a.macro_stop());
-                    return LRESULT(0);
-                }
                 if let Some(k) = tn3270::map_key(vk, m) {
                     with(|a| a.tn_key(k));
                     return LRESULT(0);
@@ -4171,11 +4563,108 @@ mod tests {
         // 画面の大きさから端末の大きさが決まっている
         let (cols, rows) = with(|a| a.grid).unwrap();
         assert!(cols >= 20 && rows >= 5, "{cols}x{rows}");
+        ssh_macro_in_window(frame);
         // 終わったタブは Enter で閉じ、タブがなくなるとウィンドウを閉じる
         with(|a| a.send_key(Key::Enter, Mods::default()));
         assert!(pump_until(Duration::from_secs(5), || unsafe {
             !IsWindow(Some(frame)).as_bool()
         }));
         shutdown();
+    }
+
+    /// Exercise the real Rhai worker / UI message bridge through the SSH tab's
+    /// input and output channels, without a network or user credentials.
+    fn ssh_macro_in_window(_frame: HWND) {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("ssh.rhai");
+        std::fs::write(&script,"let command = \"echo 測定\"; send_line(command); wait_text(\"MACRO_DONE\", 2); key(\"Ctrl+C\");").unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let old = with(|a| {
+            let log = Arc::new(yy_remote::log::TransferLog::new(
+                Some(dir.path().join("macro.log")),
+                || "test".into(),
+            ));
+            a.macro_log = Some(log.clone());
+            a.tn_log = Some(log);
+            let t = &mut a.tabs[0];
+            let old = (t.id, t.place.clone(), t.input.clone());
+            t.id += 100000;
+            t.place = Place::Remote {
+                target: Target::parse("tester@macro.invalid").unwrap(),
+                dir: None,
+            };
+            t.exited = None;
+            t.input = tx;
+            t.term = Terminal::new(80, 24, 100);
+            a.recorder = Some((t.id, yy_3270_macro::Recorder::stream()));
+            a.macro_start(0, &script).unwrap();
+            a.send_input(b"must-not-be-sent".to_vec());
+            old
+        })
+        .unwrap();
+        let mut sent = Vec::new();
+        let mut replied = false;
+        assert!(pump_until(Duration::from_secs(5), || {
+            for bytes in rx.try_iter() {
+                sent.extend(bytes);
+            }
+            if !replied && sent.contains(&b'\r') {
+                replied = true;
+                with(|a| {
+                    a.tx.send(Event::Output(a.tabs[0].id, b"MACRO_DONE\r\n".to_vec()))
+                        .unwrap();
+                    a.on_events();
+                });
+            }
+            with(|a| a.macro_run.is_none()) == Some(true)
+        }));
+        for bytes in rx.try_iter() {
+            sent.extend(bytes);
+        }
+        assert_eq!(sent, "echo 測定\r\x03".as_bytes());
+        assert!(with(|a| a.recorder.as_ref().unwrap().1.is_empty()).unwrap());
+        with(|a| {
+            a.recorder = None;
+        });
+        // Waits time out; scripts and queued operations can be stopped.
+        std::fs::write(&script, "wait_text(\"never-present\", 1);").unwrap();
+        with(|a| a.macro_start(0, &script).unwrap());
+        assert!(pump_until(Duration::from_secs(4), || with(|a| a
+            .macro_run
+            .is_none())
+            == Some(true)));
+        assert!(
+            std::fs::read_to_string(dir.path().join("macro.log"))
+                .unwrap()
+                .contains("時間切れ")
+        );
+        std::fs::write(&script, "loop { sleep(100); }").unwrap();
+        with(|a| {
+            a.macro_start(0, &script).unwrap();
+            a.macro_stop();
+        });
+        assert!(pump_until(Duration::from_secs(3), || with(|a| a
+            .macro_run
+            .is_none())
+            == Some(true)));
+        // Disconnect wakes wait_text; a disconnected SSH tab cannot run a macro.
+        std::fs::write(&script, "wait_text(\"never-present\", 30);").unwrap();
+        with(|a| {
+            a.macro_start(0, &script).unwrap();
+            a.tx.send(Event::Exit(a.tabs[0].id, None)).unwrap();
+            a.on_events();
+        });
+        assert!(pump_until(Duration::from_secs(3), || with(|a| a
+            .macro_run
+            .is_none())
+            == Some(true)));
+        with(|a| {
+            assert!(a.macro_start(0, &script).is_err());
+            let t = &mut a.tabs[0];
+            t.id = old.0;
+            t.place = old.1;
+            t.input = old.2;
+            t.exited = Some(Some(0));
+        });
     }
 }
