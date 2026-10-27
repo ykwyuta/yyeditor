@@ -14,6 +14,7 @@
 #![allow(unsafe_code)]
 
 mod app;
+mod binarytemplate;
 mod browser;
 mod clipboard;
 mod crash;

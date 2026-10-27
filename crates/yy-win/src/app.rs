@@ -87,6 +87,7 @@ const ID_ZOOM_OUT: u16 = 203;
 const ID_ZOOM_RESET: u16 = 204;
 const ID_LINE_NUMBERS: u16 = 205;
 const ID_CONTROL_CHARS: u16 = 206;
+const ID_BINARY_TEMPLATE: u16 = 214;
 const ID_WHITESPACE: u16 = 208;
 const ID_ABOUT: u16 = 301;
 const ID_HELP: u16 = 302;
@@ -619,6 +620,7 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         item(view, ID_WHITESPACE, w!("空白・タブ・改行を表示(&W)"))?;
         item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
         item(view, ID_HEX_MODE, w!("16 進数表示(&X)\tCtrl+Shift+X"))?;
+        item(view, ID_BINARY_TEMPLATE, w!("バイナリテンプレート..."))?;
         item(view, ID_CODE_MODE, w!("コード値表示(&K)\tCtrl+Shift+K"))?;
         item(view, ID_RECORD_MODE, w!("固定長表示(&R)...\tCtrl+Shift+R"))?;
         AppendMenuW(
@@ -4681,8 +4683,10 @@ fn execute_command(hwnd: HWND, id: u16) {
         return;
     }
     // 検索や矩形選択・バイナリ表示など、既存ビュー固有の操作は原文で行う。
-    if matches!(id, ID_GOTO | ID_HEX_MODE | ID_CODE_MODE | ID_RECORD_MODE)
-        || (ID_CUT..=ID_DEDUP_LINES).contains(&id)
+    if matches!(
+        id,
+        ID_GOTO | ID_HEX_MODE | ID_CODE_MODE | ID_RECORD_MODE | ID_BINARY_TEMPLATE
+    ) || (ID_CUT..=ID_DEDUP_LINES).contains(&id)
         || (ID_FIND..=ID_FIND_TOGGLE_REPLACE).contains(&id)
         || (ID_CSV_OFF..=ID_CSV_PREV_CELL).contains(&id)
     {
@@ -4924,6 +4928,24 @@ fn execute_command(hwnd: HWND, id: u16) {
         }
         ID_GOTO if with_app(|a| a.hex.is_some()) == Some(true) => cmd_hex_goto(hwnd),
         ID_HEX_MODE => cmd_toggle_hex(hwnd),
+        ID_BINARY_TEMPLATE => {
+            if with_app(|a| a.hex.is_some()) != Some(true) {
+                cmd_toggle_hex(hwnd);
+            }
+            if let Some(snapshot) =
+                with_app(|a| a.hex.is_some().then(|| a.doc.snapshot().clone())).flatten()
+                && let Some(range) = crate::binarytemplate::show(hwnd, snapshot)
+            {
+                with_app(|a| {
+                    a.doc.set_selections(SelectionSet::single(Selection {
+                        anchor: range.start,
+                        head: range.end,
+                        goal_x: None,
+                    }));
+                    a.after_move();
+                });
+            }
+        }
         ID_HISTORY | ID_BOOKMARKS => {
             let kind = if id == ID_HISTORY {
                 crate::recentdlg::ListKind::History
