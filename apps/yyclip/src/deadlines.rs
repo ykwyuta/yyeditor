@@ -1,0 +1,357 @@
+//! Deadline scheduling uses local calendar dates; notification intervals use UTC seconds.
+use chrono::{Datelike, Days, NaiveDate, NaiveDateTime};
+use serde::{Deserialize, Serialize};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+pub const DEFAULT_INTERVAL: u32 = 15;
+pub const MIN_INTERVAL: u32 = 5;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Repeat {
+    #[default]
+    Once,
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Style {
+    Alert,
+    Windows,
+    #[default]
+    Both,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Task {
+    pub id: u64,
+    pub title: String,
+    pub due: NaiveDateTime,
+    pub memo: String,
+    pub interval: u32,
+    pub style: Style,
+    pub repeat: Repeat,
+    /// Preserve the original day when February or a 30-day month is clamped.
+    pub monthly_day: u32,
+    pub completed: bool,
+    pub last_completed: Option<NaiveDateTime>,
+    pub last_notified: Option<i64>,
+}
+
+impl Task {
+    pub fn new(title: String, due: NaiveDateTime) -> Self {
+        Self {
+            id: 0,
+            title,
+            due,
+            memo: String::new(),
+            interval: DEFAULT_INTERVAL,
+            style: Style::Both,
+            repeat: Repeat::Once,
+            monthly_day: due.day(),
+            completed: false,
+            last_completed: None,
+            last_notified: None,
+        }
+    }
+
+    pub fn validate(&self) -> io::Result<()> {
+        if self.title.trim().is_empty() || self.title.chars().count() > 200 {
+            return Err(invalid("タイトルは1～200文字で入力してください。"));
+        }
+        if self.memo.len() > 64 * 1024 {
+            return Err(invalid("メモは64 KiBまでです。"));
+        }
+        if self.interval < MIN_INTERVAL {
+            return Err(invalid("通知間隔は5分以上で指定してください。"));
+        }
+        if !(1..=31).contains(&self.monthly_day) || !(1900..=9998).contains(&self.due.year()) {
+            return Err(invalid("期限の年は1900～9998で指定してください。"));
+        }
+        Ok(())
+    }
+
+    pub fn needs_notification(&self, local: NaiveDateTime, utc: i64) -> bool {
+        let morning = self.due.date().and_hms_opt(9, 0, 0).unwrap().min(self.due);
+        !self.completed
+            && local >= morning
+            && self
+                .last_notified
+                .is_none_or(|last| utc >= last.saturating_add(i64::from(self.interval) * 60))
+    }
+
+    fn next_due(&self, after: NaiveDateTime) -> io::Result<NaiveDateTime> {
+        let date = match self.repeat {
+            Repeat::Once => return Ok(self.due),
+            Repeat::Daily | Repeat::Weekly => {
+                let step = if self.repeat == Repeat::Daily { 1 } else { 7 };
+                let elapsed = (after.date() - self.due.date()).num_days().max(0) as u64;
+                let mut date = self
+                    .due
+                    .date()
+                    .checked_add_days(Days::new((elapsed / step) * step))
+                    .ok_or_else(|| invalid("次回の期限を計算できません。"))?;
+                if date.and_time(self.due.time()) <= after || date <= self.due.date() {
+                    date = date
+                        .checked_add_days(Days::new(step))
+                        .ok_or_else(|| invalid("次回の期限を計算できません。"))?;
+                }
+                date
+            }
+            Repeat::Monthly => {
+                let base = self.due.year() * 12 + self.due.month0() as i32;
+                let mut month = (after.year() * 12 + after.month0() as i32).max(base + 1);
+                loop {
+                    let year = month.div_euclid(12);
+                    let m = month.rem_euclid(12) as u32 + 1;
+                    let date = (1..=self.monthly_day)
+                        .rev()
+                        .find_map(|day| NaiveDate::from_ymd_opt(year, m, day))
+                        .ok_or_else(|| invalid("次回の期限を計算できません。"))?;
+                    if date.and_time(self.due.time()) > after {
+                        break date;
+                    }
+                    month += 1;
+                }
+            }
+        };
+        let due = date.and_time(self.due.time());
+        if due.year() > 9998 {
+            return Err(invalid("次回の期限が範囲を超えています。"));
+        }
+        Ok(due)
+    }
+}
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Data {
+    version: u32,
+    tasks: Vec<Task>,
+    next_id: u64,
+}
+
+pub struct Store {
+    path: PathBuf,
+    data: Data,
+}
+
+impl Store {
+    pub fn open(path: PathBuf) -> io::Result<Self> {
+        let data = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<Data>(&bytes).map_err(io::Error::other)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Data {
+                version: 1,
+                tasks: Vec::new(),
+                next_id: 1,
+            },
+            Err(e) => return Err(e),
+        };
+        if data.version != 1 || data.next_id == 0 {
+            return Err(invalid("対応していない期限データ形式です。"));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for t in &data.tasks {
+            t.validate()?;
+            if t.id == 0 || t.id >= data.next_id || !ids.insert(t.id) {
+                return Err(invalid("期限データのIDが不正です。"));
+            }
+        }
+        Ok(Self { path, data })
+    }
+
+    pub fn tasks(&self) -> &[Task] {
+        &self.data.tasks
+    }
+
+    /// A new resident session immediately reminds about outstanding work.
+    pub fn restart_notifications(&mut self) {
+        for task in &mut self.data.tasks {
+            if !task.completed {
+                task.last_notified = None;
+            }
+        }
+    }
+
+    fn commit(&mut self, data: Data) -> io::Result<()> {
+        let parent = self.path.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        serde_json::to_writer_pretty(&mut file, &data).map_err(io::Error::other)?;
+        file.write_all(b"\n")?;
+        file.as_file().sync_all()?;
+        file.persist(&self.path).map_err(|e| e.error)?;
+        self.data = data;
+        Ok(())
+    }
+
+    pub fn save(&mut self, mut task: Task) -> io::Result<u64> {
+        task.title = task.title.trim().to_owned();
+        task.validate()?;
+        let mut data = self.data.clone();
+        if task.id == 0 {
+            task.id = data.next_id;
+            data.next_id = data
+                .next_id
+                .checked_add(1)
+                .ok_or_else(|| invalid("IDの上限です。"))?;
+            data.tasks.push(task.clone());
+        } else {
+            let old = data
+                .tasks
+                .iter_mut()
+                .find(|t| t.id == task.id)
+                .ok_or_else(|| invalid("対象がありません。"))?;
+            *old = task.clone();
+        }
+        self.commit(data)?;
+        Ok(task.id)
+    }
+
+    pub fn complete(&mut self, id: u64, now: NaiveDateTime) -> io::Result<()> {
+        let mut task = self
+            .data
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
+            .ok_or_else(|| invalid("対象がありません。"))?;
+        if task.completed {
+            return Ok(());
+        }
+        if task.repeat == Repeat::Once {
+            task.completed = true;
+        } else {
+            task.due = task.next_due(now)?;
+        }
+        task.last_completed = Some(now);
+        task.last_notified = None;
+        self.save(task).map(|_| ())
+    }
+
+    pub fn remove(&mut self, id: u64) -> io::Result<()> {
+        let mut data = self.data.clone();
+        data.tasks.retain(|t| t.id != id);
+        self.commit(data)
+    }
+
+    pub fn notified(&mut self, ids: &[u64], utc: i64) -> io::Result<()> {
+        let mut data = self.data.clone();
+        for task in &mut data.tasks {
+            if ids.contains(&task.id) {
+                task.last_notified = Some(utc);
+            }
+        }
+        self.commit(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn date(s: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()
+    }
+    #[test]
+    fn morning_interval_overdue_and_completion_are_independent() {
+        let mut t = Task::new("提出".into(), date("2026-10-27 18:00"));
+        assert!(!t.needs_notification(date("2026-10-27 08:59"), 1000));
+        assert!(t.needs_notification(date("2026-10-27 09:00"), 1000));
+        t.last_notified = Some(1000);
+        assert!(!t.needs_notification(date("2026-10-28 09:00"), 1899));
+        assert!(t.needs_notification(date("2026-10-28 09:00"), 1900));
+        t.completed = true;
+        assert!(!t.needs_notification(date("2026-10-29 09:00"), 99999));
+        t.interval = 4;
+        assert!(t.validate().is_err());
+    }
+    #[test]
+    fn recurrence_preserves_calendar_and_month_end_anchor() {
+        let mut t = Task::new("月末".into(), date("2028-01-31 10:30"));
+        t.repeat = Repeat::Monthly;
+        assert_eq!(t.next_due(t.due).unwrap(), date("2028-02-29 10:30"));
+        t.due = t.next_due(t.due).unwrap();
+        assert_eq!(t.next_due(t.due).unwrap(), date("2028-03-31 10:30"));
+        t.repeat = Repeat::Weekly;
+        assert_eq!(
+            t.next_due(date("2028-03-20 12:00")).unwrap(),
+            date("2028-03-21 10:30")
+        );
+        t.repeat = Repeat::Daily;
+        assert_eq!(
+            t.next_due(date("2028-03-20 12:00")).unwrap(),
+            date("2028-03-21 10:30")
+        );
+    }
+    #[test]
+    fn persistence_ids_completion_and_notification_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("期限.json");
+        let mut s = Store::open(path.clone()).unwrap();
+        let task = Task::new("日本語😀".into(), date("2026-10-27 18:00"));
+        let id = s.save(task).unwrap();
+        s.notified(&[id], 100).unwrap();
+        let mut s = Store::open(path.clone()).unwrap();
+        assert_eq!(s.tasks()[0].last_notified, Some(100));
+        s.restart_notifications();
+        assert!(s.tasks()[0].needs_notification(date("2026-10-27 10:00"), 101));
+        s.complete(id, date("2026-10-27 19:00")).unwrap();
+        let mut s = Store::open(path).unwrap();
+        assert!(s.tasks()[0].completed);
+        assert!(
+            s.save(Task::new("".into(), date("2026-10-27 20:00")))
+                .is_err()
+        );
+        s.remove(id).unwrap();
+        assert!(s.tasks().is_empty());
+    }
+
+    #[test]
+    fn recurring_completion_skips_missed_occurrences_and_keeps_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("tasks.json")).unwrap();
+        let mut task = Task::new("週次作業".into(), date("2026-10-05 08:00"));
+        task.repeat = Repeat::Weekly;
+        task.interval = 5;
+        task.memo = "保存するメモ".into();
+        let id = store.save(task).unwrap();
+        store.complete(id, date("2026-10-27 10:00")).unwrap();
+        let task = &store.tasks()[0];
+        assert_eq!(task.due, date("2026-11-02 08:00"));
+        assert!(!task.completed);
+        assert_eq!(task.interval, 5);
+        assert_eq!(task.memo, "保存するメモ");
+        assert!(!task.needs_notification(date("2026-11-02 07:59"), 10));
+        assert!(task.needs_notification(date("2026-11-02 08:00"), 10));
+    }
+
+    #[test]
+    fn invalid_file_and_failed_write_never_replace_saved_or_in_memory_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        std::fs::write(&path, b"broken json").unwrap();
+        assert!(Store::open(path.clone()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"broken json");
+        let target = dir.path().join("existing-directory");
+        std::fs::create_dir(&target).unwrap();
+        let mut store = Store {
+            path: target,
+            data: Data {
+                version: 1,
+                tasks: Vec::new(),
+                next_id: 1,
+            },
+        };
+        assert!(
+            store
+                .save(Task::new("保存失敗".into(), date("2026-10-27 10:00")))
+                .is_err()
+        );
+        assert!(store.tasks().is_empty());
+    }
+}

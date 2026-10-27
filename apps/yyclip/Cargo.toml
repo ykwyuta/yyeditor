@@ -11,6 +11,12 @@ build = "../yyeditor/build.rs"
 name = "yyclip"
 path = "src/main.rs"
 
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde.workspace = true
+serde_json = "1"
+tempfile.workspace = true
+
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [

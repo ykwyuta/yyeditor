@@ -3,6 +3,10 @@
 
 #[cfg(windows)]
 mod clipboard;
+#[cfg(any(windows, test))]
+mod deadlines;
+#[cfg(windows)]
+mod deadlineui;
 #[cfg(windows)]
 mod favorites;
 #[cfg(windows)]
@@ -250,6 +254,7 @@ mod resident {
                 });
                 add_tray_icon(hwnd)?;
                 STATE.with(|cell| cell.borrow_mut().as_mut().unwrap().tray = true);
+                crate::deadlineui::start(hwnd)?;
                 Ok::<(), Error>(())
             })();
             if let Err(error) = setup {
@@ -261,6 +266,9 @@ mod resident {
             capture(hwnd);
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
+                if crate::deadlineui::dialog_message(&message) {
+                    continue;
+                }
                 if popup_key(hwnd, &message) {
                     continue;
                 }
@@ -1748,6 +1756,7 @@ mod resident {
         unsafe {
             if let Ok(menu) = CreatePopupMenu() {
                 let _ = AppendMenuW(menu, MF_STRING, 1, w!("履歴を表示"));
+                let _ = AppendMenuW(menu, MF_STRING, 10, w!("期限・定期作業を管理..."));
                 let register_flags = if templates.len() >= templates::LIMIT {
                     MF_STRING | MF_GRAYED
                 } else {
@@ -1823,6 +1832,7 @@ mod resident {
         end_menu();
         match selection {
             1 => show_history(hwnd),
+            10 => crate::deadlineui::show(),
             2 => show_register(hwnd, None),
             6 => register_favorite(hwnd, Kind::File, None),
             7 => register_favorite(hwnd, Kind::Folder, None),
@@ -1890,6 +1900,9 @@ mod resident {
                 match lparam.0 as u32 {
                     WM_LBUTTONUP | WM_LBUTTONDBLCLK => show_history(hwnd),
                     WM_RBUTTONUP => show_tray_menu(hwnd),
+                    value if value == windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK => {
+                        crate::deadlineui::show()
+                    }
                     _ => {}
                 }
                 LRESULT(0)
@@ -1994,6 +2007,7 @@ mod resident {
                 LRESULT(0)
             }
             WM_DESTROY => {
+                crate::deadlineui::shutdown();
                 MENU_OPEN.store(false, Ordering::SeqCst);
                 PICKER_OPEN.store(false, Ordering::SeqCst);
                 unsafe {

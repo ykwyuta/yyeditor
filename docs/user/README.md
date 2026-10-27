@@ -10,7 +10,7 @@
 | yyterm | [同梱ヘルプのターミナル項目](../../crates/yy-win/help/help.md)（SSH、3270、tmux/screen、マクロ、タブログ） | [SSHマクロ](../../demo/yyterm/README.md) |
 | yysftp | [同梱ヘルプ](../../crates/yy-win/help/help.md#sftp-gateway) | [ゲートウェイ設定例](../../demo/yysftp/README.md) |
 | yysheet | [同梱ヘルプ](../../crates/yy-win/help/sheet.md) | CSV・固定長ファイルを開く |
-| yyclip | [履歴・テンプレート・ファイル履歴](../../apps/yyclip/README.md) | 通知領域から起動 |
+| yyclip | [履歴・テンプレート・ファイル履歴](../../apps/yyclip/README.md) / [期限・定期作業](yyclip-deadlines.md) | 通知領域から起動 |
 | yyfilemanager | [同梱ヘルプ](../../crates/yy-win/help/filemanager.md) | 同期計画を作って確認する |
 | yybrowser | [同梱ヘルプ](../../crates/yy-win/help/browser.md) | プロファイル・接続経路を設定 |
 | yydraw | [使い方](yydraw.md) / [同梱ヘルプ](../../crates/yy-win/help/draw.md) | [業務・ITアイコン](yydraw-business-icons.md) / [イラスト](yydraw-friendly-icons.md) |
