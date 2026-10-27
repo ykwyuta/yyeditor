@@ -52,6 +52,88 @@ pub struct Query {
     pub dupe: Option<bool>,
     /// 版の判定（似たファイル）の結果
     pub version: Option<VersionMark>,
+    /// メタデータの条件（`exif.model:EOS`・`width:>=1920`。2026-10-27 の提案 6 章）
+    pub meta: Vec<MetaCond>,
+}
+
+/// メタデータの比べ方。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetaOp {
+    /// 含む（数は等しい）
+    Has,
+    Eq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// メタデータの条件。
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetaCond {
+    pub key: &'static str,
+    pub op: MetaOp,
+    pub value: String,
+}
+
+impl MetaCond {
+    fn parse(key: &'static str, v: &str) -> MetaCond {
+        let (op, rest) = if let Some(r) = v.strip_prefix(">=") {
+            (MetaOp::Ge, r)
+        } else if let Some(r) = v.strip_prefix("<=") {
+            (MetaOp::Le, r)
+        } else if let Some(r) = v.strip_prefix('>') {
+            (MetaOp::Gt, r)
+        } else if let Some(r) = v.strip_prefix('<') {
+            (MetaOp::Lt, r)
+        } else if let Some(r) = v.strip_prefix('=') {
+            (MetaOp::Eq, r)
+        } else {
+            (MetaOp::Has, v)
+        };
+        MetaCond {
+            key,
+            op,
+            value: rest.trim().to_owned(),
+        }
+    }
+
+    /// 値が合うか（値がなければ合わない。`tz` は日時を手元の時刻で比べるため）。
+    pub fn matches(&self, props: &crate::props::Props, tz: i64) -> bool {
+        use crate::props::Value;
+        let Some(v) = props.get(self.key) else {
+            return false;
+        };
+        let ord = match (v, self.value.parse::<f64>()) {
+            (Value::Num(n), Ok(x)) => n.partial_cmp(&x),
+            (Value::Time { .. }, _) => {
+                // 日時は「YYYY-MM-DD HH:MM:SS」の頭で比べる（2024・2024-05 も使える）
+                let t = v.text(tz);
+                let want = self.value.replace('/', "-");
+                if self.op == MetaOp::Has {
+                    return t.starts_with(&want);
+                }
+                Some(t[..want.len().min(t.len())].cmp(want.as_str()))
+            }
+            _ => {
+                let t = v.text(tz).to_lowercase();
+                let want = self.value.to_lowercase();
+                if self.op == MetaOp::Has {
+                    return t.contains(&want);
+                }
+                Some(t.as_str().cmp(want.as_str()))
+            }
+        };
+        let Some(o) = ord else { return false };
+        use std::cmp::Ordering::*;
+        match self.op {
+            MetaOp::Has | MetaOp::Eq => o == Equal,
+            MetaOp::Lt => o == Less,
+            MetaOp::Le => o != Greater,
+            MetaOp::Gt => o == Greater,
+            MetaOp::Ge => o != Less,
+        }
+    }
 }
 
 /// 版の判定の条件（18 章 8.1「整理の結果」）。
@@ -205,6 +287,11 @@ impl Query {
             }
         }
         true
+    }
+
+    /// メタデータの条件をすべて満たすか。
+    pub fn matches_meta(&self, props: &crate::props::Props, tz: i64) -> bool {
+        self.meta.iter().all(|c| c.matches(props, tz))
     }
 
     /// 整理の結果の条件を使うか（重複・版の判定）。
@@ -539,7 +626,9 @@ pub fn parse_query(line: &str, now: i64, tz: i64) -> Result<Query, String> {
     for t in tokens(line) {
         let (key, val) = match t.split_once(':') {
             Some((k, v))
-                if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphabetic() || c == '-') =>
+                if !k.is_empty()
+                    && k.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') =>
             {
                 (k.to_ascii_lowercase(), v.to_owned())
             }
@@ -604,6 +693,13 @@ pub fn parse_query(line: &str, now: i64, tz: i64) -> Result<Query, String> {
                 })
             }
             "name" => words.push(val),
+            k if crate::props::key(k).is_some() => q.meta.push(MetaCond::parse(
+                crate::props::key(k).unwrap_or_default(),
+                &val,
+            )),
+            _ if !key.is_empty() && key.contains('.') => {
+                return Err(format!("知らないメタデータの名前です: {key}"));
+            }
             _ => {
                 if val.len() > 2 && val.starts_with('/') && val.ends_with('/') {
                     q.name
@@ -1009,6 +1105,37 @@ fn search_inner(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metadata_conditions() {
+        use crate::props::{Props, Value};
+        let q = super::parse_query(
+            "exif.model:eos width:>=1920 exif.date:2024-05 id3.track:<10",
+            0,
+            9 * 3600,
+        )
+        .unwrap();
+        assert_eq!(q.meta.len(), 4);
+        let mut p = Props::new();
+        p.insert("exif.model", Value::Text("Canon EOS R5".into()));
+        p.insert("width", Value::Num(6000.0));
+        p.insert(
+            "exif.date",
+            Value::Time {
+                secs: crate::archive::days_from_civil(2024, 5, 6) * 86_400,
+                local: true,
+            },
+        );
+        p.insert("id3.track", Value::Num(3.0));
+        assert!(q.matches_meta(&p, 9 * 3600));
+        p.insert("width", Value::Num(1024.0));
+        assert!(!q.matches_meta(&p, 9 * 3600));
+        p.remove("width");
+        assert!(!q.matches_meta(&p, 0));
+        let q = super::parse_query("exif.date:>=2024-06", 0, 0).unwrap();
+        p.insert("width", Value::Num(6000.0));
+        assert!(!q.matches_meta(&p, 0));
+        assert!(super::parse_query("exif.nothing:1", 0, 0).is_err());
+    }
     use super::*;
     use crate::fs::Meta;
 

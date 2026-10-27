@@ -5,6 +5,7 @@
 
 - [YYシリーズ連携の追加候補（2026-10-24）](2026-10-24-series-integration.md)
 - [SSH接続先GUI・SecureCube／WinSCP設定の対応表（2026-10-25）](2026-10-25-ssh-site-settings.md)
+- [yyfilemanager の拡張: エクスプローラーの代替・フラットビュー・一括リネーム・圧縮ファイル（2026-10-27）](2026-10-27-filemanager-explorer.md)
 
 ## 1. 目的と要求
 

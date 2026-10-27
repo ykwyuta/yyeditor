@@ -130,8 +130,7 @@ fn wanted(name: &str) -> bool {
 }
 
 /// 文字の参照（`&amp;`・`&#x3042;` など）を戻す。
-#[cfg(test)]
-fn unescape(s: &str) -> String {
+pub(crate) fn unescape(s: &str) -> String {
     unescape_with_cancel(s, &|| false).unwrap()
 }
 

@@ -12,10 +12,17 @@ blake3-pure = ["blake3/pure"]
 
 [dependencies]
 blake3.workspace = true
+crc32fast = "1"
+encoding_rs.workspace = true
+flate2 = "1"
+# xz・7z の LZMA/LZMA2 を展開する（Rust だけ）
+lzma-rs = "0.3"
 miniz_oxide.workspace = true
 postcard.workspace = true
 rayon.workspace = true
 regex-automata.workspace = true
+# 一括リネームのスクリプト（3270 のマクロと同じ版・機能）
+rhai = { version = "1.26", default-features = false, features = ["std", "no_module", "no_custom_syntax"] }
 serde.workspace = true
 toml.workspace = true
 unicode-normalization.workspace = true
