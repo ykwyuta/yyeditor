@@ -302,6 +302,7 @@ pub(crate) struct App {
     preview: previewmode::PreviewPane,
     markdown: markdownmode::LivePane,
     markdown_mode: bool,
+    outline_mode: bool,
     /// SSH 接続先のファイルの編集（11 章）
     /// ワークスペースとサイドバー（左側）
     ws: WorkspacePane,
@@ -312,6 +313,7 @@ pub(crate) struct App {
 /// 非表示タブの文書と表示位置。検索条件と表示設定はウィンドウ全体で共有する。
 struct TabState {
     markdown_mode: bool,
+    outline_mode: bool,
     doc: Document,
     vp: Viewport,
     scroll_x: f32,
@@ -334,6 +336,7 @@ impl TabState {
     fn new(doc: Document) -> Self {
         Self {
             markdown_mode: false,
+            outline_mode: false,
             doc,
             vp: Viewport::default(),
             scroll_x: 0.0,
@@ -612,6 +615,7 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
             markdownmode::ID_MARKDOWN,
             w!("Markdown ライブ編集(&M)"),
         )?;
+        item(view, markdownmode::ID_OUTLINE, w!("アウトライン編集(&O)"))?;
         item(view, ID_WHITESPACE, w!("空白・タブ・改行を表示(&W)"))?;
         item(view, ID_CONTROL_CHARS, w!("制御文字を表示"))?;
         item(view, ID_HEX_MODE, w!("16 進数表示(&X)\tCtrl+Shift+X"))?;
@@ -882,6 +886,7 @@ impl App {
                 preview: Default::default(),
                 markdown: Default::default(),
                 markdown_mode: false,
+                outline_mode: false,
                 ws,
                 scm,
             };
@@ -2677,6 +2682,7 @@ impl App {
 
     pub(crate) fn set_document(&mut self, doc: Document) {
         self.markdown_mode = false;
+        self.outline_mode = false;
         self.markdown.version = None;
         ime::cancel(self.view);
         self.composition = None;
@@ -2720,6 +2726,7 @@ impl App {
     fn take_active_tab(&mut self) -> TabState {
         TabState {
             markdown_mode: self.markdown_mode,
+            outline_mode: self.outline_mode,
             doc: std::mem::replace(&mut self.doc, Document::new_empty()),
             vp: self.vp,
             scroll_x: self.scroll_x,
@@ -2741,6 +2748,7 @@ impl App {
 
     fn restore_tab(&mut self, state: TabState) {
         self.markdown_mode = state.markdown_mode;
+        self.outline_mode = state.outline_mode;
         self.markdown.version = None;
         ime::cancel(self.view);
         self.composition = None;
@@ -4659,8 +4667,10 @@ fn on_command_now(hwnd: HWND, id: u16) {
         a.markdown.dispatching = false;
         a.refresh_markdown();
     });
-    if matches!(id, ID_TAB_NEXT | ID_TAB_PREV | markdownmode::ID_MARKDOWN)
-        || (was_live && with_app(|a| !a.markdown_mode && !a.findbar.has_focus()).unwrap_or(false))
+    if matches!(
+        id,
+        ID_TAB_NEXT | ID_TAB_PREV | markdownmode::ID_MARKDOWN | markdownmode::ID_OUTLINE
+    ) || (was_live && with_app(|a| !a.markdown_mode && !a.findbar.has_focus()).unwrap_or(false))
     {
         markdownmode::focus_editor();
     }
@@ -5146,8 +5156,10 @@ fn execute_command(hwnd: HWND, id: u16) {
                 error_box(hwnd, &format!("プレビューを表示できません。\n{msg}"));
             }
         }
-        markdownmode::ID_MARKDOWN => {
-            if let Some(Err(msg)) = with_app(|a| a.toggle_markdown()) {
+        markdownmode::ID_MARKDOWN | markdownmode::ID_OUTLINE => {
+            if let Some(Err(msg)) =
+                with_app(|a| a.toggle_live_editor(id == markdownmode::ID_OUTLINE))
+            {
                 error_box(hwnd, &msg);
             }
         }
@@ -5386,8 +5398,7 @@ pub(crate) extern "system" fn frame_proc(
                     a.refresh_markdown();
                     a.layout_children();
                     a.status_msg =
-                        "Markdown ライブ編集には WebView2 が必要です。通常編集に戻しました。"
-                            .into();
+                        "ライブ編集には WebView2 が必要です。通常編集に戻しました。".into();
                     a.update_status();
                 }
             });

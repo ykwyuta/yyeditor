@@ -340,6 +340,24 @@ impl Preview {
         read_only: bool,
         folder: Option<DocBase>,
     ) {
+        self.show_editor_page(
+            source,
+            epoch,
+            folder.clone(),
+            yy_preview::live::page(source, epoch, caret, read_only, folder.is_some()),
+        );
+    }
+
+    pub(crate) fn show_outline(&self, source: &str, epoch: u64, read_only: bool) {
+        self.show_editor_page(
+            source,
+            epoch,
+            None,
+            yy_preview::outline::page(source, epoch, read_only),
+        );
+    }
+
+    fn show_editor_page(&self, source: &str, epoch: u64, folder: Option<DocBase>, html: String) {
         self.shared.editing.set(true);
         self.shared.edit_messages.borrow_mut().clear();
         *self.shared.edit_initial.borrow_mut() = Some(format!(
@@ -348,7 +366,7 @@ impl Preview {
         ));
         {
             let mut p = self.shared.page.borrow_mut();
-            p.html = yy_preview::live::page(source, epoch, caret, read_only, folder.is_some());
+            p.html = html;
             p.kind = None;
             p.line = None;
             p.folder = folder;
@@ -1419,6 +1437,130 @@ mod tests {
     use std::time::Duration;
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+
+    #[test]
+    fn outline_edit_bookmark_reference_zoom_and_readonly_in_webview2() {
+        let _serial = testing::webview2_lock();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            RegisterClassExW(&WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(preview_proc),
+                hInstance: GetModuleHandleW(None).unwrap().into(),
+                lpszClassName: PREVIEW_CLASS,
+                ..Default::default()
+            });
+        }
+        struct Parent(HWND);
+        impl Drop for Parent {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        let parent = Parent(unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PREVIEW_CLASS,
+                w!("outline test"),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                0,
+                0,
+                640,
+                480,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        });
+        let mut pane = Preview::new(parent.0, parent.0).unwrap();
+        pane.set_visible(true);
+        pane.set_bounds(0, 0, 620, 440);
+        pane.show_outline("", 91, false);
+        let mut messages = Vec::new();
+        let ready = pump_until(Duration::from_secs(45), || {
+            messages.extend(pane.take_edit_messages());
+            messages
+                .iter()
+                .any(|m| m.split('\n').nth(2) == Some("ready"))
+                || pane.is_unavailable()
+        });
+        if pane.is_unavailable() {
+            assert!(
+                std::env::var_os("YY_REQUIRE_WEBVIEW2").is_none(),
+                "WebView2: {}",
+                notice_of(pane.hwnd)
+            );
+            return;
+        }
+        assert!(
+            ready,
+            "outline did not become ready: {}",
+            notice_of(pane.hwnd)
+        );
+        assert_eq!(
+            eval(
+                &pane,
+                r#"
+            document.querySelector('[data-op=add]').click();
+            var input=document.querySelector('#tree input');
+            input.value='日本語😀';input.dispatchEvent(new Event('input'));
+            document.querySelector('[data-op=bookmark]').click();
+            document.querySelector('[data-op=add]').click();
+            document.querySelector('[data-op=indent]').click();
+            document.querySelector('[data-op=reference]').click();
+            document.querySelector('#picker button').click();
+            document.querySelectorAll('#tree input').length===2 &&
+            document.querySelectorAll('#bookmarks button').length===1 &&
+            document.querySelector('#tree .refs button').textContent.includes('日本語😀')
+        "#
+            )
+            .as_deref(),
+            Some("true")
+        );
+        pane.editor_post("{\"flush\":91}");
+        assert!(
+            pump_until(Duration::from_secs(10), || {
+                messages.extend(pane.take_edit_messages());
+                messages
+                    .iter()
+                    .any(|m| m.split('\n').nth(2) == Some("flush:91"))
+            }),
+            "outline flush missing: {messages:?}"
+        );
+        let saved = messages
+            .iter()
+            .rev()
+            .find(|m| m.split('\n').nth(2) == Some("flush:91"))
+            .unwrap()
+            .splitn(6, '\n')
+            .nth(5)
+            .unwrap()
+            .to_owned();
+        assert!(saved.contains("yyoutline") && saved.contains("日本語😀"));
+        assert_eq!(eval(&pane, "document.querySelector('#bookmarks button').click(); document.querySelector('#backlinks button')!==null && document.querySelectorAll('#crumbs button').length===2").as_deref(),Some("true"));
+        pane.show_outline(&saved, 92, true);
+        assert!(
+            pump_until(Duration::from_secs(20), || pane
+                .take_edit_messages()
+                .iter()
+                .any(|m| m.split('\n').nth(2) == Some("ready"))),
+            "readonly outline did not load"
+        );
+        assert_eq!(eval(&pane,"[...document.querySelectorAll('#tree input')].every(i=>i.readOnly) && document.querySelector('[data-op=add]').disabled && document.querySelector('#tree input').value==='日本語😀'").as_deref(),Some("true"));
+        pane.show_outline("invalid source", 93, false);
+        assert!(
+            pump_until(Duration::from_secs(20), || pane
+                .take_edit_messages()
+                .iter()
+                .any(|m| m.split('\n').nth(2) == Some("ready"))),
+            "invalid outline did not report ready"
+        );
+        assert_eq!(eval(&pane,"document.querySelector('[data-op=add]').disabled && document.querySelector('#tree').textContent.includes('読み込めません')").as_deref(), Some("true"));
+    }
 
     #[test]
     fn live_markdown_preserves_source_ime_and_flush_in_webview2() {

@@ -1,8 +1,9 @@
-//! タブ単位の任意の Markdown ライブ編集。文書と保存・Undo は通常編集と共用する。
+//! タブ単位の Markdown / アウトライン編集。文書と保存・Undo は通常編集と共用する。
 use super::*;
 use crate::preview::{DocBase, Preview};
 
 pub(super) const ID_MARKDOWN: u16 = 212;
+pub(super) const ID_OUTLINE: u16 = 213;
 
 #[derive(Clone)]
 pub(super) enum Action {
@@ -28,12 +29,10 @@ pub(super) struct LivePane {
 }
 
 impl App {
-    pub(super) fn toggle_markdown(&mut self) -> std::result::Result<(), String> {
-        if !self.markdown_mode {
+    pub(super) fn toggle_live_editor(&mut self, outline: bool) -> std::result::Result<(), String> {
+        if !self.markdown_mode || self.outline_mode != outline {
             if self.hex.is_some() || self.code.is_some() || self.csv.is_some() {
-                return Err(
-                    "通常のテキスト表示に戻してから Markdown ライブ編集を選んでください。".into(),
-                );
+                return Err("通常のテキスト表示に戻してからライブ編集を選んでください。".into());
             }
             self.markdown_source()?;
             if self.markdown.pane.is_none() {
@@ -41,7 +40,8 @@ impl App {
                     Some(Preview::new(self.frame, self.frame).map_err(|e| e.message())?);
             }
         }
-        self.markdown_mode = !self.markdown_mode;
+        self.markdown_mode = !self.markdown_mode || self.outline_mode != outline;
+        self.outline_mode = self.markdown_mode && outline;
         self.markdown.version = None;
         self.refresh_markdown();
         self.layout_children();
@@ -51,7 +51,10 @@ impl App {
     fn markdown_source(&self) -> std::result::Result<String, String> {
         let snap = self.doc.snapshot();
         if snap.len() > yy_preview::live::MAX_BYTES as u64 {
-            return Err("Markdown ライブ編集は 1 MiB までの文書に対応しています。通常編集とプレビューを利用してください。".into());
+            return Err(
+                "ライブ編集は 1 MiB までの文書に対応しています。通常編集を利用してください。"
+                    .into(),
+            );
         }
         if self.doc.is_loading() {
             return Err("文書の読み込みが終わるまでお待ちください。".into());
@@ -69,7 +72,20 @@ impl App {
                 self.menu_view,
                 ID_MARKDOWN as u32,
                 (MF_BYCOMMAND
-                    | if self.markdown_mode {
+                    | if self.markdown_mode && !self.outline_mode {
+                        MF_CHECKED
+                    } else {
+                        MF_UNCHECKED
+                    })
+                .0,
+            );
+        }
+        unsafe {
+            CheckMenuItem(
+                self.menu_view,
+                ID_OUTLINE as u32,
+                (MF_BYCOMMAND
+                    | if self.markdown_mode && self.outline_mode {
                         MF_CHECKED
                     } else {
                         MF_UNCHECKED
@@ -124,13 +140,17 @@ impl App {
         let caret = (self.doc.selections().primary().head as usize).min(source.len());
         let caret = source[..caret].encode_utf16().count();
         if let Some(pane) = &self.markdown.pane {
-            pane.show_editor(
-                &source,
-                self.markdown.epoch,
-                caret,
-                self.doc.is_busy(),
-                folder,
-            );
+            if self.outline_mode {
+                pane.show_outline(&source, self.markdown.epoch, self.doc.is_busy());
+            } else {
+                pane.show_editor(
+                    &source,
+                    self.markdown.epoch,
+                    caret,
+                    self.doc.is_busy(),
+                    folder,
+                );
+            }
         }
     }
 
@@ -199,7 +219,9 @@ impl App {
             self.edit_markdown_table(source, caret, operation);
             return None;
         }
-        if let Some(pane) = &self.markdown.pane {
+        if let Some(pane) = &self.markdown.pane
+            && !self.outline_mode
+        {
             pane.editor_post(&yy_preview::live::rendered_at(
                 epoch,
                 seq,
@@ -223,7 +245,13 @@ impl App {
             "close" => ID_CLOSE,
             "next" => ID_TAB_NEXT,
             "prev" => ID_TAB_PREV,
-            "source" => ID_MARKDOWN,
+            "source" => {
+                if self.outline_mode {
+                    ID_OUTLINE
+                } else {
+                    ID_MARKDOWN
+                }
+            }
             "preview" => ID_PREVIEW,
             "find" => ID_FIND,
             "grep" => ID_GREP,
@@ -412,6 +440,29 @@ pub(super) fn focus_editor() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn outline_changes_undo_redo_and_save_keep_ids_and_references() {
+        let source = include_str!("../../../../demo/outline/example.yyoutline");
+        let mut doc = Document::from_text(source);
+        let changed = source.replace("アイデア", "検討事項😀");
+        assert!(apply_source(&mut doc, source, &changed, 0, 0, EditKind::Other).unwrap());
+        assert!(doc.undo());
+        assert_eq!(
+            doc.snapshot().read(0..doc.snapshot().len()),
+            source.as_bytes()
+        );
+        assert!(doc.redo());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("日本語.yyoutline");
+        doc.save_as(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), changed.as_bytes());
+        let reopened = Document::open_shared_read_only(&path, &OpenOptions::default()).unwrap();
+        assert_eq!(
+            reopened.snapshot().read(0..reopened.snapshot().len()),
+            changed.as_bytes()
+        );
+    }
+
     #[test]
     fn table_actions_have_separate_undo_steps() {
         use yy_preview::live::table::{Operation, edit};

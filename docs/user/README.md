@@ -6,7 +6,7 @@
 
 | アプリ | 使い方・設定 | 作例・体験用データ |
 | --- | --- | --- |
-| yyeditor | [同梱ヘルプ](../../crates/yy-win/help/help.md)（ライブMarkdown編集を含む） | エディタからファイルを開く |
+| yyeditor | [同梱ヘルプ](../../crates/yy-win/help/help.md) / [アウトライン編集](outline.md) | [アウトライン作例](../../demo/outline/example.yyoutline) |
 | yyterm | [同梱ヘルプのターミナル項目](../../crates/yy-win/help/help.md)（SSH、3270、tmux/screen、マクロ、タブログ） | [SSHマクロ](../../demo/yyterm/README.md) |
 | yysftp | [同梱ヘルプ](../../crates/yy-win/help/help.md#sftp-gateway) | [ゲートウェイ設定例](../../demo/yysftp/README.md) |
 | yysheet | [同梱ヘルプ](../../crates/yy-win/help/sheet.md) | CSV・固定長ファイルを開く |

@@ -1,0 +1,11 @@
+{
+  "format": "yyoutline",
+  "version": 1,
+  "nodes": [
+    {"id":"project","depth":0,"text":"プロジェクト","bookmark":true,"collapsed":false,"refs":[]},
+    {"id":"ideas","depth":1,"text":"アイデア","bookmark":false,"collapsed":false,"refs":[]},
+    {"id":"outline","depth":2,"text":"階層を自由に追加する","bookmark":false,"collapsed":false,"refs":[]},
+    {"id":"tasks","depth":1,"text":"タスク","bookmark":true,"collapsed":false,"refs":["outline"]},
+    {"id":"review","depth":2,"text":"アイデアを確認する","bookmark":false,"collapsed":false,"refs":["ideas"]}
+  ]
+}

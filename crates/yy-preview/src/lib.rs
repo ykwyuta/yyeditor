@@ -11,6 +11,7 @@
 pub mod help;
 pub mod live;
 mod markdown;
+pub mod outline;
 pub mod security;
 
 use std::borrow::Cow;
@@ -167,6 +168,18 @@ pub fn asset(path: &str) -> Option<(Cow<'static, [u8]>, &'static str)> {
         ),
         "preview.css" => (
             Cow::Borrowed(include_bytes!("../assets/preview.css").as_slice()),
+            css,
+        ),
+        "outline-model.js" => (
+            Cow::Borrowed(include_bytes!("../assets/outline-model.js").as_slice()),
+            js,
+        ),
+        "outline.js" => (
+            Cow::Borrowed(include_bytes!("../assets/outline.js").as_slice()),
+            js,
+        ),
+        "outline.css" => (
+            Cow::Borrowed(include_bytes!("../assets/outline.css").as_slice()),
             css,
         ),
         "live.js" => (
