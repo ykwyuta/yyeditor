@@ -4,6 +4,9 @@
 //! （仮想リスト。数十万行でも軽い）を置く。走査・ハッシュ・同期・削除などの長い処理は作業スレッド
 //! （[`work`]）で 1 つずつ行い、進みはステータスバーに出す（Esc で中止）。中核は `yy-files`。
 
+mod browse;
+mod renamedlg;
+mod shell;
 mod work;
 
 use std::cell::RefCell;
@@ -40,13 +43,22 @@ const SS_CENTERIMAGE: u32 = 0x200;
 const WM_APP_FM: u32 = WM_APP + 90;
 
 // タブ
-const TAB_SYNC: usize = 0;
-const TAB_SEARCH: usize = 1;
-const TAB_SIMILAR: usize = 2;
-const TAB_DUPES: usize = 3;
-const TAB_REVIEW: usize = 4;
-const TAB_LOG: usize = 5;
-const TAB_NAMES: [&str; 6] = ["同期", "検索", "似たファイル", "重複", "削除の確認", "記録"];
+const TAB_BROWSE: usize = 0;
+const TAB_SYNC: usize = 1;
+const TAB_SEARCH: usize = 2;
+const TAB_SIMILAR: usize = 3;
+const TAB_DUPES: usize = 4;
+const TAB_REVIEW: usize = 5;
+const TAB_LOG: usize = 6;
+const TAB_NAMES: [&str; 7] = [
+    "フォルダ",
+    "同期",
+    "検索",
+    "似たファイル",
+    "重複",
+    "削除の確認",
+    "記録",
+];
 
 // 部品の ID
 const ID_TABS: u16 = 5000;
@@ -128,6 +140,7 @@ const CM_REMOVE: u32 = 12;
 const CM_VERSIONS: u32 = 13;
 const CM_SAME_CONTENT: u32 = 14;
 const CM_SYNC_SRC: u32 = 15;
+const CM_IN_FOLDERS: u32 = 16;
 
 /// 一覧の列（見出し・幅・右寄せ）。
 const COLUMNS: [&[(&str, i32, bool)]; 5] = [
@@ -205,9 +218,11 @@ struct App {
     dpi: u32,
     config: Config,
     dirs: Dirs,
-    /// タブごとの部品の行と一覧
+    /// タブごとの部品の行と一覧（「フォルダ」のタブは自分の窓を持つので空）
     rows: Vec<Vec<Vec<Cell>>>,
     lists: Vec<HWND>,
+    /// 「フォルダ」のタブの窓
+    browse: HWND,
     current: usize,
     edits: Edits,
     // 同期
@@ -424,7 +439,10 @@ fn run_inner() -> Result<()> {
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            if msg.message == WM_KEYDOWN && key_hook(&msg) {
+            if renamedlg::dialog_message(&msg) {
+                continue;
+            }
+            if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) && key_hook(&msg) {
                 continue;
             }
             let _ = TranslateMessage(&msg);
@@ -768,6 +786,7 @@ fn create() -> Result<HWND> {
             c(e.review_info, 0),
         ]];
         let rows = vec![
+            Vec::new(),
             sync_rows,
             search_rows,
             sim_rows,
@@ -775,8 +794,10 @@ fn create() -> Result<HWND> {
             review_rows,
             Vec::new(),
         ];
-        let mut lists = Vec::new();
-        for (i, cols) in COLUMNS.iter().enumerate() {
+        // 「フォルダ」のタブには一覧がない（自分の窓の中にある）
+        let mut lists = vec![HWND::default()];
+        for (k, cols) in COLUMNS.iter().enumerate() {
+            let i = k + 1;
             let style = LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA;
             let list = child(
                 WC_LISTVIEWW,
@@ -827,6 +848,7 @@ fn create() -> Result<HWND> {
         );
         SendMessageW(log, EM_SETLIMITTEXT, Some(WPARAM(0)), None);
         let dirs = work::dirs();
+        let browse = browse::create(frame, instance, font, dpi, dirs.clone(), status_text);
         let jobs = JobList::load(&dirs.jobs_file()).unwrap_or_default();
         let searches = SearchList::load(&dirs.searches_file()).unwrap_or_default();
         for s in &searches.searches {
@@ -859,6 +881,7 @@ fn create() -> Result<HWND> {
             dirs,
             rows,
             lists,
+            browse,
             current: 0,
             edits: e,
             jobs,
@@ -926,6 +949,11 @@ fn create() -> Result<HWND> {
     }
 }
 
+/// 「フォルダ」のタブの状態表示（ステータスバー）。
+fn status_text(s: &str) {
+    with(|a| a.set_status(s));
+}
+
 fn state_text(s: &ItemState) -> String {
     match s {
         ItemState::Pending => String::new(),
@@ -983,9 +1011,12 @@ impl App {
                 }
             }
             for (t, l) in self.lists.iter().enumerate() {
-                let _ = ShowWindow(*l, if t == i { SW_SHOW } else { SW_HIDE });
+                if !l.is_invalid() {
+                    let _ = ShowWindow(*l, if t == i { SW_SHOW } else { SW_HIDE });
+                }
             }
             let _ = ShowWindow(self.log, if i == TAB_LOG { SW_SHOW } else { SW_HIDE });
+            let _ = ShowWindow(self.browse, if i == TAB_BROWSE { SW_SHOW } else { SW_HIDE });
         }
         self.layout();
     }
@@ -1019,6 +1050,17 @@ impl App {
                     y += row_h + d(4);
                 }
             }
+            if self.current == TAB_BROWSE {
+                let _ = MoveWindow(
+                    self.browse,
+                    0,
+                    d(28),
+                    rc.right,
+                    (bottom - d(28)).max(0),
+                    true,
+                );
+                return;
+            }
             let target = if self.current == TAB_LOG {
                 self.log
             } else {
@@ -1048,7 +1090,7 @@ impl App {
     }
 
     fn refresh_list(&self, tab: usize) {
-        if let Some(l) = self.lists.get(tab) {
+        if let Some(l) = self.lists.get(tab).filter(|l| !l.is_invalid()) {
             unsafe {
                 SendMessageW(
                     *l,
@@ -2893,6 +2935,7 @@ fn list_menu(hwnd: HWND, tab: usize) {
         };
         if !rows.is_empty() {
             add(CM_OPEN, "開く(&O)");
+            add(CM_IN_FOLDERS, "「フォルダ」のタブで場所を開く(&F)");
             add(CM_LOCATE, "エクスプローラーで場所を開く(&L)");
             add(CM_EDITOR, "yyeditor で開く(&E)");
             add(CM_COPY_PATH, "パスをコピー(&C)");
@@ -2946,6 +2989,12 @@ fn list_menu(hwnd: HWND, tab: usize) {
             CM_OPEN => {
                 if let Some((p, _)) = path {
                     open_with_shell(&p);
+                }
+            }
+            CM_IN_FOLDERS => {
+                if let Some((p, _)) = &path {
+                    with(|a| a.show_tab(TAB_BROWSE));
+                    browse::open_path(p);
                 }
             }
             CM_LOCATE => {
@@ -3185,7 +3234,7 @@ fn command(id: u16, code: u32) {
                 }
             }
         }
-        _ if (ID_TAB_BASE..ID_TAB_BASE + 6).contains(&id) => {
+        _ if (ID_TAB_BASE..ID_TAB_BASE + TAB_NAMES.len() as u16).contains(&id) => {
             with(|a| a.show_tab((id - ID_TAB_BASE) as usize));
         }
         ID_HELP => {
@@ -3350,9 +3399,16 @@ fn key_hook(msg: &MSG) -> bool {
         cancel();
         return true;
     }
-    if ctrl && (0x31..=0x36).contains(&vk.0) {
+    if ctrl && (0x31..0x31 + TAB_NAMES.len() as u16).contains(&vk.0) {
         command(ID_TAB_BASE + (vk.0 - 0x31), 0);
         return true;
+    }
+    // 「フォルダ」のタブのキー
+    if with(|a| a.current) == Some(TAB_BROWSE) && browse::key(msg) {
+        return true;
+    }
+    if msg.message != WM_KEYDOWN {
+        return false;
     }
     if ctrl && vk == VK_F {
         with(|a| {
@@ -3494,7 +3550,7 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 return LRESULT(0);
             }
             let id = hdr.idFrom as u16;
-            if (ID_LIST_BASE..ID_LIST_BASE + 5).contains(&id) {
+            if (ID_LIST_BASE + 1..ID_LIST_BASE + TAB_NAMES.len() as u16 - 1).contains(&id) {
                 return on_list_notify(hwnd, (id - ID_LIST_BASE) as usize, hdr, lparam);
             }
             LRESULT(0)
@@ -3565,6 +3621,7 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             LRESULT(0)
         }
         WM_DESTROY => {
+            browse::shutdown();
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
         }

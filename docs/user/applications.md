@@ -76,9 +76,15 @@ A tray application that saves copied text for later reuse. It runs independently
 
 Clipboard content without text, such as images or file lists, is not saved. See the [yyclip README](../../apps/yyclip/README.md) (Japanese) for usage and storage locations.
 
-## yyfilemanager — Shared-Folder Synchronization, Search, and Cleanup
+## yyfilemanager — File Explorer Replacement, Synchronization, Search, and Cleanup
 
-Transfer and organize files in local folders and Windows network shares. It works with shares accessible through File Explorer, while yysftp handles file transfers over SSH.
+Browse, transfer, and organize files in local folders and Windows network shares. It works with shares accessible through File Explorer, while yysftp handles file transfers over SSH.
+
+- **Folders tab (File Explorer replacement)**: Address bar with environment variables and autocomplete, back / forward / up, a tree of common folders, pinned folders and drives, sortable details / list / large-icon views with system icons, hidden-file and extension toggles, and automatic refresh. Copy, move, delete (Recycle Bin or permanent), and rename use the Windows shell (`IFileOperation`) with its progress, conflict prompts, and undo. The right-click menu includes the Windows shell menu; cut / copy / paste and drag-and-drop exchange files with File Explorer; properties and Open with are available.
+- **Flat view**: List every file in all subfolders of the current folder in one list, with a relative-folder column, to find deeply nested files and move or rename them in bulk.
+- **Filtering**: Filter the list with the search syntax (words, wildcards, regular expressions, extension, size, dates) plus metadata conditions such as `exif.model:EOS`, `width:>=1920`, `id3.artist:…`, or `doc.author:…`.
+- **Batch rename**: Combine plain or regex find / replace (with capture groups), templates with counters, dates, substrings and metadata (Exif, image size, music tags from MP3 / FLAC / Ogg / M4A, Office and PDF document properties), case rules, and Rhai scripts. A live preview flags invalid names, duplicates, and existing files before anything is renamed; renames run in two phases (swaps and case-only changes work), roll back on failure, and can be undone from a CSV log.
+- **Archives without extraction**: Open ZIP (including ZIP64 and Shift_JIS names), tar, tar.gz, tar.xz, gz, xz, and 7z files like folders. Open a single entry, extract selected entries, or copy / drag them out.
 
 - **Synchronization**: One-way update or mirror synchronization from source to destination. Review the plan before execution; files also changed at the destination are treated as conflicts. Swap the direction to synchronize a share to a local folder.
 - **Resume and delta transfer**: Resume after disconnection or application exit, transfer only changed blocks of large files, verify transfers, and optionally copy access permissions.
@@ -128,7 +134,7 @@ yyfilemanager stores jobs, indexes, and operation records in `filemanager/` unde
 - yyeditor's CSV mode does not provide frozen headers, sorting, or filtering. Use yysheet for table processing.
 - yyeditor previews documents up to 8 MiB. HTML scripts and d3 code blocks are executed.
 - yyeditor's fixed-length view provides byte-level display and editing. Use yysheet for editing based on COBOL field types.
-- yyfilemanager does not merge changes through bidirectional synchronization. Content search does not cover image-only or encrypted PDFs.
+- yyfilemanager does not merge changes through bidirectional synchronization. Content search does not cover image-only or encrypted PDFs. The Folders tab has no thumbnail view, preview pane, or multiple tabs, and archives are read-only (encrypted ZIP entries, 7z filters such as BCJ, and xz / LZMA2 data over 1 GB can be listed but not extracted; RAR is not supported).
 - yybrowser connection profiles apply per window. Some ad-blocking rules, including uBlock Origin-specific script injection, are not supported.
 
 ## Database, comparison, diagram and 3D tools

@@ -188,3 +188,14 @@ yyfilemanager は同期・検索・似たファイル・重複・削除の確認
 - サムネイル表示・プレビューの欄・タブでの複数フォルダ・2 画面。
 - 圧縮ファイルの作成・中への書き込み、RAR の一覧（形式の権利のため）。
 - SSH 先のフォルダ（yysftp の役目のまま）。
+
+## 15. 実装の状況（2026-10-28）
+
+- 2〜5 章の段階をすべて実装した（`yy_files::archive`・`props`・`rename`・検索のメタデータの条件、
+  `yy-win/src/fm/browse.rs`・`shell.rs`・`renamedlg.rs`、ヘルプ）。
+- 10 章の設定は、利用者が編集する `config.toml` ではなく、画面の状態として `filemanager\folders.toml`
+  （`yy_files::jobs::BrowseState`）に置いた。`start_folder` は作らず、前回の場所を開く。
+- 試験: 中核は Linux で `cargo test -p yy-files`。zip・Python の zipfile（ZIP64）・GNU tar（gnu・pax）・gzip・
+  xz（複数ブロック）で作った圧縮ファイルと、ffmpeg で作った MP3・FLAC・M4A・Ogg・Opus・PNG・JPEG・WebP・MP4 を
+  読めることを確かめた（7z は試験の中で作ったもの。7-Zip で作ったものはこの環境では確かめていない）。
+  画面は Windows の CI で型検査とアドレスの解釈の試験だけで、操作の試験はない。
