@@ -32,6 +32,54 @@ pub struct JobList {
     pub jobs: Vec<SyncJob>,
 }
 
+/// 「フォルダ」のタブの表示の状態（`folders.toml`。2026-10-27 の提案 10 章）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowseState {
+    /// よく使うフォルダにピン留めしたフォルダ
+    pub pinned: Vec<PathBuf>,
+    /// 隠しファイル・システム ファイルを出す
+    pub show_hidden: bool,
+    /// 拡張子を出す
+    pub show_extensions: bool,
+    /// 表示形式（`details`・`list`・`icons`）
+    pub view: String,
+    /// フラットビューにフォルダも出す
+    pub flat_folders: bool,
+    /// 前回開いていた場所
+    pub last: String,
+    /// 左のツリーの幅（96 DPI のピクセル）
+    pub tree_width: i32,
+}
+
+impl Default for BrowseState {
+    fn default() -> Self {
+        BrowseState {
+            pinned: Vec::new(),
+            show_hidden: false,
+            show_extensions: true,
+            view: "details".into(),
+            flat_folders: false,
+            last: String::new(),
+            tree_width: 240,
+        }
+    }
+}
+
+impl BrowseState {
+    pub fn load(path: &Path) -> BrowseState {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| toml::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        let t = toml::to_string_pretty(self).map_err(io::Error::other)?;
+        crate::index::write_atomic(path, t.as_bytes())
+    }
+}
+
 impl JobList {
     pub fn load(path: &Path) -> io::Result<JobList> {
         match std::fs::read_to_string(path) {
@@ -133,6 +181,14 @@ impl Dirs {
     }
     pub fn searches_file(&self) -> PathBuf {
         self.root.join("searches.toml")
+    }
+    /// 「フォルダ」のタブの表示の状態。
+    pub fn browse_file(&self) -> PathBuf {
+        self.root.join("folders.toml")
+    }
+    /// 一括リネームの記録。
+    pub fn renames(&self) -> PathBuf {
+        self.root.join("renames")
     }
     /// 保存した目録（[`crate::catalogs`]）。
     pub fn catalogs(&self) -> PathBuf {

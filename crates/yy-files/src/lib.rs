@@ -15,6 +15,7 @@
 //! * [`limits`] … 裏の処理の CPU・メモリの上限
 //! * [`jobs`] … 同期ジョブ・保存した検索・置き場所・画面なしでの実行
 
+pub mod archive;
 pub mod catalogs;
 pub mod dupes;
 pub mod fs;
@@ -26,7 +27,9 @@ pub mod limits;
 pub mod office;
 pub mod pattern;
 pub mod pdf;
+pub mod props;
 pub mod purge;
+pub mod rename;
 pub mod scan;
 pub mod search;
 pub mod similar;

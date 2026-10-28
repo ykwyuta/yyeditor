@@ -13,7 +13,7 @@ Windows向けの編集・端末・転送・表計算・作図・DB・比較ツ�
 | **yysftp** | SFTP/SCP、再開転送、SSHゲートウェイ、ホスト別一覧コマンド | [ガイド](demo/yysftp/README.md) |
 | **yysheet** | 大量CSV、数式、COBOL固定長、レコード長・レイアウト推定 | [ガイド](crates/yy-win/help/sheet.md) |
 | **yyclip** | クリップボード・定型文・お気に入りとユーザーのファイル履歴 | [ガイド](apps/yyclip/README.md) |
-| **yyfilemanager** | フォルダー同期、検索、重複・世代整理、復元 | [ガイド](crates/yy-win/help/filemanager.md) |
+| **yyfilemanager** | エクスプローラーの代わり（フラットビュー・一括リネーム・圧縮ファイルの中）、フォルダー同期、検索、重複・世代整理、復元 | [ガイド](crates/yy-win/help/filemanager.md) |
 | **yybrowser** | タブブラウザ、プロファイル、プロキシ、広告ブロック | [ガイド](crates/yy-win/help/browser.md) |
 | **yydraw** | 構成図、公式クラウド・業務アイコン、グループ・整列、SVG/PNG | [ガイド](docs/user/yydraw.md) |
 | **yydbmanager** | 7DBのSQL・実行計画・ER図、データ入出力、保存計画の表示 | [ガイド](docs/user/yydbmanager.md) |

@@ -156,7 +156,7 @@ Windows ではファイルの先頭画面を画面外に描画して BMP に出�
 
 ## ファイル管理・ブラウザの検証
 
-yyfilemanager の中核は `cargo test -p yy-files`、ブラウザの設定・規則・ブックマークは `cargo test -p yy-browser`、広告ブロックは `cargo test -p yy-adblock` で確認できます。画面や WebView2 を含む動作は Windows 上で確認してください。
+yyfilemanager の中核は `cargo test -p yy-files`（圧縮ファイルの一覧・展開は `archive`、メタデータは `props`、一括リネームは `rename`。実際の道具で作ったファイルは `YYFILES_ARCHIVES`・`YYFILES_PROPS` にフォルダを指定して `--include-ignored` で確かめられます）、ブラウザの設定・規則・ブックマークは `cargo test -p yy-browser`、広告ブロックは `cargo test -p yy-adblock` で確認できます。画面や WebView2 を含む動作は Windows 上で確認してください。
 
 - フォルダ同期では、計画、衝突、途中再開、差分転送、隔離と復元を対象にします。共有フォルダを使う試験の条件は `crates/yy-files` のテストと CI を参照してください。
 - ブラウザでは、直接接続・プロキシ・PAC、プロファイル分離、ドメイン規則、ホスト転送、証明書の指紋照合、ブックマークの HTML 入出力、フィルタの更新・除外を確認します。

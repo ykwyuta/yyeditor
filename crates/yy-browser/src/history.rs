@@ -220,6 +220,35 @@ pub fn search_visit_indices(visits: &[Visit], query: &str) -> Vec<usize> {
         .collect()
 }
 
+/// アドレスバーの候補: 入力のすべての語を URL か題名に含む（部分一致。大文字・小文字は区別しない）
+/// ページを、最後に見たのが新しい順に `limit` 件（同じ URL は 1 件）。入力が空なら候補はない。
+pub fn suggest<'a>(visits: &'a [Visit], input: &str, limit: usize) -> Vec<&'a Visit> {
+    let words: Vec<String> = input.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    // 書いた順（古い順）に並んでいるので、後ろから見れば新しい順
+    for v in visits.iter().rev() {
+        if out.len() >= limit {
+            break;
+        }
+        if !seen.insert(v.url.as_str()) {
+            continue;
+        }
+        let url = v.url.to_lowercase();
+        let title = v.title.to_lowercase();
+        if words
+            .iter()
+            .all(|w| url.contains(w.as_str()) || title.contains(w.as_str()))
+        {
+            out.push(v);
+        }
+    }
+    out
+}
+
 /// `since` 以降（UNIX 時間の秒）のものを消す（`None` ならすべて）。消した数を返す。
 pub fn remove_since<T: Record + Timed>(path: &Path, since: Option<u64>) -> io::Result<usize> {
     let Some(since) = since else {
@@ -498,6 +527,55 @@ pub fn search_engine_name(url: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suggests_recent_pages_matching_all_words() {
+        let v = |t: u64, url: &str, title: &str| Visit {
+            time: t,
+            url: url.into(),
+            title: title.into(),
+        };
+        let visits = vec![
+            v(1, "https://example.com/rust", "Rust 入門"),
+            v(2, "https://docs.rs/serde", "serde - Rust"),
+            v(3, "https://news.example.org/", "ニュース"),
+            v(4, "https://example.com/rust", "Rust 入門（改訂）"),
+            v(5, "https://example.com/go", "Go"),
+        ];
+        let urls = |q: &str, n: usize| -> Vec<String> {
+            suggest(&visits, q, n)
+                .iter()
+                .map(|v| v.url.clone())
+                .collect()
+        };
+        // 新しく見たものが上。同じ URL は最後に見た 1 件だけ
+        assert_eq!(
+            urls("example", 10),
+            [
+                "https://example.com/go",
+                "https://example.com/rust",
+                "https://news.example.org/"
+            ]
+        );
+        assert_eq!(
+            suggest(&visits, "example", 10)[1].title,
+            "Rust 入門（改訂）"
+        );
+        // 題名でも一致、大文字・小文字は区別しない、語はすべて含むもの
+        assert_eq!(
+            urls("RUST", 10),
+            ["https://example.com/rust", "https://docs.rs/serde"]
+        );
+        assert_eq!(urls("rust serde", 10), ["https://docs.rs/serde"]);
+        assert_eq!(urls("ニュース", 10), ["https://news.example.org/"]);
+        // 文字を足すほど減る
+        assert!(urls("e", 10).len() >= urls("ex", 10).len());
+        assert!(urls("exa", 10).len() >= urls("example.com/r", 10).len());
+        assert_eq!(urls("example.com/r", 10), ["https://example.com/rust"]);
+        assert_eq!(urls("example", 1), ["https://example.com/go"]);
+        assert!(urls("  ", 10).is_empty());
+        assert!(urls("zzz", 10).is_empty());
+    }
 
     #[test]
     fn security_duplicate_must_not_change_file_type() {

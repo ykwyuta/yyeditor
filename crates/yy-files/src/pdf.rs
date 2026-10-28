@@ -1039,6 +1039,120 @@ pub fn extract_text(data: &[u8]) -> io::Result<String> {
     Ok(out)
 }
 
+/// PDF の文字列（UTF-16BE の印があれば UTF-16、なければ PDFDocEncoding を Latin-1 として）。
+fn text_string(b: &[u8]) -> String {
+    if b.starts_with(&[0xfe, 0xff]) {
+        return utf16be(&b[2..]);
+    }
+    if b.starts_with(&[0xef, 0xbb, 0xbf]) {
+        return String::from_utf8_lossy(&b[3..]).into_owned();
+    }
+    b.iter().map(|&c| c as char).collect()
+}
+
+/// PDF の日付（`D:20240506070809+09'00'`）→ UTC の UNIX 秒。時差がなければ手元の時刻として `(秒, true)`。
+pub fn parse_date(s: &str) -> Option<(i64, bool)> {
+    let s = s.trim().strip_prefix("D:").unwrap_or(s.trim());
+    let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.len() < 4 {
+        return None;
+    }
+    let num =
+        |a: usize, b: usize, d: i64| digits.get(a..b).and_then(|x| x.parse().ok()).unwrap_or(d);
+    let (y, mo, d) = (num(0, 4, 1970), num(4, 6, 1), num(6, 8, 1));
+    let (h, mi, se) = (num(8, 10, 0), num(10, 12, 0), num(12, 14, 0));
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let t = crate::archive::days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + se;
+    let rest = &s[digits.len()..];
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some('Z') => Some((t, false)),
+        Some(c @ ('+' | '-')) => {
+            let tz: String = rest[1..].chars().filter(|c| c.is_ascii_digit()).collect();
+            let oh: i64 = tz.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(0);
+            let om: i64 = tz.get(2..4).and_then(|x| x.parse().ok()).unwrap_or(0);
+            let off = (oh * 3600 + om * 60) * if c == '-' { -1 } else { 1 };
+            Some((t - off, false))
+        }
+        _ => Some((t, true)),
+    }
+}
+
+/// 文書の情報（`/Info` の題名・作成者など）とページの数。キーは `Title`・`Author`・`Subject`・
+/// `Keywords`・`Creator`・`Producer`・`CreationDate`・`ModDate`、ページの数は `Pages`。
+pub fn info(data: &[u8]) -> io::Result<Vec<(String, String)>> {
+    let doc = Doc::parse(data)?;
+    // trailer か XRef ストリームの /Info
+    let mut info_ref = None;
+    let mut root_ref = None;
+    let mut pos = data.len();
+    while let Some(at) = data[..pos].windows(7).rposition(|w| w == b"trailer") {
+        let v = parse_body(&data[at + 7..(at + 7 + 4096).min(data.len())]);
+        if let Some(d) = v.dict() {
+            info_ref = info_ref.or_else(|| d.get(b"Info".as_slice()).cloned());
+            root_ref = root_ref.or_else(|| d.get(b"Root".as_slice()).cloned());
+        }
+        if info_ref.is_some() {
+            break;
+        }
+        pos = at;
+    }
+    if info_ref.is_none() {
+        for o in doc.objs.values() {
+            if o.stream.is_none() {
+                continue;
+            }
+            let v = parse_body(&o.body);
+            if let Some(d) = v.dict()
+                && d.get(b"Type".as_slice()) == Some(&Val::Name(b"XRef".to_vec()))
+            {
+                info_ref = info_ref.or_else(|| d.get(b"Info".as_slice()).cloned());
+                root_ref = root_ref.or_else(|| d.get(b"Root".as_slice()).cloned());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(r) = info_ref
+        && let Val::Dict(d) = doc.resolve(&r)
+    {
+        for key in [
+            "Title",
+            "Author",
+            "Subject",
+            "Keywords",
+            "Creator",
+            "Producer",
+            "CreationDate",
+            "ModDate",
+        ] {
+            if let Val::Str(s) = doc.resolve(d.get(key.as_bytes()).unwrap_or(&Val::Other)) {
+                let t = text_string(&s);
+                let t = t.trim_matches(char::from(0)).trim();
+                if !t.is_empty() {
+                    out.push((key.to_owned(), t.to_owned()));
+                }
+            }
+        }
+    }
+    // ページの数
+    let pages = root_ref
+        .map(|r| doc.resolve(&r))
+        .and_then(|c| c.dict().and_then(|d| d.get(b"Pages".as_slice()).cloned()))
+        .map(|p| doc.resolve(&p))
+        .and_then(
+            |p| match p.dict().and_then(|d| d.get(b"Count".as_slice())) {
+                Some(Val::Num(n)) => Some(*n as u64),
+                _ => None,
+            },
+        );
+    if let Some(n) = pages {
+        out.push(("Pages".into(), n.to_string()));
+    }
+    Ok(out)
+}
+
 fn walk_pages(doc: &Doc, n: u32, out: &mut Vec<u32>, depth: usize) {
     if depth > 64 || out.len() > 100_000 {
         return;
@@ -1062,6 +1176,42 @@ fn walk_pages(doc: &Doc, n: u32, out: &mut Vec<u32>, depth: usize) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn reads_document_info() {
+        let pdf = build(&[
+            ("<< /Type /Catalog /Pages 2 0 R >>", None),
+            ("<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>", None),
+            ("<< /Type /Page /Parent 2 0 R >>", None),
+            ("<< /Type /Page /Parent 2 0 R >>", None),
+            (
+                "<< /Title <FEFF898B7A4D66F8> /Author (Taro) /CreationDate (D:20240506070809+09'00') >>",
+                None,
+            ),
+        ]);
+        let mut pdf = pdf;
+        // build() は trailer に /Root しか書かないので /Info を足す
+        let at = pdf.windows(7).rposition(|w| w == b"trailer").unwrap();
+        pdf.splice(
+            at + 7..at + 7,
+            b" << /Info 5 0 R /Root 1 0 R >> ".iter().copied(),
+        );
+        let info = info(&pdf).unwrap();
+        let get = |k: &str| info.iter().find(|(a, _)| a == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("Title"), Some("見積書"));
+        assert_eq!(get("Author"), Some("Taro"));
+        assert_eq!(get("Pages"), Some("2"));
+        let (t, local) = parse_date(get("CreationDate").unwrap()).unwrap();
+        assert!(!local);
+        assert_eq!(
+            t,
+            crate::archive::days_from_civil(2024, 5, 5) * 86_400 + 22 * 3600 + 8 * 60 + 9
+        );
+        assert_eq!(
+            parse_date("D:2024"),
+            Some((crate::archive::days_from_civil(2024, 1, 1) * 86_400, true))
+        );
+    }
 
     /// 試験用の PDF を作る（オブジェクトの本体の並び。ストリームは `Some` の中身を FlateDecode する）。
     pub(crate) fn build(objs: &[(&str, Option<&[u8]>)]) -> Vec<u8> {

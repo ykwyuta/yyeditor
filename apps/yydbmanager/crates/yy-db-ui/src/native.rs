@@ -3043,12 +3043,13 @@ unsafe extern "system" fn grid_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                                 (
                                     if i == 0 { 0 } else { a.top + i as u64 },
                                     h * (i as f32 + 1.),
+                                    h,
                                 )
                             })
                             .collect::<Vec<_>>();
                         let labels = positions
                             .iter()
-                            .map(|(r, _)| (*r, false))
+                            .map(|(r, _, _)| (*r, false))
                             .collect::<Vec<_>>();
                         let scene = Scene {
                             cols: &columns,

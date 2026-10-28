@@ -2,6 +2,9 @@
 //!
 //! プロファイルに関係なく共通。フォルダは名前（入れ子は `親 / 子`）で持つ。Edge・Chrome・Firefox が
 //! 書き出す HTML（Netscape Bookmark File）を読み込み・書き出しできる。
+//!
+//! 期限付きのブックマーク（`expires`）は、作ってから 1 か月（[`EXPIRY_DAYS`] 日）で消える。開くたび
+//! （そのページを表示するたび）に、そこから 1 か月に延ばす（[`Bookmarks::touch`]）。
 
 use std::io;
 use std::path::Path;
@@ -10,6 +13,9 @@ use serde::{Deserialize, Serialize};
 
 /// フォルダの入れ子の区切り。
 pub const FOLDER_SEP: &str = " / ";
+/// 期限付きのブックマークの期限（使われてからの日数）。
+pub const EXPIRY_DAYS: u64 = 30;
+const DAY: u64 = 86_400;
 
 /// ブックマーク 1 つ。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +25,9 @@ pub struct Bookmark {
     /// フォルダ（空なら一番上。入れ子は `親 / 子`）
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub folder: String,
+    /// 期限付きなら消える時刻（UNIX 時間の秒）。使うたびに延ばす
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<u64>,
 }
 
 impl Bookmark {
@@ -27,7 +36,23 @@ impl Bookmark {
             title: title.trim().to_owned(),
             url: url.trim().to_owned(),
             folder: normalize_folder(folder),
+            expires: None,
         }
+    }
+
+    /// 期限付きにする（`now` から 1 か月）・期限をなくす。
+    pub fn set_expiring(&mut self, on: bool, now: u64) {
+        self.expires = on.then(|| now + EXPIRY_DAYS * DAY);
+    }
+
+    /// 期限まで残りの日数（切り上げ。期限がなければ `None`、過ぎていれば 0）。
+    pub fn days_left(&self, now: u64) -> Option<u64> {
+        self.expires.map(|e| e.saturating_sub(now).div_ceil(DAY))
+    }
+
+    /// 期限が過ぎたか。
+    pub fn expired(&self, now: u64) -> bool {
+        self.expires.is_some_and(|e| e <= now)
     }
 
     /// 表示する名前（題名がなければ URL）。
@@ -109,6 +134,33 @@ impl Bookmarks {
                 self.items.len() - 1
             }
         }
+    }
+
+    /// 期限の過ぎたものを消す。消したものを返す。
+    pub fn purge_expired(&mut self, now: u64) -> Vec<Bookmark> {
+        let (gone, keep): (Vec<Bookmark>, Vec<Bookmark>) = std::mem::take(&mut self.items)
+            .into_iter()
+            .partition(|b| b.expired(now));
+        self.items = keep;
+        gone
+    }
+
+    /// その URL のブックマークを使った: 期限付きなら `now` から 1 か月に延ばす。延ばしたら `true`
+    /// （保存が要る）。期限の過ぎたものは延ばさない（消すのを待つ）。
+    pub fn touch(&mut self, url: &str, now: u64) -> bool {
+        let Some(i) = self.find(url) else {
+            return false;
+        };
+        let b = &mut self.items[i];
+        let Some(e) = b.expires else {
+            return false;
+        };
+        let new = now + EXPIRY_DAYS * DAY;
+        if e <= now || new <= e {
+            return false;
+        }
+        b.expires = Some(new);
+        true
     }
 
     /// 一つ上・下へ動かす。動かした先の番号を返す。
@@ -326,6 +378,42 @@ pub fn parse_html(html: &str) -> Vec<Bookmark> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expiring_bookmarks_are_extended_on_use_and_purged() {
+        let now = 1_800_000_000;
+        let mut list = Bookmarks::default();
+        let mut b = Bookmark::new("期限付き", "https://example.com/a", "");
+        b.set_expiring(true, now);
+        list.put(b);
+        list.put(Bookmark::new("ずっと", "https://example.com/b", ""));
+        assert_eq!(list.items[0].days_left(now), Some(EXPIRY_DAYS));
+        assert_eq!(list.items[0].days_left(now + DAY / 2), Some(EXPIRY_DAYS));
+        assert_eq!(list.items[1].days_left(now), None);
+        // 10 日後に使うと、そこから 30 日
+        assert!(list.touch("https://example.com/a", now + 10 * DAY));
+        assert_eq!(list.items[0].expires, Some(now + 40 * DAY));
+        assert!(!list.touch("https://example.com/b", now + 10 * DAY));
+        assert!(!list.touch("https://example.com/none", now));
+        // 保存して読み直しても残る
+        let text = toml::to_string_pretty(&list).unwrap();
+        assert!(text.contains("expires = "), "{text}");
+        let back: Bookmarks = toml::from_str(&text).unwrap();
+        assert_eq!(back, list);
+        // 期限を過ぎたら延ばさず、消す
+        let later = now + 41 * DAY;
+        assert!(list.items[0].expired(later));
+        assert!(!list.touch("https://example.com/a", later));
+        let gone = list.purge_expired(later);
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].title, "期限付き");
+        assert_eq!(list.items.len(), 1);
+        // 期限をなくす
+        let mut c = list.items[0].clone();
+        c.set_expiring(true, now);
+        c.set_expiring(false, now);
+        assert_eq!(c.expires, None);
+    }
 
     #[test]
     fn saves_finds_and_moves() {

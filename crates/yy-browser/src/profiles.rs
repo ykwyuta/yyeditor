@@ -22,6 +22,12 @@ pub struct ProfileList {
     /// ダウンロードのたびに保存先を尋ねる
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub download_ask: bool,
+    /// 左のブックマークの欄を出す（19 章 4.1）
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bookmark_bar: bool,
+    /// 左のブックマークの欄の幅（96 DPI でのピクセル。0 なら既定）
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bookmark_bar_width: u32,
     #[serde(default, rename = "profile")]
     pub profiles: Vec<ProxyProfile>,
     /// 広告ブロックのフィルタリスト（全プロファイルで共通。20 章 3）
@@ -37,6 +43,10 @@ pub struct FilterList {
     pub url: String,
     #[serde(default = "yes")]
     pub enabled: bool,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn yes() -> bool {
@@ -141,6 +151,8 @@ impl Default for ProfileList {
             search_url: String::new(),
             download_dir: String::new(),
             download_ask: false,
+            bookmark_bar: false,
+            bookmark_bar_width: 0,
             profiles: vec![
                 ProxyProfile::new("OS と同じ", ProxyMode::System),
                 ProxyProfile::new("直接", ProxyMode::Direct),

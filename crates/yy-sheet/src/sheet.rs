@@ -108,6 +108,9 @@ pub struct Sheet {
     pub cells: Arc<BTreeMap<(u64, u32), Value>>,
     /// 列幅（文字数。書いていない列は既定）
     pub col_widths: Arc<BTreeMap<u32, f32>>,
+    /// 行の高さ（既定の行の高さの何倍か。キーは絞り込み・並べ替えをしないときの格子の行。書いていない
+    /// 行は 1）
+    pub row_heights: Arc<BTreeMap<u64, f32>>,
     /// 固定する行・列の数
     pub frozen: (u32, u32),
     /// 絞り込み・並べ替え
@@ -630,6 +633,45 @@ impl Sheet {
         (rows, cols)
     }
 
+    /// 行の高さ（既定の何倍か）。`row` は絞り込み・並べ替えをしないときの格子の行。
+    pub fn row_lines(&self, row: u64) -> f32 {
+        self.row_heights.get(&row).copied().unwrap_or(1.0)
+    }
+
+    /// 行の高さを決める（既定の何倍か。1 なら既定に戻す。[`ROW_LINES_MAX`] 倍まで）。
+    pub fn set_row_lines(&mut self, row: u64, lines: f32) {
+        let lines = if lines.is_finite() {
+            lines.clamp(ROW_LINES_MIN, ROW_LINES_MAX)
+        } else {
+            1.0
+        };
+        let map = Arc::make_mut(&mut self.row_heights);
+        if (lines - 1.0).abs() < 0.01 {
+            map.remove(&row);
+        } else {
+            map.insert(row, lines);
+        }
+    }
+
+    /// 行の高さを行の挿入・削除に合わせてずらす（`at` から `n` 行。`insert` でなければ削除）。
+    fn shift_heights(&mut self, at: u64, n: u64, insert: bool) {
+        if self.row_heights.is_empty() {
+            return;
+        }
+        let h = std::mem::take(Arc::make_mut(&mut self.row_heights));
+        let end = at + n;
+        self.row_heights = Arc::new(
+            h.into_iter()
+                .filter(|(r, _)| insert || *r < at || *r >= end)
+                .map(|(r, x)| match (insert, r >= at, r >= end) {
+                    (true, true, _) => (r + n, x),
+                    (false, _, true) => (r - n, x),
+                    _ => (r, x),
+                })
+                .collect(),
+        );
+    }
+
     /// 格子の `at` 行目に `n` 行挿入する（表の中なら表に、表の外の自由なセルはずらす）。
     pub fn insert_rows(&mut self, ctx: &Context, at: u64, n: u64) -> io::Result<()> {
         self.view.rows = None;
@@ -644,6 +686,7 @@ impl Sheet {
             self.table.rows += n;
         }
         self.shift_cells(|r, c| (if r >= at { r + n } else { r }, c), |_, _| true);
+        self.shift_heights(at, n, true);
         self.styles.insert_rows(at, n);
         self.formulas.shift(yy_formula::Edit::InsertRows(at, n));
         Ok(())
@@ -668,6 +711,7 @@ impl Sheet {
             |r, c| (if r >= end { r - n } else { r }, c),
             |r, _| r < at || r >= end,
         );
+        self.shift_heights(at, n, false);
         self.styles.delete_rows(at, n);
         self.formulas.shift(yy_formula::Edit::DeleteRows(at, n));
         Ok(())
@@ -900,6 +944,10 @@ pub struct Workbook {
     pub sheets: Vec<Sheet>,
     pub date_system: DateSystem,
 }
+
+/// 行の高さの下限・上限（既定の行の高さの何倍か）
+pub const ROW_LINES_MIN: f32 = 0.5;
+pub const ROW_LINES_MAX: f32 = 40.0;
 
 /// 下へコピーで共有式にする行数（これより少なければ 1 つずつの式）。
 const SHARED_MIN: u64 = 16;

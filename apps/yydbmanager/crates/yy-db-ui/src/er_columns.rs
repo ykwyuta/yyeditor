@@ -270,7 +270,13 @@ impl State {
             .collect::<Vec<_>>();
         let count = (self.visible_rows() + 2).min(self.count() - self.top);
         let rows = (self.top..self.top + count)
-            .map(|i| (i as u64, (i - self.top) as f32 * self.painter.row_h))
+            .map(|i| {
+                (
+                    i as u64,
+                    (i - self.top) as f32 * self.painter.row_h,
+                    self.painter.row_h,
+                )
+            })
             .collect::<Vec<_>>();
         let cells = (self.top..self.top + count)
             .map(|i| {
@@ -286,7 +292,10 @@ impl State {
                     .collect()
             })
             .collect::<Vec<Vec<Cell>>>();
-        let labels = rows.iter().map(|(i, _)| (i + 1, false)).collect::<Vec<_>>();
+        let labels = rows
+            .iter()
+            .map(|(i, _, _)| (i + 1, false))
+            .collect::<Vec<_>>();
         let headers = HEADERS
             .iter()
             .enumerate()
