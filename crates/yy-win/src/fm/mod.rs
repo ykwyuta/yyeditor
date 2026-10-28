@@ -5,6 +5,7 @@
 //! （[`work`]）で 1 つずつ行い、進みはステータスバーに出す（Esc で中止）。中核は `yy-files`。
 
 mod browse;
+mod cleanup;
 mod renamedlg;
 mod shell;
 mod work;
@@ -49,14 +50,16 @@ const TAB_SEARCH: usize = 2;
 const TAB_SIMILAR: usize = 3;
 const TAB_DUPES: usize = 4;
 const TAB_REVIEW: usize = 5;
-const TAB_LOG: usize = 6;
-const TAB_NAMES: [&str; 7] = [
+const TAB_CLEANUP: usize = 6;
+const TAB_LOG: usize = 7;
+const TAB_NAMES: [&str; 8] = [
     "フォルダ",
     "同期",
     "検索",
     "似たファイル",
     "重複",
     "削除の確認",
+    "開発環境の整理",
     "記録",
 ];
 
@@ -124,6 +127,18 @@ const ID_CRASH_LOGS: u16 = 5723;
 const ID_SETTINGS: u16 = 5724;
 const ID_EXPIRE_TRASH: u16 = 5725;
 const ID_VACUUM: u16 = 5726;
+const ID_CLEAN_ROOTS: u16 = 5800;
+const ID_CLEAN_BROWSE: u16 = 5801;
+const ID_CLEAN_FIND: u16 = 5802;
+const ID_CLEAN_ECOSYSTEM: u16 = 5803;
+const ID_CLEAN_MIN: u16 = 5804;
+const ID_CLEAN_AGE: u16 = 5805;
+const ID_CLEAN_USER: u16 = 5806;
+const ID_CLEAN_ENGINES: u16 = 5807;
+const ID_CLEAN_OPEN: u16 = 5808;
+const ID_CLEAN_DETAIL: u16 = 5809;
+const ID_CLEAN_COPY: u16 = 5810;
+const ID_CLEAN_EXPORT: u16 = 5811;
 // 一覧の右クリック
 const CM_OPEN: u32 = 1;
 const CM_LOCATE: u32 = 2;
@@ -143,7 +158,7 @@ const CM_SYNC_SRC: u32 = 15;
 const CM_IN_FOLDERS: u32 = 16;
 
 /// 一覧の列（見出し・幅・右寄せ）。
-const COLUMNS: [&[(&str, i32, bool)]; 5] = [
+const COLUMNS: [&[(&str, i32, bool)]; 6] = [
     &[
         ("種類", 70, false),
         ("パス", 360, false),
@@ -186,6 +201,16 @@ const COLUMNS: [&[(&str, i32, bool)]; 5] = [
         ("理由", 160, false),
         ("自信", 40, false),
         ("グループ", 60, true),
+    ],
+    &[
+        ("環境", 100, false),
+        ("種類", 180, false),
+        ("論理容量", 100, true),
+        ("配下の最新更新", 150, false),
+        ("ファイル数", 90, true),
+        ("場所・イメージID", 400, false),
+        ("理由", 420, false),
+        ("整理方法", 420, false),
     ],
 ];
 
@@ -245,6 +270,7 @@ struct App {
     dup_rows: Vec<(usize, usize)>,
     // 削除の確認
     review: Review,
+    cleanup: yy_files::cleanup::Report,
     /// 実行中の処理（中止の印・説明）
     busy: Option<(Arc<AtomicBool>, String)>,
     rx: mpsc::Receiver<Msg>,
@@ -255,6 +281,12 @@ struct App {
 /// 入力の欄。
 #[derive(Default)]
 struct Edits {
+    clean_roots: HWND,
+    clean_ecosystem: HWND,
+    clean_min: HWND,
+    clean_age: HWND,
+    clean_user: HWND,
+    clean_engines: HWND,
     job: HWND,
     mode: HWND,
     compare: HWND,
@@ -472,6 +504,11 @@ fn create_menu() -> Result<HMENU> {
             );
         }
         let tidy = CreatePopupMenu()?;
+        add(
+            tidy,
+            ID_TAB_BASE + TAB_CLEANUP as u16,
+            "開発環境の削除候補を探す(&D)",
+        );
         add(tidy, ID_EXPIRE_TRASH, "隔離フォルダの古いものを消す(&T)...");
         add(tidy, ID_VACUUM, "中身の索引のバキューム(&V)...");
         let help = CreatePopupMenu()?;
@@ -785,6 +822,56 @@ fn create() -> Result<HWND> {
             c(button("一覧を空にする", ID_CLEAR_REVIEW), 120),
             c(e.review_info, 0),
         ]];
+        e.clean_roots = edit(ID_CLEAN_ROOTS);
+        e.clean_ecosystem = combo(ID_CLEAN_ECOSYSTEM, false);
+        for name in cleanup::FILTERS {
+            SendMessageW(
+                e.clean_ecosystem,
+                CB_ADDSTRING,
+                None,
+                Some(LPARAM(HSTRING::from(name).as_ptr() as isize)),
+            );
+        }
+        SendMessageW(e.clean_ecosystem, CB_SETCURSEL, Some(WPARAM(0)), None);
+        e.clean_min = edit(ID_CLEAN_MIN);
+        e.clean_age = edit(ID_CLEAN_AGE);
+        set_text(e.clean_min, "100");
+        set_text(e.clean_age, "30");
+        e.clean_user = check("共通キャッシュも探す", ID_CLEAN_USER);
+        e.clean_engines = check("Docker / Podman も調査", ID_CLEAN_ENGINES);
+        SendMessageW(e.clean_user, BM_SETCHECK, Some(WPARAM(1)), None);
+        SendMessageW(e.clean_engines, BM_SETCHECK, Some(WPARAM(1)), None);
+        let cleanup_rows = vec![
+            vec![
+                c(label("場所（; 区切り）"), 110),
+                c(e.clean_roots, 0),
+                c(button("追加...", ID_CLEAN_BROWSE), 70),
+            ],
+            vec![
+                c(label("環境"), 40),
+                c(e.clean_ecosystem, 145),
+                c(label("最小 MiB"), 65),
+                c(e.clean_min, 55),
+                c(label("ビルド経過日"), 95),
+                c(e.clean_age, 50),
+            ],
+            vec![
+                c(e.clean_user, 155),
+                c(e.clean_engines, 180),
+                c(button("候補を探す", ID_CLEAN_FIND), 90),
+                c(cancel(()), 65),
+            ],
+            vec![
+                c(button("フォルダで確認", ID_CLEAN_OPEN), 120),
+                c(button("詳細", ID_CLEAN_DETAIL), 65),
+                c(button("整理方法をコピー", ID_CLEAN_COPY), 135),
+                c(button("CSV 出力...", ID_CLEAN_EXPORT), 100),
+            ],
+            vec![c(
+                label("容量順に表示します。候補抽出のみで、自動削除は行いません。"),
+                0,
+            )],
+        ];
         let rows = vec![
             Vec::new(),
             sync_rows,
@@ -792,6 +879,7 @@ fn create() -> Result<HWND> {
             sim_rows,
             dup_rows,
             review_rows,
+            cleanup_rows,
             Vec::new(),
         ];
         // 「フォルダ」のタブには一覧がない（自分の窓の中にある）
@@ -898,6 +986,7 @@ fn create() -> Result<HWND> {
             dup_groups: Vec::new(),
             dup_rows: Vec::new(),
             review,
+            cleanup: yy_files::cleanup::Report::default(),
             busy: None,
             rx,
             notify,
@@ -1085,6 +1174,7 @@ impl App {
             TAB_SIMILAR => self.sim_rows.len(),
             TAB_DUPES => self.dup_rows.len(),
             TAB_REVIEW => self.review.items.len(),
+            TAB_CLEANUP => self.cleanup.items.len(),
             _ => 0,
         }
     }
@@ -1106,6 +1196,43 @@ impl App {
     /// 一覧の文字列。
     fn cell(&self, tab: usize, row: usize, col: usize) -> String {
         let size = |n: u64| yy_files::human_size(n);
+        if tab == TAB_CLEANUP {
+            return self
+                .cleanup
+                .items
+                .get(row)
+                .map(|c| match col {
+                    0 => c.ecosystem.label().into(),
+                    1 => c.kind.clone(),
+                    2 => format!("{}{}", if c.incomplete { "≥ " } else { "" }, size(c.bytes)),
+                    3 => {
+                        if c.modified > 0 {
+                            time_text(c.modified)
+                        } else {
+                            "—".into()
+                        }
+                    }
+                    4 => {
+                        if matches!(c.location, yy_files::cleanup::Location::Folder(_)) {
+                            c.files.to_string()
+                        } else {
+                            "—".into()
+                        }
+                    }
+                    5 => c.address(),
+                    6 => format!(
+                        "{}{}",
+                        if c.incomplete {
+                            "一部未集計: "
+                        } else {
+                            ""
+                        },
+                        c.reason
+                    ),
+                    _ => c.advice.clone(),
+                })
+                .unwrap_or_default();
+        }
         match tab {
             TAB_SYNC => {
                 let Some(r) = self.sync_rows.get(row) else {
@@ -2592,6 +2719,7 @@ fn finish(a: &mut App, msg: &str) {
 
 fn handle(m: Msg) {
     match m {
+        Msg::Cleaned(result) => cleanup::finished(result),
         Msg::Panicked(s) => {
             with(|a| {
                 finish(a, &format!("処理が異常終了しました: {s}"));
@@ -2916,6 +3044,10 @@ fn handle(m: Msg) {
 }
 
 fn list_menu(hwnd: HWND, tab: usize) {
+    if tab == TAB_CLEANUP {
+        cleanup::menu(hwnd);
+        return;
+    }
     let Some((rows, plan_mode)) =
         with(|a| (a.selected_rows(tab), a.plan.is_some() && a.busy.is_none()))
     else {
@@ -3227,6 +3359,16 @@ fn export_search(hwnd: HWND) {
 
 fn command(id: u16, code: u32) {
     match id {
+        ID_CLEAN_FIND => cleanup::find(),
+        ID_CLEAN_BROWSE => {
+            if let Some(h) = with(|a| a.edits.clean_roots) {
+                browse_into(h, true);
+            }
+        }
+        ID_CLEAN_OPEN => cleanup::open(),
+        ID_CLEAN_DETAIL => cleanup::details(None),
+        ID_CLEAN_COPY => cleanup::copy(),
+        ID_CLEAN_EXPORT => cleanup::export(),
         ID_EXIT => {
             if let Some(f) = with(|a| a.frame) {
                 unsafe {
@@ -3493,6 +3635,12 @@ fn on_list_notify(hwnd: HWND, tab: usize, hdr: &NMHDR, lparam: LPARAM) -> LRESUL
         }
         NM_DBLCLK => {
             let nm = unsafe { &*(lparam.0 as *const NMITEMACTIVATE) };
+            if tab == TAB_CLEANUP {
+                if nm.iItem >= 0 {
+                    cleanup::details(Some(nm.iItem as usize));
+                }
+                return LRESULT(0);
+            }
             if nm.iItem >= 0
                 && let Some(Some((p, line))) = with(|a| a.row_path(tab, nm.iItem as usize))
             {
@@ -3575,6 +3723,7 @@ extern "system" fn frame_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                     TAB_SEARCH => Some(a.edits.search_roots),
                     TAB_SIMILAR => Some(a.edits.sim_roots),
                     TAB_DUPES => Some(a.edits.dup_roots),
+                    TAB_CLEANUP => Some(a.edits.clean_roots),
                     _ => None,
                 };
                 if let Some(h) = target {

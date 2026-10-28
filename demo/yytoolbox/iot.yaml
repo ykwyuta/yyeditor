@@ -1,0 +1,23 @@
+columns:
+- name: センサーID
+  prefix: TEST-SENSOR-
+  type: sequence
+  width: 6
+- name: 日時
+  type: datetime
+- max: 50
+  min: -20
+  name: 温度
+  scale: 2
+  type: decimal
+- max: 100
+  min: 0
+  name: 湿度
+  scale: 2
+  type: decimal
+- name: 状態
+  type: choice
+  values:
+  - 正常
+  - 警告
+  - 停止

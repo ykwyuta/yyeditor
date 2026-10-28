@@ -1,0 +1,28 @@
+columns:
+- name: 患者ID
+  prefix: TEST-PATIENT-
+  type: sequence
+  width: 6
+- name: 架空氏名
+  type: person_name
+- name: テスト分類
+  type: choice
+  values:
+  - テスト分類A
+  - テスト分類B
+  - テスト分類C
+- name: 血液型
+  type: choice
+  values:
+  - A
+  - B
+  - O
+  - AB
+  - 不明
+- max: 40
+  min: 35
+  name: 体温
+  scale: 2
+  type: decimal
+- name: 来院日
+  type: date

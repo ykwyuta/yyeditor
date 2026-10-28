@@ -20,8 +20,21 @@ See the [yyeditor help](../../crates/yy-win/help/help.md) (Japanese), or press F
 
 ### Live Markdown editing
 
+The right-hand preview also supports Markdown transclusion with `![[Note]]`, `![[Note#Heading]]`, and `![[Note#^block-id]]`.
+Sources stay within the note folder tree or the dedicated snippets folder. Export a flattened Markdown copy through the File menu.
+See [Markdown embeds](markdown-embeds.md) and the [example](../../demo/markdown-embeds/main.md) (Japanese).
+
 Live editing is an optional mode alongside the normal editor and preview. Enter creates a paragraph; Shift+Enter inserts a line break.
 Tables support row/column insertion and removal. Mermaid, formulas and d3 are supported; use the bundled manual for details.
+
+## yytoolbox — Offline Developer Utilities
+
+Test regular expressions, encode/decode Base64, compute hashes, decode JWTs, format JSON/SQL, and generate password candidates with character requirements.
+Generate synthetic CSV from reusable YAML column definitions, with eight sector presets, ranges, choices, null rates, uniqueness and reproducible seeds.
+Includes compound-interest and repayment tables, Japanese-era conversion, age/school-year correspondence and DST-aware time-zone comparisons.
+Generate QR codes, encode/decode URLs, convert XML/YAML/CSV/INI, and format HTML/CSS/JavaScript.
+Timed screen/rectangle recording with system audio and microphone, and batch image resizing with aspect ratios and colored/transparent padding, use native Windows APIs and Rust libraries without FFmpeg or ImageMagick.
+Files and clipboard results are saved only through explicit actions. See the [guide](yytoolbox.md) and [CSV definitions](../../demo/yytoolbox/README.md) (Japanese).
 
 ## yyterm — Terminal and 3270 Emulator
 

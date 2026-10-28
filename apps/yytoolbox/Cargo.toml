@@ -1,0 +1,48 @@
+[package]
+name = "yytoolbox"
+description = "Offline developer tools, synthetic CSV data and date/finance calculators"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "../yyeditor/build.rs"
+
+[dependencies]
+blake3.workspace = true
+chrono = "0.4"
+chrono-tz = "0.10"
+crc32fast = "1"
+csv.workspace = true
+data-encoding.workspace = true
+getrandom = "0.3"
+md5 = "0.8"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+png = "0.17"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+roxmltree = "0.20"
+biome_formatter = "=0.5.7"
+biome_js_formatter = "=0.5.7"
+biome_js_parser = "=0.5.7"
+biome_js_syntax = "=0.5.7"
+# Keep the published Biome syntax/rowan API family compatible.
+biome_rowan = "=0.5.7"
+biome_parser = "=0.5.7"
+biome_diagnostics = "=0.5.7"
+biome_unicode_table = "=0.5.7"
+markup_fmt = "0.27"
+malva = "0.16"
+regex = "1"
+serde.workspace = true
+serde_json = "1"
+serde_yaml_ng = "0.10"
+sha1.workspace = true
+sha2.workspace = true
+sqlformat = "0.5"
+tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_SystemServices", "Win32_Media_Audio", "Win32_Media_MediaFoundation", "Win32_Media_Multimedia", "Win32_Media_KernelStreaming", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"]
+
+[lints]
+workspace = true

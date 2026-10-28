@@ -11,11 +11,13 @@
 | [SSH接続設定](ssh-connections.md) | 接続先GUI、SFTP/SCP、エージェントなし編集、ゲートウェイ |
 | [データ形式とAPI](formats.md) | 保存形式・プロトコル・文字コードの実装元と互換性の扱い |
 | [素材と描画](assets.md) | アイコン生成、フォント、プレビュー、描画性能の調査方法 |
+| [Markdown埋め込み](markdown-embeds.md) | ファイル・見出し・ブロックの展開、資源の範囲、展開保存と試験 |
 | [yydbmanager](yydbmanager.md) | ネイティブDB、DuckDBのツールチェーン、CLI/UI/実DB試験 |
 | [yymerge](yymerge.md) | GUI/CLIのビルドとヘッドレス構成 |
 | [yyproject（独立リポジトリ）](https://github.com/ykwyuta/YYproject/blob/master/docs/developer/yyproject.md) | SQLite・MCP・ネイティブGUIの構成と検証 |
 | [YY3Designer](yy3designer.md) | 画像・3DコアとWindows UIの検証 |
 | [yydraw](yydraw.md) | アプリ・作例のビルド |
+| [yytoolbox](yytoolbox.md) | ローカル変換・録画・一括画像処理の構成と試験 |
 
 作業ルールは[AGENTS.md](../../AGENTS.md)。提案・過去のレビュー・測定結果は
 [履歴](../history/README.md)へ置き、現在の内部仕様と混在させません。

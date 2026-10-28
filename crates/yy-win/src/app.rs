@@ -533,6 +533,16 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         )?;
         item(
             file,
+            previewmode::ID_SAVE_EXPANDED,
+            w!("インライン展開保存(&I)..."),
+        )?;
+        item(
+            file,
+            previewmode::ID_SNIPPETS,
+            w!("Markdownスニペットフォルダーを開く..."),
+        )?;
+        item(
+            file,
             ID_SAVE_AS_REMOTE,
             w!("リモートに名前を付けて保存(&T)..."),
         )?;
@@ -4773,6 +4783,8 @@ fn execute_command(hwnd: HWND, id: u16) {
         ID_SAVE_AS => {
             cmd_save(hwnd, true);
         }
+        previewmode::ID_SAVE_EXPANDED => previewmode::save_expanded(hwnd),
+        previewmode::ID_SNIPPETS => previewmode::open_snippets(hwnd),
         ID_SAVE_AS_REMOTE => {
             cmd_save_to(hwnd, true, SaveWhere::Remote);
         }
@@ -5347,7 +5359,10 @@ pub(crate) extern "system" fn frame_proc(
         WM_ACTIVATE => {
             // ほかのアプリ（コマンド プロンプトの git など）から戻ったら、ソース管理を読み直す
             if loword(wparam.0) != WA_INACTIVE {
-                with_app(|a| a.git_poke());
+                with_app(|a| {
+                    a.git_poke();
+                    a.schedule_preview();
+                });
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }

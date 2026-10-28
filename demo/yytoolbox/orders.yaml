@@ -1,0 +1,25 @@
+columns:
+- name: 注文ID
+  prefix: TEST-ORDER-
+  type: sequence
+  width: 6
+- name: 商品名
+  type: product_name
+- max: 10
+  min: 1
+  name: 数量
+  type: integer
+- max: 50000
+  min: 100
+  name: 単価
+  scale: 2
+  type: decimal
+- name: 状態
+  type: choice
+  values:
+  - 受付
+  - 出荷待ち
+  - 出荷済
+  - 取消
+- name: 注文日時
+  type: datetime

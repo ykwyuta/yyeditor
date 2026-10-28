@@ -17,6 +17,7 @@
 
 pub mod archive;
 pub mod catalogs;
+pub mod cleanup;
 pub mod dupes;
 pub mod fs;
 pub mod fulltext;

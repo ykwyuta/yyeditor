@@ -1,6 +1,7 @@
 //! Markdown / HTML のプレビュー（エディタの右側）: 表示の切り替え、内容の更新、スクロールの同期、
 //! 境界の移動。表示そのものは [`crate::preview`]。
 
+use std::path::Path;
 use yy_preview::{Kind, PageOptions};
 
 use super::*;
@@ -8,6 +9,8 @@ use crate::preview::Preview;
 
 /// 「プレビュー」（表示メニュー）
 pub(crate) const ID_PREVIEW: u16 = 209;
+pub(crate) const ID_SAVE_EXPANDED: u16 = 118;
+pub(crate) const ID_SNIPPETS: u16 = 119;
 /// 編集してからプレビューを更新するまでの時間（ミリ秒）
 const PREVIEW_DELAY_MS: u32 = 250;
 /// これより大きな文書はプレビューしない
@@ -166,7 +169,7 @@ impl App {
                 .and_then(|p| p.parent())
                 .map(|p| crate::preview::DocBase::Local(p.to_owned())),
         };
-        let opts = PageOptions {
+        let mut opts = PageOptions {
             has_folder: folder.is_some(),
             token_colors: self
                 .config
@@ -178,7 +181,28 @@ impl App {
         };
         match kind {
             Kind::Markdown => {
-                let body = yy_preview::markdown_to_html(&text, Some(&self.syntaxes));
+                let snippets = if self.doc.remote().is_none() {
+                    yy_config::config_dir().map(|p| p.join("snippets"))
+                } else {
+                    None
+                };
+                let local_path = if self.doc.remote().is_none() {
+                    path.as_deref()
+                } else {
+                    None
+                };
+                let expanded =
+                    yy_preview::transclusion::expand(&text, local_path, snippets.as_deref(), false);
+                let body = expanded.html(Some(&self.syntaxes));
+                let folder = if self.doc.remote().is_none() {
+                    Some(crate::preview::DocBase::Embedded {
+                        root: local_path.and_then(Path::parent).map(Path::to_path_buf),
+                        snippets,
+                    })
+                } else {
+                    folder
+                };
+                opts.has_folder = folder.is_some();
                 let line = self.preview_line();
                 pane.show_markdown(&body, &opts, folder, Some(line));
             }
@@ -233,4 +257,148 @@ pub(crate) fn translate_preview_shortcut(frame: HWND, vk: u32) -> bool {
         let _ = PostMessageW(Some(frame), WM_COMMAND, WPARAM(id as usize), LPARAM(0));
     }
     true
+}
+
+/// Export a flattened copy without changing the active document, its path or Undo.
+pub(super) fn save_expanded(hwnd: HWND) {
+    let prepared = with_app(|a| -> std::result::Result<_, String> {
+        if a.doc.is_busy() {
+            return Err("文書の処理が完了してからインライン展開保存してください。".into());
+        }
+        if a.doc.remote().is_some() {
+            return Err("インライン展開保存はローカルのMarkdown文書で利用できます。".into());
+        }
+        let path = a.doc.path().map(Path::to_path_buf);
+        let syntax = a.syntax.as_ref().map(|s| s.view.syntax().id.as_str());
+        if Kind::detect(syntax, path.as_deref()) != Some(Kind::Markdown) {
+            return Err("Markdown文書を開いてください。".into());
+        }
+        let snapshot = a.doc.snapshot();
+        if snapshot.len() > PREVIEW_MAX_BYTES {
+            return Err("展開保存は8 MiBまでの文書に対応します。".into());
+        }
+        let source = String::from_utf8(snapshot.read(0..snapshot.len()))
+            .map_err(|_| "UTF-8として読み取れません")?;
+        let snippets = yy_config::config_dir().map(|p| p.join("snippets"));
+        let expanded =
+            yy_preview::transclusion::expand(&source, path.as_deref(), snippets.as_deref(), true);
+        if !expanded.errors.is_empty() {
+            return Err(format!(
+                "参照を解決できないため保存しません。\n{}",
+                expanded.errors.join("\n")
+            ));
+        }
+        Ok((path, expanded))
+    });
+    let (current, expanded) = match prepared {
+        Some(Ok(value)) => value,
+        Some(Err(error)) => {
+            error_box(hwnd, &error);
+            return;
+        }
+        None => return,
+    };
+    let path = unsafe {
+        let Ok(dialog) =
+            CoCreateInstance::<_, IFileSaveDialog>(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)
+        else {
+            return;
+        };
+        let _ = dialog.SetTitle(w!("インライン展開保存 — Markdownのコピー"));
+        let _ = dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
+            pszName: w!("Markdown (*.md)"),
+            pszSpec: w!("*.md"),
+        }]);
+        let _ = dialog.SetDefaultExtension(w!("md"));
+        let stem = current
+            .as_deref()
+            .and_then(Path::file_stem)
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "ノート".into());
+        let _ = dialog.SetFileName(&HSTRING::from(format!("{stem}-expanded.md")));
+        if dialog.Show(Some(hwnd)).is_err() {
+            return;
+        }
+        let Some(path) = dialog.cast().ok().and_then(|d| dialog_result(&d)) else {
+            return;
+        };
+        path
+    };
+    if let Err(error) = write_expanded(&path, &expanded) {
+        error_box(hwnd, &format!("展開結果を保存できませんでした: {error}"));
+    }
+}
+
+fn write_expanded(
+    path: &Path,
+    expanded: &yy_preview::transclusion::Expansion,
+) -> std::io::Result<()> {
+    if !expanded.errors.is_empty() {
+        return Err(std::io::Error::other("未解決の参照があります"));
+    }
+    let existing = path.canonicalize().ok();
+    if expanded
+        .sources
+        .iter()
+        .any(|source| source == path || existing.as_ref() == Some(source))
+    {
+        return Err(std::io::Error::other(
+            "元のノート・埋め込み元とは別の保存先を指定してください",
+        ));
+    }
+    use std::io::Write;
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
+    file.write_all(expanded.markdown.as_bytes())?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+pub(super) fn open_snippets(hwnd: HWND) {
+    let Some(folder) = yy_config::config_dir().map(|p| p.join("snippets")) else {
+        error_box(hwnd, "設定フォルダーを取得できません。");
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(&folder) {
+        error_box(hwnd, &format!("スニペットフォルダーを作れません: {e}"));
+        return;
+    }
+    unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(
+            Some(hwnd),
+            w!("open"),
+            &HSTRING::from(folder.as_os_str()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn expanded_save_preserves_sources_and_refuses_incomplete_exports() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.md");
+        let part = dir.path().join("part.md");
+        let target = dir.path().join("copy.md");
+        let source = "# 本文\r\n\r\n![[part]]\r\n";
+        std::fs::write(&main, source).unwrap();
+        std::fs::write(&part, "共通の内容😀\n").unwrap();
+        let expanded = yy_preview::transclusion::expand(source, Some(&main), None, true);
+        assert!(expanded.errors.is_empty());
+        assert!(write_expanded(&main, &expanded).is_err());
+        assert!(write_expanded(&part, &expanded).is_err());
+        std::fs::write(&target, "以前のコピー").unwrap();
+        write_expanded(&target, &expanded).unwrap();
+        let saved = std::fs::read_to_string(&target).unwrap();
+        assert!(saved.contains("共通の内容😀") && !saved.contains("![["));
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), source);
+        assert_eq!(std::fs::read_to_string(&part).unwrap(), "共通の内容😀\n");
+        let broken = yy_preview::transclusion::expand("![[missing]]", Some(&main), None, true);
+        assert!(write_expanded(&target, &broken).is_err());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), saved);
+    }
 }

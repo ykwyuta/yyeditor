@@ -17,7 +17,7 @@
 リポジトリのルートで実行します。
 
 ```powershell
-cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw
+cargo build --release -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw -p yytoolbox
 ```
 
 実行ファイルは `target\release\` に生成されます。
@@ -169,10 +169,10 @@ yyfilemanager の中核は `cargo test -p yy-files`（圧縮ファイルの一�
 [.github/workflows/ci.yml](../../.github/workflows/ci.yml) は次を行います。
 
 - Linux x86_64 / aarch64 用の静的エージェントをビルドし、バージョン・ハッシュ・静的リンクを確認。
-- Windows でフォーマット、Clippy、ワークスペースのテスト、8アプリのリリースビルドを実行。
+- Windows でフォーマット、Clippy、ワークスペースのテスト、9アプリのリリースビルドを実行。
 - Linux で中核のテスト、x3270 / GnuCOBOL との照合、Windows UI の型検査を実行。
 - 独立ワークスペースのyymerge Windows/Linux検査・画面・Office描画検証とyydbmanager Windows/Linux検査も共通ワークフローで実行。DuckDB用の`windows-2022`固定を維持。
-- Windows各ジョブ成功後、`yyeditor-windows-x64`にyyeditor / yyterm / yysftp / yysheet / yyfilemanager / yyclip / yybrowser / yydraw / yydbmanager / yymerge / yymergewと両エージェントを収録。個別成果物も維持。
+- Windows各ジョブ成功後、`yyeditor-windows-x64`にyyeditor / yyterm / yysftp / yysheet / yyfilemanager / yyclip / yybrowser / yydraw / yytoolbox / yydbmanager / yymerge / yymergewと両エージェントを収録。個別成果物も維持。
 - yymerge/yydbmanagerの説明・ライセンス・ヘルプは同名サブフォルダーに保存。手動実行の`docker_databases=true`で5DBの実接続試験を実行。
 
 yyclip、yyfilemanager、yybrowser も CI のビルド・配布・Windows 向け型検査に含まれています。

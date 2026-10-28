@@ -1,0 +1,19 @@
+columns:
+- name: イベントID
+  type: uuid
+- name: 日時
+  type: datetime
+- name: レベル
+  type: choice
+  values:
+  - INFO
+  - WARN
+  - ERROR
+- name: 文書用IP
+  type: ip_address
+- name: テストURL
+  type: url
+- max: 5000
+  min: 0
+  name: 処理時間ms
+  type: integer

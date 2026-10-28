@@ -1,0 +1,19 @@
+columns:
+- name: ID
+  prefix: TEST-
+  type: sequence
+  width: 6
+- name: 架空氏名
+  type: person_name
+- name: メール
+  type: email
+- name: 電話
+  type: phone
+- name: 郵便番号
+  type: postal_code
+- name: 架空住所
+  type: address
+- from: 1960-01-01
+  name: 生年月日
+  to: 2010-12-31
+  type: date

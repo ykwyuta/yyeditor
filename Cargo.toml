@@ -40,6 +40,7 @@ members = [
     "apps/yyclip",
     "apps/yyfilemanager",
     "apps/yybrowser",
+    "apps/yytoolbox",
     "tools/gen-bigfile",
 ]
 

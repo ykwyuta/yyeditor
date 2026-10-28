@@ -24,6 +24,7 @@ pub(super) type SearchHit = (FileRef, u64, String);
 
 /// 作業スレッドから画面への知らせ。
 pub(super) enum Msg {
+    Cleaned(Result<yy_files::cleanup::Report, String>),
     /// ステータスバーに出す進み
     Progress(String),
     /// 記録に書く

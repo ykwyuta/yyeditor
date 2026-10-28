@@ -82,6 +82,11 @@ impl Drop for FetchPermit {
 pub(crate) enum DocBase {
     /// 手元のフォルダ（資源の要求を検証してから読む）
     Local(PathBuf),
+    /// Only the note tree and the dedicated snippets tree are resource roots.
+    Embedded {
+        root: Option<PathBuf>,
+        snippets: Option<PathBuf>,
+    },
     /// SSH 接続先のフォルダ（要求ごとにエージェントから取り寄せる）
     Remote {
         session: std::sync::Arc<yy_remote::Session>,
@@ -93,6 +98,16 @@ impl PartialEq for DocBase {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (DocBase::Local(a), DocBase::Local(b)) => a == b,
+            (
+                DocBase::Embedded {
+                    root: a,
+                    snippets: x,
+                },
+                DocBase::Embedded {
+                    root: b,
+                    snippets: y,
+                },
+            ) => a == b && x == y,
             (DocBase::Remote { dir: a, .. }, DocBase::Remote { dir: b, .. }) => a == b,
             _ => false,
         }
@@ -946,21 +961,11 @@ fn fetch_document_file(
     let mut data = Vec::new();
     match base {
         Some(DocBase::Local(root)) => {
-            let path = yy_preview::security::local_document_file(&root, &rel)?;
-            let mut file = std::fs::File::open(path)?.take(FETCH_LIMIT + 1);
-            let mut chunk = [0u8; 64 * 1024];
-            loop {
-                check()?;
-                let n = file.read(&mut chunk)?;
-                if n == 0 {
-                    break;
-                }
-                ResourceBuffer {
-                    data: &mut data,
-                    cancelled,
-                }
-                .write_all(&chunk[..n])?;
-            }
+            data = local_resource_data(&root, &rel, cancelled)?;
+        }
+        Some(DocBase::Embedded { root, snippets }) => {
+            let (root, rel) = embedded_resource_root(root, snippets, &rel)?;
+            data = local_resource_data(&root, &rel, cancelled)?;
         }
         Some(DocBase::Remote { session, dir }) => {
             let path = remote_document_file(&session, &dir.path, &rel)?;
@@ -981,6 +986,35 @@ fn fetch_document_file(
         }
     }
     check()?;
+    Ok(data)
+}
+
+fn local_resource_data(
+    root: &Path,
+    relative: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<Vec<u8>> {
+    let path = yy_preview::security::local_document_file(root, relative)?;
+    let mut file = std::fs::File::open(path)?.take(FETCH_LIMIT + 1);
+    let mut data = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        if cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Preview request cancelled",
+            ));
+        }
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        ResourceBuffer {
+            data: &mut data,
+            cancelled,
+        }
+        .write_all(&chunk[..n])?;
+    }
     Ok(data)
 }
 
@@ -1165,6 +1199,20 @@ fn open_link(shared: &Rc<Shared>, uri: &str, user_initiated: bool) {
         }
         let folder = match base {
             DocBase::Local(f) => f,
+            DocBase::Embedded { root, snippets } => {
+                let Ok((root, relative)) = embedded_resource_root(root, snippets, &rel) else {
+                    return;
+                };
+                let Ok(path) = yy_preview::security::local_document_file(&root, &relative) else {
+                    return;
+                };
+                if yy_preview::Kind::detect(None, Some(&path)).is_some() || is_text_file(&path) {
+                    post_open(shared, path);
+                } else if yy_preview::security::may_open_external_file(&path, user_initiated) {
+                    shell_open(&HSTRING::from(path.as_os_str()));
+                }
+                return;
+            }
             DocBase::Remote { session, dir } => {
                 // リモートの文書のフォルダの Markdown・HTML・テキストはエディタで開く
                 if yy_preview::Kind::detect(None, Some(Path::new(&rel))).is_some()
@@ -1196,6 +1244,21 @@ fn open_link(shared: &Rc<Shared>, uri: &str, user_initiated: bool) {
     {
         shell_open(&HSTRING::from(uri));
     }
+}
+
+fn embedded_resource_root(
+    root: Option<PathBuf>,
+    snippets: Option<PathBuf>,
+    relative: &str,
+) -> io::Result<(PathBuf, String)> {
+    let (base, relative) = match relative.strip_prefix(yy_preview::transclusion::SNIPPET_PREFIX) {
+        Some(path) => (snippets, path),
+        None => (root, relative),
+    };
+    Ok((
+        base.ok_or_else(|| io::Error::other("Markdown資源のフォルダがありません"))?,
+        relative.to_owned(),
+    ))
 }
 
 /// エディタで開くようフレームに頼む。
@@ -1432,6 +1495,113 @@ mod tests {
         assert_eq!(mime_of("x/y.svg"), "image/svg+xml");
         assert_eq!(mime_of("style.css"), "text/css; charset=utf-8");
         assert_eq!(mime_of("dir.v2/noext"), "application/octet-stream");
+    }
+    #[test]
+    fn transclusion_renders_sections_blocks_and_snippet_images_in_webview2() {
+        let _serial = testing::webview2_lock();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            RegisterClassExW(&WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(preview_proc),
+                hInstance: GetModuleHandleW(None).unwrap().into(),
+                lpszClassName: PREVIEW_CLASS,
+                ..Default::default()
+            });
+        }
+        struct Parent(HWND);
+        impl Drop for Parent {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        let parent = Parent(unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PREVIEW_CLASS,
+                w!("transclusion test"),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                0,
+                0,
+                640,
+                480,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        });
+        let files = tempfile::tempdir().unwrap();
+        let snippets = tempfile::tempdir().unwrap();
+        let main = files.path().join("main.md");
+        std::fs::write(&main, "").unwrap();
+        std::fs::write(
+            files.path().join("part.md"),
+            "# 要件\n## 対象\n埋め込み本文\n\n## 除外\n見せない内容\n\n段落の本文 ^block\n",
+        )
+        .unwrap();
+        std::fs::write(snippets.path().join("header.md"), "![画像](icon.svg)\n").unwrap();
+        std::fs::write(snippets.path().join("icon.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"><rect width=\"8\" height=\"8\" fill=\"red\"/></svg>").unwrap();
+        let source = "# メイン\n\n![[part#対象]]\n\n![[part#^block]]\n\n![[header]]\n\n終了";
+        let expanded =
+            yy_preview::transclusion::expand(source, Some(&main), Some(snippets.path()), false);
+        assert!(expanded.errors.is_empty(), "{:?}", expanded.errors);
+        let mut preview = Preview::new(parent.0, parent.0).unwrap();
+        preview.set_visible(true);
+        preview.set_bounds(0, 0, 620, 440);
+        preview.show_markdown(
+            &expanded.html(None),
+            &PageOptions {
+                has_folder: true,
+                ..Default::default()
+            },
+            Some(DocBase::Embedded {
+                root: Some(files.path().to_owned()),
+                snippets: Some(snippets.path().to_owned()),
+            }),
+            Some(0),
+        );
+        assert!(
+            pump_until(Duration::from_secs(45), || preview.loaded_kind()
+                == Some(Kind::Markdown)
+                || preview.is_unavailable()),
+            "preview did not load"
+        );
+        if preview.is_unavailable() {
+            assert!(
+                std::env::var_os("YY_REQUIRE_WEBVIEW2").is_none(),
+                "WebView2 required: {}",
+                notice_of(preview.hwnd)
+            );
+            return;
+        }
+        let actual = Cell::new(String::new());
+        assert!(
+            pump_until(Duration::from_secs(20), || {
+                let value = eval(&preview, "JSON.stringify({body:document.querySelector('#yy-content')?.innerText,image:[...document.images].some(i=>i.complete&&i.naturalWidth===8),heading:document.querySelector('h2')?.textContent})").unwrap_or_default();
+                actual.set(value.clone());
+                value.contains("埋め込み本文")
+                    && value.contains("段落の本文")
+                    && value.contains("終了")
+                    && !value.contains("見せない内容")
+                    && value.contains("\\\"image\\\":true")
+            }),
+            "rendered state: {}",
+            actual.take()
+        );
+        let base = Some(DocBase::Embedded {
+            root: Some(files.path().to_owned()),
+            snippets: Some(snippets.path().to_owned()),
+        });
+        assert!(
+            fetch_document_file(base.clone(), "__yy_snippets__/icon.svg", &|| false)
+                .unwrap()
+                .starts_with(b"<svg")
+        );
+        assert!(fetch_document_file(base, "__yy_snippets__/%2e%2e/secret", &|| false).is_err());
     }
     use std::cell::Cell;
     use std::time::Duration;

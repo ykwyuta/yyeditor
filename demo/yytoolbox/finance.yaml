@@ -1,0 +1,25 @@
+columns:
+- name: テスト口座ID
+  prefix: TEST-ACCOUNT-
+  type: sequence
+  width: 6
+- name: 架空名義
+  type: person_name
+- max: 10000000
+  min: 0
+  name: 残高
+  scale: 2
+  type: decimal
+- name: 通貨
+  type: choice
+  values:
+  - JPY
+  - USD
+  - EUR
+- max: 10
+  min: 0
+  name: テスト利率
+  scale: 2
+  type: decimal
+- name: 更新日時
+  type: datetime

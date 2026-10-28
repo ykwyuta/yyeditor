@@ -18,7 +18,7 @@ use pulldown_cmark::{
 };
 
 /// 変換に使う拡張構文。
-fn options() -> Options {
+pub(crate) fn options() -> Options {
     Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_STRIKETHROUGH
@@ -35,7 +35,20 @@ fn options() -> Options {
 
 /// Markdown を HTML（`<body>` の中身）にする。`syntaxes` があればコードブロックを色付けする。
 pub fn markdown_to_html(src: &str, syntaxes: Option<&yy_syntax::Registry>) -> String {
+    markdown_with_source_lines(src, syntaxes, &[])
+}
+
+/// Keep scroll markers tied to the original note after expanding includes.
+pub fn markdown_with_source_lines(
+    src: &str,
+    syntaxes: Option<&yy_syntax::Registry>,
+    source_lines: &[usize],
+) -> String {
     let lines = LineIndex::new(src);
+    let source_line = |offset| {
+        let line = lines.line_of(offset);
+        source_lines.get(line).copied().unwrap_or(line)
+    };
     let mut out_events: Vec<Event> = Vec::new();
     let mut slugs = Slugs::default();
     let mut depth = 0usize;
@@ -79,7 +92,7 @@ pub fn markdown_to_html(src: &str, syntaxes: Option<&yy_syntax::Registry>) -> St
                     }
                 }
                 if depth == 0 {
-                    open += &format!(" data-line=\"{}\"", lines.line_of(range.start));
+                    open += &format!(" data-line=\"{}\"", source_line(range.start));
                 }
                 open.push('>');
                 out_events.push(Event::Html(open.into()));
@@ -103,7 +116,7 @@ pub fn markdown_to_html(src: &str, syntaxes: Option<&yy_syntax::Registry>) -> St
                         .to_owned(),
                     CodeBlockKind::Indented => String::new(),
                 };
-                let line = (depth == 0).then(|| lines.line_of(range.start));
+                let line = (depth == 0).then(|| source_line(range.start));
                 out_events.push(Event::Html(code_block(&lang, &code, line, syntaxes).into()));
             }
             Event::Start(Tag::MetadataBlock(kind)) => {
@@ -119,7 +132,7 @@ pub fn markdown_to_html(src: &str, syntaxes: Option<&yy_syntax::Registry>) -> St
                     MetadataBlockKind::YamlStyle => "yaml",
                     MetadataBlockKind::PlusesStyle => "toml",
                 };
-                let mut html = code_block(lang, &text, Some(lines.line_of(range.start)), syntaxes);
+                let mut html = code_block(lang, &text, Some(source_line(range.start)), syntaxes);
                 html = html.replacen("<pre", "<pre class=\"front-matter\"", 1);
                 out_events.push(Event::Html(html.into()));
             }
@@ -135,7 +148,7 @@ pub fn markdown_to_html(src: &str, syntaxes: Option<&yy_syntax::Registry>) -> St
                     out_events.push(Event::Html(
                         format!(
                             "<span class=\"yy-line\" data-line=\"{}\"></span>",
-                            lines.line_of(range.start)
+                            source_line(range.start)
                         )
                         .into(),
                     ));
@@ -156,7 +169,7 @@ pub fn markdown_to_html(src: &str, syntaxes: Option<&yy_syntax::Registry>) -> St
                 out_events.push(Event::Html(
                     format!(
                         "<span class=\"yy-line\" data-line=\"{}\"></span>",
-                        lines.line_of(range.start)
+                        source_line(range.start)
                     )
                     .into(),
                 ));

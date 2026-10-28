@@ -13,6 +13,7 @@ Windows tools for editing, terminals, transfer, spreadsheets, diagrams, database
 | **yysftp** | SFTP/SCP, resumable transfers, SSH gateways and per-host listing commands | [Guide](demo/yysftp/README.md) |
 | **yysheet** | Large CSV, formulas, COBOL fixed records and layout/record-length inference | [Guide](crates/yy-win/help/sheet.md) |
 | **yyclip** | Clipboard history, templates, favorites and recent user files | [Guide](apps/yyclip/README.md) |
+| **yytoolbox** | Regex, Base64, hashes, JWT, JSON/SQL formatting, passwords, dummy CSV and date/finance calculators | [Guide](docs/user/yytoolbox.md) |
 | **yyfilemanager** | File Explorer replacement (flat view, batch rename, archive browsing), folder synchronization, search, duplicate/version cleanup and recovery | [Guide](crates/yy-win/help/filemanager.md) |
 | **yybrowser** | Tabbed browsing, profiles, proxies and ad blocking | [Guide](crates/yy-win/help/browser.md) |
 | **yydraw** | Architecture diagrams, cloud/business icons, grouping, alignment and SVG/PNG | [Guide](docs/user/yydraw.md) |

@@ -28,6 +28,7 @@ BROWSER = ((0xF4, 0x3F, 0x5E), (0x9F, 0x12, 0x39))  # ローズ（ほかの色�
 DRAW = ((0x63, 0x66, 0xF1), (0x37, 0x30, 0xA3))
 DATABASE = ((0x14, 0xB8, 0xA6), (0x0F, 0x76, 0x6E))
 MERGE = ((0x84, 0xCC, 0x16), (0x3F, 0x62, 0x12))
+TOOLBOX = ((0xF9, 0x73, 0x16), (0x9A, 0x34, 0x12))
 PROMPT = (0x4A, 0xDE, 0x80, 255)
 WHITE = (255, 255, 255, 255)
 LINE = (255, 255, 255, 170)
@@ -49,7 +50,12 @@ def draw_y(d, x, y, w, h, t, a):
 def draw_symbol(d, kind, x, y, w, h, t, ot):
     """アプリの記号を枠（左上 (x, y)、幅 w・高さ h）の中に描く。t は太い線（行・矢印・プロンプト）、
     ot は輪郭の線（格子・用紙・地球）の太さ。"""
-    if kind == "terminal":
+    if kind == "toolbox":
+        d.rounded_rectangle([x, y + h * .25, x + w, y + h], radius=ot, outline=WHITE, width=round(ot))
+        d.rectangle([x + w * .32, y, x + w * .68, y + h * .25], outline=WHITE, width=round(ot))
+        d.line([(x, y + h * .58), (x + w, y + h * .58)], fill=WHITE, width=round(ot))
+        d.rectangle([x + w * .46, y + h * .45, x + w * .54, y + h * .73], fill=WHITE)
+    elif kind == "terminal":
         # プロンプト「>_」
         size_p = h
         left = x + (w - size_p * 1.9) / 2
@@ -143,6 +149,7 @@ def render(size, kind="editor"):
         "draw": DRAW,
         "database": DATABASE,
         "merge": MERGE,
+        "toolbox": TOOLBOX,
     }[kind]
     n = size * SCALE
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
@@ -228,6 +235,7 @@ def main():
         ("yydraw", "draw"),
         ("yydbmanager", "database"),
         ("yymerge", "merge"),
+        ("yytoolbox", "toolbox"),
     ]:
         res = root / "apps" / app / ("app/res" if app in ("yydbmanager", "yymerge") else "res")
         res.mkdir(parents=True, exist_ok=True)

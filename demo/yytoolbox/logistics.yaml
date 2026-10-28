@@ -1,0 +1,21 @@
+columns:
+- name: 追跡ID
+  prefix: TEST-TRACK-
+  type: sequence
+  width: 6
+- name: 架空配送先
+  type: address
+- max: 100
+  min: 1
+  name: 重量kg
+  scale: 2
+  type: decimal
+- name: 状態
+  type: choice
+  values:
+  - 受付
+  - 輸送中
+  - 配送完了
+  - 返送
+- name: 出荷日
+  type: date

@@ -13,12 +13,13 @@ pub mod live;
 mod markdown;
 pub mod outline;
 pub mod security;
+pub mod transclusion;
 
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::OnceLock;
 
-pub use markdown::{escape, markdown_to_html, token_classes};
+pub use markdown::{escape, markdown_to_html, markdown_with_source_lines, token_classes};
 
 /// ページと埋め込みファイルを配信するホスト。
 pub const PREVIEW_HOST: &str = "yy-preview.local";
