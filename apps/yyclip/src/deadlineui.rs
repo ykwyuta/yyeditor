@@ -1,6 +1,6 @@
 //! Resident deadline manager and notifications. No clipboard state is changed here.
 use crate::businessdays::{Adjustment, Calendar};
-use crate::deadlines::{Repeat, Store, Style, Task};
+use crate::deadlines::{MAX_SNOOZE, Repeat, Store, Style, Task};
 use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, Timelike};
 use std::cell::RefCell;
 use windows::Win32::Foundation::*;
@@ -46,6 +46,7 @@ const MINUTE: usize = 223;
 const ADJUSTMENT: usize = 224;
 const IMPORT_CALENDAR: usize = 225;
 const CALENDAR_INFO: usize = 226;
+const SNOOZE: usize = 227;
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
 }
@@ -67,6 +68,7 @@ struct State {
     editor_open: bool,
     baseline: Option<(Vec<String>, [usize; 5])>,
     alerts: Vec<(HWND, HFONT)>,
+    alert_tasks: Vec<u64>,
     scroll: i32,
     refreshing: bool,
     last_error: Option<String>,
@@ -419,6 +421,7 @@ fn start_store(resident: HWND, mut store: Store) -> Result<()> {
                 editor_open: false,
                 baseline: None,
                 alerts: Vec::new(),
+                alert_tasks: Vec::new(),
                 scroll: 0,
                 refreshing: false,
                 last_error: None,
@@ -712,6 +715,7 @@ fn form() -> std::io::Result<Task> {
         if old.due == task.due && old.nominal_due.unwrap_or(old.due) == due {
             task.monthly_day = old.monthly_day;
             task.last_notified = old.last_notified;
+            task.snoozed_until = old.snoozed_until;
         }
     }
     task.validate()?;
@@ -962,6 +966,7 @@ fn command(id: usize) {
                         let mut task = task.clone();
                         task.completed = false;
                         task.last_notified = None;
+                        task.snoozed_until = None;
                         s.store.save(task).map(|_| ())
                     } else {
                         s.store.complete(task.id, Local::now().naive_local())
@@ -981,7 +986,8 @@ fn command(id: usize) {
             }
         }
         TEST => match form() {
-            Ok(task) => {
+            Ok(mut task) => {
+                task.id = 0; // Preview actions must never postpone a saved task.
                 if let Err(e) = notify(&[task]) {
                     error(&e.to_string());
                 }
@@ -1124,7 +1130,11 @@ fn tick_at(local: NaiveDateTime, utc: i64) {
 }
 
 fn close_alerts() {
-    let handles = with_mut(|s| std::mem::take(&mut s.alerts)).unwrap_or_default();
+    let handles = with_mut(|s| {
+        s.alert_tasks.clear();
+        std::mem::take(&mut s.alerts)
+    })
+    .unwrap_or_default();
     for (h, font) in handles {
         unsafe {
             let _ = DestroyWindow(h);
@@ -1176,6 +1186,12 @@ fn copy_wide<const N: usize>(out: &mut [u16; N], value: &str) {
 
 fn show_alerts(tasks: &[&Task]) -> Result<()> {
     close_alerts();
+    with_mut(|s| {
+        s.alert_tasks = tasks
+            .iter()
+            .filter_map(|t| (t.id != 0).then_some(t.id))
+            .collect()
+    });
     let mut monitors = Vec::<(RECT, u32)>::new();
     unsafe extern "system" fn enumerate(
         monitor: HMONITOR,
@@ -1217,15 +1233,10 @@ fn show_alerts(tasks: &[&Task]) -> Result<()> {
         title
     };
     let message = format!(
-        "期限アラート · {}件\r\n{}\r\n{}{}",
-        tasks.len(),
+        "{}\r\n{} · {}件",
         title,
         first.due.format("%m/%d %H:%M"),
-        if tasks.len() > 1 {
-            format!("  ほか{}件", tasks.len() - 1)
-        } else {
-            String::new()
-        }
+        tasks.len(),
     );
     let instance = unsafe { GetModuleHandleW(None) }?.into();
     for (work, dpi) in monitors {
@@ -1260,7 +1271,7 @@ fn show_alerts(tasks: &[&Task]) -> Result<()> {
                 scale(10),
                 scale(7),
                 width - scale(20),
-                height - scale(42),
+                scale(40),
                 Some(hwnd),
                 None,
                 Some(instance),
@@ -1270,19 +1281,69 @@ fn show_alerts(tasks: &[&Task]) -> Result<()> {
         unsafe {
             SendMessageW(label, WM_SETFONT, Some(WPARAM(font.0 as usize)), None);
         }
-        for (i, (id, title)) in [(OPEN, "一覧・完了"), (DISMISS, "閉じる")]
-            .into_iter()
-            .enumerate()
-        {
+        let half = (width - scale(28)) / 2;
+        let delay = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("COMBOBOX"),
+                w!(""),
+                WS_CHILD
+                    | WS_VISIBLE
+                    | WS_TABSTOP
+                    | WS_VSCROLL
+                    | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
+                scale(10),
+                height - scale(62),
+                half,
+                scale(180),
+                Some(hwnd),
+                Some(HMENU(SNOOZE as *mut _)),
+                Some(instance),
+                None,
+            )
+        }?;
+        unsafe {
+            SendMessageW(delay, WM_SETFONT, Some(WPARAM(font.0 as usize)), None);
+            for minutes in 0..=MAX_SNOOZE {
+                let option = HSTRING::from(if minutes == 0 {
+                    "通常間隔".into()
+                } else {
+                    format!("{minutes}分後")
+                });
+                SendMessageW(
+                    delay,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(option.as_ptr() as isize)),
+                );
+            }
+            SendMessageW(delay, CB_SETCURSEL, Some(WPARAM(0)), None);
+        }
+        for (id, title, x, y, w) in [
+            (
+                DISMISS,
+                "一時消去",
+                scale(18) + half,
+                height - scale(62),
+                half,
+            ),
+            (
+                OPEN,
+                "一覧・完了",
+                scale(10),
+                height - scale(33),
+                width - scale(20),
+            ),
+        ] {
             let b = unsafe {
                 CreateWindowExW(
                     WINDOW_EX_STYLE(0),
                     w!("BUTTON"),
                     &HSTRING::from(title),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                    scale(10) + i as i32 * ((width - scale(28)) / 2 + scale(8)),
-                    height - scale(33),
-                    (width - scale(28)) / 2,
+                    x,
+                    y,
+                    w,
                     scale(25),
                     Some(hwnd),
                     Some(HMENU(id as *mut _)),
@@ -1303,10 +1364,15 @@ fn show_alerts(tasks: &[&Task]) -> Result<()> {
 
 fn dismiss_alert(hwnd: HWND) {
     let font = with_mut(|s| {
-        s.alerts
+        let font = s
+            .alerts
             .iter()
             .position(|entry| entry.0 == hwnd)
-            .map(|index| s.alerts.remove(index).1)
+            .map(|index| s.alerts.remove(index).1);
+        if s.alerts.is_empty() {
+            s.alert_tasks.clear();
+        }
+        font
     })
     .flatten();
     unsafe {
@@ -1316,6 +1382,31 @@ fn dismiss_alert(hwnd: HWND) {
         unsafe {
             let _ = DeleteObject(HGDIOBJ(font.0));
         }
+    }
+}
+fn snooze_alert(hwnd: HWND, utc: i64) {
+    let minutes = unsafe {
+        GetDlgItem(Some(hwnd), SNOOZE as i32)
+            .map(|combo| SendMessageW(combo, CB_GETCURSEL, None, None).0)
+            .unwrap_or(-1)
+    };
+    if minutes == 0 {
+        close_alerts();
+        return;
+    }
+    if !(1..=MAX_SNOOZE as isize).contains(&minutes) {
+        error("次回通知は1～90分後で選択してください。");
+        return;
+    }
+    let ids = with(|s| s.alert_tasks.clone()).unwrap_or_default();
+    if ids.is_empty() {
+        close_alerts();
+        return;
+    } // Unsaved notification preview.
+    match with_mut(|s| s.store.snooze(&ids, minutes as u32, utc)) {
+        Some(Ok(())) => close_alerts(),
+        Some(Err(e)) => error(&e.to_string()),
+        None => (),
     }
 }
 fn font_spec(dpi: u32) -> LOGFONTW {
@@ -1928,7 +2019,7 @@ unsafe extern "system" fn alert_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM)
             match w.0 & 0xffff {
                 OPEN => show(),
                 DISMISS => {
-                    dismiss_alert(hwnd);
+                    snooze_alert(hwnd, Local::now().timestamp());
                 }
                 _ => {}
             }
@@ -2487,6 +2578,40 @@ mod tests {
         tick_at(morning, 1299);
         assert_eq!(with(|s| s.alerts.len()), Some(0));
         tick_at(morning, 1300);
+        assert!(with(|s| !s.alerts.is_empty()).unwrap());
+        let alert = with(|s| s.alerts[0].0).unwrap();
+        let delay = unsafe { GetDlgItem(Some(alert), SNOOZE as i32) }.unwrap();
+        unsafe {
+            assert_eq!(SendMessageW(delay, CB_GETCOUNT, None, None).0, 91);
+            SendMessageW(delay, CB_SHOWDROPDOWN, Some(WPARAM(1)), None);
+            assert_ne!(SendMessageW(delay, CB_GETDROPPEDSTATE, None, None).0, 0);
+            SendMessageW(delay, CB_SETCURSEL, Some(WPARAM(90)), None);
+            SendMessageW(delay, CB_SHOWDROPDOWN, Some(WPARAM(0)), None);
+        }
+        snooze_alert(alert, 1300);
+        assert_eq!(with(|s| s.alerts.len()), Some(0));
+        let saved = Store::open(path.clone()).unwrap();
+        let task = saved.tasks().iter().find(|t| t.id == id).unwrap();
+        assert_eq!(task.snoozed_until, Some(6700));
+        assert_eq!(task.interval, 5);
+        tick_at(morning, 6699);
+        assert_eq!(with(|s| s.alerts.len()), Some(0));
+        tick_at(morning, 6700);
+        assert!(with(|s| !s.alerts.is_empty()).unwrap());
+        assert_eq!(
+            with(|s| s
+                .store
+                .tasks()
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .snoozed_until),
+            Some(None)
+        );
+        close_alerts();
+        tick_at(morning, 6999);
+        assert_eq!(with(|s| s.alerts.len()), Some(0));
+        tick_at(morning, 7000);
         assert!(with(|s| !s.alerts.is_empty()).unwrap());
         close_alerts();
         // Native Windows notification path uses only a test-owned tray icon.

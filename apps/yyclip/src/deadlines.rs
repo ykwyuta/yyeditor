@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_INTERVAL: u32 = 15;
 pub const MIN_INTERVAL: u32 = 5;
+pub const MAX_SNOOZE: u32 = 90;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Repeat {
@@ -44,6 +45,9 @@ pub struct Task {
     pub completed: bool,
     pub last_completed: Option<NaiveDateTime>,
     pub last_notified: Option<i64>,
+    /// One-shot UTC deadline. Never changes the task's regular notification interval.
+    #[serde(default)]
+    pub snoozed_until: Option<i64>,
 }
 
 impl Task {
@@ -62,6 +66,7 @@ impl Task {
             completed: false,
             last_completed: None,
             last_notified: None,
+            snoozed_until: None,
         }
     }
 
@@ -90,9 +95,14 @@ impl Task {
         let morning = self.due.date().and_hms_opt(9, 0, 0).unwrap().min(self.due);
         !self.completed
             && local >= morning
-            && self
-                .last_notified
-                .is_none_or(|last| utc >= last.saturating_add(i64::from(self.interval) * 60))
+            && self.snoozed_until.map_or_else(
+                || {
+                    self.last_notified.is_none_or(|last| {
+                        utc >= last.saturating_add(i64::from(self.interval) * 60)
+                    })
+                },
+                |until| utc >= until,
+            )
     }
 
     fn next_due(&self, after: NaiveDateTime) -> io::Result<NaiveDateTime> {
@@ -200,6 +210,7 @@ impl Store {
                 apply_calendar(task, &data.calendar)?;
                 if task.due != old_due {
                     task.last_notified = None;
+                    task.snoozed_until = None;
                 }
             }
         }
@@ -292,6 +303,7 @@ impl Store {
         }
         task.last_completed = Some(now);
         task.last_notified = None;
+        task.snoozed_until = None;
         self.save(task).map(|_| ())
     }
 
@@ -306,7 +318,28 @@ impl Store {
         for task in &mut data.tasks {
             if ids.contains(&task.id) {
                 task.last_notified = Some(utc);
+                task.snoozed_until = None;
             }
+        }
+        self.commit(data)
+    }
+    pub fn snooze(&mut self, ids: &[u64], minutes: u32, utc: i64) -> io::Result<()> {
+        if !(1..=MAX_SNOOZE).contains(&minutes) {
+            return Err(invalid("次回通知は1～90分後で指定してください。"));
+        }
+        let until = utc
+            .checked_add(i64::from(minutes) * 60)
+            .ok_or_else(|| invalid("次回通知時刻を計算できません。"))?;
+        let mut data = self.data.clone();
+        let mut changed = false;
+        for task in &mut data.tasks {
+            if !task.completed && ids.contains(&task.id) {
+                task.snoozed_until = Some(until);
+                changed = true;
+            }
+        }
+        if !changed {
+            return Err(invalid("延期する未完了の作業がありません。"));
         }
         self.commit(data)
     }
@@ -499,5 +532,60 @@ mod tests {
         let legacy = Store::open(path).unwrap();
         assert_eq!(legacy.tasks()[0].adjustment, Adjustment::None);
         assert_eq!(legacy.calendar().holidays.len(), 108);
+    }
+    #[test]
+    fn one_shot_snooze_survives_restart_then_resumes_original_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let mut s = Store::open(path.clone()).unwrap();
+        let id = s
+            .save(Task::new("延期する作業".into(), date("2026-10-27 10:00")))
+            .unwrap();
+        let other = s
+            .save(Task::new("別の作業".into(), date("2026-10-27 10:00")))
+            .unwrap();
+        s.notified(&[id, other], 1000).unwrap();
+        s.snooze(&[id], 90, 1100).unwrap();
+        assert_eq!(s.tasks()[0].interval, 15);
+        assert_eq!(s.tasks()[0].snoozed_until, Some(6500));
+        assert!(!s.tasks()[0].needs_notification(date("2026-10-28 12:00"), 6499));
+        assert!(s.tasks()[1].needs_notification(date("2026-10-28 12:00"), 1900));
+        let mut s = Store::open(path).unwrap();
+        s.restart_notifications();
+        assert!(!s.tasks()[0].needs_notification(date("2026-10-28 12:00"), 6499));
+        assert!(s.tasks()[0].needs_notification(date("2026-10-28 12:00"), 6500));
+        s.notified(&[id], 6500).unwrap();
+        assert_eq!(s.tasks()[0].snoozed_until, None);
+        assert!(!s.tasks()[0].needs_notification(date("2026-10-28 12:00"), 7399));
+        assert!(s.tasks()[0].needs_notification(date("2026-10-28 12:00"), 7400));
+    }
+    #[test]
+    fn snooze_is_bounded_atomic_and_cleared_on_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let mut s = Store::open(path.clone()).unwrap();
+        let mut t = Task::new("定期作業".into(), date("2026-10-27 10:00"));
+        t.interval = 120;
+        t.repeat = Repeat::Daily;
+        let id = s.save(t).unwrap();
+        s.notified(&[id], 1000).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for minutes in [0, 91, u32::MAX] {
+            assert!(s.snooze(&[id], minutes, 1000).is_err());
+        }
+        assert!(s.snooze(&[999], 30, 1000).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let broken = dir.path().join("directory");
+        std::fs::create_dir(&broken).unwrap();
+        s.path = broken;
+        assert!(s.snooze(&[id], 90, 1000).is_err());
+        assert_eq!(s.tasks()[0].snoozed_until, None);
+        s.path = path;
+        s.snooze(&[id], 1, 1000).unwrap();
+        assert!(!s.tasks()[0].needs_notification(date("2026-10-27 12:00"), 1059));
+        assert!(s.tasks()[0].needs_notification(date("2026-10-27 12:00"), 1060));
+        s.complete(id, date("2026-10-27 11:00")).unwrap();
+        assert_eq!(s.tasks()[0].snoozed_until, None);
+        assert_eq!(s.tasks()[0].interval, 120);
     }
 }
