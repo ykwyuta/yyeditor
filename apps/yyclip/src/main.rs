@@ -1,6 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![allow(unsafe_code)]
 
+#[cfg(any(windows, test))]
+mod businessdays;
 #[cfg(windows)]
 mod clipboard;
 #[cfg(any(windows, test))]

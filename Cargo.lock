@@ -4355,6 +4355,8 @@ name = "yyclip"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "csv",
+ "encoding_rs",
  "serde",
  "serde_json",
  "tempfile",

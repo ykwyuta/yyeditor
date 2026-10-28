@@ -1,18 +1,21 @@
 //! Resident deadline manager and notifications. No clipboard state is changed here.
+use crate::businessdays::{Adjustment, Calendar};
 use crate::deadlines::{Repeat, Store, Style, Task};
-use chrono::{Days, Local, NaiveDateTime};
+use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, Timelike};
 use std::cell::RefCell;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI, SystemParametersInfoForDpi,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
+use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{BOOL, Error, HSTRING, PCWSTR, Result, w};
+use windows::core::{BOOL, Error, HRESULT, HSTRING, PCWSTR, Result, w};
 
 const CLASS: PCWSTR = w!("YYClipDeadlineManager");
 const ALERT_CLASS: PCWSTR = w!("YYClipDeadlineAlert");
@@ -38,6 +41,11 @@ const SUMMARY: usize = 218;
 const BACK: usize = 219;
 const EDIT: usize = 220;
 const EMPTY: usize = 221;
+const HOUR: usize = 222;
+const MINUTE: usize = 223;
+const ADJUSTMENT: usize = 224;
+const IMPORT_CALENDAR: usize = 225;
+const CALENDAR_INFO: usize = 226;
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
 }
@@ -57,7 +65,7 @@ struct State {
     font: HFONT,
     heading_font: HFONT,
     editor_open: bool,
-    baseline: Option<(Vec<String>, [usize; 2])>,
+    baseline: Option<(Vec<String>, [usize; 5])>,
     alerts: Vec<(HWND, HFONT)>,
     scroll: i32,
     refreshing: bool,
@@ -98,6 +106,75 @@ fn select(id: usize, at: usize) {
         SendMessageW(control(id), CB_SETCURSEL, Some(WPARAM(at)), None);
     }
 }
+fn set_due(due: NaiveDateTime) {
+    let date = SYSTEMTIME {
+        wYear: due.year() as u16,
+        wMonth: due.month() as u16,
+        wDay: due.day() as u16,
+        ..Default::default()
+    };
+    unsafe {
+        SendMessageW(
+            control(DUE),
+            DTM_SETSYSTEMTIME,
+            Some(WPARAM(GDT_VALID.0 as usize)),
+            Some(LPARAM(&date as *const _ as isize)),
+        );
+    }
+    select(HOUR, due.hour() as usize);
+    select(MINUTE, due.minute() as usize);
+}
+fn due_value() -> std::io::Result<NaiveDateTime> {
+    let fail = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "カレンダーで日付を選び、時・分を指定してください。",
+        )
+    };
+    let mut date = SYSTEMTIME::default();
+    let state = unsafe {
+        SendMessageW(
+            control(DUE),
+            DTM_GETSYSTEMTIME,
+            None,
+            Some(LPARAM(&mut date as *mut _ as isize)),
+        )
+        .0
+    };
+    if state != GDT_VALID.0 as isize {
+        return Err(fail());
+    }
+    let selected =
+        |id| u32::try_from(unsafe { SendMessageW(control(id), CB_GETCURSEL, None, None).0 }).ok();
+    NaiveDate::from_ymd_opt(date.wYear.into(), date.wMonth.into(), date.wDay.into())
+        .and_then(|d| d.and_hms_opt(selected(HOUR)?, selected(MINUTE)?, 0))
+        .ok_or_else(fail)
+}
+fn adjustment() -> Adjustment {
+    match selection(ADJUSTMENT) {
+        1 => Adjustment::Previous,
+        2 => Adjustment::Next,
+        _ => Adjustment::None,
+    }
+}
+fn calendar_info() {
+    let summary = with(|s| {
+        let (first, last) = s.store.calendar().years();
+        format!(
+            "休業日CSV: {}日 / {first}–{last}",
+            s.store.calendar().holidays.len(),
+        )
+    })
+    .unwrap_or_default();
+    let preview = match due_value() {
+        Ok(due) => match with(|s| s.store.calendar().adjust(due, adjustment())) {
+            Some(Ok(due)) => format!("保存後の期限: {}", due.format("%Y-%m-%d %H:%M")),
+            _ => "対象年の休業日CSVを登録してください".into(),
+        },
+        Err(_) => "日付・時刻を選択してください".into(),
+    };
+    set(CALENDAR_INFO, &format!("{summary}\r\n{preview}"));
+}
 fn error(message: &str) {
     let hwnd = with(|s| s.hwnd).unwrap_or_default();
     unsafe {
@@ -126,7 +203,7 @@ fn start_store(resident: HWND, mut store: Store) -> Result<()> {
         let instance = GetModuleHandleW(None)?.into();
         InitCommonControlsEx(&INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_LISTVIEW_CLASSES,
+            dwICC: ICC_LISTVIEW_CLASSES | ICC_DATE_CLASSES,
         })
         .ok()?;
         for (name, proc) in [
@@ -210,6 +287,29 @@ fn start_store(resident: HWND, mut store: Store) -> Result<()> {
             )?,
         ));
         for id in [TITLE, DUE, MEMO, INTERVAL] {
+            if id == DUE {
+                controls.push((
+                    DUE,
+                    child(
+                        DATETIMEPICK_CLASSW,
+                        "",
+                        WINDOW_STYLE(DTS_SHORTDATECENTURYFORMAT),
+                        DUE,
+                    )?,
+                ));
+                for time_id in [HOUR, MINUTE] {
+                    controls.push((
+                        time_id,
+                        child(
+                            w!("COMBOBOX"),
+                            "",
+                            WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_VSCROLL,
+                            time_id,
+                        )?,
+                    ));
+                }
+                continue;
+            }
             let style = if id == MEMO {
                 WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32) | WS_VSCROLL
             } else {
@@ -217,7 +317,7 @@ fn start_store(resident: HWND, mut store: Store) -> Result<()> {
             };
             controls.push((id, child(w!("EDIT"), "", style, id)?));
         }
-        for id in [STYLE, REPEAT] {
+        for id in [STYLE, REPEAT, ADJUSTMENT] {
             controls.push((
                 id,
                 child(
@@ -236,6 +336,7 @@ fn start_store(resident: HWND, mut store: Store) -> Result<()> {
             (TEST, "通知を試す"),
             (EDIT, "編集"),
             (BACK, "← 一覧へ"),
+            (IMPORT_CALENDAR, "休業日CSV"),
         ] {
             controls.push((
                 id,
@@ -250,6 +351,7 @@ fn start_store(resident: HWND, mut store: Store) -> Result<()> {
             "通知間隔（分）",
             "通知スタイル",
             "繰り返し",
+            "営業日補正",
         ] {
             labels.push(CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -273,6 +375,7 @@ fn start_store(resident: HWND, mut store: Store) -> Result<()> {
                 "今日と明日の予定を確認し、完了した作業を整理できます。",
             ),
             (SUMMARY, ""),
+            (CALENDAR_INFO, ""),
             (
                 EMPTY,
                 "予定はまだありません。\r\n「＋ 作業を追加」から登録してください。",
@@ -322,6 +425,46 @@ fn start_store(resident: HWND, mut store: Store) -> Result<()> {
                 display_day: None,
             })
         });
+        SendMessageW(
+            control(DUE),
+            DTM_SETFORMATW,
+            None,
+            Some(LPARAM(w!("yyyy/MM/dd").as_ptr() as isize)),
+        );
+        let range = [
+            SYSTEMTIME {
+                wYear: 1900,
+                wMonth: 1,
+                wDay: 1,
+                ..Default::default()
+            },
+            SYSTEMTIME {
+                wYear: 9998,
+                wMonth: 12,
+                wDay: 31,
+                wHour: 23,
+                wMinute: 59,
+                wSecond: 59,
+                ..Default::default()
+            },
+        ];
+        SendMessageW(
+            control(DUE),
+            DTM_SETRANGE,
+            Some(WPARAM((GDTR_MIN | GDTR_MAX) as usize)),
+            Some(LPARAM(range.as_ptr() as isize)),
+        );
+        for (id, count, unit) in [(HOUR, 24, "時"), (MINUTE, 60, "分")] {
+            for n in 0..count {
+                let option = HSTRING::from(format!("{n:02}{unit}"));
+                SendMessageW(
+                    control(id),
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(option.as_ptr() as isize)),
+                );
+            }
+        }
         for (id, options) in [
             (
                 FILTER,
@@ -339,6 +482,10 @@ fn start_store(resident: HWND, mut store: Store) -> Result<()> {
                     "毎週（同じ曜日）",
                     "毎月（同じ日、月末補正）",
                 ],
+            ),
+            (
+                ADJUSTMENT,
+                vec!["補正しない", "前の営業日へ", "次の営業日へ"],
             ),
         ] {
             for option in options {
@@ -463,17 +610,13 @@ fn clear_form() {
         );
     }
     set(TITLE, "");
-    set(
-        DUE,
-        &Local::now()
-            .naive_local()
-            .format("%Y-%m-%d 18:00")
-            .to_string(),
-    );
+    set_due(Local::now().date_naive().and_hms_opt(18, 0, 0).unwrap());
     set(MEMO, "");
     set(INTERVAL, "15");
     select(STYLE, 2);
     select(REPEAT, 0);
+    select(ADJUSTMENT, 2);
+    calendar_info();
 }
 fn selected_task() -> Option<Task> {
     let row = unsafe {
@@ -500,7 +643,16 @@ fn load_selected() {
     if let Some(t) = selected_task() {
         with_mut(|s| s.editing = Some(t.id));
         set(TITLE, &t.title);
-        set(DUE, &t.due.format("%Y-%m-%d %H:%M").to_string());
+        set_due(t.nominal_due.unwrap_or(t.due));
+        select(
+            ADJUSTMENT,
+            match t.adjustment {
+                Adjustment::None => 0,
+                Adjustment::Previous => 1,
+                Adjustment::Next => 2,
+            },
+        );
+        calendar_info();
         set(MEMO, &t.memo);
         set(INTERVAL, &t.interval.to_string());
         select(
@@ -524,9 +676,11 @@ fn load_selected() {
 }
 fn form() -> std::io::Result<Task> {
     let fail = |message: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
-    let due = NaiveDateTime::parse_from_str(text(control(DUE)).trim(), "%Y-%m-%d %H:%M")
-        .map_err(|_| fail("期限は YYYY-MM-DD HH:MM で実在する日時を入力してください。"))?;
+    let due = due_value()?;
     let mut task = Task::new(text(control(TITLE)), due);
+    task.adjustment = adjustment();
+    task.nominal_due = (task.adjustment != Adjustment::None).then_some(due);
+    task.due = with(|s| s.store.calendar().adjust(due, task.adjustment)).unwrap_or(Ok(due))?;
     task.memo = text(control(MEMO));
     let interval_text = text(control(INTERVAL));
     task.interval = if interval_text.trim().is_empty() {
@@ -555,7 +709,7 @@ fn form() -> std::io::Result<Task> {
         task.id = old.id;
         task.completed = old.completed;
         task.last_completed = old.last_completed;
-        if old.due == due {
+        if old.due == task.due && old.nominal_due.unwrap_or(old.due) == due {
             task.monthly_day = old.monthly_day;
             task.last_notified = old.last_notified;
         }
@@ -687,13 +841,19 @@ fn refresh() {
     layout();
 }
 
-fn form_snapshot() -> (Vec<String>, [usize; 2]) {
+fn form_snapshot() -> (Vec<String>, [usize; 5]) {
     (
         [TITLE, DUE, MEMO, INTERVAL]
             .into_iter()
             .map(|id| text(control(id)))
             .collect(),
-        [selection(STYLE), selection(REPEAT)],
+        [
+            selection(STYLE),
+            selection(REPEAT),
+            selection(HOUR),
+            selection(MINUTE),
+            selection(ADJUSTMENT),
+        ],
     )
 }
 fn set_mode(editor: bool) {
@@ -718,7 +878,7 @@ fn set_mode(editor: bool) {
     set(
         SUBTITLE,
         if editor {
-            "タイトルと期限を入力してください。通知は期限当日の朝から始まります。"
+            "カレンダーと時刻で期限を指定し、営業日補正を選べます。"
         } else {
             "今日と明日の予定を確認し、完了した作業を整理できます。"
         },
@@ -728,6 +888,7 @@ fn set_mode(editor: bool) {
 
 fn command(id: usize) {
     match id {
+        IMPORT_CALENDAR => import_calendar(),
         NEW => {
             clear_form();
             set_mode(true);
@@ -829,6 +990,97 @@ fn command(id: usize) {
         },
         FILTER => refresh(),
         _ => {}
+    }
+}
+
+struct CalendarPicker {
+    // Release COM interfaces before uninitializing the apartment.
+    dialog: IFileOpenDialog,
+    _apartment: crate::resident::ComApartment,
+}
+impl CalendarPicker {
+    fn new() -> Result<Self> {
+        let apartment = crate::resident::ComApartment::new()
+            .ok_or_else(|| Error::new(E_FAIL, "CSV選択画面を初期化できません。"))?;
+        let dialog: IFileOpenDialog =
+            unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)? };
+        unsafe {
+            dialog.SetOptions(dialog.GetOptions()? | FOS_FORCEFILESYSTEM)?;
+            dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
+                pszName: w!("休業日CSV (*.csv)"),
+                pszSpec: w!("*.csv"),
+            }])?;
+        }
+        Ok(Self {
+            dialog,
+            _apartment: apartment,
+        })
+    }
+}
+fn import_calendar() {
+    let hwnd = with(|s| s.hwnd).unwrap_or_default();
+    let chosen = (|| -> Result<std::path::PathBuf> {
+        unsafe {
+            let picker = CalendarPicker::new()?;
+            let dialog = &picker.dialog;
+            dialog.Show(Some(hwnd))?;
+            let name = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let path = name.to_string();
+            CoTaskMemFree(Some(name.0 as *const _));
+            Ok(std::path::PathBuf::from(path?))
+        }
+    })();
+    let path = match chosen {
+        Ok(p) => p,
+        Err(e) if e.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => return,
+        Err(e) => {
+            error(&format!("CSVを選択できません: {e}"));
+            return;
+        }
+    };
+    let parsed = (|| -> std::io::Result<Calendar> {
+        if std::fs::metadata(&path)?.len() > 4 * 1024 * 1024 {
+            return Err(std::io::Error::other("CSVは4 MiB以下にしてください。"));
+        }
+        Calendar::from_csv(
+            &std::fs::read(&path)?,
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        )
+    })();
+    let calendar = match parsed {
+        Ok(c) => c,
+        Err(e) => {
+            error(&e.to_string());
+            return;
+        }
+    };
+    let confirm = format!(
+        "{}\n休業日 {}日を登録し、現在のCSVを差し替えます。\n営業日補正を設定した未完了タスクも補正し直します。\n\n会社の休業日を追加する場合は、祝日も含めたCSVを指定してください。",
+        calendar.name,
+        calendar.holidays.len()
+    );
+    if unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            &HSTRING::from(confirm),
+            w!("休業日CSVの登録"),
+            MB_YESNO | MB_ICONQUESTION,
+        )
+    } != IDYES
+    {
+        return;
+    }
+    match with_mut(|s| s.store.register_calendar(calendar)) {
+        Some(Ok(())) => {
+            refresh();
+            close_alerts();
+            calendar_info();
+        }
+        Some(Err(e)) => error(&e.to_string()),
+        None => (),
     }
 }
 
@@ -1127,6 +1379,14 @@ fn font_and_layout() {
             );
         }
     }
+    unsafe {
+        SendMessageW(
+            control(DUE),
+            DTM_SETMCFONT,
+            Some(WPARAM(font.0 as usize)),
+            Some(LPARAM(1)),
+        );
+    }
     let mut spec = font_spec(dpi);
     spec.lfHeight = spec.lfHeight * 3 / 2;
     spec.lfWeight = 600;
@@ -1201,9 +1461,9 @@ fn layout() {
     let tiny = height < px(340);
     let wide = inner >= px(600);
     let form_height = if wide {
-        if compact { 350 } else { 440 }
+        if compact { 472 } else { 536 }
     } else {
-        620
+        704
     };
     let virtual_height = if editor {
         height.max(px(form_height + 72))
@@ -1272,7 +1532,7 @@ fn layout() {
                 x,
                 px(y + 24),
                 w,
-                if [STYLE, REPEAT].contains(&id) {
+                if [STYLE, REPEAT, ADJUSTMENT].contains(&id) {
                     px(180)
                 } else {
                     px(h)
@@ -1280,9 +1540,30 @@ fn layout() {
             );
         };
         row(0, TITLE, margin, start, inner, 32);
-        if wide {
+        let due_row = |y: i32, w: i32| {
+            let time_width = px(64);
+            let time_gap = px(6);
+            let date_width = (w - time_width * 2 - time_gap * 2).max(1);
+            row(1, DUE, margin, y, w, 32);
+            place(DUE, margin, px(y + 24), date_width, px(32));
+            place(
+                HOUR,
+                margin + date_width + time_gap,
+                px(y + 24),
+                time_width,
+                px(180),
+            );
+            place(
+                MINUTE,
+                margin + date_width + time_gap * 2 + time_width,
+                px(y + 24),
+                time_width,
+                px(180),
+            );
+        };
+        let business_y = if wide {
             let step = if compact { 62 } else { 74 };
-            row(1, DUE, margin, start + step, half, 32);
+            due_row(start + step, half);
             row(5, REPEAT, margin + half + gap, start + step, half, 32);
             let memo_y = start + step * 2;
             let memo_h = if compact { 40 } else { 64 };
@@ -1296,13 +1577,24 @@ fn layout() {
                 half,
                 32,
             );
+            memo_y + memo_h + 112
         } else {
-            row(1, DUE, margin, start + 72, inner, 32);
+            due_row(start + 72, inner);
             row(5, REPEAT, margin, start + 144, inner, 32);
             row(2, MEMO, margin, start + 216, inner, 64);
             row(3, INTERVAL, margin, start + 320, inner, 32);
             row(4, STYLE, margin, start + 392, inner, 32);
-        }
+            start + 464
+        };
+        row(6, ADJUSTMENT, margin, business_y, inner - px(140), 32);
+        place(
+            IMPORT_CALENDAR,
+            margin + inner - px(128),
+            px(business_y + 24),
+            px(128),
+            px(32),
+        );
+        place(CALENDAR_INFO, margin, px(business_y + 62), inner, px(44));
         let bw = ((inner - px(16)) / 3).max(1);
         for (i, id) in [BACK, TEST, SAVE].into_iter().enumerate() {
             unsafe {
@@ -1503,6 +1795,9 @@ unsafe extern "system" fn manager_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARA
         WM_COMMAND => {
             let id = w.0 & 0xffff;
             let code = (w.0 >> 16) & 0xffff;
+            if [HOUR, MINUTE, ADJUSTMENT].contains(&id) && code == CBN_SELCHANGE as usize {
+                calendar_info();
+            }
             if code == BN_CLICKED as usize || (id == FILTER && code == CBN_SELCHANGE as usize) {
                 command(id);
             }
@@ -1511,6 +1806,9 @@ unsafe extern "system" fn manager_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARA
         WM_NOTIFY => {
             if l.0 != 0 {
                 let header = unsafe { &*(l.0 as *const NMHDR) };
+                if header.idFrom == DUE && header.code == DTN_DATETIMECHANGE {
+                    calendar_info();
+                }
                 if header.idFrom == LIST && header.code == NM_DBLCLK {
                     command(EDIT);
                 }
@@ -1976,6 +2274,15 @@ mod tests {
         let _cleanup = Cleanup { resident, previous };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deadlines.json");
+        {
+            let picker =
+                CalendarPicker::new().expect("CSV picker initializes its own COM apartment");
+            assert!(
+                unsafe { picker.dialog.GetOptions() }
+                    .unwrap()
+                    .contains(FOS_FORCEFILESYSTEM)
+            );
+        }
         let today = Local::now().date_naive();
         let mut seeded = Store::open(path.clone()).unwrap();
         let mut overdue = Task::new(
@@ -1993,8 +2300,87 @@ mod tests {
         ]);
         command(NEW);
         assert_controls_fit(&[
-            HEADING, SUBTITLE, TITLE, DUE, MEMO, INTERVAL, STYLE, REPEAT, BACK, TEST, SAVE,
+            HEADING,
+            SUBTITLE,
+            TITLE,
+            DUE,
+            HOUR,
+            MINUTE,
+            MEMO,
+            INTERVAL,
+            STYLE,
+            REPEAT,
+            ADJUSTMENT,
+            IMPORT_CALENDAR,
+            CALENDAR_INFO,
+            BACK,
+            TEST,
+            SAVE,
         ]);
+        assert_eq!(
+            due_value().unwrap().time(),
+            chrono::NaiveTime::from_hms_opt(18, 0, 0).unwrap()
+        );
+        unsafe {
+            assert_eq!(SendMessageW(control(HOUR), CB_GETCOUNT, None, None).0, 24);
+            assert_eq!(SendMessageW(control(MINUTE), CB_GETCOUNT, None, None).0, 60);
+            let mut info = DATETIMEPICKERINFO {
+                cbSize: std::mem::size_of::<DATETIMEPICKERINFO>() as u32,
+                ..Default::default()
+            };
+            SendMessageW(
+                control(DUE),
+                DTM_GETDATETIMEPICKERINFO,
+                None,
+                Some(LPARAM(&mut info as *mut _ as isize)),
+            );
+            let x = (info.rcButton.left + info.rcButton.right) / 2;
+            let y = (info.rcButton.top + info.rcButton.bottom) / 2;
+            let position = LPARAM(((y as u32) << 16 | (x as u32 & 0xffff)) as isize);
+            SendMessageW(
+                control(DUE),
+                WM_LBUTTONDOWN,
+                Some(WPARAM(1)),
+                Some(position),
+            );
+            SendMessageW(control(DUE), WM_LBUTTONUP, None, Some(position));
+            wait(|| SendMessageW(control(DUE), DTM_GETMONTHCAL, None, None).0 != 0);
+            SendMessageW(control(DUE), DTM_CLOSEMONTHCAL, None, None);
+        }
+        set(TITLE, "日付選択の試験");
+        set_due(
+            NaiveDate::from_ymd_opt(2028, 2, 29)
+                .unwrap()
+                .and_hms_opt(23, 59, 0)
+                .unwrap(),
+        );
+        assert_eq!(
+            form().unwrap().due,
+            NaiveDate::from_ymd_opt(2028, 2, 29)
+                .unwrap()
+                .and_hms_opt(23, 59, 0)
+                .unwrap()
+        );
+        let before = form_snapshot();
+        select(MINUTE, 0);
+        assert_ne!(before, form_snapshot());
+        set_due(
+            NaiveDate::from_ymd_opt(2026, 11, 3)
+                .unwrap()
+                .and_hms_opt(18, 37, 0)
+                .unwrap(),
+        );
+        select(ADJUSTMENT, 1);
+        assert_eq!(
+            form().unwrap().due.date(),
+            NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()
+        );
+        select(ADJUSTMENT, 2);
+        assert_eq!(
+            form().unwrap().due.date(),
+            NaiveDate::from_ymd_opt(2026, 11, 4).unwrap()
+        );
+        clear_form();
         set_mode(false);
         assert!(
             with(|s| !s.alerts.is_empty()).unwrap(),
@@ -2010,9 +2396,12 @@ mod tests {
         assert!(form().is_err(), "a title is required");
         let tomorrow = today.checked_add_days(Days::new(1)).unwrap();
         set(TITLE, "対象の作業😀");
-        set(DUE, "");
+        unsafe {
+            SendMessageW(control(HOUR), CB_SETCURSEL, Some(WPARAM(usize::MAX)), None);
+        }
         assert!(form().is_err(), "a deadline is required");
-        set(DUE, &format!("{tomorrow} 18:00"));
+        set_due(tomorrow.and_hms_opt(18, 37, 0).unwrap());
+        select(ADJUSTMENT, 0);
         set(MEMO, "保存するメモ");
         set(INTERVAL, "4");
         assert!(form().is_err(), "the minimum interval is five minutes");
@@ -2056,6 +2445,10 @@ mod tests {
         refresh();
         select_task(id);
         assert_eq!(text(control(MEMO)), "保存するメモ");
+        assert_eq!(
+            due_value().unwrap(),
+            tomorrow.and_hms_opt(18, 37, 0).unwrap()
+        );
         // Timer refresh must preserve an unsaved edit.
         set(TITLE, "編集中の名前");
         refresh();

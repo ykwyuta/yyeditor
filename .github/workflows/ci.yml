@@ -92,6 +92,8 @@ jobs:
         run: |
           python tools/business-icons/generate.py --check
           python tools/friendly-icons/generate.py --check
+      - name: yyclip Japanese holiday calendar
+        run: python tools/yyclip/generate-holidays.py --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: WebView2 runtime
@@ -136,6 +138,7 @@ jobs:
           Copy-Item target/release/yysheet.exe dist/
           Copy-Item target/release/yyfilemanager.exe dist/
           Copy-Item target/release/yyclip.exe dist/
+          Copy-Item -Recurse apps/yyclip/data dist/yyclip-data
           Copy-Item target/release/yybrowser.exe dist/
           Copy-Item target/release/yydraw.exe dist/
           Copy-Item crates/yy-config/LICENSE-FS2.txt dist/

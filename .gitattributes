@@ -1,1 +1,2 @@
 *.pdf binary
+apps/yyclip/data/*.csv text eol=lf
