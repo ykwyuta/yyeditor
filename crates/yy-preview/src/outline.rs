@@ -11,7 +11,8 @@ pub fn page(source: &str, epoch: u64, read_only: bool) -> String {
 <script defer src="https://{PREVIEW_HOST}/assets/outline.js"></script></head>
 <body data-epoch="{epoch}" data-readonly="{read_only}">
 <header><strong>アウトライン</strong><button data-op="add">項目追加</button><button data-op="indent">階層を下げる</button><button data-op="outdent">階層を上げる</button><button data-op="up">上へ</button><button data-op="down">下へ</button><button data-op="bookmark">☆ ブックマーク</button><button data-op="reference">参照を追加</button><button data-op="delete">枝を削除</button><button data-command="save">保存</button><button data-command="undo">元に戻す</button><button data-command="redo">やり直す</button><button data-command="source">通常編集に戻る</button></header>
-<p id="status" role="status">Enter 項目追加 · Tab / Shift+Tab 階層変更 · Alt+↑↓ 移動 · ● ズーム · Ctrl+S 保存</p>
+<div class="options"><label>箇条書きの表示 <select id="list-style"><option value="bullets">点（●）</option><option value="numbered">番号（1. 2. 3.）</option></select></label><button data-command="exportmarkdown">Markdown にエクスポート</button></div>
+<p id="status" role="status">Enter 項目追加 · Tab / Shift+Tab 階層変更 · Alt+↑↓ 移動 · ● / 番号でズーム · Ctrl+S 保存</p>
 <nav id="crumbs" aria-label="階層の経路"></nav><div class="layout"><aside><h2>ブックマーク</h2><div id="bookmarks"></div><h2>参照元</h2><div id="backlinks"></div></aside><main id="tree" aria-label="アウトライン"></main></div>
 <textarea id="source" hidden>{}</textarea></body></html>"#,
         escape(source)

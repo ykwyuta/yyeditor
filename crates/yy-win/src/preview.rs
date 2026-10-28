@@ -1541,6 +1541,37 @@ mod tests {
             .unwrap()
             .to_owned();
         assert!(saved.contains("yyoutline") && saved.contains("日本語😀"));
+        assert_eq!(eval(&pane, r#"
+            var input=document.querySelector('#tree input');input.value='日本語😀 https://example.com/a?q=1&b=2';input.dispatchEvent(new Event('input'));
+            var style=document.getElementById('list-style');style.value='numbered';style.dispatchEvent(new Event('change'));
+            document.querySelector('[data-command=exportmarkdown]').click();
+            document.querySelector('#tree .urls a').href==='https://example.com/a?q=1&b=2' &&
+            [...document.querySelectorAll('#tree .zoom')].map(b=>b.textContent).join(',')==='1.,1.'
+        "#).as_deref(),Some("true"));
+        assert!(
+            pump_until(Duration::from_secs(10), || {
+                messages.extend(pane.take_edit_messages());
+                messages
+                    .iter()
+                    .any(|m| m.split('\n').nth(2) == Some("exportmarkdown"))
+            }),
+            "export request missing: {messages:?}"
+        );
+        let exported = messages
+            .iter()
+            .find(|m| m.split('\n').nth(2) == Some("exportmarkdown"))
+            .unwrap()
+            .splitn(6, '\n')
+            .nth(5)
+            .unwrap();
+        assert!(exported.starts_with("# 日本語😀 https://example.com/a?q=1\\&b=2\n"));
+        assert!(!exported.contains("yyoutline"));
+        SHELL_OPEN_REQUESTS.with(|requests| requests.borrow_mut().clear());
+        open_link(&pane.shared, "https://example.com/a?q=1&b=2", true);
+        assert!(
+            SHELL_OPEN_REQUESTS
+                .with(|requests| requests.borrow().as_slice() == ["https://example.com/a?q=1&b=2"])
+        );
         assert_eq!(eval(&pane, "document.querySelector('#bookmarks button').click(); document.querySelector('#backlinks button')!==null && document.querySelectorAll('#crumbs button').length===2").as_deref(),Some("true"));
         pane.show_outline(&saved, 92, true);
         assert!(
@@ -1551,6 +1582,7 @@ mod tests {
             "readonly outline did not load"
         );
         assert_eq!(eval(&pane,"[...document.querySelectorAll('#tree input')].every(i=>i.readOnly) && document.querySelector('[data-op=add]').disabled && document.querySelector('#tree input').value==='日本語😀'").as_deref(),Some("true"));
+        assert_eq!(eval(&pane,"document.getElementById('list-style').disabled && !document.querySelector('[data-command=exportmarkdown]').disabled").as_deref(),Some("true"));
         pane.show_outline("invalid source", 93, false);
         assert!(
             pump_until(Duration::from_secs(20), || pane

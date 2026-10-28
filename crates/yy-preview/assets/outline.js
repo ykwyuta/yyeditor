@@ -9,7 +9,10 @@
   const index=()=>doc.nodes.findIndex(n=>n.id===selected);
   function send(action='edit') {
     if(composing) { pending.push(action); return; }
-    bridge?.postMessage([epoch,++seq,action,0,0,source].join('\n'));
+    try {
+      const payload=action==='exportmarkdown'?M.markdown(doc):source;
+      bridge?.postMessage([epoch,++seq,action,0,0,payload].join('\n'));
+    } catch(error) { status.textContent=error.message; }
   }
   function button(label, action, parent) {
     const b=document.createElement('button'); b.type='button'; b.textContent=label;
@@ -21,6 +24,8 @@
     catch(error) { doc=null; tree.textContent='アウトラインを読み込めません。'; status.textContent=error.message; }
     loaded=true;
     document.querySelectorAll('[data-op]').forEach(b=>b.disabled=readonly || !doc);
+    document.getElementById('list-style').disabled=readonly || !doc;
+    document.querySelector('[data-command=exportmarkdown]').disabled=!doc;
     send('ready');
   }
   function change(action, mutation, redraw=true) {
@@ -36,6 +41,7 @@
     if(redraw) render(true);
     else {
       renderLinks();
+      for(const row of tree.querySelectorAll('.row')) renderUrls(row,byId(row.dataset.id).text);
       for(const link of tree.querySelectorAll('[data-target]')) {
         const target=byId(link.dataset.target);
         link.textContent='↗ '+(target?.text || (target?'(空の項目)':'参照先なし'));
@@ -51,6 +57,7 @@
     zoom=id; selected=id; render(true);
   }
   function render(restore=false) {
+    document.getElementById('list-style').value=doc.listStyle || 'bullets';
     tree.replaceChildren();
     const crumbs=document.getElementById('crumbs'); crumbs.replaceChildren();
     button('全体',()=>{zoom=null;render(true);},crumbs);
@@ -64,6 +71,7 @@
     }
     const stop=zoom ? M.end(doc,start) : doc.nodes.length, base=zoom ? doc.nodes[start].depth : 0;
     const lookup=new Map(doc.nodes.map(n=>[n.id,n]));
+    const numbers=M.numbers(doc);
     let hiddenDepth=null;
     for(let i=start;i<stop;i++) {
       const n=doc.nodes[i];
@@ -74,7 +82,7 @@
       const children=i+1<doc.nodes.length && doc.nodes[i+1].depth>n.depth;
       const fold=button(children?(n.collapsed?'▸':'▾'):'·',()=>{selected=n.id;change('outline',()=>n.collapsed=!n.collapsed);},row);
       fold.className='fold'; fold.setAttribute('aria-label',n.collapsed?'展開':'折りたたみ'); fold.disabled=readonly || !children;
-      const bullet=button('●',()=>navigate(n.id),row); bullet.className='zoom'; bullet.title='この階層にズーム';
+      const bullet=button(doc.listStyle==='numbered'?numbers[i]+'.':'●',()=>navigate(n.id),row); bullet.className='zoom'; bullet.title='この階層にズーム';
       const input=document.createElement('input'); input.value=n.text; input.readOnly=readonly;
       input.setAttribute('aria-label','階層 '+(n.depth+1)+' の項目');
       input.onfocus=()=>{selected=n.id; tree.querySelectorAll('.row').forEach(r=>r.classList.toggle('active',r===row)); renderLinks();};
@@ -92,6 +100,7 @@
         }
       };
       row.append(input);
+      const urls=document.createElement('span');urls.className='urls';row.append(urls);renderUrls(row,n.text);
       if(n.bookmark) {const star=document.createElement('span');star.textContent='★';row.append(star);}
       const refs=document.createElement('span');refs.className='refs';
       for(const target of n.refs) {
@@ -111,6 +120,13 @@
     for(const [container,filter] of [['bookmarks',n=>n.bookmark],['backlinks',n=>n.refs.includes(selected)]]) {
       const area=document.getElementById(container);area.replaceChildren();
       for(const n of doc.nodes.filter(filter)) button(n.text || '(空の項目)',()=>navigate(n.id),area);
+    }
+  }
+  function renderUrls(row,text) {
+    const area=row.querySelector('.urls');area.replaceChildren();
+    for(const url of M.urls(text)) {
+      const link=document.createElement('a');link.href=url;link.textContent=url;
+      link.target='_blank';link.rel='noopener noreferrer';link.title='ブラウザで開く: '+url;area.append(link);
     }
   }
   function reference() {
@@ -141,6 +157,7 @@
   }
   document.querySelectorAll('[data-op]').forEach(b=>b.onclick=()=>operate(b.dataset.op));
   document.querySelectorAll('[data-command]').forEach(b=>b.onclick=()=>send(b.dataset.command));
+  document.getElementById('list-style').onchange=event=>change('outline',()=>doc.listStyle=event.target.value);
   document.addEventListener('keydown',e=>{
     if(!(e.ctrlKey || e.metaKey) || e.isComposing)return;
     const command=({s:e.shiftKey?'saveas':'save',z:e.shiftKey?'redo':'undo',y:'redo',o:'open',n:'new',w:'close'})[e.key.toLowerCase()];

@@ -2,6 +2,27 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const M=require('../assets/outline-model.js');
 const node=(id,depth,text=id)=>({id,depth,text,bookmark:false,collapsed:false,refs:[]});
+test('Markdown uses six heading levels then nested lists and includes collapsed branches',()=>{
+  const doc=M.fresh();doc.nodes=Array.from({length:9},(_,i)=>node('n'+i,i,'項目 '+i));
+  doc.nodes[0].collapsed=true;doc.nodes.push(node('last',0,'終わり <script> & *強調*\n次行'));
+  const before=M.serialize(doc);
+  assert.equal(M.markdown(doc),'# 項目 0\n\n## 項目 1\n\n### 項目 2\n\n#### 項目 3\n\n##### 項目 4\n\n###### 項目 5\n- 項目 6\n    - 項目 7\n        - 項目 8\n\n# 終わり \\<script\\> \\& \\*強調\\* 次行\n');
+  assert.equal(M.serialize(doc),before);assert.equal(M.markdown(M.fresh()),'');
+  doc.nodes=Array.from({length:2000},(_,i)=>node('n'+i,i));
+  assert.throws(()=>M.markdown(doc),/1 MiB/);
+});
+test('numbers restart for each parent, survive collapsed branches and persist style',()=>{
+  const doc=M.fresh();doc.nodes=[node('a',0),node('b',1),node('c',2),node('d',1),node('e',0),node('f',1)];
+  doc.nodes[0].collapsed=true;doc.listStyle='numbered';
+  assert.deepEqual(M.numbers(doc),[1,1,1,2,2,1]);
+  assert.deepEqual(M.parse(M.serialize(doc)),doc);
+  M.move(doc,4,'up');assert.deepEqual(M.numbers(doc),[1,1,2,1,1,2]);
+  assert.throws(()=>M.parse(JSON.stringify({...doc,listStyle:'invalid'})));
+});
+test('only complete HTTP URLs become links, with safe punctuation and balanced parentheses',()=>{
+  assert.deepEqual(M.urls('参照「https://example.com/a?q=1&b=2」。 http://example.org/test. https://example.com/a_(b) (https://example.net/x) javascript:alert(1) https://'),['https://example.com/a?q=1&b=2','http://example.org/test','https://example.com/a_(b)','https://example.net/x']);
+  assert.deepEqual(M.urls('<script>alert(1)</script> file:///C:/secret data:text/html,test'),[]);
+});
 test('deep outlines roundtrip without recursion and preserve Japanese, IDs and links',()=>{
   const doc=M.fresh();
   for(let i=0;i<12000;i++)doc.nodes.push(node('n'+i,i,'日本語😀 '+i));

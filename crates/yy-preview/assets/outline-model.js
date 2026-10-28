@@ -8,6 +8,7 @@
     const doc = JSON.parse(source);
     if (doc.format !== 'yyoutline' || doc.version !== 1 || !Array.isArray(doc.nodes)) throw Error('yyoutline version 1 のファイルを開いてください。');
     const ids = new Set();
+    if (doc.listStyle !== undefined && !['bullets','numbered'].includes(doc.listStyle)) throw Error('不正な表示スタイルです。');
     let previous = -1;
     for (const n of doc.nodes) {
       if (!n || typeof n.id !== 'string' || !n.id || ids.has(n.id) ||
@@ -66,6 +67,42 @@
     doc.nodes.splice(at,end(doc,at)-at);
     // Keep references as explicit missing links; never silently retarget them.
   }
-  scope.YYOutline={fresh,parse,serialize,end,add,move,remove};
+  function numbers(doc) {
+    const counts=[], result=[];
+    for(const n of doc.nodes) {
+      counts.length=n.depth+1;
+      counts[n.depth]=(counts[n.depth] || 0)+1;
+      result.push(counts[n.depth]);
+    }
+    return result;
+  }
+  function urls(text) {
+    const result=[];
+    for(const match of text.matchAll(/https?:\/\/[^\s<>"'「」『』【】]+/gi)) {
+      let value=match[0].replace(/[.,!?;:、。！？）]+$/u,'');
+      while(value.endsWith(')') && (value.match(/\)/g)||[]).length>(value.match(/\(/g)||[]).length) value=value.slice(0,-1);
+      try { if(new URL(value).hostname && !result.includes(value)) result.push(value); } catch { /* Incomplete URL while typing. */ }
+    }
+    return result;
+  }
+  function markdown(doc) {
+    const lines=[], counts=numbers(doc), indents=[0];
+    // Escape literal text so punctuation cannot turn a node into Markdown syntax or HTML.
+    const escape=text=>text.replace(/\r\n|\r|\n/g,' ').replace(/[\\`*_[\]{}<>#!|~&]/g,'\\$&')
+      .replace(/^(\s*\d+)([.)])(?=\s)/,'$1\\$2').replace(/^(\s*)([-+])(?=\s)/,'$1\\$2');
+    let size=0;
+    for(let i=0;i<doc.nodes.length;i++) {
+      const n=doc.nodes[i], text=escape(n.text);
+      const marker=doc.listStyle==='numbered'?counts[i]+'. ':'- ', level=n.depth-6;
+      const prefix=n.depth<6 ? '#'.repeat(n.depth+1)+' ' : ' '.repeat(indents[level])+marker;
+      if(level>=0) indents[level+1]=indents[level]+Math.max(4,marker.length);
+      const line=(n.depth<6 && lines.length?'\n':'')+prefix+text+'\n';
+      size+=new TextEncoder().encode(line).length;
+      if(size>1048576) throw Error('Markdown の出力が 1 MiB を超えます。階層や項目数を減らしてください。');
+      lines.push(line);
+    }
+    return lines.join('');
+  }
+  scope.YYOutline={fresh,parse,serialize,end,add,move,remove,numbers,urls,markdown};
   if(typeof module!=='undefined') module.exports=scope.YYOutline;
 })(globalThis);

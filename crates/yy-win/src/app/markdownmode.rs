@@ -1,6 +1,7 @@
 //! タブ単位の Markdown / アウトライン編集。文書と保存・Undo は通常編集と共用する。
 use super::*;
 use crate::preview::{DocBase, Preview};
+use std::path::Path;
 
 pub(super) const ID_MARKDOWN: u16 = 212;
 pub(super) const ID_OUTLINE: u16 = 213;
@@ -14,6 +15,7 @@ pub(super) enum Action {
     TabMenu(usize),
     Open(PathBuf, Option<Encoding>, bool),
     Batch(Vec<Action>),
+    ExportOutline(String),
 }
 
 #[derive(Default)]
@@ -189,6 +191,12 @@ impl App {
             return None;
         }
         self.markdown.seq = seq;
+        // Export payload is Markdown, never the document source or an undoable edit.
+        if action == "exportmarkdown" {
+            return self
+                .outline_mode
+                .then(|| Action::ExportOutline(source.to_owned()));
+        }
         let before = self.markdown_source().ok()?;
         let kind = if matches!(action, "paragraph" | "newline") {
             EditKind::Newline
@@ -401,6 +409,7 @@ pub(super) fn on_messages(hwnd: HWND) {
 fn execute(hwnd: HWND, action: Action) {
     match action {
         Action::Command(id) => on_command_now(hwnd, id),
+        Action::ExportOutline(markdown) => export_outline(hwnd, &markdown),
         Action::Switch(index) => {
             with_app(|a| a.switch_tab(index));
             focus_editor();
@@ -417,6 +426,64 @@ fn execute(hwnd: HWND, action: Action) {
             }
         }
     }
+}
+
+fn export_outline(hwnd: HWND, markdown: &str) {
+    let current = with_app(|a| a.doc.path().map(Path::to_path_buf)).flatten();
+    let path = unsafe {
+        let Ok(dialog) =
+            CoCreateInstance::<_, IFileSaveDialog>(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)
+        else {
+            return;
+        };
+        let _ = dialog.SetTitle(w!("Markdown にエクスポート"));
+        let _ = dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
+            pszName: w!("Markdown (*.md)"),
+            pszSpec: w!("*.md"),
+        }]);
+        let _ = dialog.SetDefaultExtension(w!("md"));
+        let name = current
+            .as_ref()
+            .map(|p| p.with_extension("md"))
+            .and_then(|p| p.file_name().map(|n| n.to_owned()))
+            .unwrap_or_else(|| "アウトライン.md".into());
+        let _ = dialog.SetFileName(&HSTRING::from(name.as_os_str()));
+        if dialog.Show(Some(hwnd)).is_err() {
+            return;
+        }
+        let Some(path) = dialog.cast().ok().and_then(|d| dialog_result(&d)) else {
+            return;
+        };
+        path
+    };
+    if let Err(error) = write_outline_export(&path, current.as_deref(), markdown) {
+        error_box(hwnd, &format!("Markdown を保存できませんでした: {error}"));
+    }
+}
+
+fn write_outline_export(
+    path: &Path,
+    original: Option<&Path>,
+    markdown: &str,
+) -> std::io::Result<()> {
+    if let Some(original) = original
+        && (original == path
+            || original
+                .canonicalize()
+                .ok()
+                .zip(path.canonicalize().ok())
+                .is_some_and(|(a, b)| a == b))
+    {
+        return Err(std::io::Error::other(
+            "元のアウトラインとは別のファイル名を指定してください。",
+        ));
+    }
+    use std::io::Write;
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
+    file.write_all(markdown.as_bytes())?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 /// SetFocus は WM_SETFOCUS を同期送信するため、App の借用を解いてから呼ぶ。
@@ -440,6 +507,18 @@ pub(super) fn focus_editor() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn outline_export_writes_utf8_without_overwriting_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("source.yyoutline");
+        let target = dir.path().join("export.md");
+        std::fs::write(&original, "original JSON").unwrap();
+        std::fs::write(&target, "old export").unwrap();
+        write_outline_export(&target, Some(&original), "# 日本語😀\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "# 日本語😀\n");
+        assert!(write_outline_export(&original, Some(&original), "replace").is_err());
+        assert_eq!(std::fs::read_to_string(original).unwrap(), "original JSON");
+    }
     #[test]
     fn outline_changes_undo_redo_and_save_keep_ids_and_references() {
         let source = include_str!("../../../../demo/outline/example.yyoutline");
