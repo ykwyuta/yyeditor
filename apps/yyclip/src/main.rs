@@ -1406,8 +1406,9 @@ mod resident {
         PICKER_OPEN.store(false, Ordering::SeqCst);
         cancel_foreground_request(hwnd);
         unsafe {
+            let restore_previous = GetForegroundWindow() == hwnd;
             let _ = ShowWindow(hwnd, SW_HIDE);
-            if previous != hwnd && !previous.0.is_null() {
+            if restore_previous && previous != hwnd && !previous.0.is_null() {
                 let _ = SetForegroundWindow(previous);
             }
         }
