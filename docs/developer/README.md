@@ -20,6 +20,7 @@
 | [YY3Designer](yy3designer.md) | 画像・3DコアとWindows UIの検証 |
 | [yydraw](yydraw.md) | アプリ・作例のビルド |
 | [yyfilemanagerの容量整理・起動](filemanager-cleanup-launch.md) | 分類・読み取り探索・署名検証と承認の境界 |
+| [yyfilemanagerのサイズ・WSL](filemanager-size-wsl.md) | 非同期集計・占有率バー・Linux権限・資格情報 |
 | [yytoolbox](yytoolbox.md) | ローカル変換・録画・一括画像処理の構成と試験 |
 
 作業ルールは[AGENTS.md](../../AGENTS.md)。提案・過去のレビュー・測定結果は

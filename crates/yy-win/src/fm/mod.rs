@@ -10,6 +10,7 @@ mod launch;
 mod renamedlg;
 mod shell;
 mod work;
+mod wsl;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};

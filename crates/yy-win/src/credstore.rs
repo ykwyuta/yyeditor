@@ -62,7 +62,13 @@ impl PasswordStore for WindowsCredentials {
         name.push(0);
         let mut user: Vec<u16> = saved.user.encode_utf16().collect();
         user.push(0);
-        let mut comment: Vec<u16> = "yyeditor のリモート接続（SSH）".encode_utf16().collect();
+        let mut comment: Vec<u16> = if key.starts_with("wsl-sudo/") {
+            "yyfilemanager のWSL sudo"
+        } else {
+            "yyeditor のリモート接続（SSH）"
+        }
+        .encode_utf16()
+        .collect();
         comment.push(0);
         let mut blob: Vec<u8> = saved
             .password

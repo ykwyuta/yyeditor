@@ -54,6 +54,17 @@ pub trait PatchFile: Write + Seek + Send {
 /// ファイル操作。
 pub trait Fs: Send + Sync {
     fn read_dir(&self, path: &Path) -> io::Result<Vec<DirEntry>>;
+    /// Entries plus the number of entries whose metadata was inaccessible.
+    fn read_dir_with_errors(
+        &self,
+        path: &Path,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<(Vec<DirEntry>, u64)> {
+        if cancelled() {
+            return Err(crate::cancelled());
+        }
+        self.read_dir(path).map(|entries| (entries, 0))
+    }
     /// 情報（リンクはたどらない）。
     fn metadata(&self, path: &Path) -> io::Result<Meta>;
     fn open_read(&self, path: &Path) -> io::Result<Box<dyn ReadFile>>;
@@ -176,11 +187,25 @@ impl PatchFile for LocalPatch {
 
 impl Fs for Local {
     fn read_dir(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
+        self.read_dir_with_errors(path, &|| false)
+            .map(|(entries, _)| entries)
+    }
+
+    fn read_dir_with_errors(
+        &self,
+        path: &Path,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<(Vec<DirEntry>, u64)> {
         let mut out = Vec::new();
+        let mut errors = 0;
         for e in fs::read_dir(path)? {
+            if cancelled() {
+                return Err(crate::cancelled());
+            }
             let e = e?;
             // 項目ごとの情報が読めなければ飛ばす（消えた・権限がない）
             let Ok(m) = fs::symlink_metadata(e.path()) else {
+                errors += 1;
                 continue;
             };
             out.push(DirEntry {
@@ -188,7 +213,7 @@ impl Fs for Local {
                 meta: meta_of(&m),
             });
         }
-        Ok(out)
+        Ok((out, errors))
     }
 
     fn metadata(&self, path: &Path) -> io::Result<Meta> {

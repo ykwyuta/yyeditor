@@ -19,6 +19,7 @@ pub mod archive;
 pub mod catalogs;
 pub mod cleanup;
 pub mod dupes;
+pub mod folder_size;
 pub mod fs;
 pub mod fulltext;
 pub mod hash;
@@ -35,6 +36,7 @@ pub mod scan;
 pub mod search;
 pub mod similar;
 pub mod sync;
+pub mod wsl;
 
 pub use fs::{DirEntry, Fs, Local, Meta};
 pub use scan::{Catalog, FileEntry, ScanOptions, scan, scan_with};

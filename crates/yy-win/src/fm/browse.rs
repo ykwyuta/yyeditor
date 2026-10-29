@@ -37,6 +37,9 @@ use yy_files::jobs::{BrowseState, Dirs};
 use yy_files::props::Props;
 use yy_files::search::Query;
 
+#[path = "browse_sizes.rs"]
+mod sizes;
+
 use super::shell::{self, Op};
 use crate::util::error_box;
 use crate::{hiword, loword};
@@ -52,6 +55,8 @@ const WM_APP_PROPS: u32 = WM_APP + 104;
 const WM_APP_EXTRACTED: u32 = WM_APP + 105;
 /// 一括リネームの後などに読み直す
 pub(super) const WM_APP_RELOAD: u32 = WM_APP + 106;
+const WM_APP_SIZES: u32 = WM_APP + 107;
+const WM_APP_WSL_DISTROS: u32 = WM_APP + 108;
 
 const TIMER_FILTER: usize = 1;
 const TIMER_RELOAD: usize = 2;
@@ -96,6 +101,7 @@ const CM_SELECT_ALL: u32 = 21;
 const CM_INVERT: u32 = 22;
 const CM_REFRESH: u32 = 23;
 const CM_FLAT: u32 = 24;
+const CM_WSL_PERMISSIONS: u32 = 25;
 // 表示のメニュー
 const VM_DETAILS: u32 = 101;
 const VM_LIST: u32 = 102;
@@ -309,6 +315,8 @@ enum Col {
     Ratio,
     Method,
     Encrypted,
+    FolderTotal,
+    Share,
 }
 
 impl Col {
@@ -327,6 +335,8 @@ impl Col {
             Col::Ratio => "圧縮率",
             Col::Method => "方式",
             Col::Encrypted => "暗号化",
+            Col::FolderTotal => "合計サイズ",
+            Col::Share => "占有率",
         }
     }
 
@@ -340,13 +350,15 @@ impl Col {
             Col::Ratio => 60,
             Col::Method => 90,
             Col::Attr | Col::Encrypted => 60,
+            Col::FolderTotal => 112,
+            Col::Share => 132,
         }
     }
 
     fn right(self) -> bool {
         matches!(
             self,
-            Col::Size | Col::Total | Col::Free | Col::Packed | Col::Ratio
+            Col::Size | Col::Total | Col::Free | Col::Packed | Col::Ratio | Col::FolderTotal
         )
     }
 }
@@ -372,6 +384,12 @@ struct Batch {
 }
 
 struct State {
+    sizes: sizes::Model,
+    sizes_dirty: bool,
+    watch_ready: Arc<AtomicBool>,
+    wsl_roots: Vec<(String, PathBuf)>,
+    wsl_discovery: Option<std::thread::JoinHandle<()>>,
+    wsl_error: bool,
     hwnd: HWND,
     buttons: Vec<(u16, HWND)>,
     address: HWND,
@@ -438,6 +456,16 @@ fn text_of(h: HWND) -> String {
 fn set_text(h: HWND, s: &str) {
     unsafe {
         let _ = SetWindowTextW(h, &HSTRING::from(s));
+    }
+}
+
+fn path_key(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if yy_files::wsl::Location::parse(&text).is_some() {
+        let loc = yy_files::wsl::Location::parse(&text).unwrap();
+        format!("wsl/{}/{}", loc.distro.to_lowercase(), loc.linux)
+    } else {
+        text.to_lowercase()
     }
 }
 
@@ -702,6 +730,12 @@ pub(super) fn create(
             archive: None,
             query: None,
             query_error: None,
+            sizes: sizes::Model::default(),
+            sizes_dirty: false,
+            watch_ready: Arc::new(AtomicBool::new(false)),
+            wsl_roots: Vec::new(),
+            wsl_discovery: None,
+            wsl_error: false,
             props: HashMap::new(),
             props_pending: HashSet::new(),
             icons: HashMap::new(),
@@ -724,6 +758,7 @@ pub(super) fn create(
             s.fill_tree();
         });
         go(start, false);
+        discover_wsl();
         hwnd
     }
 }
@@ -736,6 +771,10 @@ pub(super) fn hwnd() -> HWND {
 /// 状態を保存し、一時フォルダを消す（終了するとき）。
 pub(super) fn shutdown() {
     with(|s| {
+        s.sizes.stop();
+        if let Some(thread) = s.wsl_discovery.take() {
+            let _ = thread.join();
+        }
         if let Some(c) = s.cancel.take() {
             c.store(true, Ordering::Relaxed);
         }
@@ -840,11 +879,14 @@ impl State {
                 x += self.d(w) + self.d(4);
             }
             y += h + pad;
-            let tree_w = self.d(self.st.tree_width.clamp(80, 1200)).min(rc.right / 2);
+            let tree_w = self
+                .d(self.st.tree_width.clamp(80, 1200))
+                .min((rc.right - self.d(320)).max(self.d(80)));
             let body_h = (rc.bottom - y).max(0);
             let _ = MoveWindow(self.tree, 0, y, tree_w, body_h, true);
             let lx = tree_w + self.d(SPLITTER);
             let _ = MoveWindow(self.list, lx, y, (rc.right - lx).max(0), body_h, true);
+            self.fit_size_columns();
         }
     }
 
@@ -988,8 +1030,31 @@ impl State {
             let icon = self.real_icon(&d);
             self.insert_node(pc, &label, Some(Loc::Folder(d)), icon, true);
         }
+        let linux = self.insert_node(
+            TVI_ROOT,
+            if self.wsl_error {
+                "WSL（一覧を取得できません）"
+            } else {
+                "WSL"
+            },
+            None,
+            self.folder_icon,
+            true,
+        );
+        if let Some(n) = self.nodes.last_mut() {
+            n.loaded = true;
+        }
+        for (name, path) in self.wsl_roots.clone() {
+            self.insert_node(
+                linux,
+                &name,
+                Some(Loc::Folder(path)),
+                self.folder_icon,
+                true,
+            );
+        }
         unsafe {
-            for item in [quick, pc] {
+            for item in [quick, pc, linux] {
                 SendMessageW(
                     self.tree,
                     TVM_EXPAND,
@@ -1110,11 +1175,11 @@ impl State {
                 v
             }
             Loc::Folder(_) => {
-                let mut v = vec![Col::Name];
+                let mut v = vec![Col::Name, Col::FolderTotal, Col::Share];
                 if self.flat {
                     v.push(Col::Folder);
                 }
-                v.extend([Col::Modified, Col::Type, Col::Size, Col::Created, Col::Attr]);
+                v.extend([Col::Modified, Col::Type, Col::Created, Col::Attr]);
                 v
             }
         }
@@ -1148,6 +1213,7 @@ impl State {
             self.sort = (Col::Name, true);
         }
         self.cols = cols;
+        self.fit_size_columns();
         self.show_sort_arrow();
     }
 
@@ -1190,6 +1256,9 @@ impl State {
     }
 
     fn type_name(&mut self, r: &Row) -> String {
+        if super::wsl::location(&r.path).is_some_and(|l| l.linux == "/") {
+            return "WSL ディストリビューション".into();
+        }
         if r.drive.is_some() {
             return "ローカル ディスク".into();
         }
@@ -1292,6 +1361,8 @@ impl State {
         let size = |n: u64| crate::util::human_size(n);
         match c {
             Col::Name => self.display_name(&r),
+            Col::FolderTotal => self.size_text(&r),
+            Col::Share => self.share_text(&r),
             Col::Folder => r.folder.clone(),
             Col::Modified => match self.entry(&r) {
                 Some(e) => match e.mtime {
@@ -1384,6 +1455,7 @@ impl State {
                 ext(a).cmp(&ext(b)).then_with(|| natural(&a.name, &b.name))
             }
             Col::Size => a.size.cmp(&b.size),
+            Col::FolderTotal | Col::Share => self.effective_size(a).cmp(&self.effective_size(b)),
             Col::Attr => a.attrs.cmp(&b.attrs),
             Col::Total => a.drive.map(|d| d.0).cmp(&b.drive.map(|d| d.0)),
             Col::Free => a.drive.map(|d| d.1).cmp(&b.drive.map(|d| d.1)),
@@ -1424,7 +1496,7 @@ impl State {
         let fe = yy_files::FileEntry {
             rel,
             meta: yy_files::Meta {
-                size: r.size,
+                size: self.effective_size(r).unwrap_or(r.size),
                 mtime: r.mtime,
                 ctime: r.ctime,
                 dir: r.dir,
@@ -1558,10 +1630,7 @@ impl State {
         if paths.is_empty() {
             return;
         }
-        let want: HashSet<String> = paths
-            .iter()
-            .map(|p| p.to_string_lossy().to_lowercase())
-            .collect();
+        let want: HashSet<String> = paths.iter().map(|p| path_key(p)).collect();
         let mut first = None;
         unsafe {
             let none = LVITEMW {
@@ -1576,7 +1645,7 @@ impl State {
                 Some(LPARAM(&none as *const _ as isize)),
             );
             for (vi, &ri) in self.view.iter().enumerate() {
-                if want.contains(&self.rows[ri].path.to_string_lossy().to_lowercase()) {
+                if want.contains(&path_key(&self.rows[ri].path)) {
                     let mut it = LVITEMW {
                         stateMask: LVIS_SELECTED,
                         state: LVIS_SELECTED,
@@ -1630,7 +1699,10 @@ impl State {
             }
         };
         if !sel.is_empty() {
-            let bytes: u64 = sel.iter().map(|&i| self.rows[i].size).sum();
+            let bytes: u64 = sel
+                .iter()
+                .map(|&i| self.effective_size(&self.rows[i]).unwrap_or(0))
+                .fold(0, u64::saturating_add);
             s.push_str(&format!(
                 "　{} 個を選択（{}）",
                 sel.len(),
@@ -1642,6 +1714,12 @@ impl State {
                 "　読み込み中…（{} フォルダ）Esc で止める",
                 self.scanned_dirs
             ));
+        }
+        if self.sizes.running {
+            s.push_str("　サブフォルダのサイズ計算中…（占有率は概算）");
+        }
+        if let Some(note) = self.sizes.status_note() {
+            s.push_str(&format!("　{note}"));
         }
         if let Some(e) = &self.query_error {
             s.push_str(&format!("　絞り込みの誤り: {e}"));
@@ -1734,6 +1812,27 @@ fn drives() -> Vec<PathBuf> {
         .collect()
 }
 
+fn discover_wsl() {
+    with(|s| {
+        if s.wsl_discovery.is_some() {
+            return;
+        }
+        let hwnd = s.hwnd.0 as isize;
+        s.wsl_discovery = Some(std::thread::spawn(move || {
+            post(hwnd, WM_APP_WSL_DISTROS, 0, super::wsl::distributions());
+        }));
+    });
+}
+
+fn show_properties(owner: HWND, paths: &[PathBuf]) {
+    if paths.len() == 1 && super::wsl::location(&paths[0]).is_some() {
+        let browse = with(|s| s.hwnd).unwrap_or(owner);
+        super::wsl::open(owner, &paths[0], browse, WM_APP_RELOAD);
+    } else {
+        shell::properties(owner, paths);
+    }
+}
+
 /// 合計と空き（分からなければ `None`）。
 fn disk_space(p: &Path) -> Option<(u64, u64)> {
     let w = crate::util::wide(&p.to_string_lossy());
@@ -1775,6 +1874,11 @@ fn load() {
 /// `reload` なら、新しい行が届くまで今の一覧を出しておく（見張りで読み直すときにちらつかない）。
 fn load_with(reload: bool) {
     with(|s| {
+        s.sizes.cancel();
+        s.sizes_dirty = false;
+        if !matches!(s.loc, Loc::Folder(_)) {
+            s.sizes.deactivate();
+        }
         if let Some(c) = s.cancel.take() {
             c.store(true, Ordering::Relaxed);
         }
@@ -1802,8 +1906,9 @@ fn load_with(reload: bool) {
         match s.loc.clone() {
             Loc::Computer => {
                 s.loading = true;
+                let linux = s.wsl_roots.clone();
                 std::thread::spawn(move || {
-                    let rows = drives()
+                    let mut rows: Vec<_> = drives()
                         .into_iter()
                         .map(|d| Row {
                             name: d.to_string_lossy().into_owned(),
@@ -1813,6 +1918,12 @@ fn load_with(reload: bool) {
                             ..Default::default()
                         })
                         .collect();
+                    rows.extend(linux.into_iter().map(|(name, path)| Row {
+                        name: format!("{name}（WSL）"),
+                        path,
+                        dir: true,
+                        ..Default::default()
+                    }));
                     post(
                         hwnd,
                         WM_APP_ROWS,
@@ -1831,10 +1942,15 @@ fn load_with(reload: bool) {
             Loc::Folder(p) => {
                 s.loading = true;
                 let flat = s.flat;
+                s.sizes.start(hwnd, generation, p.clone());
                 std::thread::spawn(move || list_folder(hwnd, generation, p, flat, cancel));
-                if !s.flat {
-                    s.watch = Some(watch(hwnd, generation, s.loc.clone()));
-                }
+                s.watch_ready = Arc::new(AtomicBool::new(false));
+                s.watch = Some(watch(
+                    hwnd,
+                    generation,
+                    s.loc.clone(),
+                    s.watch_ready.clone(),
+                ));
             }
             Loc::Archive { file, .. } => {
                 let cached = s.archive.as_ref().is_some_and(|(f, _)| *f == file);
@@ -1899,6 +2015,22 @@ fn list_folder(hwnd: isize, generation: u64, root: PathBuf, flat: bool, cancel: 
                 stack.push((row.path.clone(), child_rel, row.hidden));
             }
             batch.push(row);
+            if batch.len() >= 5000 || last.elapsed().as_millis() > 200 {
+                post(
+                    hwnd,
+                    WM_APP_ROWS,
+                    0,
+                    Batch {
+                        generation,
+                        rows: std::mem::take(&mut batch),
+                        done: false,
+                        error: None,
+                        dirs,
+                        free: None,
+                    },
+                );
+                last = std::time::Instant::now();
+            }
         }
         if batch.len() >= 5000 || last.elapsed().as_millis() > 200 {
             post(
@@ -1933,7 +2065,7 @@ fn list_folder(hwnd: isize, generation: u64, root: PathBuf, flat: bool, cancel: 
 }
 
 /// フォルダの変化を見張る（変わったら `WM_APP_CHANGED`）。止める印を返す。
-fn watch(hwnd: isize, generation: u64, loc: Loc) -> Arc<AtomicBool> {
+fn watch(hwnd: isize, generation: u64, loc: Loc, ready: Arc<AtomicBool>) -> Arc<AtomicBool> {
     use windows::Win32::Storage::FileSystem::{
         FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
         FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FindCloseChangeNotification,
@@ -1946,7 +2078,7 @@ fn watch(hwnd: isize, generation: u64, loc: Loc) -> Arc<AtomicBool> {
         let w = HSTRING::from(p.as_os_str());
         let Ok(h) = FindFirstChangeNotificationW(
             &w,
-            false,
+            true,
             FILE_NOTIFY_CHANGE_FILE_NAME
                 | FILE_NOTIFY_CHANGE_DIR_NAME
                 | FILE_NOTIFY_CHANGE_SIZE
@@ -1955,6 +2087,7 @@ fn watch(hwnd: isize, generation: u64, loc: Loc) -> Arc<AtomicBool> {
         ) else {
             return;
         };
+        ready.store(true, Ordering::Release);
         while !s2.load(Ordering::Relaxed) {
             if WaitForSingleObject(h, 500).0 == 0 {
                 if s2.load(Ordering::Relaxed) {
@@ -2018,6 +2151,12 @@ fn on_rows(b: Batch) {
             }
             if let Some(e) = b.error {
                 s.set_status(&e);
+            }
+            if !s.sizes.running && s.sizes_dirty {
+                s.sizes_dirty = false;
+                unsafe {
+                    SetTimer(Some(s.hwnd), TIMER_RELOAD, 400, None);
+                }
             }
         } else {
             s.append_view(from);
@@ -2257,6 +2396,9 @@ fn reload_keep_selection() {
             Some(unsafe { SendMessageW(s.list, LVM_GETTOPINDEX, None, None).0.max(0) as usize });
     });
     load_with(true);
+    if with(|s| s.loc == Loc::Computer) == Some(true) {
+        discover_wsl();
+    }
 }
 
 fn do_file_op(op: Op, paths: Vec<PathBuf>, dest: Option<PathBuf>) {
@@ -2816,6 +2958,16 @@ fn context_menu(screen: POINT) {
                 add(CM_PROPS, "プロパティ(&R)\tAlt+Enter", true);
             }
         }
+        let wsl_target = if paths.len() == 1 {
+            paths.first()
+        } else if paths.is_empty() {
+            folder.as_ref()
+        } else {
+            None
+        };
+        if !in_archive && wsl_target.is_some_and(|p| super::wsl::location(p).is_some()) {
+            add(CM_WSL_PERMISSIONS, "WSLのオーナー・パーミッション...", true);
+        }
         // シェルのメニュー（同じフォルダの項目だけ）
         let shell_paths: Vec<PathBuf> = if sel_rows.is_empty() {
             Vec::new()
@@ -2939,13 +3091,13 @@ fn context_menu(screen: POINT) {
                     }
                 });
             }
-            CM_PROPS => {
+            CM_PROPS | CM_WSL_PERMISSIONS => {
                 let ps = if paths.is_empty() {
                     folder.into_iter().collect()
                 } else {
                     paths
                 };
-                shell::properties(o, &ps);
+                show_properties(o, &ps);
             }
             CM_SELECT_ALL => select_all(false),
             CM_INVERT => select_all(true),
@@ -3094,18 +3246,20 @@ pub(super) fn key(msg: &MSG) -> bool {
             set_text(filter, "");
             apply_filter();
         }
-        VK_ESCAPE if with(|s| s.loading) == Some(true) => {
+        VK_ESCAPE if with(|s| s.loading || s.sizes.running) == Some(true) => {
             with(|s| {
                 if let Some(c) = s.cancel.take() {
                     c.store(true, Ordering::Relaxed);
                 }
                 s.loading = false;
+                s.sizes.cancel();
+                s.sizes_dirty = false;
                 s.rebuild_view();
             });
         }
         VK_RETURN if on_list && alt => {
             let ps = with(|s| s.selected_paths()).unwrap_or_default();
-            shell::properties(hwnd, &ps);
+            show_properties(hwnd, &ps);
         }
         VK_RETURN if on_list => {
             let rows = with(|s| s.selected()).unwrap_or_default();
@@ -3140,6 +3294,7 @@ pub(super) fn key(msg: &MSG) -> bool {
 
 fn on_list_notify(hdr: &NMHDR, lparam: LPARAM) -> LRESULT {
     match hdr.code {
+        NM_CUSTOMDRAW => sizes::draw(lparam),
         LVN_GETDISPINFOW => {
             let nm = unsafe { &mut *(lparam.0 as *mut NMLVDISPINFOW) };
             let row = nm.item.iItem.max(0) as usize;
@@ -3394,7 +3549,7 @@ fn on_tree_notify(hdr: &NMHDR, lparam: LPARAM) -> LRESULT {
                         });
                     }
                     CM_TERMINAL => open_terminal(owner(), &p),
-                    CM_PROPS => shell::properties(owner(), &[p]),
+                    CM_PROPS => show_properties(owner(), &[p]),
                     _ => {}
                 }
             }
@@ -3558,6 +3713,62 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
             on_rows(*unsafe { take::<Batch>(lparam) });
             LRESULT(0)
         }
+        WM_APP_SIZES => {
+            with(|s| {
+                if s.sizes.poll(s.generation) {
+                    if matches!(s.sort.0, Col::FolderTotal | Col::Share) || s.query.is_some() {
+                        s.rebuild_view();
+                    } else {
+                        unsafe {
+                            let _ = InvalidateRect(Some(s.list), None, false);
+                        }
+                        s.update_status();
+                    }
+                    if !s.sizes.running && s.sizes_dirty {
+                        s.sizes_dirty = false;
+                        unsafe {
+                            SetTimer(Some(hwnd), TIMER_RELOAD, 400, None);
+                        }
+                    }
+                }
+            });
+            LRESULT(0)
+        }
+        WM_APP_WSL_DISTROS => {
+            let result = *unsafe { take::<std::io::Result<Vec<String>>>(lparam) };
+            with(|s| {
+                if let Some(thread) = s.wsl_discovery.take() {
+                    let _ = thread.join();
+                }
+                s.wsl_error = result.is_err();
+                s.wsl_roots = result
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|name| {
+                        let path = PathBuf::from(
+                            yy_files::wsl::Location {
+                                distro: name.clone(),
+                                linux: "/".into(),
+                            }
+                            .unc(),
+                        );
+                        (name, path)
+                    })
+                    .collect();
+                s.fill_tree();
+                if s.loc == Loc::Computer {
+                    s.rows.retain(|r| super::wsl::location(&r.path).is_none());
+                    s.rows.extend(s.wsl_roots.iter().map(|(name, path)| Row {
+                        name: format!("{name}（WSL）"),
+                        path: path.clone(),
+                        dir: true,
+                        ..Default::default()
+                    }));
+                    s.rebuild_view();
+                }
+            });
+            LRESULT(0)
+        }
         WM_APP_TREE => {
             let (generation, dirs) = *unsafe { take::<(u64, Vec<(String, PathBuf)>)>(lparam) };
             with(|s| s.on_tree_loaded(wparam.0, generation, dirs));
@@ -3592,10 +3803,16 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
             LRESULT(0)
         }
         WM_APP_CHANGED => {
-            if with(|s| s.generation as usize == wparam.0 && !s.loading) == Some(true) {
-                unsafe {
-                    SetTimer(Some(hwnd), TIMER_RELOAD, 400, None);
-                }
+            if with(|s| s.generation as usize == wparam.0) == Some(true) {
+                with(|s| {
+                    if s.loading || s.sizes.running {
+                        s.sizes_dirty = true;
+                    } else {
+                        unsafe {
+                            SetTimer(Some(hwnd), TIMER_RELOAD, 400, None);
+                        }
+                    }
+                });
             }
             LRESULT(0)
         }
@@ -3692,6 +3909,17 @@ mod tests {
         assert_eq!(expand_env("%USERPROFILE%\\x"), format!("{home}\\x"));
         assert_eq!(expand_env("100%"), "100%");
         assert_eq!(expand_env("%NO_SUCH_VAR_YY%"), "%NO_SUCH_VAR_YY%");
+    }
+    #[test]
+    fn wsl_selection_keys_preserve_linux_case_and_normalize_unc_aliases() {
+        assert_eq!(
+            path_key(Path::new(r"\\wsl$\Ubuntu\home\Case")),
+            path_key(Path::new(r"\\wsl.localhost\ubuntu\home\Case"))
+        );
+        assert_ne!(
+            path_key(Path::new(r"\\wsl$\Ubuntu\home\Case")),
+            path_key(Path::new(r"\\wsl$\Ubuntu\home\case"))
+        );
     }
 
     #[test]
