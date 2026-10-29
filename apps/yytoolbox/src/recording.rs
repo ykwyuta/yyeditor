@@ -24,7 +24,34 @@ use windows::{
 };
 use yytoolbox::{Output, Params, Result, integer, value};
 
-pub const CANCEL_HOTKEY: i32 = 0x5954;
+pub const STOP_HOTKEY: i32 = 0x5954;
+
+/// Keep the actual registration from preflight until recording has finished.
+/// A probe followed by unregistering would allow another app to take the key.
+pub struct StopHotkey(HWND);
+impl StopHotkey {
+    pub fn register(hwnd: HWND, key: &str) -> Result<Self> {
+        let (modifiers, vk) = match key {
+            "Esc" => (MOD_NOREPEAT, VK_ESCAPE),
+            "Ctrl+Shift+F9" => (MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, VK_F9),
+            "Ctrl+Shift+F10" => (MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, VK_F10),
+            "Ctrl+Shift+F11" => (MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, VK_F11),
+            "Ctrl+Alt+F9" => (MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, VK_F9),
+            "Ctrl+Alt+F10" => (MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, VK_F10),
+            _ => return Err("録画終了・保存キーを選び直してください".into()),
+        };
+        unsafe { RegisterHotKey(Some(hwnd), STOP_HOTKEY, modifiers, u32::from(vk.0)) }
+            .map_err(|e| format!("{key}を登録できません。他のアプリで使用されている可能性があります。「録画終了・保存キー」で別のキーを選んで、もう一度開始してください。\n{e}"))?;
+        Ok(Self(hwnd))
+    }
+}
+impl Drop for StopHotkey {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnregisterHotKey(Some(self.0), STOP_HOTKEY);
+        }
+    }
+}
 pub struct Plan {
     pub destination: PathBuf,
     pub rect: RECT,
@@ -55,21 +82,18 @@ impl Plan {
 pub struct UiGuard {
     hwnd: HWND,
     windows: Vec<(HWND, u32)>,
+    _hotkey: StopHotkey,
 }
 impl UiGuard {
+    #[cfg(test)]
     pub fn new(hwnd: HWND) -> Result<Self> {
-        unsafe {
-            RegisterHotKey(
-                Some(hwnd),
-                CANCEL_HOTKEY,
-                MOD_NOREPEAT,
-                u32::from(VK_ESCAPE.0),
-            )
-            .map_err(|e| format!("Escを録画中止キーに登録できません: {e}"))?;
-        }
+        Self::hide(hwnd, StopHotkey::register(hwnd, "Esc")?)
+    }
+    pub fn hide(hwnd: HWND, hotkey: StopHotkey) -> Result<Self> {
         let mut guard = Self {
             hwnd,
             windows: Vec::new(),
+            _hotkey: hotkey,
         };
         unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> BOOL {
             if unsafe { IsWindowVisible(hwnd) }.as_bool() {
@@ -101,7 +125,6 @@ impl UiGuard {
 impl Drop for UiGuard {
     fn drop(&mut self) {
         unsafe {
-            let _ = UnregisterHotKey(Some(self.hwnd), CANCEL_HOTKEY);
             for (window, affinity) in &self.windows {
                 if IsWindow(Some(*window)).as_bool() {
                     let _ = SetWindowDisplayAffinity(*window, WINDOW_DISPLAY_AFFINITY(*affinity));
@@ -265,7 +288,7 @@ unsafe fn pick_rectangle() -> Result<Option<RECT>> {
             if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 break;
             }
-            if msg.message == WM_HOTKEY && msg.wParam.0 == CANCEL_HOTKEY as usize {
+            if msg.message == WM_HOTKEY && msg.wParam.0 == STOP_HOTKEY as usize {
                 picker.done = true;
                 break;
             }
@@ -478,7 +501,9 @@ impl Desktop {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                     biWidth: width as i32,
-                    biHeight: height as i32,
+                    // Negative DIB height stores the top row first, matching
+                    // the encoder's positive MF_MT_DEFAULT_STRIDE.
+                    biHeight: -(height as i32),
                     biPlanes: 1,
                     biBitCount: 32,
                     biCompression: BI_RGB.0,
@@ -509,6 +534,11 @@ impl Desktop {
             })
         }
     }
+}
+trait FrameSource {
+    fn frame(&self, rect: RECT) -> Result<&[u8]>;
+}
+impl FrameSource for Desktop {
     fn frame(&self, rect: RECT) -> Result<&[u8]> {
         unsafe {
             StretchBlt(
@@ -702,6 +732,14 @@ fn capture_audio(
 }
 
 pub fn record(plan: Plan, cancelled: &AtomicBool) -> Result<Output> {
+    record_with_source(plan, cancelled, Desktop::new)
+}
+
+fn record_with_source<S: FrameSource>(
+    plan: Plan,
+    cancelled: &AtomicBool,
+    create_source: impl FnOnce(u32, u32) -> Result<S>,
+) -> Result<Output> {
     if cancelled.load(Ordering::Relaxed) {
         return Err("録画を中止しました。録画ファイルは保存していません".into());
     }
@@ -730,7 +768,7 @@ pub fn record(plan: Plan, cancelled: &AtomicBool) -> Result<Output> {
         plan.fps,
         plan.system || plan.microphone,
     )?;
-    let desktop = Desktop::new(width, height)?;
+    let desktop = create_source(width, height)?;
     let begin = Arc::new(AtomicBool::new(false));
     let mut audio = Vec::new();
     if plan.system {
@@ -745,9 +783,9 @@ pub fn record(plan: Plan, cancelled: &AtomicBool) -> Result<Output> {
     let total_audio = u64::from(plan.seconds) * 48000;
     let frame_duration = 10_000_000 / i64::from(plan.fps);
     let mut frames = 0;
-    while start.elapsed() < Duration::from_secs(u64::from(plan.seconds)) {
-        if cancelled.load(Ordering::Relaxed) {
-            return Err("録画を中止しました。録画ファイルは保存していません".into());
+    'capture: while start.elapsed() < Duration::from_secs(u64::from(plan.seconds)) {
+        if frames > 0 && cancelled.load(Ordering::Relaxed) {
+            break;
         }
         let elapsed = start.elapsed();
         let time = (elapsed.as_nanos() / 100) as i64;
@@ -786,7 +824,7 @@ pub fn record(plan: Plan, cancelled: &AtomicBool) -> Result<Output> {
         let next = Duration::from_secs_f64(f64::from(frames) / f64::from(plan.fps));
         while next > start.elapsed() {
             if cancelled.load(Ordering::Relaxed) {
-                return Err("録画を中止しました。録画ファイルは保存していません".into());
+                break 'capture;
             }
             std::thread::park_timeout(
                 next.saturating_sub(start.elapsed())
@@ -794,8 +832,12 @@ pub fn record(plan: Plan, cancelled: &AtomicBool) -> Result<Output> {
             );
         }
     }
+    let elapsed = start
+        .elapsed()
+        .min(Duration::from_secs(u64::from(plan.seconds)));
+    let recorded_audio = ((elapsed.as_nanos() * 48000 / 1_000_000_000) as u64).min(total_audio);
     if let Some(stream) = encoder.audio {
-        let count = total_audio.saturating_sub(sent_audio) as usize;
+        let count = recorded_audio.saturating_sub(sent_audio) as usize;
         if count > 0 {
             let sources = audio
                 .iter()
@@ -816,17 +858,14 @@ pub fn record(plan: Plan, cancelled: &AtomicBool) -> Result<Output> {
         }
     }
     drop(audio);
-    if cancelled.load(Ordering::Relaxed) {
-        return Err("録画を中止しました。録画ファイルは保存していません".into());
-    }
     encoder.finish()?;
     drop(encoder);
     temp.persist(&plan.destination)
         .map_err(|e| e.error.to_string())?;
     let text = format!(
-        "録画を保存しました: {}\n{width}×{height} / {}秒 / {frames}フレーム\nPC再生音: {} / マイク: {}",
+        "録画を保存しました: {}\n{width}×{height} / {:.2}秒 / {frames}フレーム\nPC再生音: {} / マイク: {}",
         plan.destination.display(),
-        plan.seconds,
+        elapsed.as_secs_f64(),
         plan.system,
         plan.microphone
     );
@@ -849,6 +888,152 @@ mod hardware_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn conflicting_stop_key_can_be_replaced_and_registration_is_released() {
+        struct Window(HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        let window = || {
+            Window(unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("STATIC"),
+                    w!("hotkey test"),
+                    WINDOW_STYLE(0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    Some(HWND_MESSAGE),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            })
+        };
+        let owner = window();
+        let recorder = window();
+        let reserved = StopHotkey::register(owner.0, "Ctrl+Shift+F11").unwrap();
+        let error = StopHotkey::register(recorder.0, "Ctrl+Shift+F11")
+            .err()
+            .unwrap();
+        assert!(error.contains("別のキー"));
+        assert!(!unsafe { IsWindowVisible(recorder.0) }.as_bool());
+        let alternate = StopHotkey::register(recorder.0, "Ctrl+Alt+F10").unwrap();
+        drop(alternate);
+        let reused = StopHotkey::register(recorder.0, "Ctrl+Alt+F10").unwrap();
+        drop(reused);
+        drop(reserved);
+        let released = StopHotkey::register(recorder.0, "Ctrl+Shift+F11").unwrap();
+        drop(released);
+        assert!(StopHotkey::register(recorder.0, "invalid").is_err());
+    }
+
+    #[test]
+    fn early_stop_finalizes_and_replaces_target_with_decodable_short_video() {
+        struct Frames<'a> {
+            bytes: Vec<u8>,
+            count: Cell<u32>,
+            stop_at: u32,
+            stop: &'a AtomicBool,
+        }
+        impl FrameSource for Frames<'_> {
+            fn frame(&self, _: RECT) -> Result<&[u8]> {
+                self.count.set(self.count.get() + 1);
+                if self.count.get() == self.stop_at {
+                    self.stop.store(true, Ordering::Relaxed);
+                }
+                Ok(&self.bytes)
+            }
+        }
+        let _com = Com::new().unwrap();
+        let _media = Media::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        for stop_at in [1, 3] {
+            let path = dir.path().join(format!("stop-{stop_at}.mp4"));
+            std::fs::write(&path, b"old-content").unwrap();
+            let mut params = yytoolbox::Tool::Recording.defaults();
+            params.insert("seconds".into(), "10".into());
+            let rect = RECT {
+                right: 64,
+                bottom: 64,
+                ..Default::default()
+            };
+            let stop = AtomicBool::new(false);
+            let result = record_with_source(
+                Plan::new(path.clone(), rect, &params).unwrap(),
+                &stop,
+                |width, height| {
+                    Ok(Frames {
+                        bytes: vec![128; (width * height * 4) as usize],
+                        count: Cell::new(0),
+                        stop_at,
+                        stop: &stop,
+                    })
+                },
+            )
+            .unwrap();
+            assert!(result.text.contains(&format!("{stop_at}フレーム")));
+            unsafe {
+                let mut attributes = None;
+                MFCreateAttributes(&mut attributes, 1).unwrap();
+                let attributes = attributes.unwrap();
+                attributes
+                    .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
+                    .unwrap();
+                let reader =
+                    MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), &attributes)
+                        .unwrap();
+                let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+                let media = MFCreateMediaType().unwrap();
+                media
+                    .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                    .unwrap();
+                media.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32).unwrap();
+                reader.SetCurrentMediaType(stream, None, &media).unwrap();
+                let mut decoded = 0;
+                loop {
+                    let mut flags = 0;
+                    let mut time = 0;
+                    let mut sample = None;
+                    reader
+                        .ReadSample(
+                            stream,
+                            0,
+                            None,
+                            Some(&mut flags),
+                            Some(&mut time),
+                            Some(&mut sample),
+                        )
+                        .unwrap();
+                    if sample.is_some() {
+                        decoded += 1;
+                        assert!(
+                            time < 10_000_000,
+                            "short recording must not run for 10 seconds"
+                        );
+                    }
+                    if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                        break;
+                    }
+                    assert!(decoded <= stop_at);
+                }
+                assert_eq!(decoded, stop_at);
+            }
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                stop_at.min(2) as usize
+            );
+        }
+    }
     #[test]
     fn native_mp4_h264_aac_encodes_and_decodes_synthetic_frames_and_audio() {
         // No desktop or physical microphone is captured by this regression test.
@@ -857,17 +1042,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("synthetic.mp4");
         let encoder = Encoder::new(&path, 64, 64, 10, true).unwrap();
-        let mut frame = vec![0u8; 64 * 64 * 4];
-        for y in 0..64 {
-            for x in 0..64 {
-                let offset = (y * 64 + x) * 4;
-                frame[offset..offset + 4].copy_from_slice(if y < 32 {
-                    &[255, 0, 0, 255]
-                } else {
-                    &[0, 0, 255, 255]
-                });
+        // Draw through GDI into the actual capture DIB. A synthetic byte array
+        // alone cannot detect a disagreement between DIB and encoder row order.
+        let desktop = Desktop::new(64, 64).unwrap();
+        let frame = unsafe {
+            for (top, bottom, color) in [(0, 32, 0x0000ff), (32, 64, 0xff0000)] {
+                let brush = CreateSolidBrush(COLORREF(color));
+                assert!(!brush.is_invalid());
+                let filled = FillRect(
+                    desktop.dc,
+                    &RECT {
+                        left: 0,
+                        top,
+                        right: 64,
+                        bottom,
+                    },
+                    brush,
+                );
+                let _ = DeleteObject(brush.into());
+                assert_ne!(filled, 0);
             }
-        }
+            assert!(GdiFlush().as_bool());
+            std::slice::from_raw_parts(desktop.data, 64 * 64 * 4).to_vec()
+        };
         for index in 0..20 {
             encoder
                 .sample(encoder.video, &frame, index * 1_000_000, 1_000_000)
@@ -905,6 +1102,12 @@ mod tests {
                 .unwrap();
             reader.SetCurrentMediaType(stream, None, &output).unwrap();
             let media = reader.GetCurrentMediaType(stream).unwrap();
+            let stride = media
+                .GetUINT32(&MF_MT_DEFAULT_STRIDE)
+                .map(|value| value as i32)
+                .unwrap_or_else(|_| {
+                    MFGetStrideForBitmapInfoHeader(MFVideoFormat_RGB32.data1, 64).unwrap()
+                });
             assert_eq!(
                 media.GetUINT64(&MF_MT_FRAME_SIZE).unwrap(),
                 (64u64 << 32) | 64
@@ -934,11 +1137,21 @@ mod tests {
                         let mut length = 0;
                         buffer.Lock(&mut ptr, None, Some(&mut length)).unwrap();
                         let bytes = std::slice::from_raw_parts(ptr, length as usize);
-                        assert!(bytes[0] > bytes[2] + 100, "bottom row should be blue");
-                        let offset = 63 * 64 * 4;
+                        // Interpret rows using the decoded media type, not a
+                        // hard-coded assumption about RGB output orientation.
+                        let last_row = 63 * stride.unsigned_abs() as usize;
+                        let (top, bottom) = if stride < 0 {
+                            (last_row, 0)
+                        } else {
+                            (0, last_row)
+                        };
                         assert!(
-                            bytes[offset + 2] > bytes[offset] + 100,
-                            "top row should be red"
+                            bytes[top + 2] > bytes[top].saturating_add(100),
+                            "top row should be red; stride={stride}"
+                        );
+                        assert!(
+                            bytes[bottom] > bytes[bottom + 2].saturating_add(100),
+                            "bottom row should be blue; stride={stride}"
                         );
                         buffer.Unlock().unwrap();
                     }

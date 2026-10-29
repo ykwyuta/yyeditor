@@ -4113,7 +4113,7 @@ mod tests {
         let config = {
             use rustls::pki_types::pem::PemObject;
             use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let provider = Arc::new(yy_tls_crypto::provider());
             let certs = vec![CertificateDer::from_pem_slice(cert.cert_pem.as_bytes()).unwrap()];
             let key = PrivateKeyDer::from_pem_slice(cert.key_pem.as_bytes()).unwrap();
             Arc::new(

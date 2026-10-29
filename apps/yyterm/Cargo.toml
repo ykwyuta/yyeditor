@@ -16,7 +16,7 @@ path = "src/main.rs"
 default = ["ssh", "tls"]
 # OpenSSH を使わない組み込みの SSH クライアント
 ssh = ["dep:yy-ssh"]
-# 3270 の TLS（rustls + ring）
+# 3270 の TLS（rustls + RustCrypto）
 tls = ["dep:yy-3270-tls", "yy-3270-tls/rustls"]
 
 [target.'cfg(windows)'.dependencies]

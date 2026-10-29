@@ -953,7 +953,7 @@ mod tests {
                 .unwrap();
             let mut roots = RootCertStore::empty();
             roots.add(der).unwrap();
-            let client = ClientConfig::builder_with_provider(provider)
+            let client = ClientConfig::builder_with_provider(Arc::new(yy_tls_crypto::provider()))
                 .with_protocol_versions(&[version])
                 .unwrap()
                 .with_root_certificates(roots)

@@ -6,7 +6,7 @@
 
 `yy-ssh-crypto`はAES-128/256-GCMとOpenSSH形式のChaCha20-Poly1305を担当する。AES-GCMは暗号化しない4バイトの長さをAADに含め、固定32ビット＋64ビットの呼出カウンターを使用する。カウンターの周回後は拒否する。ChaCha20-Poly1305はヘッダーと本文に別の鍵を使い、64ビットのnonce、本文のブロックカウンター1、暗号文全体へのPoly1305認証を使う。IETFの同名AEADとは形式が異なる。再鍵交換とSSH連番の管理はrusshに残す。
 
-通常のSSH依存はring/AWS-LCを使わない。暗号互換性の比較試験のみringを開発依存として使う。3270のTLS等の別経路には現在もringが残る。
+通常のSSH依存はring/AWS-LCを使わない。暗号互換性の比較試験のみringを開発依存として使う。3270のTLSも[共有RustCryptoバックエンド](tls-crypto.md)を使う。独立yydbmanagerのTLSは別途移行が必要。
 
 ```sh
 cargo clippy --workspace --all-targets --locked -- -D warnings

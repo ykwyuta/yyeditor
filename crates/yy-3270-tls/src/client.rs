@@ -1,4 +1,4 @@
-//! rustls（ring）による TLS の接続（機能 `rustls`）。
+//! rustls + RustCrypto による TLS の接続（機能 `rustls`）。
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -28,7 +28,7 @@ pub(crate) fn connect(
     opts: &Options,
     confirm: Confirm,
 ) -> io::Result<TlsStream> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = Arc::new(yy_tls_crypto::provider());
     let outcome = Arc::new(Mutex::new(Outcome::default()));
     let verifier = Verifier::new(opts, provider.clone(), confirm, outcome.clone())?;
     let builder = ClientConfig::builder_with_provider(provider)
@@ -62,6 +62,19 @@ pub(crate) fn connect(
     sock.set_read_timeout(None)?;
 
     let o = outcome.lock().unwrap().clone();
+    // Certificate verification runs before CertificateVerify and Finished.
+    // Persist TOFU only after the peer has proved possession of its key and
+    // authenticated the complete handshake.
+    if let Some((path, key)) = &o.pending_known
+        && let Some(cert) = &o.cert
+    {
+        known::add(path, key, &cert.sha256, &cert.subject).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("証明書の記録 {} に書けません: {e}", path.display()),
+            )
+        })?;
+    }
     let info = SessionInfo {
         version: match conn.protocol_version() {
             Some(rustls::ProtocolVersion::TLSv1_3) => "TLS 1.3".into(),
@@ -271,6 +284,7 @@ struct Outcome {
     problem: Option<String>,
     /// 断った理由
     refused: Option<String>,
+    pending_known: Option<(PathBuf, String)>,
 }
 
 struct Verifier {
@@ -457,12 +471,8 @@ impl ServerCertVerifier for Verifier {
                 "証明書を受け入れなかったため、接続しません（{problem}）"
             )));
         }
-        if let Some(path) = &self.known
-            && let Err(e) = known::add(path, &key, &info.sha256, &info.subject)
-        {
-            return Err(self.refuse(format!("証明書の記録 {} に書けません: {e}", path.display())));
-        }
         let mut o = self.outcome.lock().unwrap();
+        o.pending_known = self.known.as_ref().map(|path| (path.clone(), key));
         o.cert = Some(info);
         o.trust = Some(Trust::Accepted);
         o.problem = Some(problem);

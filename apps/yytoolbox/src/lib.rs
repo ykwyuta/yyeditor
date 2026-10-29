@@ -169,7 +169,7 @@ impl Tool {
                 "構文を解析して整形します。コードは実行しません。字下げと折り返し幅を指定できます。"
             }
             Self::Recording => {
-                "時間指定のMP4録画。実行で保存先・範囲を選びます。自身は隠し、Escで中止・破棄。Windows標準APIを使用。"
+                "時間指定のMP4録画。自身は隠し、終了キーでそこまでを保存。キーは開始前に登録を確認し、変更できます。"
             }
             Self::ResizeImages => {
                 "実行で画像と出力フォルダを選択。比率維持・背景補完・透明背景。入力と既存ファイルを上書きしません。"
@@ -192,6 +192,18 @@ impl Tool {
                 f("max_width", "最大録画幅px", "1920"),
                 s("system_audio", "PC再生音", &["なし", "あり"]),
                 s("microphone", "マイク音", &["なし", "あり"]),
+                s(
+                    "stop_key",
+                    "録画終了・保存キー",
+                    &[
+                        "Esc",
+                        "Ctrl+Shift+F9",
+                        "Ctrl+Shift+F10",
+                        "Ctrl+Shift+F11",
+                        "Ctrl+Alt+F9",
+                        "Ctrl+Alt+F10",
+                    ],
+                ),
             ],
             Self::ResizeImages => vec![
                 f("width", "最大幅／枠幅px", "1280"),

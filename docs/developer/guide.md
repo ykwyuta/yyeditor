@@ -8,6 +8,7 @@ This repository is a Rust Cargo workspace. See [README.md](../../README.md) for 
 
 - Rust stable. `rust-toolchain.toml` selects stable with rustfmt and Clippy.
 - The workspace uses Rust edition 2024 and declares `rust-version = "1.85"`.
+- The TLS backend and updated crypto dependencies require Rust 1.87 or newer. The workspace baseline does not specify every dependency's minimum; validate with current stable Rust.
 - Normal Windows builds require the MSVC toolchain, Visual Studio Build Tools with C++ build tools, and the Windows SDK.
 - Running and testing previews and yybrowser requires the Microsoft Edge WebView2 runtime.
 - Linux can be used to develop and test the platform-independent core libraries and yy-agent. The GUI applications do not run on Linux.
@@ -97,7 +98,7 @@ rustup target add x86_64-pc-windows-msvc
 cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw -p yytoolbox --no-default-features --target x86_64-pc-windows-msvc
 ```
 
-This check disables default features. The 3270 TLS backend still uses ring and requires the Windows SDK; built-in SSH and development-certificate signing use RustCrypto. BLAKE3 always enables `pure`, including normal builds and independent applications, so it requires neither a C compiler nor an external assembler. The old `yy-files/blake3-pure` flag remains as a compatibility alias. BLAKE3 still lists `cc` as a build dependency, but does not compile its C/assembly implementations in this configuration. Validate the normal configuration, including SSH and TLS, on Windows.
+This check disables default features. The 3270 TLS backend, built-in SSH and development-certificate signing use RustCrypto. BLAKE3 always enables `pure`, including normal builds and independent applications. These crypto implementations require neither a C compiler nor an external assembler. The old `yy-files/blake3-pure` flag remains as a compatibility alias. BLAKE3 still lists `cc` as a build dependency, but does not compile its C/assembly implementations in this configuration. Validate the normal configuration and Windows APIs on Windows; the OS linker and SDK are still required. The independent yydbmanager database and TLS dependencies are separate.
 
 ## Repository Structure
 

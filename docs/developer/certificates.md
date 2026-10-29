@@ -16,4 +16,4 @@ cargo test -p yy-cert -p yy-browser -p yy-3270-tls -p yy-3270-mock --features yy
 
 yy-certの試験は鍵の保存・復元、署名の改変拒否、証明書のSAN・用途・期間・署名を確認する。yy-browserは生成した証明書でTLS 1.2/1.3のハンドシェイクとデータ転送をメモリ上で実行する。3270は実ソケットでTLS・STARTTLS・クライアント証明書・TOFU等を確認するため、ループバック接続を許可した環境が必要。
 
-TLS通信そのものは現在もrustls/ringを利用する。SSHは別の共有部品でRustCryptoを利用する。証明書生成からringを外したことは、ルートの依存全体からringがなくなったことを意味しない。
+3270のTLS通信は[共有TLSバックエンド](tls-crypto.md)を通してRustCryptoを使う。SSHも別の共有部品でRustCryptoを利用する。ringは比較試験の開発依存に残り、独立yydbmanagerやWebView2自体のTLSは別の範囲になる。

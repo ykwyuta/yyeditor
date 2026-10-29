@@ -147,7 +147,7 @@ fn fingerprint(der: &[u8]) -> String {
 /// rustls のサーバーの設定を作る。
 pub(crate) fn server_config(t: &MockTls) -> io::Result<Arc<ServerConfig>> {
     let err = |e: &dyn std::fmt::Display| io::Error::other(format!("TLS の設定: {e}"));
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = Arc::new(yy_tls_crypto::provider());
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(t.cert_pem.as_bytes())
         .collect::<Result<_, _>>()
         .map_err(|e| err(&e))?;

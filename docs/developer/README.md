@@ -10,6 +10,7 @@
 | [リモート・データモデル](remote-and-data-models.md) | 通信、シート、図、比較、DBの内部境界 |
 | [SSH接続設定](ssh-connections.md) | 接続先GUI、SFTP/SCP、エージェントなし編集、ゲートウェイ |
 | [証明書生成](certificates.md) | RustCrypto署名、rcgen、鍵の保存形式、TLS回帰試験 |
+| [TLS暗号](tls-crypto.md) | Pure Rust provider、3270のTLS 1.2/1.3、相互運用と保守上の境界 |
 | [データ形式とAPI](formats.md) | 保存形式・プロトコル・文字コードの実装元と互換性の扱い |
 | [素材と描画](assets.md) | アイコン生成、フォント、プレビュー、描画性能の調査方法 |
 | [Markdown埋め込み](markdown-embeds.md) | ファイル・見出し・ブロックの展開、資源の範囲、展開保存と試験 |

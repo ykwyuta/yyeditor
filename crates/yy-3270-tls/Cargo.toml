@@ -8,16 +8,17 @@ license.workspace = true
 
 [features]
 default = ["rustls"]
-# rustls（ring）による TLS の実装。なければ型と設定だけ（C のビルドが要らない）
-rustls = ["dep:rustls", "dep:rustls-native-certs"]
+# rustls + RustCrypto による TLS。無効なら型と設定だけを利用できる。
+rustls = ["dep:rustls", "dep:rustls-native-certs", "dep:yy-tls-crypto"]
 
 [dependencies]
 rustls = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
+yy-tls-crypto = { workspace = true, optional = true }
 sha2.workspace = true
 
 [dev-dependencies]
-rustls.workspace = true
+rustls = { workspace = true, features = ["ring"] }
 rcgen.workspace = true
 yy-cert.workspace = true
 tempfile.workspace = true

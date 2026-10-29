@@ -82,7 +82,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path vendor/rustls-rustcrypto/Cargo.toml -- --check
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -98,6 +100,7 @@ jobs:
         run: |
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo clippy -p russh --lib --locked -- -D warnings
+          cargo clippy -p rustls-rustcrypto --lib --locked -- -D warnings
       - name: WebView2 runtime
         shell: pwsh
         run: |
@@ -201,6 +204,7 @@ jobs:
         run: |
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo clippy -p russh --lib --locked -- -D warnings
+          cargo clippy -p rustls-rustcrypto --lib --locked -- -D warnings
       - name: test
         run: cargo test --workspace
       # 模擬ホストが、広く使われている 3270 のエミュレーター（x3270）に対して正しく振る舞うか（14 章 16）
@@ -212,8 +216,8 @@ jobs:
       - name: type-check Windows UI
         run: |
           rustup target add x86_64-pc-windows-msvc
-          # 3270 の TLS（ring）は C のビルドに Windows SDK が要るので、ここでは既定機能を外して確かめる
-          # （SSH は RustCrypto。通常の SSH・TLS 構成は Windows のジョブで検証する）
+          # 既定機能なしの構成も確かめる。SSH・3270 TLS の暗号は RustCrypto。
+          # 通常の構成と実際の Windows API は Windows のジョブで検証する。
           # BLAKE3 は共有依存で常に pure を使うので、ml64.exe は不要
           cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw -p yytoolbox --no-default-features --target x86_64-pc-windows-msvc
 

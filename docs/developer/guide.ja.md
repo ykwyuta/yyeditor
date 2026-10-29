@@ -8,6 +8,7 @@
 
 - Rust stable。`rust-toolchain.toml` で stable、rustfmt、Clippy を指定しています。
 - Cargo ワークスペースは Rust 2024 edition、`rust-version = "1.85"` を指定しています。
+- TLSバックエンドと修正版の暗号依存はRust 1.87以上が必要です。宣言された基準だけで全依存の最低バージョンを判断せず、最新stableを使って検証してください。
 - Windows アプリの通常のビルドには MSVC ツールチェーン、Visual Studio Build Tools の C++ ビルドツールと Windows SDK を用意してください。
 - プレビューと yybrowser の実行・検証には Microsoft Edge WebView2 ランタイムが必要です。
 - Linux では OS に依存しない中核ライブラリと yy-agent を開発・テストできます。GUI アプリの Linux 起動はサポートしていません。
@@ -97,7 +98,7 @@ rustup target add x86_64-pc-windows-msvc
 cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw -p yytoolbox --no-default-features --target x86_64-pc-windows-msvc
 ```
 
-この検査は既定機能を外した構成です。3270のTLSは現在もringを使うためWindows SDKが必要ですが、組み込みSSHと開発者用証明書の署名はRustCryptoを使います。BLAKE3 は通常ビルド・独立アプリを含めて常に `pure` を有効にしており、Cコンパイラーや外部アセンブラーは不要です。旧コマンドの `yy-files/blake3-pure` は互換用に残しています。`cc` がBLAKE3のビルド依存に残っていても、C/アセンブリの実装をコンパイルする構成ではありません。SSH・TLS を含む通常の構成は Windows の検証で確認します。
+この検査は既定機能を外した構成です。3270のTLS、組み込みSSH、開発者用証明書の署名はRustCryptoを使います。BLAKE3 は通常ビルド・独立アプリを含めて常に `pure` を有効にしており、これらの暗号処理にはCコンパイラーや外部アセンブラーは不要です。旧コマンドの `yy-files/blake3-pure` は互換用に残しています。`cc` がBLAKE3のビルド依存に残っていても、C/アセンブリの実装をコンパイルする構成ではありません。通常の構成とWindows APIはWindowsの検証で確認し、OS標準のリンカー・SDKは引き続き用意します。独立yydbmanagerのDB・TLS依存は別途扱います。
 
 ## リポジトリの構成
 

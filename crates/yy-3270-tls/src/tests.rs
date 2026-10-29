@@ -20,6 +20,9 @@ use crate::client::*;
 use crate::connect;
 use crate::*;
 
+#[path = "adversarial_tests.rs"]
+mod adversarial;
+
 /// 試験の認証局・サーバー・クライアントの証明書。
 struct Pki {
     ca_pem: String,

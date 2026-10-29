@@ -20,7 +20,8 @@ yy-cert = { workspace = true, optional = true }
 tempfile.workspace = true
 
 [dev-dependencies]
-rustls.workspace = true
+rustls = { workspace = true, features = ["ring"] }
+yy-tls-crypto.workspace = true
 
 [lints]
 workspace = true

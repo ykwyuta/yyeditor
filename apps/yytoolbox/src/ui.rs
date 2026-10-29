@@ -365,7 +365,14 @@ impl State {
         let hwnd = self.hwnd.0 as isize;
         self.result = None;
         set_text(self.output, "");
-        set_text(self.status, "処理中…「中止」またはEscで中止できます。");
+        if matches!(&job, Job::Recording(_)) {
+            set_text(
+                self.status,
+                "録画中…選択した終了キーでそこまでを保存します。",
+            );
+        } else {
+            set_text(self.status, "処理中…「中止」またはEscで中止できます。");
+        }
         let spawned = std::thread::Builder::new()
             .name("yytoolbox-work".into())
             .spawn(move || {
@@ -684,7 +691,14 @@ fn command(id: u16, code: u16) {
             state(|s| {
                 if let Some(r) = &s.running {
                     r.cancel.store(true, Ordering::Relaxed);
-                    set_text(s.status, "中止を要求しました…");
+                    set_text(
+                        s.status,
+                        if s.recording_ui.is_some() {
+                            "録画を終了して保存しています…"
+                        } else {
+                            "中止を要求しました…"
+                        },
+                    );
                 }
             });
         }
@@ -773,7 +787,7 @@ extern "system" fn proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM
             });
             LRESULT(0)
         }
-        WM_HOTKEY if wparam.0 == crate::recording::CANCEL_HOTKEY as usize => {
+        WM_HOTKEY if wparam.0 == crate::recording::STOP_HOTKEY as usize => {
             command(CANCEL, 0);
             LRESULT(0)
         }
@@ -1001,8 +1015,26 @@ fn start_recording() {
     let Some(destination) = dialog(Some("recording.mp4")) else {
         return;
     };
+    let hotkey = match crate::recording::StopHotkey::register(
+        hwnd,
+        yytoolbox::value(&params, "stop_key", "Esc"),
+    ) {
+        Ok(hotkey) => hotkey,
+        Err(message) => {
+            error(&message);
+            state(|s| {
+                if let Some(field) = s.fields.iter().find(|f| f.definition.key == "stop_key") {
+                    s.reveal(field.control);
+                    unsafe {
+                        let _ = SetFocus(Some(field.control));
+                    }
+                }
+            });
+            return;
+        }
+    };
     let started = (|| -> yytoolbox::Result<_> {
-        let guard = crate::recording::UiGuard::new(hwnd)?;
+        let guard = crate::recording::UiGuard::hide(hwnd, hotkey)?;
         let Some(rect) =
             crate::recording::area(yytoolbox::value(&params, "area", "全画面（メイン）"))?
         else {
@@ -1672,7 +1704,19 @@ mod tests {
         pump_until(|| state(|s| s.running.is_none() && s.result.is_some()).unwrap_or(false));
         assert!(files.path().join("ui-test-resized.png").is_file());
         assert!(state(|s| s.result.as_ref().unwrap().notice.contains("1件保存")).unwrap());
-        let guard = crate::recording::UiGuard::new(hwnd).unwrap();
+        // This checks window exclusion/restoration, not the user's global Esc
+        // binding. Exercise the same alternate-key registration as the UI.
+        let hotkey = [
+            "Ctrl+Alt+F9",
+            "Ctrl+Alt+F10",
+            "Ctrl+Shift+F9",
+            "Ctrl+Shift+F10",
+            "Ctrl+Shift+F11",
+        ]
+        .into_iter()
+        .find_map(|key| crate::recording::StopHotkey::register(hwnd, key).ok())
+        .expect("no recording test hotkey is available");
+        let guard = crate::recording::UiGuard::hide(hwnd, hotkey).unwrap();
         assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool());
         drop(guard);
         assert!(unsafe { IsWindowVisible(hwnd) }.as_bool());

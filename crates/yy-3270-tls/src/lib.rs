@@ -8,7 +8,7 @@
 //!   （自己署名など）、SSH のホスト鍵と同じく利用者に確かめて記録する（TOFU）。記録と違えば接続しない。
 //! - クライアント証明書: PEM のファイル（証明書と秘密鍵）。
 //!
-//! 暗号は rustls（ring。機能 `rustls`）。端末側は OpenSSL・OpenSSH に依存しない。機能 `rustls` なしでは
+//! 暗号は rustls + RustCrypto（機能 `rustls`）。端末側は OpenSSL・OpenSSH に依存しない。機能 `rustls` なしでは
 //! 型と設定だけを使え、[`connect`] はエラーを返す（C のビルドの要らない型の確かめ用）。
 //!
 //! つないだ後の読み書きは [`TlsReader`]・[`TlsWriter`] に分かれ、別々のスレッドで使える（端末の

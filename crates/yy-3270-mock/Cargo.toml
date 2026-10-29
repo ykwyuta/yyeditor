@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 yy-encoding.workspace = true
 rustls.workspace = true
+yy-tls-crypto.workspace = true
 rcgen.workspace = true
 yy-cert.workspace = true
 sha2.workspace = true

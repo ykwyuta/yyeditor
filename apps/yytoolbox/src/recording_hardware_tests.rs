@@ -2,6 +2,170 @@
 use super::*;
 use windows::Win32::System::SystemServices::SS_WHITERECT;
 
+#[test]
+#[ignore = "shows a two-tone window and captures the real desktop to verify MP4 orientation"]
+fn real_desktop_video_keeps_top_and_bottom() {
+    let _com = Com::new().unwrap();
+    let _media = Media::new().unwrap();
+    unsafe {
+        use windows::Win32::UI::HiDpi::{
+            DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            SetThreadDpiAwarenessContext,
+        };
+        struct Dpi(DPI_AWARENESS_CONTEXT);
+        impl Drop for Dpi {
+            fn drop(&mut self) {
+                unsafe {
+                    SetThreadDpiAwarenessContext(self.0);
+                }
+            }
+        }
+        let _dpi = Dpi(SetThreadDpiAwarenessContext(
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        ));
+        struct Window(HWND, HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                    let _ = SetForegroundWindow(self.1);
+                }
+            }
+        }
+        let foreground = GetForegroundWindow();
+        let hwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            w!("STATIC"),
+            w!("yytoolbox orientation verification"),
+            WS_POPUP | WS_VISIBLE | WINDOW_STYLE(SS_WHITERECT.0),
+            100,
+            100,
+            160,
+            120,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let _window = Window(hwnd, foreground);
+        let child = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("STATIC"),
+            None,
+            WS_CHILD
+                | WS_VISIBLE
+                | WINDOW_STYLE(windows::Win32::System::SystemServices::SS_BLACKRECT.0),
+            0,
+            60,
+            160,
+            60,
+            Some(hwnd),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let _ = UpdateWindow(hwnd);
+        let _ = UpdateWindow(child);
+        windows::Win32::Graphics::Dwm::DwmFlush().unwrap();
+        let mut client = RECT::default();
+        GetClientRect(hwnd, &mut client).unwrap();
+        assert_eq!((client.right, client.bottom), (160, 120));
+        let mut origin = POINT::default();
+        assert!(ClientToScreen(hwnd, &mut origin).as_bool());
+        let rect = RECT {
+            left: origin.x,
+            top: origin.y,
+            right: origin.x + client.right,
+            bottom: origin.y + client.bottom,
+        };
+        let desktop = Desktop::new(160, 120).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let frame = desktop.frame(rect).unwrap();
+            let top = frame[3 * 160 * 4 + 80 * 4];
+            let bottom = frame[116 * 160 * 4 + 80 * 4];
+            if top > 220 && bottom < 180 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "test pattern not visible: top={top}, bottom={bottom}"
+            );
+            std::thread::park_timeout(Duration::from_millis(10));
+        }
+        let path = output_dir().join("orientation.mp4");
+        let mut params = yytoolbox::Tool::Recording.defaults();
+        params.insert("seconds".into(), "2".into());
+        record(
+            Plan::new(path.clone(), rect, &params).unwrap(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let mut attributes = None;
+        MFCreateAttributes(&mut attributes, 1).unwrap();
+        let attributes = attributes.unwrap();
+        attributes
+            .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
+            .unwrap();
+        let reader =
+            MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), &attributes).unwrap();
+        let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+        let media = MFCreateMediaType().unwrap();
+        media
+            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+            .unwrap();
+        media.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32).unwrap();
+        reader.SetCurrentMediaType(stream, None, &media).unwrap();
+        let media = reader.GetCurrentMediaType(stream).unwrap();
+        assert_eq!(
+            media.GetUINT64(&MF_MT_FRAME_SIZE).unwrap(),
+            (160u64 << 32) | 120
+        );
+        let stride = media
+            .GetUINT32(&MF_MT_DEFAULT_STRIDE)
+            .map(|value| value as i32)
+            .unwrap_or_else(|_| {
+                MFGetStrideForBitmapInfoHeader(MFVideoFormat_RGB32.data1, 160).unwrap()
+            });
+        let mut frames = 0;
+        loop {
+            let mut flags = 0;
+            let mut sample = None;
+            reader
+                .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
+                .unwrap();
+            if let Some(sample) = sample {
+                let buffer = sample.ConvertToContiguousBuffer().unwrap();
+                let mut ptr = std::ptr::null_mut();
+                let mut length = 0;
+                buffer.Lock(&mut ptr, None, Some(&mut length)).unwrap();
+                let bytes = std::slice::from_raw_parts(ptr, length as usize);
+                assert!(bytes.len() >= 120 * stride.unsigned_abs() as usize);
+                let row = |y: usize| if stride < 0 { 119 - y } else { y } * stride.unsigned_abs() as usize + 80 * 4;
+                let top = bytes[row(3)];
+                let bottom = bytes[row(116)];
+                buffer.Unlock().unwrap();
+                assert!(
+                    top > 220 && bottom < 180,
+                    "MP4 is inverted: top={top}, bottom={bottom}, stride={stride}"
+                );
+                frames += 1;
+            }
+            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                break;
+            }
+            assert!(frames < 200, "unexpected video duration");
+        }
+        assert!(frames > 0);
+        eprintln!(
+            "{}: {frames} real desktop frames retain white top / dark bottom",
+            path.display()
+        );
+    }
+}
+
 fn output_dir() -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/recording-hardware");
     std::fs::create_dir_all(&path).unwrap();
@@ -231,7 +395,7 @@ fn real_audio(loopback: bool) {
         "microphone.mp4"
     });
     let mut params = yytoolbox::Tool::Recording.defaults();
-    params.insert("seconds".into(), "2".into());
+    params.insert("seconds".into(), "10".into());
     params.insert("max_width".into(), "640".into());
     params.insert(
         if loopback {
@@ -243,13 +407,40 @@ fn real_audio(loopback: bool) {
         "あり".into(),
     );
     let rect = area("全画面（メイン）").unwrap().unwrap();
-    record(
+    let stop = AtomicBool::new(false);
+    struct StopDesktop<'a> {
+        desktop: Desktop,
+        count: std::cell::Cell<u32>,
+        stop: &'a AtomicBool,
+    }
+    impl FrameSource for StopDesktop<'_> {
+        fn frame(&self, rect: RECT) -> Result<&[u8]> {
+            let bytes = self.desktop.frame(rect)?;
+            self.count.set(self.count.get() + 1);
+            if self.count.get() == 20 {
+                self.stop.store(true, Ordering::Relaxed);
+            }
+            Ok(bytes)
+        }
+    }
+    record_with_source(
         Plan::new(path.clone(), rect, &params).unwrap(),
-        &AtomicBool::new(false),
+        &stop,
+        |w, h| {
+            Ok(StopDesktop {
+                desktop: Desktop::new(w, h)?,
+                count: std::cell::Cell::new(0),
+                stop: &stop,
+            })
+        },
     )
     .unwrap();
     let stats = decode(&path, true);
     eprintln!("{} AAC decoded={stats:?}", path.display());
+    assert!(
+        stats.1 < 30_000_000,
+        "early stop must not pad audio to 10 seconds: {stats:?}"
+    );
     if loopback {
         assert!(stats.2 > 10.0);
     }
@@ -314,7 +505,8 @@ fn real_window_exclusion_and_escape() {
             before, after,
             "hidden yytoolbox window must disappear from real capture"
         );
-        let path = output_dir().join("cancelled.mp4");
+        let files = tempfile::tempdir().unwrap();
+        let path = files.path().join("early-stop.mp4");
         std::fs::write(&path, b"preserve-existing-file").unwrap();
         let mut params = yytoolbox::Tool::Recording.defaults();
         params.insert("seconds".into(), "10".into());
@@ -323,8 +515,30 @@ fn real_window_exclusion_and_escape() {
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
         let (tx, rx) = mpsc::sync_channel(1);
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        struct ReadyDesktop {
+            desktop: Desktop,
+            count: std::cell::Cell<u32>,
+            ready: mpsc::SyncSender<()>,
+        }
+        impl FrameSource for ReadyDesktop {
+            fn frame(&self, rect: RECT) -> Result<&[u8]> {
+                let bytes = self.desktop.frame(rect)?;
+                self.count.set(self.count.get() + 1);
+                if self.count.get() == 20 {
+                    let _ = self.ready.send(());
+                }
+                Ok(bytes)
+            }
+        }
         let worker = std::thread::spawn(move || {
-            let _ = tx.send(record(plan, &flag));
+            let _ = tx.send(record_with_source(plan, &flag, |w, h| {
+                Ok(ReadyDesktop {
+                    desktop: Desktop::new(w, h)?,
+                    count: std::cell::Cell::new(0),
+                    ready: ready_tx,
+                })
+            }));
         });
         struct Worker(Arc<AtomicBool>, Option<JoinHandle<()>>);
         impl Drop for Worker {
@@ -336,19 +550,15 @@ fn real_window_exclusion_and_escape() {
             }
         }
         let worker = Worker(cancel.clone(), Some(worker));
-        // Wait for the real recorder's temporary MP4, rather than a fixed delay.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !std::fs::read_dir(output_dir())
-            .unwrap()
-            .any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".tmp"))
-        {
-            assert!(
-                Instant::now() < deadline,
-                "recorder did not open its temporary MP4: {:?}",
-                rx.try_recv()
-            );
-            std::thread::park_timeout(Duration::from_millis(5));
-        }
+        // Wait for actual captured frames, not just an open temporary file.
+        ready_rx
+            .recv_timeout(Duration::from_secs(8))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "recorder did not capture 20 frames: {e}; result={:?}",
+                    rx.try_recv()
+                )
+            });
         let inputs = [
             INPUT {
                 r#type: INPUT_KEYBOARD,
@@ -375,7 +585,7 @@ fn real_window_exclusion_and_escape() {
         loop {
             let mut msg = MSG::default();
             if PeekMessageW(&mut msg, Some(hwnd), WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool() {
-                assert_eq!(msg.wParam.0, CANCEL_HOTKEY as usize);
+                assert_eq!(msg.wParam.0, STOP_HOTKEY as usize);
                 cancel.store(true, Ordering::Relaxed);
                 break;
             }
@@ -387,13 +597,20 @@ fn real_window_exclusion_and_escape() {
         }
         let result = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         drop(worker);
-        assert!(result.unwrap_err().contains("中止"));
-        assert_eq!(std::fs::read(path).unwrap(), b"preserve-existing-file");
+        assert!(result.unwrap().text.contains("録画を保存しました"));
+        let _com = Com::new().unwrap();
+        let _media = Media::new().unwrap();
+        let stats = decode(&path, false);
+        assert!(
+            stats.1 < 90_000_000,
+            "Esc must end before the requested 10 seconds: {stats:?}"
+        );
+        assert_eq!(std::fs::read_dir(files.path()).unwrap().count(), 1);
         drop(guard);
         assert!(IsWindowVisible(hwnd).as_bool());
         drop(window);
         eprintln!(
-            "real GDI exclusion, window restoration, global Escape and MP4 preservation passed"
+            "real GDI exclusion, window restoration, global Escape and early MP4 save passed"
         );
     }
 }
