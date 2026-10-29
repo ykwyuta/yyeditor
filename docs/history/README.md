@@ -19,5 +19,9 @@
 - [TLSの敵対的レビュー（2026-10-29）](verification/tls-adversarial-2026-10-29.md): 3エージェントによる攻撃入力・信頼境界の検査と修正、未検証範囲。
 - [yytoolbox録画の上下反転修正（2026-10-29）](verification/yytoolbox-recording-orientation-2026-10-29.md): DIBの行順統一、実デスクトップMP4の全30フレーム確認。
 
+- [録画操作バー・容量整理・アプリ起動承認（2026-10-29）](verification/toolbox-filemanager-controls-2026-10-29.md): ボタンによる途中保存とEsc廃止、録画からのバー除外、大容量候補と未署名アプリ承認。
+
+- [yytoolboxの簡易動画編集（2026-10-29）](verification/toolbox-video-edit-2026-10-29.md): 複数範囲のカット・クリップ、実MFによる映像・音声の検証、元動画保護。
+
 記録を追加するときは日時・コミット・環境・成功/失敗/未実行の区別を記載します。
 新しい機能の使い方や現行の仕様説明は、この場所だけに追加しないでください。

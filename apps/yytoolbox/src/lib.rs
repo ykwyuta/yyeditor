@@ -7,6 +7,7 @@ mod formats;
 pub mod images;
 mod random;
 mod text;
+pub mod video;
 mod webtools;
 
 use std::collections::BTreeMap;
@@ -40,9 +41,10 @@ pub enum Tool {
     JavaScript,
     Recording,
     ResizeImages,
+    VideoEdit,
 }
 
-pub const TOOLS: [Tool; 22] = [
+pub const TOOLS: [Tool; 23] = [
     Tool::Regex,
     Tool::Base64Encode,
     Tool::Base64Decode,
@@ -65,6 +67,7 @@ pub const TOOLS: [Tool; 22] = [
     Tool::JavaScript,
     Tool::Recording,
     Tool::ResizeImages,
+    Tool::VideoEdit,
 ];
 
 #[derive(Clone, Debug)]
@@ -119,6 +122,7 @@ impl Tool {
             Self::JavaScript => "JavaScript 整形",
             Self::Recording => "画面録画",
             Self::ResizeImages => "画像の一括リサイズ",
+            Self::VideoEdit => "動画編集（カット・クリップ）",
         }
     }
 
@@ -169,7 +173,10 @@ impl Tool {
                 "構文を解析して整形します。コードは実行しません。字下げと折り返し幅を指定できます。"
             }
             Self::Recording => {
-                "時間指定のMP4録画。自身は隠し、終了キーでそこまでを保存。キーは開始前に登録を確認し、変更できます。"
+                "時間指定のMP4録画。小型バーの停止ボタンで途中保存。Escでは停止しません。操作バーは録画から除外します。"
+            }
+            Self::VideoEdit => {
+                "時間範囲を残すクリップ／取り除くカット。例: 5-10, 20-30（秒または時:分:秒）。元動画を保ちMP4へ再エンコード。先頭の映像・音声を使用。"
             }
             Self::ResizeImages => {
                 "実行で画像と出力フォルダを選択。比率維持・背景補完・透明背景。入力と既存ファイルを上書きしません。"
@@ -196,7 +203,7 @@ impl Tool {
                     "stop_key",
                     "録画終了・保存キー",
                     &[
-                        "Esc",
+                        "なし（ボタンのみ）",
                         "Ctrl+Shift+F9",
                         "Ctrl+Shift+F10",
                         "Ctrl+Shift+F11",
@@ -204,6 +211,10 @@ impl Tool {
                         "Ctrl+Alt+F10",
                     ],
                 ),
+            ],
+            Self::VideoEdit => vec![
+                s("edit_mode", "操作", &["クリップ（残す）", "カット（削除）"]),
+                f("ranges", "時間範囲（開始-終了）", "0-10"),
             ],
             Self::ResizeImages => vec![
                 f("width", "最大幅／枠幅px", "1280"),
@@ -449,7 +460,7 @@ pub fn execute(
     defaults.extend(params.clone());
     let params = &defaults;
     let output = match tool {
-        Tool::Recording | Tool::ResizeImages => {
+        Tool::Recording | Tool::ResizeImages | Tool::VideoEdit => {
             Err("Windows画面の「実行」で対象・保存先を選んでください".into())
         }
         Tool::QrCode => webtools::qr(input, params),

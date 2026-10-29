@@ -2150,9 +2150,8 @@ fn open_row(r: &Row) {
         );
         return;
     }
-    let w = HSTRING::from(r.path.as_os_str());
-    unsafe {
-        windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &w, None, None, SW_SHOWNORMAL);
+    if let Err(error) = super::launch::open(hwnd(), &r.path) {
+        error_box(hwnd(), &error);
     }
 }
 
@@ -2190,16 +2189,8 @@ fn on_extracted(enter: bool, r: Result<PathBuf, String>) {
             true,
         ),
         Ok(p) => {
-            let w = HSTRING::from(p.as_os_str());
-            unsafe {
-                windows::Win32::UI::Shell::ShellExecuteW(
-                    None,
-                    w!("open"),
-                    &w,
-                    None,
-                    None,
-                    SW_SHOWNORMAL,
-                );
+            if let Err(error) = super::launch::open(hwnd(), &p) {
+                error_box(hwnd(), &error);
             }
             with(|s| s.update_status());
         }

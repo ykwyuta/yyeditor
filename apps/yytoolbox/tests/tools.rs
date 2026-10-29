@@ -91,7 +91,7 @@ fn jwt_is_decode_only_and_sql_preserves_literals() {
 fn every_tool_has_an_executable_default_example_and_limits_are_enforced() {
     for tool in yytoolbox::TOOLS {
         let p = tool.defaults();
-        if matches!(tool, Tool::Recording | Tool::ResizeImages) {
+        if matches!(tool, Tool::Recording | Tool::ResizeImages | Tool::VideoEdit) {
             assert!(
                 execute(tool, "", &p, &|| false)
                     .unwrap_err()

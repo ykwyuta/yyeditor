@@ -6,6 +6,7 @@
 
 mod browse;
 mod cleanup;
+mod launch;
 mod renamedlg;
 mod shell;
 mod work;
@@ -59,7 +60,7 @@ const TAB_NAMES: [&str; 8] = [
     "似たファイル",
     "重複",
     "削除の確認",
-    "開発環境の整理",
+    "容量の整理",
     "記録",
 ];
 
@@ -507,7 +508,7 @@ fn create_menu() -> Result<HMENU> {
         add(
             tidy,
             ID_TAB_BASE + TAB_CLEANUP as u16,
-            "開発環境の削除候補を探す(&D)",
+            "キャッシュ・大容量データを探す(&D)",
         );
         add(tidy, ID_EXPIRE_TRASH, "隔離フォルダの古いものを消す(&T)...");
         add(tidy, ID_VACUUM, "中身の索引のバキューム(&V)...");
@@ -837,7 +838,7 @@ fn create() -> Result<HWND> {
         e.clean_age = edit(ID_CLEAN_AGE);
         set_text(e.clean_min, "100");
         set_text(e.clean_age, "30");
-        e.clean_user = check("共通キャッシュも探す", ID_CLEAN_USER);
+        e.clean_user = check("共通キャッシュ・管理データ", ID_CLEAN_USER);
         e.clean_engines = check("Docker / Podman も調査", ID_CLEAN_ENGINES);
         SendMessageW(e.clean_user, BM_SETCHECK, Some(WPARAM(1)), None);
         SendMessageW(e.clean_engines, BM_SETCHECK, Some(WPARAM(1)), None);
@@ -849,14 +850,14 @@ fn create() -> Result<HWND> {
             ],
             vec![
                 c(label("環境"), 40),
-                c(e.clean_ecosystem, 145),
+                c(e.clean_ecosystem, 185),
                 c(label("最小 MiB"), 65),
                 c(e.clean_min, 55),
                 c(label("ビルド経過日"), 95),
                 c(e.clean_age, 50),
             ],
             vec![
-                c(e.clean_user, 155),
+                c(e.clean_user, 210),
                 c(e.clean_engines, 180),
                 c(button("候補を探す", ID_CLEAN_FIND), 90),
                 c(cancel(()), 65),
@@ -1213,7 +1214,11 @@ impl App {
                         }
                     }
                     4 => {
-                        if matches!(c.location, yy_files::cleanup::Location::Folder(_)) {
+                        if matches!(
+                            c.location,
+                            yy_files::cleanup::Location::Folder(_)
+                                | yy_files::cleanup::Location::File(_)
+                        ) {
                             c.files.to_string()
                         } else {
                             "—".into()

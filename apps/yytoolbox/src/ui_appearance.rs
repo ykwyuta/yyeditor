@@ -117,6 +117,7 @@ impl State {
         match id {
             EXAMPLE | OPEN | SAVE_INPUT => uses_input(self.tool),
             CANCEL => self.running.is_some(),
+            SAVE => !matches!(self.tool, Tool::Recording | Tool::VideoEdit),
             _ => true,
         }
     }

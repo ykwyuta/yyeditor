@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use yy_files::cleanup::{Candidate, Ecosystem, Location, Options, Report};
 
-pub(super) const FILTERS: [&str; 8] = [
+pub(super) const FILTERS: [&str; 19] = [
     "すべて",
     "Python",
     "Node.js / JS",
@@ -14,8 +14,19 @@ pub(super) const FILTERS: [&str; 8] = [
     ".NET",
     "Docker",
     "Podman",
+    "C/C++・ゲーム開発",
+    "Go",
+    "Ruby",
+    "PHP",
+    "携帯・Android/iOS",
+    "仮想マシン・WSL",
+    "ブラウザー・アプリ",
+    "データベース・メール",
+    "動画・音声・ディスク",
+    "システム・ログ",
+    "その他大容量データ",
 ];
-const ECOSYSTEMS: [Ecosystem; 7] = [
+const ECOSYSTEMS: [Ecosystem; 18] = [
     Ecosystem::Python,
     Ecosystem::Node,
     Ecosystem::Java,
@@ -23,6 +34,17 @@ const ECOSYSTEMS: [Ecosystem; 7] = [
     Ecosystem::DotNet,
     Ecosystem::Docker,
     Ecosystem::Podman,
+    Ecosystem::Native,
+    Ecosystem::Go,
+    Ecosystem::Ruby,
+    Ecosystem::Php,
+    Ecosystem::Mobile,
+    Ecosystem::VirtualMachine,
+    Ecosystem::Browser,
+    Ecosystem::Database,
+    Ecosystem::Media,
+    Ecosystem::System,
+    Ecosystem::Other,
 ];
 
 pub(super) fn find() {
@@ -57,7 +79,7 @@ pub(super) fn find() {
             roots_of(&text_of(a.edits.clean_roots))
         };
         let checked = |h| unsafe { SendMessageW(h, BM_GETCHECK, None, None).0 != 0 };
-        let caches = if !containers_only && checked(a.edits.clean_user) {
+        let caches = if checked(a.edits.clean_user) {
             yy_files::cleanup::user_caches(|key| {
                 std::env::var_os(key)
                     .filter(|s| !s.is_empty())
@@ -76,47 +98,50 @@ pub(super) fn find() {
         }
         a.cleanup = Report::default();
         a.refresh_list(TAB_CLEANUP);
-        a.start("開発環境の削除候補を探索", move |cx| {
-            let result = (|| {
-                let mut report = yy_files::cleanup::scan(
-                    &yy_files::Local,
-                    &roots,
-                    &caches,
-                    &options,
-                    &|n, path| cx.progress(&format!("探索: {n} 項目・{}", path.display())),
-                )?;
-                if engines {
-                    for engine in [Ecosystem::Docker, Ecosystem::Podman] {
-                        if options.ecosystem.is_some_and(|e| e != engine) {
-                            continue;
-                        }
-                        match yy_files::cleanup::containers(
-                            engine,
-                            options.min_bytes,
-                            &|tool, args| run_tool(cx, tool, args),
-                        ) {
-                            Ok(other) => {
-                                let omitted = other
-                                    .warning_count
-                                    .saturating_sub(other.warnings.len() as u64);
-                                report.items.extend(other.items);
-                                for warning in other.warnings {
-                                    report.warn(warning);
-                                }
-                                report.warning_count += omitted;
+        a.start(
+            "キャッシュ・大容量データの整理候補を探索",
+            move |cx| {
+                let result = (|| {
+                    let mut report = yy_files::cleanup::scan(
+                        &yy_files::Local,
+                        &roots,
+                        &caches,
+                        &options,
+                        &|n, path| cx.progress(&format!("探索: {n} 項目・{}", path.display())),
+                    )?;
+                    if engines {
+                        for engine in [Ecosystem::Docker, Ecosystem::Podman] {
+                            if options.ecosystem.is_some_and(|e| e != engine) {
+                                continue;
                             }
-                            Err(e) if yy_files::is_cancelled(&e) => return Err(e),
-                            Err(e) => {
-                                report.warn(format!("{}: 調査できません: {e}", engine.label()))
+                            match yy_files::cleanup::containers(
+                                engine,
+                                options.min_bytes,
+                                &|tool, args| run_tool(cx, tool, args),
+                            ) {
+                                Ok(other) => {
+                                    let omitted = other
+                                        .warning_count
+                                        .saturating_sub(other.warnings.len() as u64);
+                                    report.items.extend(other.items);
+                                    for warning in other.warnings {
+                                        report.warn(warning);
+                                    }
+                                    report.warning_count += omitted;
+                                }
+                                Err(e) if yy_files::is_cancelled(&e) => return Err(e),
+                                Err(e) => {
+                                    report.warn(format!("{}: 調査できません: {e}", engine.label()))
+                                }
                             }
                         }
                     }
-                }
-                report.sort();
-                Ok(report)
-            })();
-            cx.send(Msg::Cleaned(result.map_err(|e| work::describe(&e))));
-        });
+                    report.sort();
+                    Ok(report)
+                })();
+                cx.send(Msg::Cleaned(result.map_err(|e| work::describe(&e))));
+            },
+        );
     });
 }
 
@@ -240,10 +265,10 @@ pub(super) fn finished(result: std::result::Result<Report, String>) {
             let folders = report
                 .items
                 .iter()
-                .filter(|c| matches!(c.location, Location::Folder(_)))
+                .filter(|c| matches!(c.location, Location::Folder(_) | Location::File(_)))
                 .fold(0u64, |n, c| n.saturating_add(c.bytes));
             let summary = format!(
-                "候補 {} 件・フォルダ論理容量 {}・警告 {} 件（記録参照）。イメージ容量は共有レイヤーを含みます",
+                "候補 {} 件・ファイル/フォルダ論理容量 {}・警告 {} 件。不要とは未判定・イメージ共有容量に注意",
                 report.items.len(),
                 yy_files::human_size(folders),
                 report.warning_count
@@ -290,9 +315,14 @@ pub(super) fn details(row: Option<usize>) {
 
 pub(super) fn open() {
     if let Some((frame, c)) = selected(None) {
-        if let Location::Folder(path) = c.location {
+        if let Location::Folder(path) | Location::File(path) = &c.location {
+            let path = if matches!(c.location, Location::File(_)) {
+                path.parent().unwrap_or(path)
+            } else {
+                path.as_path()
+            };
             with(|a| a.show_tab(TAB_BROWSE));
-            browse::open_path(&path);
+            browse::open_path(path);
         } else {
             info_box(
                 frame,

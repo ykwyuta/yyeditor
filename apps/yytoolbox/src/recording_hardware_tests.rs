@@ -459,8 +459,8 @@ fn real_microphone() {
 }
 
 #[test]
-#[ignore = "creates a visible test window, hides it and sends a real global Escape key"]
-fn real_window_exclusion_and_escape() {
+#[ignore = "creates a visible test window, hides it and stops recording with the control bar"]
+fn real_window_exclusion_and_stop_button() {
     unsafe {
         let foreground = GetForegroundWindow();
         struct Window(HWND, HWND);
@@ -498,7 +498,7 @@ fn real_window_exclusion_and_escape() {
             bottom: 340,
         };
         let before = desktop.frame(rect).unwrap().to_vec();
-        let guard = UiGuard::new(hwnd).unwrap();
+        let mut guard = UiGuard::new(hwnd).unwrap();
         assert!(!IsWindowVisible(hwnd).as_bool());
         let after = desktop.frame(rect).unwrap().to_vec();
         assert_ne!(
@@ -559,42 +559,12 @@ fn real_window_exclusion_and_escape() {
                     rx.try_recv()
                 )
             });
-        let inputs = [
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VK_ESCAPE,
-                        ..Default::default()
-                    },
-                },
-            },
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VK_ESCAPE,
-                        dwFlags: KEYEVENTF_KEYUP,
-                        ..Default::default()
-                    },
-                },
-            },
-        ];
-        assert_eq!(SendInput(&inputs, std::mem::size_of::<INPUT>() as i32), 2);
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            let mut msg = MSG::default();
-            if PeekMessageW(&mut msg, Some(hwnd), WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool() {
-                assert_eq!(msg.wParam.0, STOP_HOTKEY as usize);
-                cancel.store(true, Ordering::Relaxed);
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "real Escape did not produce WM_HOTKEY"
-            );
-            std::thread::park_timeout(Duration::from_millis(5));
-        }
+        guard.show_controls(10, "なし（ボタンのみ）", 103).unwrap();
+        guard.controls.as_ref().unwrap().click_stop();
+        let mut msg = MSG::default();
+        assert!(PeekMessageW(&mut msg, Some(hwnd), WM_COMMAND, WM_COMMAND, PM_REMOVE).as_bool());
+        assert_eq!(msg.wParam.0, 103);
+        cancel.store(true, Ordering::Relaxed);
         let result = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         drop(worker);
         assert!(result.unwrap().text.contains("録画を保存しました"));
@@ -603,14 +573,12 @@ fn real_window_exclusion_and_escape() {
         let stats = decode(&path, false);
         assert!(
             stats.1 < 90_000_000,
-            "Esc must end before the requested 10 seconds: {stats:?}"
+            "Stop button must end before the requested 10 seconds: {stats:?}"
         );
         assert_eq!(std::fs::read_dir(files.path()).unwrap().count(), 1);
         drop(guard);
         assert!(IsWindowVisible(hwnd).as_bool());
         drop(window);
-        eprintln!(
-            "real GDI exclusion, window restoration, global Escape and early MP4 save passed"
-        );
+        eprintln!("real GDI exclusion, window restoration, stop button and early MP4 save passed");
     }
 }

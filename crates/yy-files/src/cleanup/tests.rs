@@ -1,6 +1,108 @@
 use super::*;
 use crate::fs::Local;
 
+#[test]
+fn managed_large_files_and_new_ecosystems_are_read_only_and_filterable() {
+    let dir = tempfile::tempdir().unwrap();
+    for path in [
+        "VM/disk.vhdx",
+        "VM/disk.qcow2",
+        "phone/old.ipsw",
+        "mail/store.pst",
+        "db/main.sqlite",
+        "backup/full.tibx",
+        "movie/raw.mxf",
+        "logs/heap.hprof",
+        "disk/setup.iso",
+        "go/go.mod",
+        "go/vendor/cache/data",
+        "php/composer.json",
+        "php/vendor/cache/data",
+        "c/CMakeLists.txt",
+        "c/cmake-build-debug/out/data",
+        "py/.hypothesis/cache/data",
+    ] {
+        write(dir.path(), path, 64);
+    }
+    write(dir.path(), "documents/vendor/original", 64);
+    let before = std::fs::read(dir.path().join("VM/disk.vhdx")).unwrap();
+    let report = scan(
+        &Local,
+        &[dir.path().into()],
+        &[],
+        &Options {
+            min_bytes: 32,
+            ..all()
+        },
+        &|_, _| true,
+    )
+    .unwrap();
+    assert_eq!(report.items.len(), 13, "{:#?}", report.items);
+    assert_eq!(
+        report
+            .items
+            .iter()
+            .filter(|c| matches!(c.location, Location::File(_)))
+            .count(),
+        9
+    );
+    assert!(
+        report
+            .items
+            .iter()
+            .any(|c| c.ecosystem == Ecosystem::VirtualMachine && c.advice.contains("圧縮"))
+    );
+    assert!(
+        report
+            .items
+            .iter()
+            .all(|c| !c.address().contains("documents"))
+    );
+    assert_eq!(
+        before,
+        std::fs::read(dir.path().join("VM/disk.vhdx")).unwrap()
+    );
+    let filtered = scan(
+        &Local,
+        &[dir.path().into()],
+        &[],
+        &Options {
+            ecosystem: Some(Ecosystem::VirtualMachine),
+            ..all()
+        },
+        &|_, _| true,
+    )
+    .unwrap();
+    assert_eq!(filtered.items.len(), 2);
+    assert!(super::expanded::file(Path::new("unknown.data"), 1024 * 1024 * 1024).is_some());
+    assert!(super::expanded::file(Path::new("unknown.data"), 1024).is_none());
+}
+
+#[test]
+fn common_backups_and_vm_storage_are_identified_without_nested_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "Apple/MobileSync/Backup/device/data", 80);
+    write(dir.path(), "Docker/wsl/disk.vhdx", 96);
+    let roots = user_caches(|key| match key {
+        "USERPROFILE" | "LOCALAPPDATA" => Some(dir.path().into()),
+        _ => None,
+    });
+    let report = scan(&Local, &[], &roots, &all(), &|_, _| true).unwrap();
+    assert_eq!(report.items.len(), 2, "{:#?}", report.items);
+    assert!(
+        report
+            .items
+            .iter()
+            .any(|c| c.ecosystem == Ecosystem::Mobile && c.advice.contains("唯一のコピー"))
+    );
+    assert!(
+        report
+            .items
+            .iter()
+            .any(|c| c.ecosystem == Ecosystem::Docker && c.advice.contains("直接削除しない"))
+    );
+}
+
 fn write(root: &Path, path: &str, bytes: usize) {
     let path = root.join(path);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();

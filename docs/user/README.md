@@ -12,7 +12,7 @@
 | yysheet | [同梱ヘルプ](../../crates/yy-win/help/sheet.md) | CSV・固定長ファイルを開く |
 | yyclip | [履歴・テンプレート・ファイル履歴](../../apps/yyclip/README.md) / [期限・定期作業](yyclip-deadlines.md) | 通知領域から起動 |
 | yytoolbox | [使い方](yytoolbox.md) / [同梱ヘルプ](../../apps/yytoolbox/help/help.md) | [ダミーCSVの8分野の定義](../../demo/yytoolbox/README.md) |
-| yyfilemanager | [同梱ヘルプ](../../crates/yy-win/help/filemanager.md) / [開発環境の整理](yyfilemanager-cleanup.md) | 同期計画を作って確認する |
+| yyfilemanager | [同梱ヘルプ](../../crates/yy-win/help/filemanager.md) / [キャッシュ・大容量データの整理](yyfilemanager-cleanup.md) | 同期計画を作って確認する |
 | yybrowser | [同梱ヘルプ](../../crates/yy-win/help/browser.md) | プロファイル・接続経路を設定 |
 | yydraw | [使い方](yydraw.md) / [同梱ヘルプ](../../crates/yy-win/help/draw.md) | [業務・ITアイコン](yydraw-business-icons.md) / [イラスト](yydraw-friendly-icons.md) |
 | yydbmanager | [使い方](yydbmanager.md) / [同梱ヘルプ](../../apps/yydbmanager/help/help.md) | [7DBデモ](../../demo/yydbmanager/README.md) / [実行計画](../../demo/yydbmanager/plans/README.md) |

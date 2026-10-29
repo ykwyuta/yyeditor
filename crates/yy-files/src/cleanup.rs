@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::fs::{Fs, Meta};
 
+mod expanded;
 #[cfg(test)]
 mod tests;
 
@@ -17,6 +18,17 @@ pub enum Ecosystem {
     DotNet,
     Docker,
     Podman,
+    Native,
+    Go,
+    Ruby,
+    Php,
+    Mobile,
+    VirtualMachine,
+    Browser,
+    Database,
+    Media,
+    System,
+    Other,
 }
 
 impl Ecosystem {
@@ -29,6 +41,17 @@ impl Ecosystem {
             Self::DotNet => ".NET",
             Self::Docker => "Docker",
             Self::Podman => "Podman",
+            Self::Native => "C/C++・ゲーム開発",
+            Self::Go => "Go",
+            Self::Ruby => "Ruby",
+            Self::Php => "PHP",
+            Self::Mobile => "携帯・Android/iOS",
+            Self::VirtualMachine => "仮想マシン・WSL",
+            Self::Browser => "ブラウザー・アプリ",
+            Self::Database => "データベース・メール",
+            Self::Media => "動画・音声・ディスク",
+            Self::System => "システム・ログ",
+            Self::Other => "その他大容量データ",
         }
     }
 }
@@ -36,6 +59,7 @@ impl Ecosystem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Location {
     Folder(PathBuf),
+    File(PathBuf),
     Image { engine: Ecosystem, id: String },
     BuildCache,
 }
@@ -57,7 +81,7 @@ pub struct Candidate {
 impl Candidate {
     pub fn address(&self) -> String {
         match &self.location {
-            Location::Folder(path) => path.display().to_string(),
+            Location::Folder(path) | Location::File(path) => path.display().to_string(),
             Location::Image { engine, id } => format!("{}: {id}", engine.label()),
             Location::BuildCache => format!("{}: build cache", self.ecosystem.label()),
         }
@@ -205,6 +229,7 @@ pub fn user_caches(env: impl Fn(&str) -> Option<PathBuf>) -> Vec<CacheRoot> {
         Ecosystem::DotNet,
         "NuGet キャッシュ",
     );
+    expanded::common_roots(&env, &mut roots);
     roots
 }
 
@@ -447,7 +472,15 @@ pub fn scan(
         }
         match cache.path.canonicalize() {
             Ok(path) => {
-                forced.insert(path.clone(), Rule { ecosystem: cache.ecosystem, name: cache.name, build: false, advice: "利用中のツールを停止してから整理。ローカルのみのパッケージが含まれないか確認。再取得にはネットワークが必要です。" });
+                forced.insert(
+                    path.clone(),
+                    Rule {
+                        ecosystem: cache.ecosystem,
+                        name: cache.name,
+                        build: false,
+                        advice: expanded::advice(cache.ecosystem),
+                    },
+                );
                 if !unique.iter().any(|p| path.starts_with(p)) {
                     unique.push(path);
                 }
@@ -482,21 +515,42 @@ pub fn scan(
         .saturating_sub(i64::from(options.build_age_days).saturating_mul(86_400_000_000_000));
     while let Some((path, siblings)) = stack.pop() {
         tick(&mut report, &path, progress)?;
-        if protected(&path) || !visited_roots.insert(path.clone()) {
+        if (protected(&path) && !forced.contains_key(&path)) || !visited_roots.insert(path.clone())
+        {
             continue;
         }
         let meta = match fs.metadata(&path) {
-            Ok(m) if m.dir && !m.link => m,
+            Ok(m) if !m.link => m,
             Ok(_) => continue,
             Err(e) => {
                 report.warn(format!("{}: {e}", path.display()));
                 continue;
             }
         };
+        if !meta.dir {
+            if meta.size >= options.min_bytes
+                && let Some(rule) = expanded::file(&path, meta.size)
+                && options.ecosystem.is_none_or(|e| e == rule.ecosystem)
+            {
+                report.items.push(Candidate {
+                    ecosystem: rule.ecosystem,
+                    kind: rule.name.into(),
+                    location: Location::File(path),
+                    bytes: meta.size,
+                    modified: meta.mtime,
+                    files: 1,
+                    incomplete: false,
+                    reason: "容量の確認候補です。不要・削除可能と判定したものではありません".into(),
+                    advice: rule.advice.into(),
+                });
+            }
+            continue;
+        }
         let mut found = forced
             .get(&path)
             .copied()
-            .or_else(|| rule(&path, meta, &siblings));
+            .or_else(|| rule(&path, meta, &siblings))
+            .or_else(|| expanded::directory(&path, &siblings));
         if found.is_none()
             && matches!(
                 path.file_name().and_then(|n| n.to_str()),
@@ -537,7 +591,7 @@ pub fn scan(
                             options.build_age_days
                         )
                     } else {
-                        "再生成可能な依存関係・キャッシュの標準配置".into()
+                        "既知のキャッシュ・管理データの配置。整理方法を確認してください".into()
                     },
                     advice: rule.advice.into(),
                 });
@@ -551,7 +605,7 @@ pub fn scan(
                     .filter(|e| !e.meta.dir && !e.meta.link)
                     .map(|e| e.name.clone())
                     .collect();
-                for entry in entries.into_iter().filter(|e| e.meta.dir && !e.meta.link) {
+                for entry in entries.into_iter().filter(|e| !e.meta.link) {
                     stack.push((path.join(entry.name), names.clone()));
                 }
             }

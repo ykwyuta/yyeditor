@@ -25,14 +25,18 @@ use windows::{
 use yytoolbox::{Output, Params, Result, integer, value};
 
 pub const STOP_HOTKEY: i32 = 0x5954;
+#[path = "recording_bar.rs"]
+mod bar;
+#[path = "video_edit.rs"]
+pub mod video_edit;
 
 /// Keep the actual registration from preflight until recording has finished.
 /// A probe followed by unregistering would allow another app to take the key.
-pub struct StopHotkey(HWND);
+pub struct StopHotkey(Option<HWND>);
 impl StopHotkey {
     pub fn register(hwnd: HWND, key: &str) -> Result<Self> {
         let (modifiers, vk) = match key {
-            "Esc" => (MOD_NOREPEAT, VK_ESCAPE),
+            "なし（ボタンのみ）" => return Ok(Self(None)),
             "Ctrl+Shift+F9" => (MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, VK_F9),
             "Ctrl+Shift+F10" => (MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, VK_F10),
             "Ctrl+Shift+F11" => (MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, VK_F11),
@@ -42,13 +46,15 @@ impl StopHotkey {
         };
         unsafe { RegisterHotKey(Some(hwnd), STOP_HOTKEY, modifiers, u32::from(vk.0)) }
             .map_err(|e| format!("{key}を登録できません。他のアプリで使用されている可能性があります。「録画終了・保存キー」で別のキーを選んで、もう一度開始してください。\n{e}"))?;
-        Ok(Self(hwnd))
+        Ok(Self(Some(hwnd)))
     }
 }
 impl Drop for StopHotkey {
     fn drop(&mut self) {
-        unsafe {
-            let _ = UnregisterHotKey(Some(self.0), STOP_HOTKEY);
+        if let Some(hwnd) = self.0 {
+            unsafe {
+                let _ = UnregisterHotKey(Some(hwnd), STOP_HOTKEY);
+            }
         }
     }
 }
@@ -83,17 +89,19 @@ pub struct UiGuard {
     hwnd: HWND,
     windows: Vec<(HWND, u32)>,
     _hotkey: StopHotkey,
+    controls: Option<bar::ControlBar>,
 }
 impl UiGuard {
     #[cfg(test)]
     pub fn new(hwnd: HWND) -> Result<Self> {
-        Self::hide(hwnd, StopHotkey::register(hwnd, "Esc")?)
+        Self::hide(hwnd, StopHotkey::register(hwnd, "なし（ボタンのみ）")?)
     }
     pub fn hide(hwnd: HWND, hotkey: StopHotkey) -> Result<Self> {
         let mut guard = Self {
             hwnd,
             windows: Vec::new(),
             _hotkey: hotkey,
+            controls: None,
         };
         unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> BOOL {
             if unsafe { IsWindowVisible(hwnd) }.as_bool() {
@@ -121,9 +129,19 @@ impl UiGuard {
         }
         Ok(guard)
     }
+    pub fn show_controls(&mut self, seconds: u32, key: &str, stop_command: u16) -> Result<()> {
+        self.controls = Some(bar::ControlBar::new(self.hwnd, seconds, key, stop_command)?);
+        Ok(())
+    }
+    pub fn stopping(&self) {
+        if let Some(bar) = &self.controls {
+            bar.stopping();
+        }
+    }
 }
 impl Drop for UiGuard {
     fn drop(&mut self) {
+        self.controls.take();
         unsafe {
             for (window, affinity) in &self.windows {
                 if IsWindow(Some(*window)).as_bool() {
@@ -345,6 +363,15 @@ struct Encoder {
 }
 impl Encoder {
     fn new(path: &std::path::Path, width: u32, height: u32, fps: u32, audio: bool) -> Result<Self> {
+        Self::with_rate(path, width, height, (u64::from(fps) << 32) | 1, audio)
+    }
+    fn with_rate(
+        path: &std::path::Path,
+        width: u32,
+        height: u32,
+        rate: u64,
+        audio: bool,
+    ) -> Result<Self> {
         unsafe {
             let writer = MFCreateSinkWriterFromURL(&HSTRING::from(path.as_os_str()), None, None)
                 .map_err(|e| e.to_string())?;
@@ -368,7 +395,7 @@ impl Encoder {
                 )
                 .map_err(|e| e.to_string())?;
             output
-                .SetUINT64(&MF_MT_FRAME_RATE, (u64::from(fps) << 32) | 1)
+                .SetUINT64(&MF_MT_FRAME_RATE, rate)
                 .map_err(|e| e.to_string())?;
             output
                 .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)
@@ -921,6 +948,12 @@ mod tests {
         };
         let owner = window();
         let recorder = window();
+        assert!(StopHotkey::register(recorder.0, "Esc").is_err());
+        let default = yytoolbox::Tool::Recording.defaults();
+        assert_eq!(value(&default, "stop_key", ""), "なし（ボタンのみ）");
+        let button_only = StopHotkey::register(recorder.0, "なし（ボタンのみ）").unwrap();
+        assert!(button_only.0.is_none());
+        drop(button_only);
         let reserved = StopHotkey::register(owner.0, "Ctrl+Shift+F11").unwrap();
         let error = StopHotkey::register(recorder.0, "Ctrl+Shift+F11")
             .err()

@@ -65,6 +65,7 @@ enum Job {
     Text(Tool, String, Params),
     Images(Vec<PathBuf>, PathBuf, Params),
     Recording(crate::recording::Plan),
+    VideoEdit(PathBuf, PathBuf, yytoolbox::video::Edit),
 }
 impl Job {
     fn run(self, cancel: &AtomicBool) -> yytoolbox::Result<Output> {
@@ -76,6 +77,9 @@ impl Job {
                 yytoolbox::images::resize_batch(&files, &folder, &params, &|| {
                     cancel.load(Ordering::Relaxed)
                 })
+            }
+            Self::VideoEdit(source, destination, edit) => {
+                crate::recording::video_edit::edit(&source, &destination, &edit, cancel)
             }
             Self::Recording(plan) => crate::recording::record(plan, cancel),
         }
@@ -120,6 +124,12 @@ thread_local! {static STATE:RefCell<Option<State>>=const {RefCell::new(None)};}
 fn state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     STATE.with(|s| s.try_borrow_mut().ok()?.as_mut().map(f))
 }
+// The main thread receives key messages for the recording bar too.
+fn escape() {
+    if !state(|s| s.recording_ui.is_some()).unwrap_or(false) {
+        command(CANCEL, 0);
+    }
+}
 fn set_text(hwnd: HWND, text: &str) {
     let display = text.replace("\r\n", "\n").replace('\n', "\r\n");
     unsafe {
@@ -148,6 +158,7 @@ fn uses_input(tool: Tool) -> bool {
             | Tool::AgeGrade
             | Tool::Recording
             | Tool::ResizeImages
+            | Tool::VideoEdit
     )
 }
 fn navigation_label(tool: Tool) -> &'static str {
@@ -157,6 +168,7 @@ fn navigation_label(tool: Tool) -> &'static str {
         Tool::DummyCsv => "ダミーCSV生成",
         Tool::Url => "URL変換",
         Tool::ResizeImages => "画像リサイズ",
+        Tool::VideoEdit => "動画カット・クリップ",
         _ => tool.label(),
     }
 }
@@ -262,6 +274,7 @@ impl State {
                 match tool {
                     Tool::Recording => "録画を開始",
                     Tool::ResizeImages => "画像を選ぶ",
+                    Tool::VideoEdit => "動画を選んで保存",
                     _ => "実行",
                 },
             );
@@ -333,7 +346,12 @@ impl State {
                 let on = match *id {
                     CANCEL => busy,
                     HELP => true,
-                    COPY | SAVE => !busy && self.result.is_some(),
+                    SAVE => {
+                        !busy
+                            && self.result.is_some()
+                            && !matches!(self.tool, Tool::Recording | Tool::VideoEdit)
+                    }
+                    COPY => !busy && self.result.is_some(),
                     OPEN | SAVE_INPUT | EXAMPLE => !busy && uses_input(self.tool),
                     _ => !busy,
                 };
@@ -368,7 +386,7 @@ impl State {
         if matches!(&job, Job::Recording(_)) {
             set_text(
                 self.status,
-                "録画中…選択した終了キーでそこまでを保存します。",
+                "録画中…小型バーの「停止して保存」で終了できます。",
             );
         } else {
             set_text(self.status, "処理中…「中止」またはEscで中止できます。");
@@ -683,6 +701,7 @@ fn command(id: u16, code: u16) {
             Some((_, true)) => {}
             Some((Tool::Recording, false)) => start_recording(),
             Some((Tool::ResizeImages, false)) => start_images(),
+            Some((Tool::VideoEdit, false)) => start_video(),
             _ => {
                 state(State::start);
             }
@@ -690,6 +709,9 @@ fn command(id: u16, code: u16) {
         CANCEL => {
             state(|s| {
                 if let Some(r) = &s.running {
+                    if let Some(guard) = &s.recording_ui {
+                        guard.stopping();
+                    }
                     r.cancel.store(true, Ordering::Relaxed);
                     set_text(
                         s.status,
@@ -1017,7 +1039,7 @@ fn start_recording() {
     };
     let hotkey = match crate::recording::StopHotkey::register(
         hwnd,
-        yytoolbox::value(&params, "stop_key", "Esc"),
+        yytoolbox::value(&params, "stop_key", "なし（ボタンのみ）"),
     ) {
         Ok(hotkey) => hotkey,
         Err(message) => {
@@ -1034,13 +1056,18 @@ fn start_recording() {
         }
     };
     let started = (|| -> yytoolbox::Result<_> {
-        let guard = crate::recording::UiGuard::hide(hwnd, hotkey)?;
+        let mut guard = crate::recording::UiGuard::hide(hwnd, hotkey)?;
         let Some(rect) =
             crate::recording::area(yytoolbox::value(&params, "area", "全画面（メイン）"))?
         else {
             return Ok(None);
         };
         let plan = crate::recording::Plan::new(destination, rect, &params)?;
+        guard.show_controls(
+            yytoolbox::integer(&params, "seconds", 1, 3600)?,
+            yytoolbox::value(&params, "stop_key", "なし（ボタンのみ）"),
+            CANCEL,
+        )?;
         Ok(Some((guard, plan)))
     })();
     match started {
@@ -1054,6 +1081,50 @@ fn start_recording() {
         Err(message) => error(&message),
     }
 }
+fn start_video() {
+    let Some(params) = state(|s| s.params()) else {
+        return;
+    };
+    let edit = match yytoolbox::video::Edit::parse(&params) {
+        Ok(edit) => edit,
+        Err(e) => {
+            error(&e);
+            return;
+        }
+    };
+    let selected = (|| -> windows::core::Result<Option<PathBuf>> {
+        unsafe {
+            let Some(hwnd) = state(|s| s.hwnd) else {
+                return Ok(None);
+            };
+            let picker: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+            picker.SetTitle(w!("編集する動画を選択"))?;
+            picker.SetOptions(picker.GetOptions()? | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM)?;
+            picker.SetFileTypes(&[COMDLG_FILTERSPEC {
+                pszName: w!("動画（Windows対応コーデック）"),
+                pszSpec: w!("*.mp4;*.m4v;*.mov;*.wmv;*.avi;*.mkv;*.webm"),
+            }])?;
+            if picker.Show(Some(hwnd)).is_err() {
+                return Ok(None);
+            }
+            let raw = picker.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let path = raw.to_string();
+            CoTaskMemFree(Some(raw.0.cast()));
+            Ok(Some(PathBuf::from(path?)))
+        }
+    })();
+    match selected {
+        Ok(Some(source)) => {
+            if let Some(destination) = dialog(Some("edited.mp4")) {
+                state(|s| s.start_job(Job::VideoEdit(source, destination, edit)));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => error(&e.to_string()),
+    }
+}
+
 fn start_images() {
     let Some(params) = state(|s| s.params()) else {
         return;
@@ -1119,6 +1190,11 @@ fn start_images() {
 }
 
 fn save(input: bool) {
+    // MP4 was already finalized at the destination selected before recording.
+    // Do not offer a second save dialog for its textual status report.
+    if !input && state(|s| matches!(s.tool, Tool::Recording | Tool::VideoEdit)).unwrap_or(false) {
+        return;
+    }
     let data = state(|s| {
         if input {
             Some((
@@ -1300,7 +1376,7 @@ pub fn run() -> std::result::Result<(), String> {
                     continue;
                 }
                 if msg.wParam.0 == VK_ESCAPE.0 as usize {
-                    command(CANCEL, 0);
+                    escape();
                     continue;
                 }
             }
@@ -1408,11 +1484,11 @@ mod tests {
         }
         // Actual GDI controls/fonts at each modeled monitor DPI; changing the
         // user's Windows display settings is not necessary for this regression.
-        for dpi in [96, 120, 144, 192] {
+        for dpi in [192, 144, 120, 96] {
             state(|s| s.test_dpi = Some(dpi));
-            for zoom in [75, 100, 125, 150, 200] {
+            for zoom in [200, 150, 125, 100, 75] {
                 state(|s| s.zoom_to(zoom));
-                for tool in TOOLS {
+                for tool in TOOLS.into_iter().rev() {
                     choose(tool);
                     for logical_width in [480, 640, 1100] {
                         let width = logical_width * dpi as i32 / 96;
@@ -1704,21 +1780,43 @@ mod tests {
         pump_until(|| state(|s| s.running.is_none() && s.result.is_some()).unwrap_or(false));
         assert!(files.path().join("ui-test-resized.png").is_file());
         assert!(state(|s| s.result.as_ref().unwrap().notice.contains("1件保存")).unwrap());
-        // This checks window exclusion/restoration, not the user's global Esc
-        // binding. Exercise the same alternate-key registration as the UI.
-        let hotkey = [
-            "Ctrl+Alt+F9",
-            "Ctrl+Alt+F10",
-            "Ctrl+Shift+F9",
-            "Ctrl+Shift+F10",
-            "Ctrl+Shift+F11",
-        ]
-        .into_iter()
-        .find_map(|key| crate::recording::StopHotkey::register(hwnd, key).ok())
-        .expect("no recording test hotkey is available");
-        let guard = crate::recording::UiGuard::hide(hwnd, hotkey).unwrap();
+        let report = state(|s| s.result.take()).flatten().unwrap();
+        choose(Tool::Recording);
+        state(|s| {
+            s.result = Some(report);
+            s.enabled();
+            let save = s.buttons.iter().find(|b| b.0 == SAVE).unwrap().1;
+            assert!(
+                !unsafe { IsWindowVisible(save) }.as_bool(),
+                "recording must not ask for a second result save"
+            );
+            assert!(!unsafe { IsWindowEnabled(save) }.as_bool());
+        });
+        let key = "なし（ボタンのみ）";
+        let hotkey = crate::recording::StopHotkey::register(hwnd, key).unwrap();
+        let mut guard = crate::recording::UiGuard::hide(hwnd, hotkey).unwrap();
+        guard.show_controls(60, key, CANCEL).unwrap();
         assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool());
-        drop(guard);
+        let flag = Arc::new(AtomicBool::new(false));
+        state(|s| {
+            s.recording_ui = Some(guard);
+            s.running = Some(Running {
+                cancel: flag.clone(),
+                thread: std::thread::spawn(|| {}),
+            });
+        });
+        // Exercise the same Escape route used by the main message loop, with
+        // a live recording guard and cancellation flag. Explicit stop still works.
+        escape();
+        assert!(!flag.load(Ordering::Relaxed));
+        command(CANCEL, 0);
+        assert!(flag.load(Ordering::Relaxed));
+        let running = state(|s| {
+            s.recording_ui.take();
+            s.running.take().unwrap()
+        })
+        .unwrap();
+        running.thread.join().unwrap();
         assert!(unsafe { IsWindowVisible(hwnd) }.as_bool());
     }
 }
