@@ -1,2 +1,3 @@
 *.pdf binary
 apps/yyclip/data/*.csv text eol=lf
+apps/yydbmanager/crates/yy-parquet-zstd/tests/fixtures/corpus.csv text eol=lf

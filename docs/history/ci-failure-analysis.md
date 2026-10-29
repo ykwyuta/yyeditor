@@ -65,3 +65,13 @@ Db2の新ドライバーはCRRTKNが固定で、異なる接続のAPPLICATION_ID
 ヘルプの実際の破棄を期限付きで待ってから次へ進むよう変更する。キャプチャは取得対象名を記録し、矩形取得失敗・0サイズでは対象ハンドル・矩形・同一プロセス内の画面情報を付けて失敗させる。PrintWindowや保存の失敗時もGDIオブジェクトをfinallyで解放する。試験のスキップや失敗の無視、固定待機時間の延長は行わない。
 
 ローカルの独立ワークスペースで書式・全対象Clippy・通常試験61件が成功した。最新ビルドを用いたSQL実行計画・編集済みER・WebView2なしのヘルプの画面回帰も成功した。修正後SHAのCI完了結果も確認する。
+
+## 2026-10-29: Zstd参照CSVのWindows改行変換
+
+[実行40858184952のyydbmanager Windowsジョブ](https://github.com/ykwyuta/yyeditor/actions/runs/40858184952/job/123394390752)（SHA `f076538a6c433870092ac1b7983ec7fa7a79dbe2`）の`Test embedded engines, plans and transfer`で、`yy-parquet-zstd/tests/codec.rs`の参照フレーム読み込み・連結フレーム読み込みの2件が`Zstd decoded size does not match Parquet page size`で失敗した。Parquetの22レベル相互運用と、同じコーデックの圧縮・展開往復は成功していた。
+
+原因は確認済み。固定Zstdフレームの元データはLFの132,667バイトだが、期待値を`include_bytes!`する`corpus.csv`に改行属性がなかった。実際のGitで`core.autocrlf=true`・`core.eol=crlf`の`checkout-index`を使うと、1,401個のLFにCRが加わり134,068バイトになる。手元の`core.autocrlf=input`とLinuxでは元のLFを保つため、従来のローカル試験では検出できなかった。
+
+当該CSVだけを`.gitattributes`の`text eol=lf`で固定し、参照データの説明にバイト一致の要件を明記する。同じGitチェックアウト条件で修正後のCSVが132,667バイト・CRなしとなり、元データとバイト一致することを確認する。参照圧縮ファイルの再生成、サイズ・バイト比較の緩和、失敗試験の除外は行わない。独立yydbmanagerワークスペースの書式・全対象Clippy・通常試験をWindows/Linuxで検証し、修正SHAのCI完了まで確認する。
+
+ローカルではRust 1.99.0で独立ワークスペース全体の書式・全対象ClippyがWindows/Linuxとも成功し、通常試験はWindows 67件・Linux 57件成功した。Windowsの一時ファイル置換はサンドボックスで拒否されたため、実ファイル操作の権限を付けて成功を確認した。外部DB等を必要とする既存のignored試験は実行していない。ログは`target/ci-zstd-db-clippy-windows.log`、`target/ci-zstd-db-tests-windows.log`、`target/ci-zstd-db-linux.log`。

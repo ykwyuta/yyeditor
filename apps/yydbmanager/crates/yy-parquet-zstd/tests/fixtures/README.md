@@ -4,6 +4,11 @@ Synthetic UTF-8 CSV input and 22 independent reference frames, generated using
 zstd crate 0.13.3 / libzstd 1.5.7. Frames include checksums and intentionally omit
 a declared content size, exercising streaming-header compatibility.
 
+`corpus.csv` must retain LF line endings on every platform. Its bytes are the
+expected decoded contents of the fixed frames, so `.gitattributes` pins its
+checkout format even when `core.autocrlf=true`. Keep byte-for-byte comparisons;
+do not normalize the expected data in the decoder tests.
+
 From the repository root, regenerate and cross-check both directions:
 
 ```sh
