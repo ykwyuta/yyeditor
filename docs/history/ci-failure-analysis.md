@@ -55,3 +55,13 @@ Db2の新ドライバーはCRRTKNが固定で、異なる接続のAPPLICATION_ID
 ## 2026-10-26: Office変換ツール導入による長時間化
 
 [実行40284650502](https://github.com/ykwyuta/yyeditor/actions/runs/40284650502)ではLibreOffice・日本語フォントの導入に約68分を要した。aptログの160 MB取得に1時間7分41秒という記録から、Ubuntuミラーの転送待ちが主因と確認した。利用者の指示によりExcel・PowerPointの画像比較を廃止し、変換コードとCIの導入・専用試験を削除する。Office内容比較・通常画像・PDF比較の試験は維持する。[変更と検証記録](verification/yymerge-no-office-images-2026-10-26.md)を参照。変更後CIの所要時間は未測定。
+
+## 2026-10-29: 画面試験の閉鎖待ちとキャプチャ対象の診断
+
+[実行40792413651のyydbmanager Windowsジョブ](https://github.com/ykwyuta/yyeditor/actions/runs/40792413651/job/123180588392)（SHA `30df3fa0ac4f0cd521907b52616ba884f9738bfd`）で、`windows-shell.ps1` の `Snapshot` がBitmap生成時に `Parameter is not valid` で失敗した。直前の同じyydbmanagerソースに対する[実行40788137025](https://github.com/ykwyuta/yyeditor/actions/runs/40788137025)は成功している。
+
+取得先の矩形・画面名がログにないため、今回無効になったウィンドウと機序は未確定。コード上は `GetWindowRect` の失敗を無視しており、無効な対象では0サイズのBitmapを生成してしまう。また、各ヘルプを `PostMessage(WM_CLOSE)` で閉じた後、固定40msだけで次を開いており、古いヘルプを次の検索で拾う競合がある。これは確認した試験上の問題であり、今回の直接原因という断定はしない。
+
+ヘルプの実際の破棄を期限付きで待ってから次へ進むよう変更する。キャプチャは取得対象名を記録し、矩形取得失敗・0サイズでは対象ハンドル・矩形・同一プロセス内の画面情報を付けて失敗させる。PrintWindowや保存の失敗時もGDIオブジェクトをfinallyで解放する。試験のスキップや失敗の無視、固定待機時間の延長は行わない。
+
+ローカルの独立ワークスペースで書式・全対象Clippy・通常試験61件が成功した。最新ビルドを用いたSQL実行計画・編集済みER・WebView2なしのヘルプの画面回帰も成功した。修正後SHAのCI完了結果も確認する。

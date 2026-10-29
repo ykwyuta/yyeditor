@@ -66,14 +66,21 @@ function Wait-Frame {
     throw 'Window did not appear'
 }
 function Snapshot([IntPtr]$Window,[string]$Name) {
+    Write-Host "Snapshot: $Name (window=$Window)"
     Start-Sleep -Milliseconds 250
-    $taskRect=[DbShellTest+Rect]::new(); [DbShellTest]::GetWindowRect($Window,[ref]$taskRect)|Out-Null
+    $taskRect=[DbShellTest+Rect]::new()
+    if(![DbShellTest]::GetWindowRect($Window,[ref]$taskRect) -or $taskRect.right -le $taskRect.left -or $taskRect.bottom -le $taskRect.top){
+        throw "Snapshot target is unavailable: $Name, window=$Window, rect=$($taskRect.left),$($taskRect.top),$($taskRect.right),$($taskRect.bottom)`n$([DbShellTest]::Describe($taskProcess.Id))"
+    }
     $taskImage=[Drawing.Bitmap]::new($taskRect.right-$taskRect.left,$taskRect.bottom-$taskRect.top)
-    $taskGraphics=[Drawing.Graphics]::FromImage($taskImage)
-    $taskDC=$taskGraphics.GetHdc()
-    try {if(![DbShellTest]::PrintWindow($Window,$taskDC,2)){throw 'PrintWindow failed'}} finally {$taskGraphics.ReleaseHdc($taskDC)}
-    $taskImage.Save((Join-Path $taskOutput "$Name.png"),[Drawing.Imaging.ImageFormat]::Png)
-    $taskGraphics.Dispose();$taskImage.Dispose()
+    try {
+        $taskGraphics=[Drawing.Graphics]::FromImage($taskImage)
+        try {
+            $taskDC=$taskGraphics.GetHdc()
+            try {if(![DbShellTest]::PrintWindow($Window,$taskDC,2)){throw "PrintWindow failed: $Name"}} finally {$taskGraphics.ReleaseHdc($taskDC)}
+            $taskImage.Save((Join-Path $taskOutput "$Name.png"),[Drawing.Imaging.ImageFormat]::Png)
+        } finally {$taskGraphics.Dispose()}
+    } finally {$taskImage.Dispose()}
 }
 function Wait-VisibleDialog([string]$Class,[string]$Title) {
     for($i=0;$i -lt 100;$i++) {
@@ -128,7 +135,7 @@ try {
         }
         Snapshot $taskHelp "help-$($taskTopic.Id)"
         [DbShellTest]::PostMessage($taskHelp,0x10,0,0)|Out-Null
-        Start-Sleep -Milliseconds 40
+        Wait-DialogClosed $taskHelp
     }
     if($HelpOnly){ 'Embedded Markdown help topics and offline text fallback OK'; return }
 
@@ -609,7 +616,7 @@ try {
     'Menus, offline help/F1, Oracle/Db2 instructions, SQL/ER document tabs/ER spreadsheet/7 DB type dropdowns/Excel clipboard/batch validation/undo/resize, connection dialogs, encrypted persistence/reload OK' | Set-Content (Join-Path $taskOutput 'shell-test.txt')
     Get-Content (Join-Path $taskOutput 'shell-test.txt')
 } finally {
-    if($taskProcess -and !$taskProcess.HasExited){Stop-Process -Id $taskProcess.Id}
+    if($taskProcess -and !$taskProcess.HasExited){Stop-Process -Id $taskProcess.Id; $taskProcess.WaitForExit()}
     Set-Clipboard -Value $taskOldClipboard
     $env:YYDBMANAGER_CONNECTIONS_FILE=$taskOldConfig
     [DbShellTest]::SetThreadDpiAwarenessContext($taskOldDpi)|Out-Null
