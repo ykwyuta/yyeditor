@@ -78,6 +78,8 @@ mod resident {
     const WM_SHOW_HISTORY: u32 = WM_APP + 2;
     const WM_HIDE_HISTORY: u32 = WM_APP + 3;
     const CAPTURE_TIMER: usize = 1;
+    const FOREGROUND_TIMER: usize = 2;
+    const FOREGROUND_RETRIES: u8 = 5;
     /// キーボード・マウスのフックを付け直す間隔。応答が遅れたフックを Windows は知らせずに外すことがある
     /// （ほかのアプリが忙しく、このスレッドに順番が回らないとき）ので、定期的に付け直す。
     const REHOOK_MS: u32 = 30_000;
@@ -100,6 +102,14 @@ mod resident {
     thread_local! {
         static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
         static HOOK_STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
+        static FOREGROUND_REQUEST: RefCell<Option<ForegroundRequest>> = const { RefCell::new(None) };
+    }
+
+    #[derive(Clone, Copy)]
+    struct ForegroundRequest {
+        previous: HWND,
+        focus: Option<HWND>,
+        remaining: u8,
     }
 
     struct HookState {
@@ -427,13 +437,73 @@ mod resident {
         }
     }
 
-    /// 非表示の通知用ウィンドウをメニューの間だけ 1px 表示し、キー入力を受けられるようにする。
     /// `hwnd` を前面にして `focus` にキーボードのフォーカスを移す。常駐アプリがキーボードのフックの知らせで
     /// 前面になろうとすると、Windows の「前面を奪わせない」制限で `SetForegroundWindow` が断られ、フォーカスが
     /// 移らない（矢印キーが前のアプリへ行く）ことがある。今の前面のウィンドウのスレッドと一時的に入力を
     /// 結び付けてから前面にする。
     fn bring_to_front(hwnd: HWND, focus: Option<HWND>) {
+        cancel_foreground_request(hwnd);
+        let previous = unsafe { GetForegroundWindow() };
+        try_bring_to_front(hwnd, focus);
+        if unsafe { GetForegroundWindow() } != hwnd {
+            FOREGROUND_REQUEST.with(|cell| {
+                *cell.borrow_mut() = Some(ForegroundRequest {
+                    previous,
+                    focus,
+                    remaining: FOREGROUND_RETRIES,
+                });
+            });
+            unsafe { SetTimer(Some(hwnd), FOREGROUND_TIMER, 50, None) };
+        }
+    }
+
+    fn cancel_foreground_request(hwnd: HWND) {
+        FOREGROUND_REQUEST.with(|cell| *cell.borrow_mut() = None);
+        let _ = unsafe { KillTimer(Some(hwnd), FOREGROUND_TIMER) };
+    }
+
+    fn retry_foreground_request(hwnd: HWND) {
+        let request = FOREGROUND_REQUEST.with(|cell| *cell.borrow());
+        let Some(mut request) = request else {
+            cancel_foreground_request(hwnd);
+            return;
+        };
+        let foreground = unsafe { GetForegroundWindow() };
+        if foreground == hwnd {
+            // 別スレッドの前面化が遅れて完了した場合も、一覧へ入力先を移す。
+            if let Some(focus) = request.focus {
+                let _ = unsafe { SetFocus(Some(focus)) };
+            }
+            cancel_foreground_request(hwnd);
+            return;
+        }
+        // 表示要求の後に利用者が別のアプリへ移った場合は、フォーカスを奪い返さない。
+        if foreground != request.previous || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            cancel_foreground_request(hwnd);
+            return;
+        }
+        try_bring_to_front(hwnd, request.focus);
+        request.remaining -= 1;
+        if unsafe { GetForegroundWindow() } == hwnd || request.remaining == 0 {
+            cancel_foreground_request(hwnd);
+        } else {
+            FOREGROUND_REQUEST.with(|cell| *cell.borrow_mut() = Some(request));
+        }
+    }
+
+    fn try_bring_to_front(hwnd: HWND, focus: Option<HWND>) {
         unsafe {
+            // 起動時の WS_EX_TOPMOST だけでは、他の最前面ウィンドウより後ろに残る。
+            // 毎回 Z オーダーを更新し、前面化が拒否された場合もメニューを見える位置に置く。
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
             let me = GetCurrentThreadId();
             let fg = GetForegroundWindow();
             let fg_thread = if fg.0.is_null() {
@@ -441,11 +511,14 @@ mod resident {
             } else {
                 GetWindowThreadProcessId(fg, None)
             };
-            let attached = fg_thread != 0
+            let activated = SetForegroundWindow(hwnd).as_bool();
+            let attached = !activated
+                && fg_thread != 0
                 && fg_thread != me
                 && AttachThreadInput(me, fg_thread, true).as_bool();
-            let _ = BringWindowToTop(hwnd);
-            let _ = SetForegroundWindow(hwnd);
+            if !activated {
+                let _ = SetForegroundWindow(hwnd);
+            }
             let _ = SetActiveWindow(hwnd);
             if let Some(f) = focus {
                 let _ = SetFocus(Some(f));
@@ -1331,6 +1404,7 @@ mod resident {
             return;
         };
         PICKER_OPEN.store(false, Ordering::SeqCst);
+        cancel_foreground_request(hwnd);
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
             if previous != hwnd && !previous.0.is_null() {
@@ -1890,6 +1964,10 @@ mod resident {
                 capture(hwnd);
                 LRESULT(0)
             }
+            WM_TIMER if wparam.0 == FOREGROUND_TIMER => {
+                retry_foreground_request(hwnd);
+                LRESULT(0)
+            }
             WM_SHOW_HISTORY => {
                 show_history(hwnd);
                 LRESULT(0)
@@ -2047,6 +2125,115 @@ mod resident {
     #[cfg(test)]
     mod layout_tests {
         use super::*;
+
+        #[test]
+        #[ignore = "requires an interactive Windows desktop; changes foreground temporarily"]
+        fn popup_returns_above_another_topmost_window_on_every_open() {
+            struct DesktopWindows {
+                previous: HWND,
+                windows: Vec<HWND>,
+            }
+            impl Drop for DesktopWindows {
+                fn drop(&mut self) {
+                    for hwnd in self.windows.iter().rev() {
+                        cancel_foreground_request(*hwnd);
+                        let _ = unsafe { DestroyWindow(*hwnd) };
+                    }
+                    let _ = unsafe { SetForegroundWindow(self.previous) };
+                }
+            }
+            let mut desktop = DesktopWindows {
+                previous: unsafe { GetForegroundWindow() },
+                windows: Vec::new(),
+            };
+            for title in [
+                w!("yyclip foreground competitor"),
+                w!("yyclip foreground popup"),
+            ] {
+                desktop.windows.push(unsafe {
+                    CreateWindowExW(
+                        WS_EX_TOOLWINDOW,
+                        w!("STATIC"),
+                        title,
+                        WS_POPUP | WS_BORDER,
+                        40,
+                        40,
+                        320,
+                        160,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap()
+                });
+            }
+            let competitor = desktop.windows[0];
+            let popup = desktop.windows[1];
+            for cycle in 0..8 {
+                unsafe {
+                    let _ = ShowWindow(popup, SW_HIDE);
+                    SetWindowPos(
+                        popup,
+                        Some(HWND_NOTOPMOST),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    )
+                    .unwrap();
+                    let _ = ShowWindow(competitor, SW_SHOW);
+                    bring_to_front(competitor, Some(competitor));
+                    assert_eq!(GetForegroundWindow(), competitor, "cycle {cycle}");
+                    let _ = ShowWindow(popup, SW_SHOWNOACTIVATE);
+                    bring_to_front(popup, Some(popup));
+                }
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    if unsafe { GetForegroundWindow() } == popup {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "cycle {cycle}: foreground={:?}",
+                        unsafe { GetForegroundWindow() }
+                    );
+                    retry_foreground_request(popup);
+                    std::thread::yield_now();
+                }
+                unsafe {
+                    assert_eq!(
+                        windows::Win32::UI::Input::KeyboardAndMouse::GetFocus(),
+                        popup
+                    );
+                    assert_ne!(
+                        GetWindowLongPtrW(popup, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0,
+                        0
+                    );
+                    // popup が competitor より上にあることを実際の Z オーダーから確認する。
+                    let mut above = GetWindow(competitor, GW_HWNDPREV).unwrap_or_default();
+                    while !above.0.is_null() && above != popup {
+                        above = GetWindow(above, GW_HWNDPREV).unwrap_or_default();
+                    }
+                    assert_eq!(above, popup, "cycle {cycle}");
+                }
+                cancel_foreground_request(popup);
+                assert!(FOREGROUND_REQUEST.with(|cell| cell.borrow().is_none()));
+            }
+            // 再試行待ちの間に別のウィンドウへ移ったら、前面化し直さない。
+            bring_to_front(competitor, Some(competitor));
+            FOREGROUND_REQUEST.with(|cell| {
+                *cell.borrow_mut() = Some(ForegroundRequest {
+                    previous: popup,
+                    focus: Some(popup),
+                    remaining: FOREGROUND_RETRIES,
+                });
+            });
+            retry_foreground_request(popup);
+            assert_eq!(unsafe { GetForegroundWindow() }, competitor);
+            assert!(FOREGROUND_REQUEST.with(|cell| cell.borrow().is_none()));
+        }
 
         #[test]
         fn editor_controls_fit_scaled_fonts_and_work_areas() {
