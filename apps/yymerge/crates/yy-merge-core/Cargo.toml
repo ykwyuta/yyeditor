@@ -14,7 +14,7 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 yy-encoding = { git = "https://github.com/ykwyuta/YYLibrary", rev = "57deca92c834227f705496fd7c5c4a226ec8dc97" }
-blake3 = "1.8"
+blake3 = { version = "1.8", features = ["pure"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 roxmltree = "0.21"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }

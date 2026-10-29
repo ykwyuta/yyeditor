@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [features]
 default = ["devcert"]
-# 開発者用証明書を作る（rcgen + ring。C のビルドが要る）
+# 開発者用証明書を作る（rcgen + RustCrypto）
 devcert = ["yy-browser/devcert"]
 
 [dependencies]

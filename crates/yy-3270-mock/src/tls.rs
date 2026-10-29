@@ -5,12 +5,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
+use rcgen::{BasicConstraints, DnType, IsCa, Issuer};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 use sha2::{Digest, Sha256};
+use yy_cert::KeyPair;
 
 use crate::codes::*;
 use crate::{Conn, NEG, Shared, Stream, Unit};
@@ -58,7 +59,9 @@ pub struct TestPki {
 impl TestPki {
     pub fn generate() -> TestPki {
         let ca_key = KeyPair::generate().expect("鍵");
-        let mut p = CertificateParams::new(Vec::<String>::new()).expect("証明書");
+        let mut p = ca_key
+            .certificate_params(Vec::<String>::new())
+            .expect("証明書");
         p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         p.distinguished_name
             .push(DnType::CommonName, "yy-3270-mock CA");
@@ -66,17 +69,18 @@ impl TestPki {
         let issuer = Issuer::new(p, ca_key);
         let issue = |names: &[&str], cn: &str| {
             let key = KeyPair::generate().expect("鍵");
-            let mut p =
-                CertificateParams::new(names.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-                    .expect("証明書");
+            let mut p = key
+                .certificate_params(names.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                .expect("証明書");
             p.distinguished_name.push(DnType::CommonName, cn);
             let c = p.signed_by(&key, &issuer).expect("証明書");
-            (c.pem(), key.serialize_pem())
+            (c.pem(), key.serialize_pem().expect("PKCS#8 PEM"))
         };
         let (server_cert_pem, server_key_pem) = issue(&["localhost", "127.0.0.1"], "localhost");
         let (client_cert_pem, client_key_pem) = issue(&[], "TSOUSER1");
         let key = KeyPair::generate().expect("鍵");
-        let mut p = CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+        let mut p = key
+            .certificate_params(vec!["localhost".to_string(), "127.0.0.1".to_string()])
             .expect("証明書");
         p.distinguished_name
             .push(DnType::CommonName, "yy-3270-mock self-signed");
@@ -86,7 +90,7 @@ impl TestPki {
             server_cert_pem,
             server_key_pem,
             self_signed_cert_pem: ss.pem(),
-            self_signed_key_pem: key.serialize_pem(),
+            self_signed_key_pem: key.serialize_pem().expect("PKCS#8 PEM"),
             client_cert_pem,
             client_key_pem,
         }

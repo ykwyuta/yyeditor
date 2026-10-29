@@ -11,6 +11,7 @@ publish = false
 yy-encoding.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
+yy-cert.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]

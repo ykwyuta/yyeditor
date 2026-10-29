@@ -1,5 +1,20 @@
 # SSH接続設定とエージェントなしファイル編集
 
+## 暗号バックエンド
+
+`yy-ssh`はRustCryptoを使うローカル修正版のrussh 0.63.1を利用する。上流の固定版ソースと変更範囲は[`vendor/russh/YYEDITOR-PATCH.md`](../../vendor/russh/YYEDITOR-PATCH.md)を参照。依存を更新する際はローカル変更を再確認し、ルートとyymergeが同じソース・機能（`rustcrypto,rsa,flate2`）を解決することを確認する。
+
+`yy-ssh-crypto`はAES-128/256-GCMとOpenSSH形式のChaCha20-Poly1305を担当する。AES-GCMは暗号化しない4バイトの長さをAADに含め、固定32ビット＋64ビットの呼出カウンターを使用する。カウンターの周回後は拒否する。ChaCha20-Poly1305はヘッダーと本文に別の鍵を使い、64ビットのnonce、本文のブロックカウンター1、暗号文全体へのPoly1305認証を使う。IETFの同名AEADとは形式が異なる。再鍵交換とSSH連番の管理はrusshに残す。
+
+通常のSSH依存はring/AWS-LCを使わない。暗号互換性の比較試験のみringを開発依存として使う。3270のTLS等の別経路には現在もringが残る。
+
+```sh
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p yy-ssh-crypto -p yy-ssh -p yy-agent -p yy-remote --locked
+```
+
+Linuxの`yy-ssh/tests/openssh.rs`は外部OpenSSHクライアントを相手に、各AEAD暗号のバイナリ往復と再鍵交換を検証する。`YY_REQUIRE_OPENSSH=1`でOpenSSHを必須にする。CIはこの設定を有効にし、既存のOpenSSH導入手順を利用する。SFTP試験は別途sftp-serverも必要。通常の製品動作にOpenSSHの実行ファイルを追加したわけではない。
+
 ## 設定の所有と優先順位
 
 操作方法・保存例は[同梱ヘルプ](../../crates/yy-win/help/help.md#ssh-sites)。

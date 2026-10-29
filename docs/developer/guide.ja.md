@@ -94,10 +94,10 @@ Linux から Windows UI の型検査をする場合は、CI と同じく次を�
 
 ```sh
 rustup target add x86_64-pc-windows-msvc
-cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw --no-default-features --features yy-files/blake3-pure --target x86_64-pc-windows-msvc
+cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw -p yytoolbox --no-default-features --target x86_64-pc-windows-msvc
 ```
 
-この検査では Windows SDK を必要とする組み込み SSH や開発者用証明書生成などの既定機能を外します。BLAKE3 は `yy-files/blake3-pure` を指定し、Windows のアセンブラーを必要としない構成で型検査します。SSH・TLS を含む通常の構成は Windows の検証で確認します。
+この検査は既定機能を外した構成です。3270のTLSは現在もringを使うためWindows SDKが必要ですが、組み込みSSHと開発者用証明書の署名はRustCryptoを使います。BLAKE3 は通常ビルド・独立アプリを含めて常に `pure` を有効にしており、Cコンパイラーや外部アセンブラーは不要です。旧コマンドの `yy-files/blake3-pure` は互換用に残しています。`cc` がBLAKE3のビルド依存に残っていても、C/アセンブリの実装をコンパイルする構成ではありません。SSH・TLS を含む通常の構成は Windows の検証で確認します。
 
 ## リポジトリの構成
 

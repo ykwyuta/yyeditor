@@ -9,6 +9,11 @@
 - [描画性能の測定](benchmarks/yydraw.md): 日付・条件付きの実測と改善経緯。
 - [CI失敗の分析](ci-failure-analysis.md): 過去の原因と対策の根拠。継続的な作業ルールは[AGENTS.md](../../AGENTS.md)。
 - [yydbmanagerの検討中の項目](yydbmanager-roadmap.md)。
+- [Pure Rust化できる依存関係の調査（2026-10-29）](pure-rust-dependency-audit-2026-10-29.md): 4ワークスペースのネイティブ依存、既存実装への置換、独自アダプターの候補。
+- [BLAKE3のPure Rust化検証（2026-10-29）](verification/blake3-pure-2026-10-29.md): バックエンド間のハッシュ互換性とCコンパイラーなしのビルド確認。
+- [証明書署名のPure Rust化（2026-10-29）](verification/certificate-pure-rust-2026-10-29.md): rcgenの署名をRustCryptoへ移行し、ブラウザー・3270の証明書を共通化。
+- [SSH暗号のPure Rust化（2026-10-29）](verification/ssh-pure-rust-2026-10-29.md): RustCryptoによるパケット暗号、ringとの照合、OpenSSHとの再鍵交換・転送試験。
+- [Parquet ZstdのPure Rust化（2026-10-29）](verification/parquet-zstd-pure-rust-2026-10-29.md): 圧縮レベル1〜22の相互運用、Cコンパイラーなしの検証、圧縮率と速度の比較。
 
 記録を追加するときは日時・コミット・環境・成功/失敗/未実行の区別を記載します。
 新しい機能の使い方や現行の仕様説明は、この場所だけに追加しないでください。

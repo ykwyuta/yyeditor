@@ -11,7 +11,7 @@ fn main() {
     }
 }
 
-/// 開発者用証明書を作る関数（rcgen + ring。19 章 3.6）。
+/// 開発者用証明書を作る関数（rcgen + RustCrypto。19 章 3.6）。
 #[cfg(all(windows, feature = "devcert"))]
 fn dev_cert() -> Option<yy_win::DevCertFn> {
     Some(yy_browser::rules::generate_dev_cert)

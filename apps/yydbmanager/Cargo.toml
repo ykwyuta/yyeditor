@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["app", "crates/yy-db-core", "crates/yy-db-ui"]
+members = ["app", "crates/yy-db-core", "crates/yy-db-ui", "crates/yy-parquet-zstd"]
+exclude = ["vendor/parquet"]
 
 [workspace.package]
 version = "0.1.0"

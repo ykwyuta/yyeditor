@@ -2,6 +2,27 @@
 
 コマンドはリポジトリルートから実行します。
 
+## ParquetのZstdバックエンド
+
+Parquetはローカル修正版の56.2.1を使い、`arrow,snap,zstd-rust`を有効にします。変更範囲は[依存元の記録](../../apps/yydbmanager/vendor/parquet/YYEDITOR-PATCH.md)を参照。`yy-parquet-zstd`が`zstandard = 0.1.9`へ圧縮レベル1〜22をそのまま渡します。レベルの読み替えや上限の引き下げは行いません。ParquetのZstdLevel APIが元から受け付けない0・負数・23以上はエラーです。
+
+この依存にはRust 1.96以上が必要です。通常のアプリ依存から`zstd`・`zstd-safe`・`zstd-sys`は外れますが、DuckDB本体に含まれるC++と圧縮処理、SQLite、TLS等のネイティブ実装は別に残ります。既定のParquet書き出し設定と画面の操作は変更していません。
+
+展開時はParquetページの展開後サイズを上限として使い、実際の結果とも一致することを確認します。チェックサム検証と128 MiBの既定ウィンドウ上限を維持し、連結フレーム・skippable frameも処理します。全体の検証が成功してから呼び出し元の出力へ追記するため、失敗時に途中のデータを残しません。
+
+通常のワークスペース試験には、libzstd 1.5.7から作った22レベルの固定フレーム・Parquetファイルと、型・NULL・辞書エンコーディング・小数精度・バイナリ・壊れた入力・ブロック境界の回帰試験を含みます。ネットワークやDuckDBの拡張取得は使いません。
+
+参照実装を使った再生成・相互検証と簡易測定は、製品とは別のCargoワークスペースで実行します。再生成は既存の試験用ファイルを上書きします。
+
+```sh
+cargo run --manifest-path apps/yydbmanager/tests/zstd-reference/Cargo.toml --release --locked
+cargo run --manifest-path apps/yydbmanager/tests/zstd-reference/Cargo.toml --release --locked -- --benchmark
+```
+
+この参照ツールだけはC版libzstdを比較用にビルドします。アプリの開発依存にも入りません。修正版とレジストリー版のParquetを別ソースとして同時に参照し、全22レベル・両WriterVersionで相互に読み込みます。測定結果は`target/zstd-benchmark.json`、相互検証結果は`target/zstd-compatibility.json`へ出力します。
+
+## 通常のビルドと検証
+
 ```powershell
 cargo build --manifest-path apps/yydbmanager/Cargo.toml --release -p yydbmanager --locked
 ./apps/yydbmanager/target/release/yydbmanager.exe

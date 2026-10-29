@@ -673,10 +673,13 @@ pub fn cert_file_stem(host: &str) -> String {
 /// 開発者用証明書を作る（自己署名。ホスト名を別名に入れ、サーバーの認証に使う）。
 #[cfg(feature = "devcert")]
 pub fn generate_dev_cert(host: &str) -> Result<DevCert, String> {
-    use rcgen::{CertificateParams, DnType, ExtendedKeyUsagePurpose, KeyPair};
+    use rcgen::{DnType, ExtendedKeyUsagePurpose};
+    use yy_cert::KeyPair;
     let (h, _) = split_host_port(host.trim())?;
     let key = KeyPair::generate().map_err(|e| e.to_string())?;
-    let mut p = CertificateParams::new(vec![h.to_owned()]).map_err(|e| e.to_string())?;
+    let mut p = key
+        .certificate_params(vec![h.to_owned()])
+        .map_err(|e| e.to_string())?;
     p.distinguished_name.push(DnType::CommonName, h);
     p.distinguished_name
         .push(DnType::OrganizationName, "yybrowser developer certificate");
@@ -693,7 +696,7 @@ pub fn generate_dev_cert(host: &str) -> Result<DevCert, String> {
     Ok(DevCert {
         sha256: fingerprint(cert.der()),
         cert_pem: cert.pem(),
-        key_pem: key.serialize_pem(),
+        key_pem: key.serialize_pem().map_err(|e| e.to_string())?,
     })
 }
 
@@ -925,5 +928,65 @@ mod tests {
         assert!(crt.ends_with("www.example.com.crt"));
         assert_eq!(std::fs::read_to_string(key).unwrap(), c.key_pem);
         assert!(generate_dev_cert("bad host").is_err());
+    }
+
+    #[cfg(feature = "devcert")]
+    #[test]
+    fn generated_certificate_performs_tls_handshake() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
+        use rustls::{
+            ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection,
+        };
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+
+        for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+            let cert = generate_dev_cert("localhost:443").unwrap();
+            let der = CertificateDer::from_pem_slice(cert.cert_pem.as_bytes()).unwrap();
+            let key = PrivateKeyDer::from_pem_slice(cert.key_pem.as_bytes()).unwrap();
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let server = ServerConfig::builder_with_provider(provider.clone())
+                .with_protocol_versions(&[version])
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![der.clone()], key)
+                .unwrap();
+            let mut roots = RootCertStore::empty();
+            roots.add(der).unwrap();
+            let client = ClientConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[version])
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let mut client =
+                ClientConnection::new(Arc::new(client), ServerName::try_from("localhost").unwrap())
+                    .unwrap();
+            let mut server = ServerConnection::new(Arc::new(server)).unwrap();
+            for _ in 0..10 {
+                let mut wire = Vec::new();
+                client.write_tls(&mut wire).unwrap();
+                server.read_tls(&mut wire.as_slice()).unwrap();
+                server.process_new_packets().unwrap();
+                wire.clear();
+                server.write_tls(&mut wire).unwrap();
+                client.read_tls(&mut wire.as_slice()).unwrap();
+                client.process_new_packets().unwrap();
+                if !client.is_handshaking() && !server.is_handshaking() {
+                    break;
+                }
+            }
+            assert!(!client.is_handshaking() && !server.is_handshaking());
+            client
+                .writer()
+                .write_all(b"developer certificate TLS")
+                .unwrap();
+            let mut wire = Vec::new();
+            client.write_tls(&mut wire).unwrap();
+            server.read_tls(&mut wire.as_slice()).unwrap();
+            server.process_new_packets().unwrap();
+            let mut received = [0; 25];
+            server.reader().read_exact(&mut received).unwrap();
+            assert_eq!(&received, b"developer certificate TLS");
+        }
     }
 }

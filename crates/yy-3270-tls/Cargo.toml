@@ -19,6 +19,7 @@ sha2.workspace = true
 [dev-dependencies]
 rustls.workspace = true
 rcgen.workspace = true
+yy-cert.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -33,4 +33,4 @@ PDF page counting and rasterization use embedded Hayro (MIT selected), with
 Vello CPU and its Rust dependencies. No Poppler executable or shared library
 is used. See LICENSE-PDF-DEPS.txt for dependency and bundled font/CMap/ICC notices.
 
-SSH uses the YY series yy-ssh/yy-remote components and the Rust russh client, with its cryptography and runtime dependencies. License texts and attributions: LICENSE-SSH-DEPS.txt.
+SSH uses the YY series yy-ssh/yy-remote components and a locally patched russh 0.63.1 client with a RustCrypto packet-encryption backend (source: vendor/russh in the yyeditor repository), with its cryptography and runtime dependencies. License texts and attributions: LICENSE-SSH-DEPS.txt.

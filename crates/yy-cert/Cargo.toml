@@ -1,0 +1,18 @@
+[package]
+name = "yy-cert"
+description = "RustCrypto P-256 signing adapter for rcgen certificates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rcgen.workspace = true
+p256 = "0.14"
+sha2.workspace = true
+
+[dev-dependencies]
+x509-parser = { version = "0.18", default-features = false }
+
+[lints]
+workspace = true

@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-# BLAKE3 を C・アセンブリなしで作る（Linux から Windows 向けに型検査するとき。ml64.exe がないため）
+# 既存のビルドコマンドとの互換用。BLAKE3 は共有依存で常に pure を有効にする。
 blake3-pure = ["blake3/pure"]
 
 [dependencies]

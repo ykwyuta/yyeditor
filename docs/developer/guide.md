@@ -94,10 +94,10 @@ To type-check the Windows UI from Linux, use the CI command below. This check is
 
 ```sh
 rustup target add x86_64-pc-windows-msvc
-cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw --no-default-features --features yy-files/blake3-pure --target x86_64-pc-windows-msvc
+cargo check -p yy-win -p yyeditor -p yyterm -p yysftp -p yysheet -p yyfilemanager -p yyclip -p yybrowser -p yydraw -p yytoolbox --no-default-features --target x86_64-pc-windows-msvc
 ```
 
-This check disables default features such as built-in SSH and development-certificate generation that require the Windows SDK. `yy-files/blake3-pure` avoids requiring a Windows assembler for BLAKE3. Validate the normal configuration, including SSH and TLS, on Windows.
+This check disables default features. The 3270 TLS backend still uses ring and requires the Windows SDK; built-in SSH and development-certificate signing use RustCrypto. BLAKE3 always enables `pure`, including normal builds and independent applications, so it requires neither a C compiler nor an external assembler. The old `yy-files/blake3-pure` flag remains as a compatibility alias. BLAKE3 still lists `cc` as a build dependency, but does not compile its C/assembly implementations in this configuration. Validate the normal configuration, including SSH and TLS, on Windows.
 
 ## Repository Structure
 

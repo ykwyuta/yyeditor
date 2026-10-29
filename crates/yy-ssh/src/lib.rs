@@ -1,6 +1,6 @@
 //! yyeditor に組み込む SSH クライアント（11 章 4）。
 //!
-//! SSH プロトコルは Pure Rust の `russh`（暗号処理は `ring`）で話し、`ssh.exe` など OpenSSH の
+//! SSH プロトコルは Pure Rust の `russh`（暗号処理は RustCrypto）で話し、`ssh.exe` など OpenSSH の
 //! プログラムは使わない（C1）。非同期実行（tokio）はこのクレートの中に閉じ込め、外には
 //! [`yy_remote::Connector`] と [`yy_remote::Transport`] の同期的な trait だけを見せる。
 //!

@@ -2,10 +2,11 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
+use rcgen::{BasicConstraints, DnType, IsCa, Issuer};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use yy_cert::KeyPair;
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -29,7 +30,7 @@ struct Pki {
 impl Pki {
     fn new() -> Pki {
         let key = KeyPair::generate().unwrap();
-        let mut p = CertificateParams::new(Vec::<String>::new()).unwrap();
+        let mut p = key.certificate_params(Vec::<String>::new()).unwrap();
         p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         p.distinguished_name.push(DnType::CommonName, "yy test CA");
         let cert = p.self_signed(&key).unwrap();
@@ -43,7 +44,8 @@ impl Pki {
     /// 認証局が発行した証明書と鍵。
     fn issue(&self, names: &[&str], cn: &str) -> (CertificateDer<'static>, KeyPair, String) {
         let key = KeyPair::generate().unwrap();
-        let mut p = CertificateParams::new(names.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        let mut p = key
+            .certificate_params(names.iter().map(|s| s.to_string()).collect::<Vec<_>>())
             .unwrap();
         p.distinguished_name.push(DnType::CommonName, cn);
         let cert = p.signed_by(&key, &self.issuer).unwrap();
@@ -54,8 +56,9 @@ impl Pki {
 /// 自己署名の証明書と鍵。
 fn self_signed(names: &[&str]) -> (CertificateDer<'static>, KeyPair, String) {
     let key = KeyPair::generate().unwrap();
-    let mut p =
-        CertificateParams::new(names.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+    let mut p = key
+        .certificate_params(names.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        .unwrap();
     p.distinguished_name
         .push(DnType::CommonName, "mvs01 self-signed");
     p.distinguished_name
@@ -85,7 +88,9 @@ fn server_config(
         }
         None => b.with_no_client_auth(),
     };
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        key.serialize_der().expect("PKCS#8 DER"),
+    ));
     Arc::new(b.with_single_cert(vec![cert], key).unwrap())
 }
 
@@ -349,7 +354,11 @@ fn client_certificate_is_sent_when_required() {
     // 証明書と鍵を 1 つの PEM に
     let (_, ckey, cpem) = pki.issue(&[], "TSOUSER1");
     let both = dir.path().join("client.pem");
-    std::fs::write(&both, format!("{cpem}{}", ckey.serialize_pem())).unwrap();
+    std::fs::write(
+        &both,
+        format!("{cpem}{}", ckey.serialize_pem().expect("PKCS#8 PEM")),
+    )
+    .unwrap();
     let (port, h) = serve_once(cfg, false);
     let o = Options {
         ca_file: Some(ca),
@@ -439,7 +448,9 @@ fn tls12_only_server() {
             .with_no_client_auth()
             .with_single_cert(
                 vec![cert],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                    key.serialize_der().expect("PKCS#8 DER"),
+                )),
             )
             .unwrap();
     let (port, h) = serve_once(Arc::new(cfg), false);

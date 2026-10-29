@@ -2979,10 +2979,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10b99e0098aa4082912d4c649628623db6aba77335e4f4569ff5083a6448b32e"
 dependencies = [
  "pem",
- "ring",
  "rustls-pki-types",
  "time",
- "x509-parser",
  "yasna",
 ]
 
@@ -3130,8 +3128,6 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.63.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35bab1b87d915817d5d9cc352637cd40d5f0b298a48c6309af9156a4addc3031"
 dependencies = [
  "aes",
  "bitflags 2.13.2",
@@ -3177,7 +3173,6 @@ dependencies = [
  "polyval",
  "rand 0.10.3",
  "rand_core 0.10.1",
- "ring",
  "rsa",
  "russh-cryptovec",
  "russh-util",
@@ -3196,6 +3191,7 @@ dependencies = [
  "tokio",
  "typenum",
  "universal-hash",
+ "yy-ssh-crypto",
  "zeroize",
 ]
 
@@ -4764,7 +4760,6 @@ dependencies = [
  "lazy_static",
  "nom",
  "oid-registry",
- "ring",
  "rusticata-macros",
  "thiserror 2.0.21",
  "time",
@@ -4836,6 +4831,7 @@ dependencies = [
  "yy-3270",
  "yy-3270-macro",
  "yy-3270-tls",
+ "yy-cert",
  "yy-encoding",
 ]
 
@@ -4848,6 +4844,7 @@ dependencies = [
  "rustls-native-certs",
  "sha2",
  "tempfile",
+ "yy-cert",
 ]
 
 [[package]]
@@ -4878,10 +4875,12 @@ name = "yy-browser"
 version = "0.1.0"
 dependencies = [
  "rcgen",
+ "rustls",
  "serde",
  "sha2",
  "tempfile",
  "toml",
+ "yy-cert",
 ]
 
 [[package]]
@@ -4891,6 +4890,16 @@ dependencies = [
  "criterion",
  "memchr",
  "proptest",
+]
+
+[[package]]
+name = "yy-cert"
+version = "0.1.0"
+dependencies = [
+ "p256",
+ "rcgen",
+ "sha2",
+ "x509-parser",
 ]
 
 [[package]]
@@ -5113,6 +5122,18 @@ dependencies = [
  "tempfile",
  "tokio",
  "yy-remote",
+]
+
+[[package]]
+name = "yy-ssh-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "chacha20",
+ "poly1305",
+ "ring",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]

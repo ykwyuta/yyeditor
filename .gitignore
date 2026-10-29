@@ -3,4 +3,5 @@
 /apps/yymerge/target
 /apps/yy3designer/target
 /apps/yydbmanager/crates/*/target/
+/apps/yydbmanager/tests/zstd-reference/target/
 *.big

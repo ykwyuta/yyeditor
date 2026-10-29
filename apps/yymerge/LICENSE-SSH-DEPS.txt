@@ -19330,6 +19330,7 @@ DEALINGS IN THE SOFTWARE.
 russh 0.63.1
 License: Apache-2.0
 Source: https://crates.io/crates/russh/0.63.1
+Local modifications: yyeditor vendor/russh, RustCrypto backend; see vendor/russh/YYEDITOR-PATCH.md.
 
 ========================================================================
 russh-cryptovec 0.62.0

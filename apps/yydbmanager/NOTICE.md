@@ -41,3 +41,5 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+Parquet 56.2.1 uses a local Pure Rust Zstd backend (zstandard 0.1.9) for all compression levels 1 through 22. The native zstd/zstd-sys crates are not part of the application dependency graph. This does not remove the separate native SQLite or DuckDB engines. See THIRD-PARTY-NOTICES.md for Apache Parquet and zstandard notices.
