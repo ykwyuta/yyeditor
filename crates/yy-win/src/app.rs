@@ -45,6 +45,7 @@ mod gitmode;
 mod hexmode;
 mod markdownmode;
 mod previewmode;
+mod saveformat;
 mod syntaxmode;
 pub(crate) mod workspacemode;
 
@@ -4577,22 +4578,8 @@ fn show_save_dialog(
     unsafe {
         let dialog: IFileSaveDialog =
             CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
-        let filters = [
-            COMDLG_FILTERSPEC {
-                pszName: w!("すべてのファイル (*.*)"),
-                pszSpec: w!("*.*"),
-            },
-            COMDLG_FILTERSPEC {
-                pszName: w!("テキスト ファイル (*.txt)"),
-                pszSpec: w!("*.txt"),
-            },
-        ];
-        let _ = dialog.SetFileTypes(&filters);
-        let name = current
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "無題.txt".to_owned());
-        let _ = dialog.SetFileName(&HSTRING::from(name));
+        let suggestion = with_app(|a| a.save_suggestion(current))?;
+        saveformat::configure_dialog(&dialog, &suggestion).ok()?;
         let custom = dialog.cast::<IFileDialogCustomize>().ok();
         if let Some(c) = &custom {
             add_encoding_combo(c, Some(encoding), false);

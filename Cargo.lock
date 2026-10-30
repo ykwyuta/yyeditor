@@ -5259,6 +5259,7 @@ dependencies = [
  "blake3",
  "crossbeam-channel",
  "rustls",
+ "serde_json",
  "tempfile",
  "webview2-com",
  "windows",

@@ -532,7 +532,7 @@ mod tests {
         );
         assert!(doc.redo());
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("日本語.yyoutline");
+        let path = dir.path().join("日本語.json");
         doc.save_as(&path).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), changed.as_bytes());
         let reopened = Document::open_shared_read_only(&path, &OpenOptions::default()).unwrap();
