@@ -43,69 +43,71 @@ fn bar_fits_dpi_and_hotkeys_and_stop_notifies_owner_once() {
         "Ctrl+Alt+F9",
         "Ctrl+Alt+F10",
     ] {
-        let bar = ControlBar::new(owner.0, 3600, key, 103).unwrap();
-        unsafe {
-            let _ = ShowWindow(bar.0, SW_HIDE);
-            let s = data(bar.0).unwrap();
-            for dpi in [96, 120, 144, 192] {
-                s.dpi.set(dpi);
-                MoveWindow(
-                    bar.0,
-                    0,
-                    0,
-                    240 * dpi as i32 / 96,
-                    104 * dpi as i32 / 96,
-                    false,
-                )
-                .unwrap();
-                layout(bar.0, true);
-                SendMessageW(bar.0, WM_TIMER, None, None);
-                for h in [s.status, s.hint, s.stop] {
-                    let mut client = RECT::default();
-                    GetClientRect(h, &mut client).unwrap();
-                    let length = GetWindowTextLengthW(h) as usize;
-                    let mut text = vec![0u16; length + 1];
-                    GetWindowTextW(h, &mut text);
-                    let dc = GetDC(Some(h));
-                    let old = SelectObject(dc, s.font.get().into());
-                    let mut extent = SIZE::default();
-                    GetTextExtentPoint32W(dc, &text[..length], &mut extent).unwrap();
-                    SelectObject(dc, old);
-                    ReleaseDC(Some(h), dc);
-                    assert!(
-                        extent.cx <= client.right && extent.cy <= client.bottom,
-                        "{key} DPI={dpi}: {extent:?} {client:?}"
-                    );
+        for audio_only in [false, true] {
+            let bar = ControlBar::new(owner.0, 3600, key, 103, audio_only).unwrap();
+            unsafe {
+                let _ = ShowWindow(bar.0, SW_HIDE);
+                let s = data(bar.0).unwrap();
+                for dpi in [96, 120, 144, 192] {
+                    s.dpi.set(dpi);
+                    MoveWindow(
+                        bar.0,
+                        0,
+                        0,
+                        240 * dpi as i32 / 96,
+                        104 * dpi as i32 / 96,
+                        false,
+                    )
+                    .unwrap();
+                    layout(bar.0, true);
+                    SendMessageW(bar.0, WM_TIMER, None, None);
+                    for h in [s.status, s.hint, s.stop] {
+                        let mut client = RECT::default();
+                        GetClientRect(h, &mut client).unwrap();
+                        let length = GetWindowTextLengthW(h) as usize;
+                        let mut text = vec![0u16; length + 1];
+                        GetWindowTextW(h, &mut text);
+                        let dc = GetDC(Some(h));
+                        let old = SelectObject(dc, s.font.get().into());
+                        let mut extent = SIZE::default();
+                        GetTextExtentPoint32W(dc, &text[..length], &mut extent).unwrap();
+                        SelectObject(dc, old);
+                        ReleaseDC(Some(h), dc);
+                        assert!(
+                            extent.cx <= client.right && extent.cy <= client.bottom,
+                            "{key} DPI={dpi}: {extent:?} {client:?}"
+                        );
+                    }
                 }
+                SendMessageW(s.stop, BM_CLICK, None, None);
+                SendMessageW(s.stop, BM_CLICK, None, None);
+                let mut message = MSG::default();
+                assert!(
+                    PeekMessageW(
+                        &mut message,
+                        Some(owner.0),
+                        WM_COMMAND,
+                        WM_COMMAND,
+                        PM_REMOVE
+                    )
+                    .as_bool()
+                );
+                assert_eq!(message.wParam.0, 103);
+                assert!(
+                    !PeekMessageW(
+                        &mut message,
+                        Some(owner.0),
+                        WM_COMMAND,
+                        WM_COMMAND,
+                        PM_REMOVE
+                    )
+                    .as_bool()
+                );
+                assert!(!IsWindowEnabled(s.stop).as_bool());
+                let handle = bar.0;
+                drop(bar);
+                assert!(!IsWindow(Some(handle)).as_bool());
             }
-            SendMessageW(s.stop, BM_CLICK, None, None);
-            SendMessageW(s.stop, BM_CLICK, None, None);
-            let mut message = MSG::default();
-            assert!(
-                PeekMessageW(
-                    &mut message,
-                    Some(owner.0),
-                    WM_COMMAND,
-                    WM_COMMAND,
-                    PM_REMOVE
-                )
-                .as_bool()
-            );
-            assert_eq!(message.wParam.0, 103);
-            assert!(
-                !PeekMessageW(
-                    &mut message,
-                    Some(owner.0),
-                    WM_COMMAND,
-                    WM_COMMAND,
-                    PM_REMOVE
-                )
-                .as_bool()
-            );
-            assert!(!IsWindowEnabled(s.stop).as_bool());
-            let handle = bar.0;
-            drop(bar);
-            assert!(!IsWindow(Some(handle)).as_bool());
         }
     }
 }
@@ -160,7 +162,7 @@ fn real_visible_bar_is_excluded_and_button_saves_short_mp4() {
             .unwrap(),
         );
         let _ = UpdateWindow(_canvas.0);
-        let bar = ControlBar::new(owner.0, 10, "なし（ボタンのみ）", 103).unwrap();
+        let bar = ControlBar::new(owner.0, 10, "なし（ボタンのみ）", 103, false).unwrap();
         assert!(IsWindowVisible(bar.0).as_bool());
         let mut rect = RECT::default();
         GetWindowRect(bar.0, &mut rect).unwrap();

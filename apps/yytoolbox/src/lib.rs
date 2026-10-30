@@ -5,6 +5,7 @@ mod dummy;
 mod finance;
 mod formats;
 pub mod images;
+pub mod mp3;
 mod random;
 mod text;
 pub mod video;
@@ -120,7 +121,7 @@ impl Tool {
             Self::Html => "HTML 整形",
             Self::Css => "CSS 整形",
             Self::JavaScript => "JavaScript 整形",
-            Self::Recording => "画面録画",
+            Self::Recording => "画面録画・録音",
             Self::ResizeImages => "画像の一括リサイズ",
             Self::VideoEdit => "動画編集（カット・クリップ）",
         }
@@ -173,7 +174,7 @@ impl Tool {
                 "構文を解析して整形します。コードは実行しません。字下げと折り返し幅を指定できます。"
             }
             Self::Recording => {
-                "時間指定のMP4録画。小型バーの停止ボタンで途中保存。Escでは停止しません。操作バーは録画から除外します。"
+                "MP4録画／音声のみのMP3録音。小型バーの停止ボタンで途中保存。Escでは停止しません。操作バーは録画から除外します。"
             }
             Self::VideoEdit => {
                 "時間範囲を残すクリップ／取り除くカット。例: 5-10, 20-30（秒または時:分:秒）。元動画を保ちMP4へ再エンコード。先頭の映像・音声を使用。"
@@ -190,18 +191,23 @@ impl Tool {
         match self {
             Self::Recording => vec![
                 s(
+                    "capture_mode",
+                    "保存する内容",
+                    &["画面と音声（MP4）", "音声のみ（MP3）"],
+                ),
+                s(
                     "area",
                     "録画する範囲",
                     &["全画面（メイン）", "全画面（すべて）", "矩形選択"],
                 ),
-                f("seconds", "録画時間（秒）", "60"),
+                f("seconds", "収録時間（秒）", "60"),
                 f("fps", "フレーム毎秒", "15"),
                 f("max_width", "最大録画幅px", "1920"),
                 s("system_audio", "PC再生音", &["なし", "あり"]),
                 s("microphone", "マイク音", &["なし", "あり"]),
                 s(
                     "stop_key",
-                    "録画終了・保存キー",
+                    "収録終了・保存キー",
                     &[
                         "なし（ボタンのみ）",
                         "Ctrl+Shift+F9",

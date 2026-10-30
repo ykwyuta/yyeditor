@@ -25,10 +25,16 @@ use windows::{
 use yytoolbox::{Output, Params, Result, integer, value};
 
 pub const STOP_HOTKEY: i32 = 0x5954;
+#[path = "audio_recording.rs"]
+mod audio_recording;
 #[path = "recording_bar.rs"]
 mod bar;
 #[path = "video_edit.rs"]
 pub mod video_edit;
+
+pub fn audio_only(params: &Params) -> bool {
+    value(params, "capture_mode", "画面と音声（MP4）") == "音声のみ（MP3）"
+}
 
 /// Keep the actual registration from preflight until recording has finished.
 /// A probe followed by unregistering would allow another app to take the key.
@@ -42,10 +48,10 @@ impl StopHotkey {
             "Ctrl+Shift+F11" => (MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, VK_F11),
             "Ctrl+Alt+F9" => (MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, VK_F9),
             "Ctrl+Alt+F10" => (MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, VK_F10),
-            _ => return Err("録画終了・保存キーを選び直してください".into()),
+            _ => return Err("収録終了・保存キーを選び直してください".into()),
         };
         unsafe { RegisterHotKey(Some(hwnd), STOP_HOTKEY, modifiers, u32::from(vk.0)) }
-            .map_err(|e| format!("{key}を登録できません。他のアプリで使用されている可能性があります。「録画終了・保存キー」で別のキーを選んで、もう一度開始してください。\n{e}"))?;
+            .map_err(|e| format!("{key}を登録できません。他のアプリで使用されている可能性があります。「収録終了・保存キー」で別のキーを選んで、もう一度開始してください。\n{e}"))?;
         Ok(Self(Some(hwnd)))
     }
 }
@@ -59,6 +65,7 @@ impl Drop for StopHotkey {
     }
 }
 pub struct Plan {
+    pub audio_only: bool,
     pub destination: PathBuf,
     pub rect: RECT,
     seconds: u32,
@@ -69,17 +76,45 @@ pub struct Plan {
 }
 impl Plan {
     pub fn new(destination: PathBuf, rect: RECT, params: &Params) -> Result<Self> {
-        if rect.right - rect.left < 2 || rect.bottom - rect.top < 2 {
+        let audio_only = audio_only(params);
+        if !matches!(
+            value(params, "capture_mode", "画面と音声（MP4）"),
+            "画面と音声（MP4）" | "音声のみ（MP3）"
+        ) {
+            return Err("保存する内容を選び直してください".into());
+        }
+        let system = value(params, "system_audio", "なし") == "あり";
+        let microphone = value(params, "microphone", "なし") == "あり";
+        if audio_only && !system && !microphone {
+            return Err("音声のみの録音ではPC再生音またはマイク音を「あり」にしてください".into());
+        }
+        if audio_only
+            && !destination
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"))
+        {
+            return Err("音声のみの保存先には.mp3拡張子を指定してください".into());
+        }
+        if !audio_only && (rect.right - rect.left < 2 || rect.bottom - rect.top < 2) {
             return Err("録画範囲は2×2ピクセル以上です".into());
         }
         Ok(Self {
+            audio_only,
             destination,
             rect,
             seconds: integer(params, "seconds", 1, 3600)?,
-            fps: integer(params, "fps", 1, 30)?,
-            max_width: integer(params, "max_width", 320, 7680)?,
-            system: value(params, "system_audio", "なし") == "あり",
-            microphone: value(params, "microphone", "なし") == "あり",
+            fps: if audio_only {
+                1
+            } else {
+                integer(params, "fps", 1, 30)?
+            },
+            max_width: if audio_only {
+                320
+            } else {
+                integer(params, "max_width", 320, 7680)?
+            },
+            system,
+            microphone,
         })
     }
 }
@@ -129,8 +164,20 @@ impl UiGuard {
         }
         Ok(guard)
     }
-    pub fn show_controls(&mut self, seconds: u32, key: &str, stop_command: u16) -> Result<()> {
-        self.controls = Some(bar::ControlBar::new(self.hwnd, seconds, key, stop_command)?);
+    pub fn show_controls(
+        &mut self,
+        seconds: u32,
+        key: &str,
+        stop_command: u16,
+        audio_only: bool,
+    ) -> Result<()> {
+        self.controls = Some(bar::ControlBar::new(
+            self.hwnd,
+            seconds,
+            key,
+            stop_command,
+            audio_only,
+        )?);
         Ok(())
     }
     pub fn stopping(&self) {
@@ -759,6 +806,9 @@ fn capture_audio(
 }
 
 pub fn record(plan: Plan, cancelled: &AtomicBool) -> Result<Output> {
+    if plan.audio_only {
+        return audio_recording::record(plan, cancelled);
+    }
     record_with_source(plan, cancelled, Desktop::new)
 }
 

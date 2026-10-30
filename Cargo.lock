@@ -3382,6 +3382,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_mp3"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eda7c6c82285d2bc3f1e6aded40ca6f7572fe9eec77f18fb10efc1d03aed3877"
+
+[[package]]
 name = "rustybuzz"
 version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5381,6 +5387,7 @@ dependencies = [
  "qrcode",
  "regex",
  "roxmltree",
+ "rusty_mp3",
  "serde",
  "serde_json",
  "serde_yaml_ng",

@@ -336,11 +336,27 @@ impl State {
     }
     fn enabled(&self) {
         let busy = self.running.is_some();
+        let audio_only =
+            self.tool == Tool::Recording && crate::recording::audio_only(&self.params());
+        if self.tool == Tool::Recording
+            && let Some((_, button, _)) = self.buttons.iter().find(|b| b.0 == RUN)
+        {
+            set_text(
+                *button,
+                if audio_only {
+                    "録音を開始"
+                } else {
+                    "録画を開始"
+                },
+            );
+        }
         unsafe {
             let _ = EnableWindow(self.select, !busy);
             let _ = EnableWindow(self.input, !busy && uses_input(self.tool));
             for field in &self.fields {
-                let _ = EnableWindow(field.control, !busy);
+                let video_only =
+                    audio_only && matches!(field.definition.key, "area" | "fps" | "max_width");
+                let _ = EnableWindow(field.control, !busy && !video_only);
             }
             for (id, hwnd, _) in &self.buttons {
                 let on = match *id {
@@ -386,7 +402,7 @@ impl State {
         if matches!(&job, Job::Recording(_)) {
             set_text(
                 self.status,
-                "録画中…小型バーの「停止して保存」で終了できます。",
+                "収録中…小型バーの「停止して保存」で終了できます。",
             );
         } else {
             set_text(self.status, "処理中…「中止」またはEscで中止できます。");
@@ -716,7 +732,7 @@ fn command(id: u16, code: u16) {
                     set_text(
                         s.status,
                         if s.recording_ui.is_some() {
-                            "録画を終了して保存しています…"
+                            "収録を終了して保存しています…"
                         } else {
                             "中止を要求しました…"
                         },
@@ -1034,7 +1050,26 @@ fn start_recording() {
     let Some((hwnd, params)) = state(|s| (s.hwnd, s.params())) else {
         return;
     };
-    let Some(destination) = dialog(Some("recording.mp4")) else {
+    let audio_only = crate::recording::audio_only(&params);
+    let filename = if audio_only {
+        "recording.mp3"
+    } else {
+        "recording.mp4"
+    };
+    // Validate before showing a save dialog or hiding the application.
+    if let Err(message) = crate::recording::Plan::new(
+        PathBuf::from(filename),
+        RECT {
+            right: 2,
+            bottom: 2,
+            ..Default::default()
+        },
+        &params,
+    ) {
+        error(&message);
+        return;
+    }
+    let Some(destination) = dialog(Some(filename)) else {
         return;
     };
     let hotkey = match crate::recording::StopHotkey::register(
@@ -1057,16 +1092,22 @@ fn start_recording() {
     };
     let started = (|| -> yytoolbox::Result<_> {
         let mut guard = crate::recording::UiGuard::hide(hwnd, hotkey)?;
-        let Some(rect) =
-            crate::recording::area(yytoolbox::value(&params, "area", "全画面（メイン）"))?
-        else {
-            return Ok(None);
+        let rect = if audio_only {
+            RECT::default()
+        } else {
+            let Some(rect) =
+                crate::recording::area(yytoolbox::value(&params, "area", "全画面（メイン）"))?
+            else {
+                return Ok(None);
+            };
+            rect
         };
         let plan = crate::recording::Plan::new(destination, rect, &params)?;
         guard.show_controls(
             yytoolbox::integer(&params, "seconds", 1, 3600)?,
             yytoolbox::value(&params, "stop_key", "なし（ボタンのみ）"),
             CANCEL,
+            audio_only,
         )?;
         Ok(Some((guard, plan)))
     })();
@@ -1782,6 +1823,51 @@ mod tests {
         assert!(state(|s| s.result.as_ref().unwrap().notice.contains("1件保存")).unwrap());
         let report = state(|s| s.result.take()).flatten().unwrap();
         choose(Tool::Recording);
+        for audio_only in [true, false] {
+            let id = state(|s| {
+                let mode = s
+                    .fields
+                    .iter()
+                    .find(|f| f.definition.key == "capture_mode")
+                    .unwrap();
+                unsafe {
+                    SendMessageW(
+                        mode.control,
+                        CB_SETCURSEL,
+                        Some(WPARAM(usize::from(audio_only))),
+                        None,
+                    );
+                }
+                FIELD_BASE
+                    + s.fields
+                        .iter()
+                        .position(|f| f.definition.key == "capture_mode")
+                        .unwrap() as u16
+            })
+            .unwrap();
+            command(id, CBN_SELCHANGE as u16);
+            state(|s| {
+                for field in &s.fields {
+                    let expected = !audio_only
+                        || !matches!(field.definition.key, "area" | "fps" | "max_width");
+                    assert_eq!(
+                        unsafe { IsWindowEnabled(field.control) }.as_bool(),
+                        expected,
+                        "{}",
+                        field.definition.key
+                    );
+                }
+                let run = s.buttons.iter().find(|b| b.0 == RUN).unwrap().1;
+                assert_eq!(
+                    text(run),
+                    if audio_only {
+                        "録音を開始"
+                    } else {
+                        "録画を開始"
+                    }
+                );
+            });
+        }
         state(|s| {
             s.result = Some(report);
             s.enabled();
@@ -1795,7 +1881,7 @@ mod tests {
         let key = "なし（ボタンのみ）";
         let hotkey = crate::recording::StopHotkey::register(hwnd, key).unwrap();
         let mut guard = crate::recording::UiGuard::hide(hwnd, hotkey).unwrap();
-        guard.show_controls(60, key, CANCEL).unwrap();
+        guard.show_controls(60, key, CANCEL, false).unwrap();
         assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool());
         let flag = Arc::new(AtomicBool::new(false));
         state(|s| {

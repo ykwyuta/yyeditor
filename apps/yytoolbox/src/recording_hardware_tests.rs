@@ -458,6 +458,56 @@ fn real_microphone() {
     real_audio(false);
 }
 
+fn real_audio_only_mp3(system: bool, microphone: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let _tone = system.then(Tone::start);
+    let mut params = yytoolbox::Tool::Recording.defaults();
+    params.insert("capture_mode".into(), "音声のみ（MP3）".into());
+    params.insert("seconds".into(), "2".into());
+    params.insert(
+        "system_audio".into(),
+        if system { "あり" } else { "なし" }.into(),
+    );
+    params.insert(
+        "microphone".into(),
+        if microphone { "あり" } else { "なし" }.into(),
+    );
+    let path = dir.path().join(format!("{system}-{microphone}.mp3"));
+    let output = record(
+        Plan::new(path.clone(), RECT::default(), &params).unwrap(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(output.notice.contains("MP3保存完了"));
+    let _com = Com::new().unwrap();
+    let _media = Media::new().unwrap();
+    let stats = decode(&path, true);
+    assert!(std::fs::metadata(&path).unwrap().len() < 48000 * 4);
+    assert!(stats.1 < 23_000_000);
+    if system {
+        assert!(stats.2 > 10.0, "loopback tone was not captured: {stats:?}");
+    }
+    eprintln!("MP3 real device: system={system}, microphone={microphone}, decoded={stats:?}");
+}
+
+#[test]
+#[ignore = "plays a quiet tone and records the actual output device to a temporary MP3"]
+fn real_audio_only_system_mp3() {
+    real_audio_only_mp3(true, false);
+}
+
+#[test]
+#[ignore = "records the actual microphone to a temporary MP3"]
+fn real_audio_only_microphone_mp3() {
+    real_audio_only_mp3(false, true);
+}
+
+#[test]
+#[ignore = "plays a quiet tone and records output plus actual microphone to a temporary MP3"]
+fn real_audio_only_mixed_mp3() {
+    real_audio_only_mp3(true, true);
+}
+
 #[test]
 #[ignore = "creates a visible test window, hides it and stops recording with the control bar"]
 fn real_window_exclusion_and_stop_button() {
@@ -559,7 +609,9 @@ fn real_window_exclusion_and_stop_button() {
                     rx.try_recv()
                 )
             });
-        guard.show_controls(10, "なし（ボタンのみ）", 103).unwrap();
+        guard
+            .show_controls(10, "なし（ボタンのみ）", 103, false)
+            .unwrap();
         guard.controls.as_ref().unwrap().click_stop();
         let mut msg = MSG::default();
         assert!(PeekMessageW(&mut msg, Some(hwnd), WM_COMMAND, WM_COMMAND, PM_REMOVE).as_bool());

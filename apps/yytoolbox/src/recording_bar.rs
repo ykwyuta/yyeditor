@@ -22,6 +22,7 @@ struct State {
     stopped: Cell<bool>,
     start: Instant,
     seconds: u32,
+    audio_only: bool,
 }
 impl Drop for State {
     fn drop(&mut self) {
@@ -38,7 +39,13 @@ impl ControlBar {
             SendMessageW(data(self.0).unwrap().stop, BM_CLICK, None, None);
         }
     }
-    pub(super) fn new(owner: HWND, seconds: u32, key: &str, command: u16) -> Result<Self> {
+    pub(super) fn new(
+        owner: HWND,
+        seconds: u32,
+        key: &str,
+        command: u16,
+        audio_only: bool,
+    ) -> Result<Self> {
         unsafe {
             let instance = GetModuleHandleW(None).map_err(|e| e.to_string())?;
             let class = WNDCLASSW {
@@ -71,7 +78,11 @@ impl ControlBar {
             let hwnd = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                 CLASS,
-                w!("yytoolbox 録画中"),
+                &HSTRING::from(if audio_only {
+                    "yytoolbox 録音中"
+                } else {
+                    "yytoolbox 録画中"
+                }),
                 WS_POPUP | WS_BORDER,
                 monitor.rcWork.right - width - scale(12),
                 monitor.rcWork.top + scale(12),
@@ -84,13 +95,15 @@ impl ControlBar {
             )
             .map_err(|e| e.to_string())?;
             let bar = Self(hwnd);
-            // Never silently display controls in the recorded video.
-            SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
-                .map_err(|e| format!("操作バーを録画から除外できません: {e}"))?;
-            let mut affinity = 0;
-            GetWindowDisplayAffinity(hwnd, &mut affinity).map_err(|e| e.to_string())?;
-            if affinity != WDA_EXCLUDEFROMCAPTURE.0 {
-                return Err("録画操作バーのキャプチャ除外に対応していません".into());
+            // Audio-only does not capture a desktop and needs no capture exclusion.
+            if !audio_only {
+                SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+                    .map_err(|e| format!("操作バーを録画から除外できません: {e}"))?;
+                let mut affinity = 0;
+                GetWindowDisplayAffinity(hwnd, &mut affinity).map_err(|e| e.to_string())?;
+                if affinity != WDA_EXCLUDEFROMCAPTURE.0 {
+                    return Err("録画操作バーのキャプチャ除外に対応していません".into());
+                }
             }
             let child = |class, title: &HSTRING, id| {
                 CreateWindowExW(
@@ -115,7 +128,15 @@ impl ControlBar {
                 )
                 .map_err(|e| e.to_string())
             };
-            let status = child(w!("STATIC"), &HSTRING::from("● 録画中  00:00"), 2)?;
+            let status = child(
+                w!("STATIC"),
+                &HSTRING::from(if audio_only {
+                    "● 録音中  00:00"
+                } else {
+                    "● 録画中  00:00"
+                }),
+                2,
+            )?;
             let hint = child(
                 w!("STATIC"),
                 &HSTRING::from(if key == "なし（ボタンのみ）" {
@@ -138,6 +159,7 @@ impl ControlBar {
                 stopped: Cell::new(false),
                 start: Instant::now(),
                 seconds,
+                audio_only,
             });
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(data) as isize);
             layout(hwnd, true);
@@ -214,7 +236,7 @@ unsafe fn stop(hwnd: HWND, notify: bool) {
         if let Some(s) = data(hwnd)
             && !s.stopped.replace(true)
         {
-            let _ = SetWindowTextW(s.status, w!("録画を保存しています…"));
+            let _ = SetWindowTextW(s.status, w!("収録を保存しています…"));
             let _ = EnableWindow(s.stop, false);
             if notify {
                 let _ = PostMessageW(
@@ -244,7 +266,12 @@ unsafe extern "system" fn proc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -
                 {
                     let elapsed = s.start.elapsed().as_secs();
                     let title = HSTRING::from(format!(
-                        "● 録画中  {:02}:{:02} / {:02}:{:02}",
+                        "● {}  {:02}:{:02} / {:02}:{:02}",
+                        if s.audio_only {
+                            "録音中"
+                        } else {
+                            "録画中"
+                        },
                         elapsed / 60,
                         elapsed % 60,
                         s.seconds / 60,
