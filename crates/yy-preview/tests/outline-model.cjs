@@ -2,6 +2,29 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const M=require('../assets/outline-model.js');
 const node=(id,depth,text=id)=>({id,depth,text,bookmark:false,collapsed:false,refs:[]});
+
+test('paste splits LF/CRLF/CR into siblings and preserves IDs, children and references',()=>{
+  for(const newline of ['\n','\r\n','\r']) {
+    const doc=M.fresh();doc.nodes=[node('root',0,'前😀選択後'),node('child',1),node('next',0)];
+    doc.nodes[0].bookmark=true;doc.nodes[0].collapsed=true;doc.nodes[2].refs=['root'];
+    const result=M.paste(doc,0,['一','二','','三',''].join(newline),3,5,'lines');
+    assert.deepEqual(doc.nodes.map(n=>[n.text,n.depth]),[['前😀一',0],['child',1],['二',0],['',0],['三',0],['後',0],['next',0]]);
+    assert.equal(doc.nodes[0].id,'root');assert.equal(doc.nodes[0].bookmark,true);assert.equal(doc.nodes[0].collapsed,true);
+    assert.deepEqual(doc.nodes.at(-1).refs,['root']);
+    assert.equal(result.id,doc.nodes[5].id);assert.equal(result.caret,0);assert.equal(result.added,4);
+    assert.equal(new Set(doc.nodes.map(n=>n.id)).size,doc.nodes.length);
+    assert.deepEqual(M.parse(M.serialize(doc)),doc);
+  }
+});
+
+test('single-line paste replaces only selected text and normalizes newlines to spaces',()=>{
+  const doc=M.fresh();doc.nodes=[node('a',0,'前😀選択後'),node('child',1)];
+  const result=M.paste(doc,0,'日本語\r\n次\r\n\n末尾',3,5,'single');
+  assert.equal(doc.nodes[0].text,'前😀日本語 次  末尾後');
+  assert.equal(doc.nodes.length,2);assert.equal(result.id,'a');
+  assert.equal(result.caret,'前😀日本語 次  末尾'.length);assert.equal(result.added,0);
+  assert.throws(()=>M.paste(doc,0,'text',0,0,'unknown'));
+});
 test('Markdown uses six heading levels then nested lists and includes collapsed branches',()=>{
   const doc=M.fresh();doc.nodes=Array.from({length:9},(_,i)=>node('n'+i,i,'項目 '+i));
   doc.nodes[0].collapsed=true;doc.nodes.push(node('last',0,'終わり <script> & *強調*\n次行'));

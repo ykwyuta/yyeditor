@@ -43,6 +43,7 @@ mod codemode;
 mod csvmode;
 mod gitmode;
 mod hexmode;
+mod htmlpaste;
 mod markdownmode;
 mod previewmode;
 mod saveformat;
@@ -101,6 +102,7 @@ const ID_REDO: u16 = 402;
 const ID_CUT: u16 = 403;
 const ID_COPY: u16 = 404;
 const ID_PASTE: u16 = 405;
+const ID_PASTE_MARKDOWN: u16 = 413;
 const ID_SELECT_ALL: u16 = 406;
 const ID_DELETE: u16 = 407;
 const ID_RECT_MODE: u16 = 408;
@@ -563,6 +565,11 @@ fn create_menu() -> Result<(HMENU, HMENU, HMENU, HMENU)> {
         item(edit, ID_CUT, w!("切り取り(&T)\tCtrl+X"))?;
         item(edit, ID_COPY, w!("コピー(&C)\tCtrl+C"))?;
         item(edit, ID_PASTE, w!("貼り付け(&P)\tCtrl+V"))?;
+        item(
+            edit,
+            ID_PASTE_MARKDOWN,
+            w!("HTMLをMarkdown化して貼り付ける(&M)"),
+        )?;
         item(edit, ID_DELETE, w!("削除(&D)\tDel"))?;
         sep(edit)?;
         item(edit, ID_SELECT_ALL, w!("すべて選択(&A)\tCtrl+A"))?;
@@ -1504,6 +1511,7 @@ impl App {
         set(ID_CUT, has_sel && !self.doc.is_read_only());
         set(ID_COPY, has_sel);
         set(ID_DELETE, has_sel && !self.doc.is_read_only());
+        set(ID_PASTE_MARKDOWN, htmlpaste::can_paste(self));
         set(ID_RECT_TO_CARETS, self.rect.is_some());
         // 開いているファイルがブックマークにあればチェックを付ける
         unsafe {
@@ -4970,6 +4978,7 @@ fn execute_command(hwnd: HWND, id: u16) {
                 with_app(|a| a.paste(&text, column));
             }
         }
+        ID_PASTE_MARKDOWN => htmlpaste::paste(hwnd),
         ID_DELETE => {
             with_app(|a| {
                 if !a.delete_selection(EditKind::Other)
@@ -5415,6 +5424,10 @@ pub(crate) extern "system" fn frame_proc(
             markdownmode::on_messages(hwnd);
             LRESULT(0)
         }
+        crate::preview::WM_APP_PREVIEW_EXPORT => {
+            previewmode::save_standalone_html(hwnd);
+            LRESULT(0)
+        }
         crate::preview::WM_APP_PREVIEW_FAILED => {
             with_app(|a| {
                 if a.markdown_mode && a.markdown.pane.as_ref().is_some_and(|p| p.is_unavailable()) {
@@ -5603,6 +5616,10 @@ pub(crate) extern "system" fn view_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_CONTEXTMENU => {
+            htmlpaste::context_menu(hwnd, lparam);
+            LRESULT(0)
+        }
         WM_PAINT => {
             if with_app(|a| a.paint()).is_none() {
                 // 状態を借用中（モーダルループ中など）は描画せず、後で再描画する

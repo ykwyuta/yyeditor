@@ -18,6 +18,66 @@ const PREVIEW_MAX_BYTES: u64 = 8 << 20;
 /// エディタとプレビューの境界の幅（96 DPI でのピクセル）
 const SPLITTER: i32 = 6;
 
+pub(super) fn save_standalone_html(hwnd: HWND) {
+    let prepared = with_app(|a| {
+        // Include edits whose delayed preview refresh has not fired yet.
+        a.refresh_preview();
+        let snapshot = a.preview.pane.as_ref()?.export_snapshot()?;
+        Some((snapshot, a.doc.location()))
+    })
+    .flatten();
+    let Some((snapshot, source)) = prepared else {
+        return;
+    };
+    let path = unsafe {
+        let Ok(dialog) =
+            CoCreateInstance::<_, IFileSaveDialog>(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)
+        else {
+            return;
+        };
+        let _ = dialog.SetTitle(w!("画像を埋め込んだシングルHTMLを保存"));
+        let _ = dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
+            pszName: w!("HTML (*.html)"),
+            pszSpec: w!("*.html"),
+        }]);
+        let _ = dialog.SetDefaultExtension(w!("html"));
+        let stem = source
+            .as_deref()
+            .and_then(Path::file_stem)
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "プレビュー".into());
+        let _ = dialog.SetFileName(&HSTRING::from(format!("{stem}.html")));
+        if dialog.Show(Some(hwnd)).is_err() {
+            return;
+        }
+        let Some(path) = dialog.cast().ok().and_then(|d| dialog_result(&d)) else {
+            return;
+        };
+        path
+    };
+    if source.as_ref().is_some_and(|s| {
+        s.canonicalize()
+            .ok()
+            .zip(path.canonicalize().ok())
+            .is_some_and(|(s, p)| s == p)
+    }) {
+        error_box(hwnd, "元のMarkdownファイルには上書きできません。");
+        return;
+    }
+    match Preview::save_standalone(snapshot, path.clone()) {
+        Ok(()) => {
+            with_app(|a| {
+                a.status_msg = format!("シングルHTMLを保存しました: {}", path.display());
+                a.update_status();
+            });
+        }
+        Err(error) => error_box(
+            hwnd,
+            &format!("シングルHTMLを保存できませんでした。\n{error}"),
+        ),
+    }
+}
+
 /// プレビューの表示状態。
 pub(crate) struct PreviewPane {
     pub pane: Option<Preview>,

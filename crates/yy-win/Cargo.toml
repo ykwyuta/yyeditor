@@ -39,6 +39,15 @@ crossbeam-channel.workspace = true
 windows-numerics.workspace = true
 tempfile.workspace = true
 serde_json = "1"
+# HTML parsing and Markdown generation are entirely Rust (html5ever).
+htmd = "=0.5.5"
+html5ever = "0.38"
+markup5ever_rcdom = "0.38"
+data-encoding.workspace = true
+url = "2"
+# Use the existing RustCrypto TLS provider; no ring/OpenSSL/C backend.
+ureq = { version = "=3.2.0", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
+yy-tls-crypto.workspace = true
 
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true

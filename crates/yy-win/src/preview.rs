@@ -48,11 +48,15 @@ use yy_preview::{DOC_HOST, Kind, PAGE_URL, PREVIEW_HOST, PageOptions};
 use crate::PREVIEW_CLASS;
 use crate::util::Context;
 
+mod outlinepaste;
+mod standalone;
+
 /// プレビューのリンクから文書を開く要求（`lparam` は `Box<PathBuf>` のポインタ）。フレームに送る。
 pub(crate) const WM_APP_PREVIEW_OPEN: u32 = WM_APP + 21;
 /// WebView2 を使えなかった（プレビューの欄には案内を表示している）。フレームに送る。
 pub(crate) const WM_APP_PREVIEW_FAILED: u32 = WM_APP + 22;
 pub(crate) const WM_APP_MARKDOWN_EDIT: u32 = WM_APP + 23;
+pub(crate) const WM_APP_PREVIEW_EXPORT: u32 = WM_APP + 25;
 // Poll owned result channels on the UI thread; never post heap pointers to a dying HWND.
 const FETCH_TIMER: usize = 0x5959;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -239,6 +243,8 @@ struct Page {
     navigation: Option<u64>,
     /// 文書の相対パスの起点
     folder: Option<DocBase>,
+    /// Writable outline editor epoch, used only for native paste menu commands.
+    outline_epoch: Option<u64>,
     /// エディタの表示位置（先頭の行）
     line: Option<usize>,
 }
@@ -264,6 +270,29 @@ pub(crate) struct Preview {
 }
 
 impl Preview {
+    pub(crate) fn export_snapshot(&self) -> Option<standalone::Snapshot> {
+        let page = self.shared.page.borrow();
+        (page.kind == Some(Kind::Markdown) && !self.shared.editing.get()).then(|| {
+            standalone::Snapshot {
+                html: page.html.clone(),
+                folder: page.folder.clone(),
+            }
+        })
+    }
+
+    pub(crate) fn save_standalone(
+        snapshot: standalone::Snapshot,
+        path: PathBuf,
+    ) -> std::result::Result<(), String> {
+        let show = crate::remote::show_status;
+        show("画像を埋め込んでHTMLを作成しています…（Escで中止）");
+        let result = crate::remote::wait(&show, move |work| {
+            standalone::save(&snapshot, &path, &|| work.cancelled())
+        });
+        show("");
+        result.map_err(|e| e.to_string())
+    }
+
     /// プレビューの欄を作る（非表示）。WebView2 は最初に表示するときに作る。
     pub(crate) fn new(parent: HWND, frame: HWND) -> Result<Preview> {
         let hwnd = unsafe {
@@ -360,6 +389,7 @@ impl Preview {
             epoch,
             folder.clone(),
             yy_preview::live::page(source, epoch, caret, read_only, folder.is_some()),
+            None,
         );
     }
 
@@ -369,10 +399,18 @@ impl Preview {
             epoch,
             None,
             yy_preview::outline::page(source, epoch, read_only),
+            (!read_only).then_some(epoch),
         );
     }
 
-    fn show_editor_page(&self, source: &str, epoch: u64, folder: Option<DocBase>, html: String) {
+    fn show_editor_page(
+        &self,
+        source: &str,
+        epoch: u64,
+        folder: Option<DocBase>,
+        html: String,
+        outline_epoch: Option<u64>,
+    ) {
         self.shared.editing.set(true);
         self.shared.edit_messages.borrow_mut().clear();
         *self.shared.edit_initial.borrow_mut() = Some(format!(
@@ -385,6 +423,7 @@ impl Preview {
             p.kind = None;
             p.line = None;
             p.folder = folder;
+            p.outline_epoch = outline_epoch;
             p.version += 1;
         }
         navigate(&self.shared);
@@ -413,12 +452,14 @@ impl Preview {
         folder: Option<DocBase>,
         line: Option<usize>,
     ) {
+        self.shared.editing.set(false);
         let message = {
             let mut p = self.shared.page.borrow_mut();
             p.line = line;
             p.html = yy_preview::markdown_page(body, opts);
             let same = p.loaded == Some(Kind::Markdown) && p.folder == folder;
             p.kind = Some(Kind::Markdown);
+            p.outline_epoch = None;
             p.folder = folder;
             if same {
                 // 読み直したときも最新の内容になるように、返した版も進める
@@ -438,10 +479,12 @@ impl Preview {
 
     /// HTML 文書を表示する（ページを読み直す。スクロール位置はページ側で保つ）。
     pub(crate) fn show_html(&self, src: &str, opts: &PageOptions, folder: Option<DocBase>) {
+        self.shared.editing.set(false);
         {
             let mut p = self.shared.page.borrow_mut();
             p.html = yy_preview::html_page(src, opts);
             p.kind = Some(Kind::Html);
+            p.outline_epoch = None;
             p.folder = folder;
             p.version += 1;
         }
@@ -450,6 +493,8 @@ impl Preview {
 
     /// 案内の文を表示する（プレビューできない文書など）。
     pub(crate) fn show_notice(&self, text: &str) {
+        self.shared.editing.set(false);
+        self.shared.page.borrow_mut().outline_epoch = None;
         {
             let mut p = self.shared.page.borrow_mut();
             let html = format!(
@@ -633,6 +678,42 @@ fn setup(
             COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
         )?;
         let mut token = 0i64;
+
+        if let (Ok(view), Ok(environment)) = (
+            webview.cast::<ICoreWebView2_11>(),
+            env.cast::<ICoreWebView2Environment9>(),
+        ) {
+            let s = shared.clone();
+            view.add_ContextMenuRequested(
+                &webview2_com::ContextMenuRequestedEventHandler::create(Box::new(
+                    move |_, args| {
+                        let Some(args) = args else { return Ok(()) };
+                        if s.editing.get() && s.page.borrow().outline_epoch.is_some() {
+                            let mut editable = windows::core::BOOL(0);
+                            args.ContextMenuTarget()?.IsEditable(&mut editable)?;
+                            if editable.as_bool() {
+                                let items = args.MenuItems()?;
+                                for (index, item) in outlinepaste::menu_items(&environment, &s)?
+                                    .iter()
+                                    .enumerate()
+                                {
+                                    items.InsertValueAtIndex(index as u32, item)?;
+                                }
+                            }
+                            return Ok(());
+                        }
+                        if s.page.borrow().kind != Some(Kind::Markdown) || s.editing.get() {
+                            return Ok(());
+                        }
+                        let item = standalone::menu_item(&environment, s.frame)?;
+                        let items = args.MenuItems()?;
+                        items.InsertValueAtIndex(0, &item)?;
+                        Ok(())
+                    },
+                )),
+                &mut token,
+            )?;
+        }
 
         let s = shared.clone();
         webview.add_WebMessageReceived(

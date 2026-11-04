@@ -198,7 +198,9 @@ impl App {
                 .then(|| Action::ExportOutline(source.to_owned()));
         }
         let before = self.markdown_source().ok()?;
-        let kind = if matches!(action, "paragraph" | "newline") {
+        let kind = if action == "paste" {
+            EditKind::Paste
+        } else if matches!(action, "paragraph" | "newline") {
             EditKind::Newline
         } else if action == "edit" {
             EditKind::Typing
@@ -507,6 +509,31 @@ pub(super) fn focus_editor() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn outline_paste_has_one_undo_step_separate_from_typing() {
+        let original = "{\"format\":\"yyoutline\",\"version\":1,\"nodes\":[]}\n";
+        let typed = "{\"format\":\"yyoutline\",\"version\":1,\"nodes\":[{\"id\":\"root\",\"depth\":0,\"text\":\"入力\",\"bookmark\":false,\"collapsed\":false,\"refs\":[]}]}\n";
+        let mut pasted: serde_json::Value = serde_json::from_str(typed).unwrap();
+        pasted["nodes"].as_array_mut().unwrap().push(serde_json::json!({"id":"new","depth":0,"text":"貼り付け😀","bookmark":false,"collapsed":false,"refs":[]}));
+        let pasted = format!("{pasted}\n");
+        let mut doc = Document::from_text(original);
+        assert!(apply_source(&mut doc, original, typed, 0, 0, EditKind::Typing).unwrap());
+        assert!(apply_source(&mut doc, typed, &pasted, 0, 0, EditKind::Paste).unwrap());
+        for expected in [typed, original] {
+            assert!(doc.undo());
+            assert_eq!(
+                doc.snapshot().read(0..doc.snapshot().len()),
+                expected.as_bytes()
+            );
+        }
+        for expected in [typed, &pasted] {
+            assert!(doc.redo());
+            assert_eq!(
+                doc.snapshot().read(0..doc.snapshot().len()),
+                expected.as_bytes()
+            );
+        }
+    }
     #[test]
     fn outline_export_writes_utf8_without_overwriting_original() {
         let dir = tempfile::tempdir().unwrap();

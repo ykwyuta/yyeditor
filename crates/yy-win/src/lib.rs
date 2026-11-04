@@ -31,6 +31,7 @@ mod goto;
 mod grepdlg;
 mod help;
 mod highlight;
+mod htmlmarkdown;
 mod ime;
 mod preview;
 mod recentdlg;

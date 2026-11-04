@@ -5,6 +5,7 @@
   const readonly=document.body.dataset.readonly==='true';
   let epoch=Number(document.body.dataset.epoch), seq=0, source='', doc=null, selected=null, zoom=null;
   let composing=false, pending=[], loaded=false;
+  let pasteTarget=null;
   const byId=id=>doc?.nodes.find(n=>n.id===id);
   const index=()=>doc.nodes.findIndex(n=>n.id===selected);
   function send(action='edit') {
@@ -19,6 +20,7 @@
     b.onclick=action; parent.append(b); return b;
   }
   function load(text) {
+    pasteTarget=null;
     source=text;
     try { doc=M.parse(source); selected=doc.nodes[0]?.id ?? null; render(); }
     catch(error) { doc=null; tree.textContent='アウトラインを読み込めません。'; status.textContent=error.message; }
@@ -29,13 +31,13 @@
     send('ready');
   }
   function change(action, mutation, redraw=true) {
-    if(readonly || !doc || composing) return;
+    if(readonly || !doc || composing) return false;
     const before=M.serialize(doc), oldSelected=selected;
     mutation();
     const next=M.serialize(doc);
     if(new TextEncoder().encode(next).length>1048576) {
       doc=M.parse(before); selected=oldSelected;
-      status.textContent='1 MiB の上限を超えるため変更できません。'; render(); return;
+      status.textContent='1 MiB の上限を超えるため変更できません。'; render(); return false;
     }
     source=next; send(action);
     if(redraw) render(true);
@@ -47,6 +49,30 @@
         link.textContent='↗ '+(target?.text || (target?'(空の項目)':'参照先なし'));
       }
     }
+    return true;
+  }
+  // Let WebView2 show its native menu, keeping the exact input range for its paste commands.
+  tree.addEventListener('contextmenu',event=>{
+    pasteTarget=null;
+    const input=event.target.closest?.('.row input');
+    if(!input || readonly || !doc || composing)return;
+    pasteTarget={id:input.closest('.row').dataset.id,start:input.selectionStart,stop:input.selectionEnd,source};
+  });
+  function pasteText(mode,text) {
+    const target=pasteTarget;pasteTarget=null;
+    if(!target || readonly || !doc || composing || target.source!==source || typeof text!=='string' || !text)return;
+    if(!['lines','single'].includes(mode))return;
+    if(new TextEncoder().encode(text).length>1048576) {status.textContent='貼り付けできるテキストは 1 MiB までです。';return;}
+    const at=doc.nodes.findIndex(n=>n.id===target.id);if(at<0)return;
+    let result;
+    const changed=change('paste',()=>{
+      result=M.paste(doc,at,text,target.start,target.stop,mode);
+      selected=result.id;
+    });
+    if(!changed)return;
+    if(result.added && zoom===target.id) {zoom=null;render(true);}
+    const input=[...tree.querySelectorAll('.row')].find(row=>row.dataset.id===selected)?.querySelector('input');
+    input?.focus();input?.setSelectionRange(result.caret,result.caret);
   }
   function focus() {
     const row=[...tree.children].find(r=>r.dataset.id===selected);
@@ -166,6 +192,7 @@
   if(bridge) {
     bridge.addEventListener('message',event=>{
       const data=event.data;
+      if(data.epoch===epoch && typeof data.outlinePaste==='string') pasteText(data.outlinePaste,data.text);
       if(data.epoch===epoch && typeof data.initial==='string' && !loaded) load(data.initial);
       if(data.flush===epoch) {
         // Blur commits an active IME composition; compositionend drains pending flushes.

@@ -67,6 +67,27 @@
     doc.nodes.splice(at,end(doc,at)-at);
     // Keep references as explicit missing links; never silently retarget them.
   }
+  function paste(doc, at, text, start, stop, mode) {
+    const node=doc.nodes[at];
+    if(!node || !['lines','single'].includes(mode)) throw Error('貼り付け先が不正です。');
+    start=Math.max(0,Math.min(node.text.length,start));
+    stop=Math.max(start,Math.min(node.text.length,stop));
+    const prefix=node.text.slice(0,start), suffix=node.text.slice(stop);
+    const lines=text.split(/\r\n|\r|\n/);
+    if(mode==='single') lines.splice(0,lines.length,lines.join(' '));
+    const insert=end(doc,at);
+    node.text=prefix+lines[0];
+    if(lines.length===1) {
+      node.text+=suffix;
+      return {id:node.id,caret:prefix.length+lines[0].length,added:0};
+    }
+    const siblings=lines.slice(1).map(text=>({id:id(),depth:node.depth,text,bookmark:false,collapsed:false,refs:[]}));
+    const last=siblings.at(-1), caret=last.text.length;
+    last.text+=suffix;
+    // Existing children stay attached to their original, ID-addressed parent.
+    doc.nodes=doc.nodes.slice(0,insert).concat(siblings,doc.nodes.slice(insert));
+    return {id:last.id,caret,added:siblings.length};
+  }
   function numbers(doc) {
     const counts=[], result=[];
     for(const n of doc.nodes) {
@@ -103,6 +124,6 @@
     }
     return lines.join('');
   }
-  scope.YYOutline={fresh,parse,serialize,end,add,move,remove,numbers,urls,markdown};
+  scope.YYOutline={fresh,parse,serialize,end,add,move,remove,paste,numbers,urls,markdown};
   if(typeof module!=='undefined') module.exports=scope.YYOutline;
 })(globalThis);
