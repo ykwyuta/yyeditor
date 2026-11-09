@@ -11,8 +11,12 @@ fn main() {
         eprintln!("yytoolbox: {e}");
         std::process::exit(1);
     }
+    // The GUI is Windows-only. Elsewhere this binary is the command line (yytoolbox-cli).
     #[cfg(not(windows))]
-    eprintln!(
-        "yytoolbox の画面はWindows専用です。計算・変換は cargo test -p yytoolbox で検証できます。"
-    );
+    std::process::exit(yytoolbox::cli::run(
+        std::env::args_os().skip(1).collect(),
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    ));
 }

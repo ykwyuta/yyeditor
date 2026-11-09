@@ -150,16 +150,7 @@ fn show(hwnd: HWND, visible: bool) {
     }
 }
 fn uses_input(tool: Tool) -> bool {
-    !matches!(
-        tool,
-        Tool::Password
-            | Tool::Compound
-            | Tool::Loan
-            | Tool::AgeGrade
-            | Tool::Recording
-            | Tool::ResizeImages
-            | Tool::VideoEdit
-    )
+    tool.uses_input()
 }
 fn navigation_label(tool: Tool) -> &'static str {
     match tool {

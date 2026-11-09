@@ -1,6 +1,6 @@
 # yytoolbox ヘルプ
 
-開発用の変換・生成・計算、画面録画、画像処理をローカルで行うWindowsアプリです。
+開発用の変換・生成・計算、ステップ計数、画面録画、画像処理をローカルで行うWindowsアプリです。録画・画像処理以外はコマンドラインからも使えます。
 入力・結果を外部サービスへ送信せず、入力履歴の記録も行いません。録画・画像処理は実行時に保存先を選びます。
 「入力を開く」でUTF-8ファイルを読み、「入力を保存」で定義等を保存できます。
 「結果をコピー」「結果を保存」は明示操作で行います。保存先はその都度選択します。
@@ -25,6 +25,41 @@ Ctrl＋/−、Ctrl+0、Ctrl+マウスホイールでも変更できます。Wind
 - JWT: 3区画のJWSをデコードします。署名・発行者・有効期限は検証しません。暗号化JWEは非対応です。
 - JSON: 整形／圧縮。数値の原文、文字列のエスケープ、キー順序を維持します。JSONの深さはパーサーの上限に従います。
 - SQL: Generic／PostgreSQL／SQL Server、キーワードの大文字・小文字を選べます。フォーマットのみで、DBへの接続・実行・完全な構文検証はしません。入力128 KiBまで。負荷を抑えるため括弧の深さを64までに制限し、この判定では文字列内の括弧も数えます。
+
+## ステップカウンタ
+
+ソースコードの総行数・ステップ（実行行）・コメント行・空行を数えます。画面では入力欄のテキストを選択した言語で数えます。
+フォルダー単位で数える場合はコマンドラインの `yytoolbox-cli steps <フォルダー>` を使います（次節）。
+
+- 空白文字だけの行は空行です。ブロックコメントの中の空白行も空行に数えます。
+- コメント以外の字句（文字列を含む）がある行はステップです。コードの後ろに書いたコメントの行もステップです。
+- それ以外のコメントだけの行はコメント行です。文字列・文字リテラル内の `//`・`#`・`/*` 等はコメントとして扱いません。
+- 対応言語: C、C++、C#、Java、Kotlin、Scala、JavaScript、TypeScript、Go、Rust、Swift、Objective-C、Dart、PHP、Python、Ruby、Perl、Shell、PowerShell、バッチ、R、Lua、SQL、Visual Basic（VB.NET/VBA/VBScript）、Pascal/Delphi、Haskell、Fortran（自由形式）、COBOL、HTML、XML、CSS、SCSS/Less、YAML、Makefile、Dockerfile、CMake。
+- 入れ子のブロックコメント（Rust、Kotlin、Scala、Swift、Haskell）、Pythonの行頭の三重引用符（docstring）、Rubyの `=begin`〜`=end`、PerlのPOD、VB・バッチの `REM`、Luaの `--[[ ]]` を扱います。
+- COBOLは固定形式として、1〜6桁目（一連番号）と73桁目以降を除き、7桁目の `*`・`/` をコメント行とします。`*>` の注記にも対応します。1〜6桁目に数字・空白以外がある行は自由形式として読みます。
+- 字句の完全な解析ではありません。プリプロセッサーで無効化したコード、ヒアドキュメント、言語内の別言語（HTML内のスクリプト等）は通常の行として数えます。
+
+## コマンドライン
+
+`yytoolbox-cli.exe`（Windowsのコンソール用。`yytoolbox.exe` と同じフォルダー）から、画面のツールを端末・スクリプトで使えます。
+`yytoolbox-cli list` でツール名、`yytoolbox-cli <ツール> --help` で条件の名前・既定値・選択肢を表示します。
+
+```text
+yytoolbox-cli hash --algorithm SHA-256 --text "こんにちは"
+yytoolbox-cli json --layout 圧縮 < data.json > data.min.json
+yytoolbox-cli base64-decode --text 44GT44KT44Gr44Gh44Gv
+yytoolbox-cli dummy-csv --example --rows 1000 --output test.csv
+yytoolbox-cli steps --files src
+yytoolbox-cli steps --format csv --exclude generated --output steps.csv .
+```
+
+- 条件は `--<名前> <値>` または `--<名前>=<値>` で指定します。選択肢から外れた値・不明な条件はエラーです。
+- 入力は `--text`、`--input <ファイル>`、`--example`（入力例）のいずれか。省略時は標準入力を読みます。ファイル・標準入力の文字コードは自動判別します。
+  入力はテキストとして読み、上限は画面と同じ1 MiBです。ハッシュはバイナリファイル全体ではなく、読み込んだテキストのUTF-8バイト列が対象です。
+- 結果は標準出力、`--output <ファイル>` ではファイルへ保存します。Base64デコード・QR画像はバイト列をそのまま保存します。補足メッセージは標準エラーに出し、`-q` で抑止します。
+- `steps` はファイル・フォルダーを再帰的にたどり、拡張子・ファイル名から言語を判定して言語別・合計を表示します。`--files` でファイルごとの明細、`--format csv|json` で表計算・スクリプト向けの形式になります。
+  `.git`・`node_modules`・`target`・`obj` 等の生成物フォルダーと `.` で始まる名前は除外します（`--no-default-excludes`・`--hidden` で対象にできます）。`--exclude <名前|*.拡張子>` を追加できます。判定できない拡張子は `--lang <言語>` で言語を固定して数えます。`yytoolbox-cli steps --languages` で対応拡張子を表示します。
+- 終了コードは成功0、処理の失敗1、指定の誤り2です。画面録画・動画編集・画像の一括リサイズは画面専用です。
 
 ## QRコード・URL変換
 
