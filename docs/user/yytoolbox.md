@@ -2,6 +2,7 @@
 
 正規表現・変換・テストデータ生成・日付と金額の計算・画面録画・簡易動画編集・画像処理をまとめたWindowsアプリです。
 `yytoolbox.exe`を起動します。ネットワーク接続やWebView2は不要です。
+録画・動画編集・画像処理以外のツールとステップカウンタは、コンソール用の`yytoolbox-cli.exe`から端末・スクリプトでも使えます。
 
 ## 使い方
 
@@ -20,6 +21,7 @@ F1で[同梱ヘルプ](../../apps/yytoolbox/help/help.md)を開けます。対�
 | テキスト | 正規表現とキャプチャ、Base64標準／URL-safeエンコード・デコード |
 | 検査 | MD5、SHA-1、SHA-224/256/384/512、BLAKE3、CRC32、JWTのヘッダー・ペイロード表示 |
 | 整形 | JSON整形・圧縮、SQL整形、HTML・CSS・JavaScript整形 |
+| 計測 | 主要言語のステップ（実行行）・コメント行・空行の計数、フォルダー単位の言語別集計（CLI） |
 | 変換 | URLエンコード・デコード、XML／YAML／CSV／INIの相互変換 |
 | QRコード | UTF-8テキストから生成、画面表示、SVG／PNG保存 |
 | 録画・録音 | 全画面／矩形・時間指定MP4、音声のみのMP3保存、PC再生音とマイク、小型バーで途中保存、操作バーを録画から除外 |
@@ -33,6 +35,21 @@ JWTはデコード表示のみで署名を検証しません。パスワード�
 録画・画像処理はFFmpeg・ImageMagickに依存しません。録画はWindows標準のMedia FoundationとWASAPI、画像はRustの画像処理ライブラリを使用します。
 相互変換の初期値は型・入れ子を保持する専用表現です。通常のXML・CSV・INIにしたい場合は「標準形式」を選びます。詳しい表現規則は同梱ヘルプを参照してください。
 数値・キー順序を維持するJSON整形、金額の端数調整、改元日の境界、4月2日〜翌4月1日の学年区分を扱います。
+
+## コマンドラインから使う
+
+`yytoolbox-cli list`でツールの一覧、`yytoolbox-cli <ツール> --help`で条件を表示します。入力は標準入力・`--text`・`--input`、結果は標準出力・`--output`です。
+
+```text
+yytoolbox-cli hash --algorithm SHA-256 --text "こんにちは"
+yytoolbox-cli json --layout 圧縮 < data.json > data.min.json
+yytoolbox-cli steps --files src
+yytoolbox-cli steps --format csv --output steps.csv .
+```
+
+`steps`はフォルダーを再帰的にたどり、拡張子から言語を判定して総行数・ステップ・コメント行・空行を言語別に集計します。
+C/C++、C#、Java、JavaScript/TypeScript、Python、Go、Rust、Kotlin、Swift、PHP、Ruby、Visual Basic、COBOL、SQL、シェル等に対応し、
+文字コード（UTF-8、Shift_JIS、EUC-JP、UTF-16）を自動判別します。数え方と全オプションは同梱ヘルプの「ステップカウンタ」「コマンドライン」を参照してください。
 
 ## 音声だけを保存する
 

@@ -1,5 +1,6 @@
 //! Offline tools. Text operations perform no network, clipboard or filesystem I/O.
 //! Batch images use only explicitly supplied input and output paths.
+pub mod cli;
 mod dates;
 mod dummy;
 mod finance;
@@ -7,6 +8,7 @@ mod formats;
 pub mod images;
 pub mod mp3;
 mod random;
+pub mod steps;
 mod text;
 pub mod video;
 mod webtools;
@@ -43,9 +45,10 @@ pub enum Tool {
     Recording,
     ResizeImages,
     VideoEdit,
+    StepCount,
 }
 
-pub const TOOLS: [Tool; 23] = [
+pub const TOOLS: [Tool; 24] = [
     Tool::Regex,
     Tool::Base64Encode,
     Tool::Base64Decode,
@@ -53,6 +56,7 @@ pub const TOOLS: [Tool; 23] = [
     Tool::Jwt,
     Tool::Json,
     Tool::Sql,
+    Tool::StepCount,
     Tool::Password,
     Tool::DummyCsv,
     Tool::Compound,
@@ -124,7 +128,56 @@ impl Tool {
             Self::Recording => "画面録画・録音",
             Self::ResizeImages => "画像の一括リサイズ",
             Self::VideoEdit => "動画編集（カット・クリップ）",
+            Self::StepCount => "ステップカウンタ",
         }
+    }
+
+    /// Stable ASCII name used by the command line.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Regex => "regex",
+            Self::Base64Encode => "base64-encode",
+            Self::Base64Decode => "base64-decode",
+            Self::Hash => "hash",
+            Self::Jwt => "jwt",
+            Self::Json => "json",
+            Self::Sql => "sql",
+            Self::Password => "password",
+            Self::DummyCsv => "dummy-csv",
+            Self::Compound => "compound",
+            Self::Loan => "loan",
+            Self::Calendar => "calendar",
+            Self::AgeGrade => "age-grade",
+            Self::TimeZones => "time-zones",
+            Self::QrCode => "qr",
+            Self::Url => "url",
+            Self::Convert => "convert",
+            Self::Html => "html",
+            Self::Css => "css",
+            Self::JavaScript => "javascript",
+            Self::Recording => "recording",
+            Self::ResizeImages => "resize-images",
+            Self::VideoEdit => "video-edit",
+            Self::StepCount => "steps",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        TOOLS.into_iter().find(|t| t.id().eq_ignore_ascii_case(id))
+    }
+
+    /// Whether the tool reads the main text input.
+    pub fn uses_input(self) -> bool {
+        !matches!(
+            self,
+            Self::Password
+                | Self::Compound
+                | Self::Loan
+                | Self::AgeGrade
+                | Self::Recording
+                | Self::ResizeImages
+                | Self::VideoEdit
+        )
     }
 
     pub fn description(self) -> &'static str {
@@ -181,6 +234,9 @@ impl Tool {
             }
             Self::ResizeImages => {
                 "実行で画像と出力フォルダを選択。比率維持・背景補完・透明背景。入力と既存ファイルを上書きしません。"
+            }
+            Self::StepCount => {
+                "ソースの総行数・ステップ（実行行）・コメント行・空行を数えます。フォルダー単位の集計は yytoolbox-cli steps <フォルダー>。"
             }
         }
     }
@@ -338,6 +394,7 @@ impl Tool {
                 f("birth", "生年月日", "2015-04-02"),
                 Field::new("asof", "基準日", chrono::Local::now().format("%Y-%m-%d")),
             ],
+            Self::StepCount => vec![s("language", "言語", steps::LANGUAGE_CHOICES)],
             Self::TimeZones => vec![
                 f("instant", "日時（ISO8601）", "now"),
                 f("origin", "時差の基準地域", "Asia/Tokyo"),
@@ -374,6 +431,7 @@ impl Tool {
             Self::Sql => "select customer_id, sum(amount) as total from test_orders where status = 'pending' group by customer_id order by total desc;".into(),
             Self::DummyCsv => dummy::preset(value(params, "preset", "個人")),
             Self::Calendar => "令和元年5月1日".into(),
+            Self::StepCount => "/**\n * 挨拶を表示する。\n */\npublic class Hello {\n\n    // 入口\n    public static void main(String[] args) {\n        System.out.println(\"Hello // 文字列\"); /* 末尾 */\n    }\n}\n".into(),
             Self::TimeZones => "Asia/Tokyo\nUTC\nAsia/Shanghai\nAsia/Kolkata\nEurope/London\nEurope/Paris\nAmerica/New_York\nAmerica/Los_Angeles\nAustralia/Sydney\nPacific/Auckland".into(),
             _ => String::new(),
         }
@@ -488,6 +546,7 @@ pub fn execute(
         Tool::Calendar => dates::calendar(input),
         Tool::AgeGrade => dates::age_grade(params),
         Tool::TimeZones => dates::time_zones(input, params),
+        Tool::StepCount => steps::tool(input, params),
     }?;
     checkpoint(cancelled)?;
     if output.bytes.len() > MAX_OUTPUT || output.text.len() > MAX_OUTPUT {
