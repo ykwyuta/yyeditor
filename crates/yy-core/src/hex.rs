@@ -324,6 +324,8 @@ pub fn decode_text(charset: Charset, bytes: &[u8]) -> String {
 pub enum CellMark {
     Control,
     Invalid,
+    /// 固定長表示のコード値で、上位の `FF` を省いた値（1 バイトの半角カナ `FF71` を `71` と書く）
+    Omitted,
 }
 
 /// 1 行の表示テキストと、文字の欄で色を変える範囲（UTF-16 の位置）。

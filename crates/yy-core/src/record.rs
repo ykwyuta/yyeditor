@@ -12,8 +12,10 @@
 //! ```
 //!
 //! コード値は文字の先頭のバイトの桁から、その文字のバイトの桁に収まる範囲に書く（16 進数で
-//! 2 桁以上。結合文字などで複数の文字になるときは `+` でつなぐ）。収まらないとき（1 バイトの
-//! 半角カナ `FF71` など）は `**` とし、値はステータスバーに表示する。
+//! 2 桁以上。結合文字などで複数の文字になるときは `+` でつなぐ）。1 バイトの半角カナ（`FF71`）
+//! など、U+FF00〜FFFF の 1 文字が収まらないときは上位の `FF` を省いて下 2 桁（`71`）を色を変えて
+//! 書く。それでも収まらないとき（1 バイトの `€` = `20AC` など）は `**` とする。どちらも値は
+//! ステータスバーに表示する。
 //!
 //! 文字はレコードごとに読む（EBCDIC のシフト状態はレコードの先頭で 1 バイト部に戻る）。
 
@@ -154,7 +156,7 @@ impl RecordLayout {
                     len,
                     chars: decoded,
                 } => {
-                    code.put_code(col, room(*len), &compact_code(decoded), None);
+                    code.put_char_code(col, room(*len), decoded);
                     chars.put(col, text, *width, None);
                 }
                 CharCell::Cont => {}
@@ -236,6 +238,20 @@ impl Builder {
         }
     }
 
+    /// 文字 `chars` のコード値を書く。U+FF00〜FFFF の 1 文字が収まらなければ、上位の `FF` を
+    /// 省いた下 2 桁を色を変えて書く。
+    fn put_char_code(&mut self, col: usize, room: usize, chars: &str) {
+        let s = compact_code(chars);
+        let mut it = chars.chars();
+        match (it.next(), it.next()) {
+            (Some(c), None) if s.len() > room && ('\u{FF00}'..='\u{FFFF}').contains(&c) => {
+                let low = format!("{:02X}", c as u32 & 0xFF);
+                self.put(col, &low, 2, Some(CellMark::Omitted));
+            }
+            _ => self.put_code(col, room, &s, None),
+        }
+    }
+
     fn finish(self) -> RowText {
         RowText {
             text: self.text,
@@ -301,7 +317,9 @@ mod tests {
         let cells = char_cells(Some(enc), &bytes, 0, true);
         let l = RecordLayout::new(1, bytes.len() as u64);
         let [code, _, chars] = l.format_record(1, &bytes, &cells, true);
-        assert_eq!(code.text, "     1  ** 31");
+        // 上位の FF を省いた下 2 桁を色を変えて書く
+        assert_eq!(code.text, "     1  71 31");
+        assert_eq!(code.marks, vec![(8..10, CellMark::Omitted)]);
         assert_eq!(chars.text, "        ｱ  1");
         assert_eq!(
             char_at(&cells, 0).map(unicode_label).as_deref(),
@@ -341,6 +359,14 @@ mod tests {
         let l = RecordLayout::new(1, bytes.len() as u64);
         let [code, _, _] = l.format_record(1, &bytes, &cells, false);
         assert_eq!(code.text, "     1  **");
+        // U+FF00〜FFFF 以外の 1 バイトの文字（Windows-1252 の € = U+20AC）は `**`
+        let enc = Encoding::from_name("windows-1252").unwrap();
+        let bytes = b"\x80a";
+        let cells = char_cells(Some(enc), bytes, 0, true);
+        let l = RecordLayout::new(1, 2);
+        let [code, _, _] = l.format_record(1, bytes, &cells, false);
+        assert_eq!(code.text, "     1  ** 61");
+        assert_eq!(code.marks, vec![(8..10, CellMark::Control)]);
     }
 
     #[test]
