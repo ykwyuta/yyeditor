@@ -338,9 +338,13 @@ jobs:
       - name: Real SSH large files and host-key rejection in an isolated container
         run: |
           mkdir -p "${{ runner.temp }}/yymerge-ssh-live"
+          # ホストでビルドした実行ファイルをそのまま動かすので、glibc がそろうよう
+          # コンテナはランナーと同じ Ubuntu の版にする（ubuntu-latest の更新に追従する）
+          image="$(. /etc/os-release && echo "$ID:$VERSION_ID")"
+          echo "container image: $image"
           docker run --rm -e YYMERGE_TEST_EXE=/workspace/apps/yymerge/target/debug/yymerge \
             -v "$GITHUB_WORKSPACE:/workspace:ro" -v "${{ runner.temp }}/yymerge-ssh-live:/results" \
-            ubuntu:24.04 sh /workspace/apps/yymerge/tests/ssh-live.sh
+            "$image" sh /workspace/apps/yymerge/tests/ssh-live.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
