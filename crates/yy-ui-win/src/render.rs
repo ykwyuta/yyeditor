@@ -151,6 +151,8 @@ struct Brushes {
     line_number_estimated: ID2D1SolidColorBrush,
     invalid: ID2D1SolidColorBrush,
     control: ID2D1SolidColorBrush,
+    /// 固定長表示のコード値で上位の桁を省いた値（テーマの数値の色）
+    omitted: ID2D1SolidColorBrush,
     selection: ID2D1SolidColorBrush,
     search_match: ID2D1SolidColorBrush,
     caret: ID2D1SolidColorBrush,
@@ -183,6 +185,7 @@ impl Target {
                 line_number_estimated: brush(c.line_number_estimated)?,
                 invalid: brush(c.invalid_byte)?,
                 control: brush(c.control)?,
+                omitted: brush(c.syntax_color("number").unwrap_or(c.line_number))?,
                 selection: brush(c.selection)?,
                 search_match: brush(c.search_match)?,
                 caret: brush(c.caret)?,
@@ -1059,6 +1062,7 @@ impl Renderer {
                     let brush = match mark {
                         CellMark::Control => &b.control,
                         CellMark::Invalid => &b.invalid,
+                        CellMark::Omitted => &b.omitted,
                     };
                     effect(brush, range.start, range.len())?;
                 }
@@ -1233,6 +1237,7 @@ impl Renderer {
                         let brush = match mark {
                             CellMark::Control => &b.control,
                             CellMark::Invalid => &b.invalid,
+                            CellMark::Omitted => &b.omitted,
                         };
                         effect(brush, range.start, range.len())?;
                     }
@@ -1416,6 +1421,7 @@ impl Renderer {
                     let brush = match mark {
                         CellMark::Control => &b.control,
                         CellMark::Invalid => &b.invalid,
+                        CellMark::Omitted => &b.omitted,
                     };
                     effect(brush, range.start, range.len())?;
                 }

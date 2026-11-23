@@ -100,19 +100,24 @@ impl HexLayout {
 /// 文字の欄の 1 バイトの表示。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CharCell {
-    /// 文字の先頭のバイト（表示する文字列、表示幅（桁）、文字のバイト数）
+    /// 文字の先頭のバイト（表示する文字列、表示幅（桁）、文字のバイト数、読んだ文字）。
+    /// `text` は表示用（結合文字だけなら `◌` を付ける）、`chars` は読んだままの文字。
     Char {
         text: String,
         width: usize,
         len: usize,
+        chars: String,
     },
     /// 文字の 2 バイト目以降
     Cont,
-    /// 制御文字など、表示しない文字（`.`）
-    Control,
+    /// 制御文字など、表示しない文字（`.`）。読んだ文字（SO・SI のように文字にならないものは空）
+    Control(String),
     /// 文字コードとして不正なバイト（`.`）
     Invalid,
 }
+
+/// 文字の欄に何もないバイト（読む範囲の外など）。
+pub(crate) static NO_CHAR: CharCell = CharCell::Control(String::new());
 
 /// 文字の欄の文字コード。`None` は ASCII（印字できる ASCII 以外は `.`）。
 pub type Charset = Option<yy_encoding::Encoding>;
@@ -135,16 +140,22 @@ pub fn char_cells(charset: Charset, data: &[u8], base: u64, ambiguous_wide: bool
         return data
             .iter()
             .map(|&b| match printable(b) {
-                '.' if b != b'.' => CharCell::Control,
+                // ASCII の範囲の制御文字は、その値が Unicode のコード値
+                '.' if b != b'.' => CharCell::Control(if b.is_ascii() {
+                    char::from(b).to_string()
+                } else {
+                    String::new()
+                }),
                 c => CharCell::Char {
                     text: c.to_string(),
                     width: 1,
                     len: 1,
+                    chars: c.to_string(),
                 },
             })
             .collect();
     };
-    let mut cells = vec![CharCell::Control; data.len()];
+    let mut cells = vec![CharCell::Control(String::new()); data.len()];
     if enc == Encoding::Utf8 {
         let mut pos = 0;
         for chunk in data.utf8_chunks() {
@@ -221,7 +232,7 @@ fn assign(
     }
     // EBCDIC の SO（0x0E）・SI（0x0F）は文字にならない
     while ebcdic && b - a > 1 && matches!(data[a], 0x0E | 0x0F) {
-        cells[a] = CharCell::Control;
+        cells[a] = CharCell::Control(String::new());
         a += 1;
     }
     if a >= b {
@@ -229,7 +240,7 @@ fn assign(
     }
     if chars.is_empty() {
         for c in &mut cells[a..b] {
-            *c = CharCell::Control;
+            *c = CharCell::Control(String::new());
         }
         return;
     }
@@ -244,8 +255,13 @@ fn is_invalid(c: char) -> bool {
 /// 位置 `at` から `len` バイトの文字 `s` を割り当てる。
 fn set_char(cells: &mut [CharCell], at: usize, len: usize, s: &str, ambiguous_wide: bool) {
     cells[at] = match display_char(s, ambiguous_wide && len >= 2) {
-        None => CharCell::Control,
-        Some((text, width)) => CharCell::Char { text, width, len },
+        None => CharCell::Control(s.to_owned()),
+        Some((text, width)) => CharCell::Char {
+            text,
+            width,
+            len,
+            chars: s.to_owned(),
+        },
     };
     for c in &mut cells[at + 1..at + len] {
         *c = CharCell::Cont;
@@ -308,6 +324,8 @@ pub fn decode_text(charset: Charset, bytes: &[u8]) -> String {
 pub enum CellMark {
     Control,
     Invalid,
+    /// 固定長表示のコード値で、上位の `FF` を省いた値（1 バイトの半角カナ `FF71` を `71` と書く）
+    Omitted,
 }
 
 /// 1 行の表示テキストと、文字の欄で色を変える範囲（UTF-16 の位置）。
@@ -335,11 +353,12 @@ impl HexLayout {
             *u16pos += s.encode_utf16().count();
         };
         for i in 0..n {
-            match cells.get(i).unwrap_or(&CharCell::Control) {
+            match cells.get(i).unwrap_or(&NO_CHAR) {
                 CharCell::Char {
                     text: s,
                     width,
                     len,
+                    ..
                 } => {
                     let avail = (*len).min(n - i);
                     let continues = i + len > n;
@@ -363,7 +382,7 @@ impl HexLayout {
                         push(&mut text, " ", &mut u16pos);
                     }
                 }
-                cell @ (CharCell::Control | CharCell::Invalid) => {
+                cell @ (CharCell::Control(_) | CharCell::Invalid) => {
                     let mark = if *cell == CharCell::Invalid {
                         CellMark::Invalid
                     } else {
@@ -592,7 +611,7 @@ mod tests {
         // 奇数の位置から渡しても符号単位の境界から読む
         let u16 = b"\x00A\x00B\x00C";
         let cells = char_cells(Some(Encoding::Utf16Be), &u16[1..], 1, true);
-        assert_eq!(cells[0], CharCell::Control);
+        assert_eq!(cells[0], CharCell::Control(String::new()));
         assert!(matches!(&cells[1], CharCell::Char { text, len: 2, .. } if text == "B"));
         // IBM-930: SO「日本」SI は SO・SI を制御文字、2 バイトずつ文字に
         let enc = Encoding::Ebcdic(Ccsid::Ibm930, Records::Fixed(80));

@@ -746,6 +746,15 @@ impl App {
         if let Some(b) = snap.byte_at(head) {
             s += &format!("  値 {b:02X}");
         }
+        // 固定長表示ではカーソルの文字の Unicode のコード値（コード値の行に収まらないときの確認用）
+        if let (Some(h), Some(n)) = (self.hex, self.hex.and_then(|h| h.record)) {
+            let start = head - head % n;
+            let data = snap.read(start..(start + n).min(snap.len()));
+            let cells = hex::char_cells(h.charset, &data, start, self.config.editor.ambiguous_wide);
+            if let Some(c) = record::char_at(&cells, (head - start) as usize) {
+                s += &format!("  文字 {}", record::unicode_label(c));
+            }
+        }
         if !sel.is_empty() {
             let n = sel.end() - sel.start();
             s += &format!("  ({} バイト選択)", group_digits(n));
