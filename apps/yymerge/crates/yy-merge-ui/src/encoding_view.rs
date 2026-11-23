@@ -334,8 +334,8 @@ pub(super) fn smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     {
         return Err("binary bytes hidden or rejected".into());
     }
-    for i in 0..2 {
-        win(a.editors[i].offscreen(480, 220))?;
+    for editor in &mut a.editors[..2] {
+        win(editor.offscreen(480, 220))?;
     }
     if std::fs::read(&left).map_err(|e| e.to_string())? != [0x12, 0x3c, 0, 0xff] {
         return Err("byte review changed original".into());

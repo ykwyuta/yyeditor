@@ -75,3 +75,28 @@ Db2の新ドライバーはCRRTKNが固定で、異なる接続のAPPLICATION_ID
 当該CSVだけを`.gitattributes`の`text eol=lf`で固定し、参照データの説明にバイト一致の要件を明記する。同じGitチェックアウト条件で修正後のCSVが132,667バイト・CRなしとなり、元データとバイト一致することを確認する。参照圧縮ファイルの再生成、サイズ・バイト比較の緩和、失敗試験の除外は行わない。独立yydbmanagerワークスペースの書式・全対象Clippy・通常試験をWindows/Linuxで検証し、修正SHAのCI完了まで確認する。
 
 ローカルではRust 1.99.0で独立ワークスペース全体の書式・全対象ClippyがWindows/Linuxとも成功し、通常試験はWindows 67件・Linux 57件成功した。Windowsの一時ファイル置換はサンドボックスで拒否されたため、実ファイル操作の権限を付けて成功を確認した。外部DB等を必要とする既存のignored試験は実行していない。ログは`target/ci-zstd-db-clippy-windows.log`、`target/ci-zstd-db-tests-windows.log`、`target/ci-zstd-db-linux.log`。
+
+## 2026-11-23: Rust 1.100の新しいClippy検査（cfgで定数になる真偽値・添字だけのループ）
+
+[実行45161077755](https://github.com/ykwyuta/yyeditor/actions/runs/45161077755)（SHA `bc9512d99f241f0dac76b44488b9da1a5135dc74`）で、次の3ジョブがClippyの段階で失敗した。
+
+- [Linux (core crates)](https://github.com/ykwyuta/yyeditor/actions/runs/45161077755/job/137646397809)
+- [yymerge Linux CLI](https://github.com/ykwyuta/yyeditor/actions/runs/45161077755/job/137646397420)
+- [yymerge Windows](https://github.com/ykwyuta/yyeditor/actions/runs/45161077755/job/137646397974)
+
+同じブランチのpushによる実行は、後続の実行に置き換わってキャンセルされており、失敗ではない。
+
+原因は確認済み。CIの`stable`がRust 1.100へ更新され、変更していない既存コードが新しい検査に該当した。
+
+- `needless_bool`: `crates/yy-browser/src/history.rs`の`same_download_metadata`と、yymergeの`yy-merge-cli/src/git_tool.rs`の`null_role`。どちらも`#[cfg(not(windows))]`の側が`true`・`false`だけを返すため、早期`return`との組み合わせとして検出された。
+- `needless_range_loop`: yymergeの`yy-merge-ui/src/encoding_view.rs`と`native.rs`（Windowsだけでコンパイルされる）で、添字にだけ使うループ変数が検出された。
+
+手元はRust 1.97.0で、同じ検査は成功していた。AGENTS.mdにある「ローカルのRustがCIより古い場合は、その結果でCI成功を見込まない」状況にあたる。
+
+`allow`は追加せず、計算をまとめ直した。真偽値は条件式にまとめ、Windowsでの判定は変えていない（拡張子が異なる場合はZone情報を読まない、`nul`の判定）。ループは先頭2つのエディタのスライスを反復する形にした。
+
+検証範囲は次のとおり。
+
+- ローカルのRust 1.100.0で、ルートワークスペースの書式・全対象Clippyが成功した。
+- yymergeは、Linuxの`--no-default-features`とWindowsターゲットの全対象Clippyがともに成功した。
+- ルートのWindowsターゲットは、CIの型検査と同じUI各パッケージのClippyが成功した。`yy-browser`単体の`--all-targets`は、`ring`のビルドにC コンパイラが必要なため未検証。WindowsのCIジョブで確認する。

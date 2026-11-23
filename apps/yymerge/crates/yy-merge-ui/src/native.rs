@@ -2633,8 +2633,8 @@ fn comparison_smoke(a: &mut App, dir: &std::path::Path) -> Result<()> {
     }
     a.editors[1].scroll_rows(-3);
     sync_sources(a, 1);
-    for i in 0..2 {
-        win(a.editors[i].offscreen(700, 300))?;
+    for editor in &mut a.editors[..2] {
+        win(editor.offscreen(700, 300))?;
     }
     if a.editors[0].aligned.as_ref().unwrap().top != 5 {
         return Err("reverse synchronization failed".into());
