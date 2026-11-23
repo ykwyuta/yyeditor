@@ -100,3 +100,13 @@ Db2の新ドライバーはCRRTKNが固定で、異なる接続のAPPLICATION_ID
 - ローカルのRust 1.100.0で、ルートワークスペースの書式・全対象Clippyが成功した。
 - yymergeは、Linuxの`--no-default-features`とWindowsターゲットの全対象Clippyがともに成功した。
 - ルートのWindowsターゲットは、CIの型検査と同じUI各パッケージのClippyが成功した。`yy-browser`単体の`--all-targets`は、`ring`のビルドにC コンパイラが必要なため未検証。WindowsのCIジョブで確認する。
+
+## 2026-11-23: ubuntu-latest の更新とSSH試験コンテナのglibc
+
+上記のClippy修正後の[実行45165519140のyymerge Linux CLIジョブ](https://github.com/ykwyuta/yyeditor/actions/runs/45165519140/job/137661331376)（SHA `dbf2177c2636dc8cf570af55afb022fa3af18a85`）で、Clippy・通常試験は成功した。一方、`Real SSH large files and host-key rejection in an isolated container`が失敗した。ホストでビルドした`target/debug/yymerge`を`ubuntu:24.04`のコンテナで起動すると、``version `GLIBC_2.43' not found``となる。
+
+glibcの版が合わないことはログで確認済み。`ubuntu-latest`がglibc 2.43の新しいUbuntuへ更新され、24.04（glibc 2.39）に固定したコンテナで新しいシンボルを解決できない。ランナーの具体的なUbuntuの版は、glibcの版からの推定である。
+
+コンテナのイメージを、ランナーの`/etc/os-release`の`ID:VERSION_ID`から決めるよう変更した。実際に使ったイメージ名はログに出す。SSH試験の内容、必須指定（`YYMERGE_REQUIRE_SFTP`）、ホスト鍵拒否の確認は変えていない。ランナーを古い版に固定することや、試験の省略はしていない。
+
+手元は24.04で同じ不一致を再現できず、Dockerもない。そのため、変更後のCIでの成功を検証の条件とする。
