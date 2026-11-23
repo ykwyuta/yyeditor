@@ -373,9 +373,7 @@ fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
 /// Identical bytes do not imply identical launch behavior or origin trust.
 fn same_download_metadata(a: &Path, b: &Path) -> bool {
     let extension = |p: &Path| p.extension().map(|e| e.to_string_lossy().to_lowercase());
-    if extension(a) != extension(b) {
-        return false;
-    }
+    let same_extension = extension(a) == extension(b);
     #[cfg(windows)]
     {
         fn zone(path: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -393,11 +391,11 @@ fn same_download_metadata(a: &Path, b: &Path) -> bool {
             }
             Ok(Some(data))
         }
-        matches!((zone(a), zone(b)), (Ok(a), Ok(b)) if a == b)
+        same_extension && matches!((zone(a), zone(b)), (Ok(a), Ok(b)) if a == b)
     }
     #[cfg(not(windows))]
     {
-        true
+        same_extension
     }
 }
 

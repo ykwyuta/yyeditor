@@ -53,19 +53,12 @@ pub enum GitCommand {
     },
 }
 fn null_role(path: &Path) -> bool {
-    if path == Path::new("/dev/null") {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        path.as_os_str()
-            .to_str()
-            .is_some_and(|s| s.eq_ignore_ascii_case("nul"))
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    path == Path::new("/dev/null")
+        || (cfg!(windows)
+            && path
+                .as_os_str()
+                .to_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case("nul")))
 }
 fn regular(path: &Path) -> Result<()> {
     let m = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
